@@ -910,10 +910,13 @@ function conditionInterpretation(conditions = {}) {
 }
 
 function lawnScoreLabel(score) {
+  // State labels describing the CURRENT health band — never a trend word.
+  // "Improving" implied a comparison the first report can't have (no prior
+  // assessment); the LawnTrendChart owns trend once there are 2+ visits.
   const value = Number(score);
   if (!Number.isFinite(value)) return 'Tracking';
   if (value >= 85) return 'Strong';
-  if (value >= 70) return 'Improving';
+  if (value >= 70) return 'Healthy';
   if (value >= 55) return 'Watch';
   return 'Needs attention';
 }
@@ -963,6 +966,45 @@ function lawnWaterLine(water = {}) {
     return `Estimated irrigation: ${dailyIrrigation} per day from the weekly setting. Rainfall was not recorded for this visit.`;
   }
   return '';
+}
+
+// Water-balance block: compares what the lawn receives (scheduled irrigation +
+// rainfall) to the grass×season recommendation. Surplus reads as over-watering
+// (the fungus/mushroom cross-check); deficit as drought stress. When no schedule
+// is on file it prompts the customer to add it (deep-links to My Property).
+function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live' }) {
+  const advice = water?.irrigationAdvice;
+  if (!advice) {
+    const line = lawnWaterLine(water);
+    return line ? <div className="lawn-water-line">{line}</div> : null;
+  }
+  const recommended = formatWaterInches(advice.recommendedInchesPerWeek);
+
+  if (advice.profileMissing) {
+    return (
+      <div className="lawn-water-line lawn-water-balance" data-water-status="unknown">
+        We recommend about <strong>{recommended}/week</strong> of total water (rain + irrigation) for your {grassLabel} this time of year.{' '}
+        {mode === 'live'
+          ? <a className="lawn-water-cta" href="/?tab=property">Add your irrigation schedule</a>
+          : <span>Add your irrigation schedule in the portal</span>}{' '}
+        so we can tailor this to your lawn.
+      </div>
+    );
+  }
+
+  const applied = formatWaterInches(advice.appliedInchesPerWeek);
+  const gap = formatWaterInches(Math.abs(Number(advice.differentialInchesPerWeek) || 0));
+  let message;
+  if (advice.status === 'surplus') {
+    message = <>You're applying about <strong>{applied}/week</strong> — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season. Easing back can reduce fungus, mushrooms, and weed pressure.</>;
+  } else if (advice.status === 'deficit') {
+    message = <>You're applying about <strong>{applied}/week</strong> — roughly {gap} short of the ~{recommended} your {grassLabel} needs this season.</>;
+  } else if (advice.status === 'rain_unknown') {
+    message = <>You're applying about <strong>{applied}/week</strong> of irrigation. We couldn't read recent rainfall to finish the water balance — the seasonal target for your {grassLabel} is about {recommended}/week.</>;
+  } else {
+    message = <>You're applying about <strong>{applied}/week</strong>, right around the ~{recommended} target for this season.</>;
+  }
+  return <div className="lawn-water-line lawn-water-balance" data-water-status={advice.status}>{message}</div>;
 }
 
 function lawnAssessmentBody(assessment = {}) {
@@ -1274,7 +1316,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   const Root = embedded ? 'div' : 'section';
   const profile = assessment.turfProfile;
   const irrigationInches = formatIrrigationInches(profile?.irrigationInchesPerWeek);
-  const waterLine = lawnWaterLine(assessment.waterContext);
+  const grassLabel = profile?.grassType ? formatEnumLabel(profile.grassType) : 'lawn';
   const metricRows = lawnMetricRows(assessment);
   const visiblePhotos = (assessment.photos || []).filter((photo) => photo.url).slice(0, 3);
 
@@ -1306,9 +1348,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
         </div>
         <LawnTrendChart trend={assessment.trend || []} summary={assessment.customerSummary} />
       </div>
-      {waterLine && (
-        <div className="lawn-water-line">{waterLine}</div>
-      )}
+      <LawnWaterBalance water={assessment.waterContext} grassLabel={grassLabel} mode={mode} />
       <div className="lawn-score-grid">
         {metricRows.map(([label, value]) => (
           <div className="lawn-score-cell" key={label}>
@@ -1786,12 +1826,14 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
   );
 }
 
-export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false } = {}) {
+export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true } = {}) {
   return [
     ['#visit-summary', 'Summary'],
     hasReentry ? ['#re-entry', 'Re-entry'] : null,
     hasVisitTimeline ? ['#service-timeline', 'Timeline'] : null,
-    ['#service-coverage', 'Map'],
+    // The Map link targets the coverage card's anchor; lawn/tree-shrub reports
+    // hide that card, so the link would jump nowhere — omit it there.
+    hasCoverageMap ? ['#service-coverage', 'Map'] : null,
     hasProducts ? ['#products-applied', 'Products'] : null,
     hasPestPressure ? ['#pest-pressure', 'Pest Pressure'] : null,
     hasActivity ? ['#activity', 'Activity'] : null,
@@ -1799,7 +1841,8 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
 }
 
 function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false }) {
-  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity });
+  const hasCoverageMap = !(serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')));
+  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity, hasCoverageMap });
 
   return (
     <section className="sr-section quick-report-tools" id="quick-navigation">
@@ -4070,7 +4113,12 @@ function ServiceReportCoverageAndWorkflow({
   mapBackgroundUrl,
   mapAttribution,
   applications = [],
+  serviceLine = null,
 }) {
+  // Lawn and tree & shrub reports don't show the per-area Coverage map — the
+  // lawn-intelligence/assessment surfaces tell that story instead. Keep the
+  // Visit Timeline for every service line.
+  const hideCoverage = serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || ''));
   return (
     <>
       <ServiceTimelineSection
@@ -4081,13 +4129,15 @@ function ServiceReportCoverageAndWorkflow({
         visitTiming={visitTiming}
         timingSource={timingSource}
       />
-      <ServiceCoverageCard
-        coverage={serviceCoverage}
-        evidenceLevel={evidenceLevel}
-        mapBackgroundUrl={mapBackgroundUrl}
-        mapAttribution={mapAttribution}
-        applications={applications}
-      />
+      {!hideCoverage && (
+        <ServiceCoverageCard
+          coverage={serviceCoverage}
+          evidenceLevel={evidenceLevel}
+          mapBackgroundUrl={mapBackgroundUrl}
+          mapAttribution={mapAttribution}
+          applications={applications}
+        />
+      )}
     </>
   );
 }
@@ -7295,11 +7345,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           )}
         </section>
 
-        <TypedFindingsCard typedReport={data.typedReport} />
-
-        {data.serviceLine === 'lawn' && (
-          <LawnProgramOverviewCard context={data.lawnProgramOverview} />
+        {/* Lawn reports lead with the factual record — products applied + the
+            visit timeline — right after the assessment. Other service lines
+            keep these lower (rendered below, gated by !isLawnReport). The
+            program explainer + Ask-Waves move down for lawn. */}
+        {isLawnReport && (
+          <>
+            <AppliedProductsSection data={data} mode={mode} />
+            <div id="map">
+              <ServiceReportCoverageAndWorkflow
+                serviceType={visitTimelineServiceType}
+                serviceCoverage={serviceCoverage}
+                visitTimeline={normalizedVisitTimeline}
+                workflowEvents={data.workflowEvents}
+                customerInteraction={data.customerInteraction}
+                visitTiming={data.visitTiming}
+                timingSource={data}
+                evidenceLevel={data.evidenceLevel}
+                mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+                mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+                applications={data.applications || []}
+                serviceLine={data.serviceLine}
+              />
+            </div>
+          </>
         )}
+
+        <TypedFindingsCard typedReport={data.typedReport} />
 
         <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />
 
@@ -7353,6 +7425,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         ))}
 
+        {/* Lawn: program explainer drops below the factual record, just above
+            Ask-Waves. */}
+        {data.serviceLine === 'lawn' && (
+          <LawnProgramOverviewCard context={data.lawnProgramOverview} />
+        )}
+
         <QuickNavigationAndAsk
           mode={mode}
           token={token}
@@ -7365,26 +7443,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           hasActivity={Boolean(data.activity)}
         />
 
-        <div id="map">
-          <ServiceReportCoverageAndWorkflow
-            serviceType={visitTimelineServiceType}
-            serviceCoverage={serviceCoverage}
-            visitTimeline={normalizedVisitTimeline}
-            workflowEvents={data.workflowEvents}
-            customerInteraction={data.customerInteraction}
-            visitTiming={data.visitTiming}
-            timingSource={data}
-            evidenceLevel={data.evidenceLevel}
-            mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
-            mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-            applications={data.applications || []}
-          />
-        </div>
+        {/* Non-lawn lines keep Timeline + Coverage and Products here; lawn
+            already rendered them up top. */}
+        {!isLawnReport && (
+          <div id="map">
+            <ServiceReportCoverageAndWorkflow
+              serviceType={visitTimelineServiceType}
+              serviceCoverage={serviceCoverage}
+              visitTimeline={normalizedVisitTimeline}
+              workflowEvents={data.workflowEvents}
+              customerInteraction={data.customerInteraction}
+              visitTiming={data.visitTiming}
+              timingSource={data}
+              evidenceLevel={data.evidenceLevel}
+              mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+              mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+              applications={data.applications || []}
+              serviceLine={data.serviceLine}
+            />
+          </div>
+        )}
 
-        <AppliedProductsSection
-          data={data}
-          mode={mode}
-        />
+        {!isLawnReport && (
+          <AppliedProductsSection
+            data={data}
+            mode={mode}
+          />
+        )}
 
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">

@@ -17,6 +17,14 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 
 const VISION_PROMPT = `You are a lawn health assessment tool for a professional lawn care company in Southwest Florida. Analyze the provided lawn photo and return ONLY a JSON object with the following scores. Base your analysis on what is visible in the photo. The primary turf type in this region is St. Augustine grass.
 
+Agronomic tells to weigh:
+- Mushrooms, toadstools, or fungal fruiting bodies are a strong sign of OVERWATERING (or buried organic debris). When visible, raise "fungal_activity" to at least "minor" and call out likely overwatering in the observations.
+- Standing water, algae, or moss also point to overwatering; dry/tan blades and curling point to under-watering.
+- Brown-patch rings, dollar-spot blotches, or gray leaf spot indicate fungal disease.
+- Name specific weeds when identifiable (e.g., nutsedge, crabgrass, dollarweed) instead of just "weeds".
+
+Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
+
 Return this exact JSON structure and nothing else — no markdown, no backticks, no preamble:
 {
   "turf_density": <number 0-100>,
@@ -24,7 +32,7 @@ Return this exact JSON structure and nothing else — no markdown, no backticks,
   "color_health": <number 1-10>,
   "fungal_activity": <"none" | "minor" | "moderate" | "severe">,
   "thatch_visibility": <"low" | "moderate" | "high">,
-  "observations": "<brief notes>"
+  "observations": "<one concise paragraph>"
 }`;
 
 // ── Category mappings ───────────────────────────────────────────
@@ -215,9 +223,14 @@ function averageScores(claudeResult, geminiResult) {
     }
   }
 
-  // Observations: concatenate both
-  const observations = [claudeResult.observations, geminiResult.observations].filter(Boolean);
-  composite.observations = observations.join(' | ');
+  // Observations: the customer-facing narrative is a SINGLE voice — the primary
+  // VISION model (Claude), falling back to Gemini — never the two glued together
+  // with " | " (which produced run-on, self-contradicting prose when the models
+  // disagreed). Both raw notes are retained for internal review; the score-level
+  // disagreement is already captured in divergenceFlags.
+  composite.observationsClaude = claudeResult.observations || null;
+  composite.observationsGemini = geminiResult.observations || null;
+  composite.observations = String(claudeResult.observations || geminiResult.observations || '').trim();
 
   return { composite, divergenceFlags };
 }

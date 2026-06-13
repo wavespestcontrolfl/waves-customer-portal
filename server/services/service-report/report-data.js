@@ -6,6 +6,7 @@ const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = 
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
+const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -200,6 +201,11 @@ async function attachApprovedReportProductFacts(knex, products = []) {
 }
 
 function numberOrNull(value) {
+  // Nullish/empty must be null, not 0 — otherwise firstNumber() short-circuits
+  // on a null first arg (Number(null) === 0) and never reaches its fallbacks,
+  // e.g. a null completion-rain value would mask FAWN rainfall, or a null
+  // turf-profile irrigation value would mask the customer's portal entry.
+  if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -217,14 +223,38 @@ function roundInches(value) {
   return n == null ? null : Math.round(n * 100) / 100;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {} } = {}) {
+function monthFromServiceDate(serviceDate) {
+  if (!serviceDate) return null;
+  // A DATE column can arrive as a JS Date object (pg/Knex) or an ISO string.
+  // String(Date) yields "Sat Jun 13 2026 ..." whose slice(5,7) is non-numeric,
+  // which would silently fall back to the peak-season target. Normalize a Date
+  // to YYYY-MM-DD first; ET is behind UTC so a date-only value never crosses a
+  // month boundary under toISOString.
+  const str = serviceDate instanceof Date ? serviceDate.toISOString() : String(serviceDate);
+  const m = Number(str.slice(5, 7));
+  return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
+}
+
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null } = {}) {
+  const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
+  const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
+  const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
   const irrigationInchesPerWeek = firstNumber(
-    turfProfile?.irrigation_inches_per_week,
-    assessment.irrigation_inches_per_week,
-    propertyPrefs?.irrigation_inches_per_week,
+    turfIrrigationInches,
+    assessmentIrrigationInches,
+    prefsIrrigationInches,
   );
+  // The portal irrigation toggle (property_preferences.irrigation_system, which
+  // is backfilled to false) only governs a portal-sourced value. A higher-
+  // priority turf/assessment reading must NOT be suppressed by it.
+  const irrigationInchesFromPrefsOnly =
+    turfIrrigationInches == null && assessmentIrrigationInches == null && prefsIrrigationInches != null;
   const irrigationInchesPerDay = irrigationInchesPerWeek == null ? null : irrigationInchesPerWeek / 7;
   const rainfallInchesToday = firstNumber(
+    // Prefer the same rainfall the weather block shows (completion conditions —
+    // Open-Meteo) so the water line never reads 0" next to a non-zero "rain last
+    // 24 hr". FAWN snapshot fills in only when the completion value is absent.
+    completionRainfallInchesToday,
     fawnSnapshot.rainfall_in,
     fawnSnapshot.rain_24h_in,
     fawnSnapshot.precipitation_in,
@@ -239,8 +269,29 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
   const dailyInputs = [irrigationInchesPerDay, rainfallInchesToday].filter((value) => value != null);
   const weeklyInputs = [irrigationInchesPerWeek, rainfallInches7d].filter((value) => value != null);
 
-  if (!dailyInputs.length && !weeklyInputs.length) return null;
+  const grassType = turfProfile?.grass_type || assessment.grass_type || null;
+  const irrigationAdvice = buildIrrigationAdvice({
+    grassType,
+    month: monthFromServiceDate(serviceDate),
+    irrigationInchesPerWeek,
+    // Only a TRUE 7-day total drives the water balance. A 24-hour completion
+    // value is not a weekly figure — substituting it would let the advice claim
+    // deficit/balanced from a single day of rain. When no weekly total exists the
+    // advice returns 'rain_unknown' (and the 24h rain still shows in the weather
+    // block + the visible rainfallInchesToday field).
+    rainfallInches7d,
+    // Portal irrigation-system toggle suppresses a stale weekly-inches value
+    // ONLY when that value is the portal-sourced one — never when turf/assessment
+    // data supplied it (the toggle's false default would otherwise hide a real
+    // schedule shown in the profile line).
+    irrigationEnabled: irrigationInchesFromPrefsOnly && propertyPrefs && propertyPrefs.irrigation_system != null
+      ? !!propertyPrefs.irrigation_system
+      : null,
+  });
 
+  // Always return a context for lawn reports: even with no inputs we carry the
+  // grass×season recommendation so the report can prompt the customer to add
+  // their irrigation schedule.
   return {
     irrigationInchesPerWeek: roundInches(irrigationInchesPerWeek),
     irrigationInchesPerDay: roundInches(irrigationInchesPerDay),
@@ -248,11 +299,12 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     rainfallInches7d: roundInches(rainfallInches7d),
     effectiveInchesToday: dailyInputs.length ? roundInches(dailyInputs.reduce((sum, value) => sum + value, 0)) : null,
     effectiveInches7d: rainfallInches7d == null ? null : roundInches(weeklyInputs.reduce((sum, value) => sum + value, 0)),
-    targetInchesPerWeek: 1,
-    targetInchesPerDay: roundInches(1 / 7),
+    targetInchesPerWeek: irrigationAdvice.recommendedInchesPerWeek,
+    targetInchesPerDay: roundInches(irrigationAdvice.recommendedInchesPerWeek / 7),
     rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
       ? 'fawn_daily_observation'
       : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
+    irrigationAdvice,
   };
 }
 
@@ -1647,11 +1699,23 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     : [];
   const defaultCustomerSummary = lawnAssessmentSummary(currentScore, initialScore, trend.length);
   const fawnSnapshot = parseJsonObject(assessment.fawn_snapshot);
+  // Mirror the report payload's conditions merge (service.conditions +
+  // service.weather_data) so the water line reads the same rain the hero
+  // weather card shows, even when conditions is empty/stale.
+  const completionConditions = {
+    ...parseJsonObject(service.conditions),
+    ...parseJsonObject(service.weather_data),
+  };
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
     propertyPrefs,
     fawnSnapshot,
+    serviceDate: assessment.service_date,
+    completionRainfallInchesToday: firstNumber(
+      completionConditions.rain_24h_in,
+      completionConditions.rainfall_in,
+    ),
   });
 
   return {
@@ -2221,4 +2285,6 @@ module.exports = {
   publicTimingFields,
   resolveReportArrivalTime,
   resolveReportCompletionTime,
+  monthFromServiceDate,
+  firstNumber,
 };
