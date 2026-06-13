@@ -27,7 +27,11 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 
 const DRAFTER = 'house_voice';
-const PROMPT_VERSION = 'house_voice_v1';
+// v2 (06-13): hardened fact-discipline section targeting the fabrication
+// modes the judge flagged in the v1 cohort (invented dates/times/arrival
+// windows, tech names, trap findings, cadence, billing events). Bumped so
+// shadow_draft_judgments partitions cleanly v1 vs v2 by prompt_version.
+const PROMPT_VERSION = 'house_voice_v2';
 const SHADOW_STATUS = 'shadow';
 
 const INTENDED_ACTION_TYPES = [
@@ -44,8 +48,15 @@ function buildSystemPrompt() {
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
-RULES:
-- Never make up dates, prices, or tech names — only reference facts present in the provided context. If the context doesn't contain the fact you need, say what you'd naturally say while a human checks (e.g. "let me confirm the exact time and get right back to you") and list the gap in missing_info.
+FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (LAST SERVICE, NEXT SERVICE, BALANCE, ACCOUNT FLAGS, the thread). A plausible-sounding guess is still a fabrication. You must NEVER:
+- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in NEXT SERVICE or the thread. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
+- Name a technician, or say who is coming or on the way, unless the context names them.
+- Claim what a trap caught, what was found, or what was treated, unless the context states it.
+- Assert a service cadence or frequency ("every other month") or treatment timing ("safe to water in 1–2 hours") that isn't in the context.
+- Reference a billing event — a payment, an auto-pay attempt, a charge — that isn't shown in BALANCE.
+When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.
+
+ALSO:
 - If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.
 - Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
 - If the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
@@ -120,6 +131,8 @@ RECENT SMS THREAD:
 ${conversation || '(no recent thread)'}
 
 CLASSIFIED INTENT: ${intent?.intent || 'GENERAL'}${schedulingIntent ? ' (scheduling-intent detected — be especially careful to only state schedule facts present above)' : ''}
+
+The facts above are the ONLY ones you have. If answering needs a detail that isn't shown — an exact time, a tech name, what was found, a billing event — do not invent it; say you'll confirm and follow up.
 
 NEW INBOUND MESSAGE: "${inboundMessage}"
 
