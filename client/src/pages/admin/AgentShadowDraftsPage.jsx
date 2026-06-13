@@ -164,9 +164,68 @@ function IntentScoreCard({ row }) {
   );
 }
 
+const MODE_TONES = {
+  shadow: { bg: "#F4F4F5", fg: D.zinc, label: "Shadow" },
+  suggest: { bg: "#DCFCE7", fg: D.green, label: "Suggest" },
+  locked: { bg: "#FEE2E2", fg: D.red, label: "Escalation — always shadow" },
+};
+
+function IntentModeCard({ row, busy, onToggle }) {
+  const tone = row.locked ? MODE_TONES.locked : MODE_TONES[row.mode] || MODE_TONES.shadow;
+  const s = row.suggest || {};
+  const hasHistory = (s.suggested || 0) > 0;
+  return (
+    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, fontWeight: 850, color: D.heading, overflowWrap: "anywhere" }}>{intentLabel(row.intent)}</span>
+        <Chip tone={tone}>{tone.label}</Chip>
+        {!row.locked && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onToggle(row)}
+            style={{
+              marginLeft: "auto",
+              minHeight: 28,
+              borderRadius: 6,
+              border: `1px solid ${D.border}`,
+              background: D.card,
+              color: row.mode === "suggest" ? D.zinc : D.green,
+              fontSize: 12,
+              fontWeight: 750,
+              padding: "0 10px",
+              cursor: busy ? "default" : "pointer",
+              opacity: busy ? 0.6 : 1,
+            }}
+          >
+            {row.mode === "suggest" ? "Back to shadow" : "Enable suggest"}
+          </button>
+        )}
+      </div>
+      {hasHistory && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
+          <span><strong style={{ color: D.heading }}>{s.suggested}</strong> suggested</span>
+          {s.pending ? <span><strong style={{ color: D.heading }}>{s.pending}</strong> pending</span> : null}
+          <span style={{ color: D.green }}><strong>{s.accepted || 0}</strong> accepted</span>
+          <span style={{ color: D.amber }}><strong>{s.corrected || 0}</strong> corrected</span>
+          <span><strong style={{ color: D.heading }}>{s.ignored || 0}</strong> ignored</span>
+          {s.expired ? <span><strong style={{ color: D.heading }}>{s.expired}</strong> expired</span> : null}
+        </div>
+      )}
+      {row.updatedBy && row.updatedBy !== "migration" && (
+        <div style={{ fontSize: 11, color: D.muted }}>
+          Set by {row.updatedBy} · {timeLabel(row.updatedAt)}{row.reason ? ` · ${row.reason}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function AgentShadowDraftsPage({ embedded = false }) {
   const [data, setData] = useState(null);
   const [scores, setScores] = useState(null);
+  const [modes, setModes] = useState(null);
+  const [modeBusy, setModeBusy] = useState("");
   const [intentFilter, setIntentFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -176,12 +235,14 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     setError("");
     try {
       const qs = intentFilter ? `?intent=${encodeURIComponent(intentFilter)}` : "";
-      const [drafts, scoreRows] = await Promise.all([
+      const [drafts, scoreRows, modeRows] = await Promise.all([
         adminFetch(`/admin/agents/shadow-drafts${qs}`),
         adminFetch("/admin/agents/shadow-scores"),
+        adminFetch("/admin/agents/intent-modes"),
       ]);
       setData(drafts);
       setScores(scoreRows);
+      setModes(modeRows);
     } catch (err) {
       setError(err.message || "Failed to load shadow drafts.");
     } finally {
@@ -192,6 +253,25 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  const toggleMode = useCallback(async (row) => {
+    const nextMode = row.mode === "suggest" ? "shadow" : "suggest";
+    setModeBusy(row.intent);
+    setError("");
+    try {
+      const updated = await adminFetch(`/admin/agents/intent-modes/${encodeURIComponent(row.intent)}`, {
+        method: "PUT",
+        body: JSON.stringify({ mode: nextMode }),
+      });
+      setModes((current) => current
+        ? { ...current, intents: current.intents.map((r) => (r.intent === updated.intent ? { ...r, ...updated } : r)) }
+        : current);
+    } catch (err) {
+      setError(err.message || "Failed to update intent mode.");
+    } finally {
+      setModeBusy("");
+    }
+  }, []);
 
   const intents = useMemo(() => (scores?.intents || []).map((row) => row.intent), [scores]);
   const drafts = data?.drafts || [];
@@ -218,6 +298,27 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         {error && (
           <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 750 }}>
             {error}
+          </div>
+        )}
+
+        {(modes?.intents || []).length > 0 && (
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Intent graduation</div>
+              <div style={{ fontSize: 12, color: D.muted }}>
+                Suggest surfaces the draft as an Agent Review card in the comms composer — a human still reads, edits, and sends.
+              </div>
+            </div>
+            {modes.gateEnabled === false && (
+              <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 750 }}>
+                GATE_SMS_SUGGEST_MODE is off — suggest flips are saved but take effect once the gate is enabled.
+              </div>
+            )}
+            <div className="shadow-scores-grid">
+              {modes.intents.map((row) => (
+                <IntentModeCard key={row.intent} row={row} busy={modeBusy === row.intent} onToggle={toggleMode} />
+              ))}
+            </div>
           </div>
         )}
 

@@ -65,6 +65,13 @@ const gates = {
   // customer-visible effect; prod opt-in per house pattern.
   shadowJudge: isProd ? process.env.GATE_SHADOW_JUDGE === 'true' : true,
 
+  // SMS Suggest Mode (brand-voice loop, Phase D) — intents flipped to
+  // 'suggest' in sms_intent_modes surface their house-voice draft as an
+  // Agent Review card in the comms composer. A human still reads, edits,
+  // and sends — never auto-sends. Escalation intents and scheduling-intent
+  // messages stay shadow regardless. Prod opt-in per house pattern.
+  smsSuggestMode: isProd ? process.env.GATE_SMS_SUGGEST_MODE === 'true' : true,
+
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
 

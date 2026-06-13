@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { upsertReplyExampleFromAgentReview } = require('../services/reply-training-capture');
+const { SUGGEST_WORKFLOW } = require('../services/sms-suggest-mode');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -302,11 +303,20 @@ router.get('/', async (req, res, next) => {
 
     if (status !== 'all') q.where('ad.status', status);
     if (workflow) q.where('ad.workflow', workflow);
+    // Pending house-voice suggestions are not actionable here — they resolve
+    // through the comms composer (send / own-reply), supersede, or expiry,
+    // and the /:id/review route rejects them. Keep them out of the default
+    // pending queue so the worklist stays actionable; explicit ?workflow=
+    // still reaches them, and resolved rows show in the other status views.
+    else if (status === 'pending_review') q.whereNot('ad.workflow', SUGGEST_WORKFLOW);
 
     const hasReplyTrainingTable = await tableExists('reply_training_examples');
     const [rows, metricsRows, replyMetricRows, replyVerdictRows, replyWorkflowRows, replyScenarioRows, recentRejectedRows] = await Promise.all([
       q,
       db('agent_decisions')
+        // Pending suggestions are excluded from the queue above — keep the
+        // pending badge consistent with what the list actually shows.
+        .whereRaw("NOT (workflow = ? AND status = 'pending_review')", [SUGGEST_WORKFLOW])
         .select('status')
         .count('* as count')
         .groupBy('status'),
@@ -552,6 +562,17 @@ router.post('/:id/review', async (req, res, next) => {
 
     if (verdict === 'corrected' && !correctedActions.length && !correctionNote) {
       return res.status(400).json({ error: 'corrected decisions require correctedActions or a correctionNote' });
+    }
+
+    // House-voice suggestions must not be resolved here: accepted/corrected
+    // on that workflow means the composer send handler actually sent the
+    // text. A generic review verdict would remove the composer card, skew
+    // the graduation telemetry, and leave the customer unreplied.
+    const existing = await db('agent_decisions').where({ id: req.params.id }).first('id', 'workflow');
+    if (existing?.workflow === SUGGEST_WORKFLOW) {
+      return res.status(409).json({
+        error: 'House-voice suggestions resolve through the SMS composer (send or reply your own way) — review them from /admin/communications.',
+      });
     }
 
     const [row] = await db('agent_decisions')

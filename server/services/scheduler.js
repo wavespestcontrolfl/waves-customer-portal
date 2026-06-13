@@ -42,6 +42,61 @@ function scheduledSmsAttemptSql() {
 async function recoverStaleScheduledSmsClaims(now) {
   const staleBefore = new Date(now.getTime() - SCHEDULED_SMS_STALE_CLAIM_MS);
   const attemptsSql = scheduledSmsAttemptSql();
+
+  // Settle stale claims whose send PROVABLY happened first: the provider
+  // path writes a sibling sms_log row tagged with scheduled_sms_log_id when
+  // Twilio accepts. Blindly re-scheduling those would double-text the
+  // customer, and failing them would reopen Agent Review decisions on an
+  // answered thread. Mirrors the normal sent path (created_at re-stamped to
+  // send time, queued_at preserved).
+  const settled = await db.raw(`
+    UPDATE sms_log AS s
+    SET status = 'sent',
+        created_at = ?,
+        updated_at = ?,
+        metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
+          'queued_at', s.created_at,
+          'scheduled_sms_recovered_sent_at', ?::timestamptz
+        )
+    WHERE s.status = 'sending'
+      AND s.scheduled_for IS NOT NULL
+      AND s.scheduled_for <= ?
+      AND s.updated_at <= ?
+      AND EXISTS (
+        SELECT 1 FROM sms_log p
+        WHERE p.metadata->>'scheduled_sms_log_id' = s.id::text
+          AND p.direction = 'outbound'
+          AND p.status IN ('queued', 'sent', 'delivered')
+      )
+    RETURNING s.id, s.metadata, s.message_body, s.admin_user_id
+  `, [now, now, now, now, staleBefore]);
+
+  const settledRows = settled.rows || [];
+  if (settledRows.length > 0) {
+    logger.warn(`[scheduled-sms] Settled ${settledRows.length} stale claim(s) whose provider send already happened`);
+    const { resolveSuggestionAfterSend, ignoreParkedSuggestions } = require('./sms-suggest-mode');
+    for (const row of settledRows) {
+      let meta = row.metadata;
+      if (typeof meta === 'string') {
+        try { meta = JSON.parse(meta); } catch { meta = {}; }
+      }
+      meta = meta || {};
+      if (meta.agent_decision_id) {
+        await resolveSuggestionAfterSend({
+          decisionId: meta.agent_decision_id,
+          sentBody: row.message_body,
+          reviewedBy: row.admin_user_id || 'Admin',
+        });
+      }
+      if (Array.isArray(meta.parked_decision_ids) && meta.parked_decision_ids.length) {
+        await ignoreParkedSuggestions({
+          decisionIds: meta.parked_decision_ids,
+          reviewedBy: row.admin_user_id || 'Admin',
+        });
+      }
+    }
+  }
+
   const result = await db.raw(`
     UPDATE sms_log
     SET status = CASE
@@ -56,7 +111,7 @@ async function recoverStaleScheduledSmsClaims(now) {
       AND scheduled_for IS NOT NULL
       AND scheduled_for <= ?
       AND updated_at <= ?
-    RETURNING status
+    RETURNING status, metadata
   `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, now, staleBefore]);
 
   const recovered = result.rows || [];
@@ -64,6 +119,27 @@ async function recoverStaleScheduledSmsClaims(now) {
     const retryCount = recovered.filter(row => row.status === 'scheduled').length;
     const failedCount = recovered.filter(row => row.status === 'failed').length;
     logger.warn(`[scheduled-sms] Recovered ${recovered.length} stale claim(s): ${retryCount} retried, ${failedCount} failed`);
+
+    // Rows that exhausted their attempts will never send — any Agent Review
+    // decisions parked behind them must return to the composer now, not
+    // after the 48h expiry sweep. Retried rows keep their decisions parked.
+    const decisionIds = [];
+    for (const row of recovered) {
+      if (row.status !== 'failed') continue;
+      let meta = row.metadata;
+      if (typeof meta === 'string') {
+        try { meta = JSON.parse(meta); } catch { meta = {}; }
+      }
+      meta = meta || {};
+      if (meta.agent_decision_id) decisionIds.push(meta.agent_decision_id);
+      if (Array.isArray(meta.parked_decision_ids)) decisionIds.push(...meta.parked_decision_ids);
+    }
+    if (decisionIds.length) {
+      await require('./sms-suggest-mode').reopenScheduledSuggestions({
+        decisionIds,
+        reason: 'Scheduled send failed after repeated claim timeouts — suggestion reopened.',
+      });
+    }
   }
 }
 
@@ -563,6 +639,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:10AM ET — Recover claimed Agent Review decisions + expire stale
+  // composer suggestions (brand-voice loop, Phase D). Recovery is NOT gated:
+  // the /sms claim path parks ANY verified Agent Review draft (lead
+  // workflows included) in status='scheduled' regardless of the suggest-mode
+  // gate, and a post-claim crash must never strand those rows invisible.
+  // Only the house-voice expiry (pending >48h → expired) is gated.
+  // =========================================================================
+  cron.schedule('10 4 * * *', async () => {
+    logger.info('Running: SMS suggestion recovery + expiry sweep');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { recoverSuggestionHoldingStates, expireStaleSuggestions } = require('./sms-suggest-mode');
+      await runExclusive('sms-suggest-expiry', async () => {
+        await recoverSuggestionHoldingStates();
+        if (isEnabled('smsSuggestMode')) await expireStaleSuggestions();
+      });
+    } catch (err) {
+      logger.error(`SMS suggestion recovery/expiry sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
   // Stripe's retry window is 72h max, so anything past 90d is just historical
   // noise; the table grows ~50–500 rows/day and never shrinks otherwise.
@@ -990,8 +1088,23 @@ function initScheduledJobs() {
       } catch { return; /* scheduled_for column may not exist yet */ }
 
       for (const msg of scheduled) {
+        // Decision linkage is read FRESH after each terminal update, not
+        // from the claim snapshot: the cancel route can transfer parked
+        // decision ids onto this row while the provider send is in flight,
+        // and those must still be resolved/reopened here.
+        const readFreshMeta = async () => {
+          const fresh = await db('sms_log').where({ id: msg.id }).first('metadata');
+          const raw = fresh?.metadata;
+          if (typeof raw === 'string') {
+            try { return JSON.parse(raw); } catch { return {}; }
+          }
+          return raw || {};
+        };
         try {
           const purpose = purposeForScheduledMessageType(msg.message_type);
+          const claimMeta = typeof msg.metadata === 'string'
+            ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
+            : (msg.metadata || {});
           const smsResult = await sendCustomerMessage({
             to: msg.to_phone,
             body: msg.message_body,
@@ -1010,6 +1123,13 @@ function initScheduledJobs() {
               scheduled_sms_log_id: msg.id,
               fromNumber: msg.from_phone || undefined,
               adminUserId: msg.admin_user_id || undefined,
+              // Decision linkage rides into the provider-created sms_log row
+              // so the nightly sweep can recover the claims if the process
+              // dies between Twilio's accept and the resolution below.
+              agentDecisionId: claimMeta.agent_decision_id || undefined,
+              parkedDecisionIds: Array.isArray(claimMeta.parked_decision_ids) && claimMeta.parked_decision_ids.length
+                ? claimMeta.parked_decision_ids
+                : undefined,
             },
           });
           const completedAt = new Date();
@@ -1026,6 +1146,29 @@ function initScheduledJobs() {
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
+
+            // A scheduled send composed from an Agent Review draft resolves
+            // its decision now that the message actually left — schedule-sms
+            // stashed the verified id on the row. Suggestions parked behind
+            // the queued reply resolve as ignored (their drafts return to
+            // the judge). Internal catches: a resolution failure must not
+            // flip a SENT row to failed.
+            const sentMeta = await readFreshMeta();
+            if (sentMeta.agent_decision_id) {
+              const { resolveSuggestionAfterSend } = require('./sms-suggest-mode');
+              await resolveSuggestionAfterSend({
+                decisionId: sentMeta.agent_decision_id,
+                sentBody: msg.message_body,
+                reviewedBy: msg.admin_user_id || 'Admin',
+              });
+            }
+            if (Array.isArray(sentMeta.parked_decision_ids) && sentMeta.parked_decision_ids.length) {
+              const { ignoreParkedSuggestions } = require('./sms-suggest-mode');
+              await ignoreParkedSuggestions({
+                decisionIds: sentMeta.parked_decision_ids,
+                reviewedBy: msg.admin_user_id || 'Admin',
+              });
+            }
           } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
@@ -1037,12 +1180,73 @@ function initScheduledJobs() {
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            // The customer was never answered — used + parked cards return.
+            const blockedMeta = await readFreshMeta();
+            await require('./sms-suggest-mode').reopenScheduledSuggestions({
+              decisionIds: [blockedMeta.agent_decision_id, ...(Array.isArray(blockedMeta.parked_decision_ids) ? blockedMeta.parked_decision_ids : [])],
+              reason: 'Scheduled send was blocked — suggestion reopened.',
+            });
           }
         } catch (err) {
-          await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: new Date() });
           logger.error(`[scheduled-sms] Failed: ${err.message}`);
+          try {
+            // Ambiguous failure: Twilio may have ACCEPTED before the
+            // exception (e.g. the queued-row update threw). A provider row
+            // tagged with this row's id proves the send — settle as sent
+            // and resolve the decisions; reopening here would resurface a
+            // card on an answered thread and invite a duplicate reply.
+            const providerRow = await db('sms_log')
+              .where({ direction: 'outbound' })
+              .whereIn('status', ['queued', 'sent', 'delivered'])
+              .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(msg.id)])
+              .first('id');
+            const failedAt = new Date();
+            if (providerRow) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'sent',
+                created_at: failedAt,
+                updated_at: failedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
+              });
+              const recoveredMeta = await readFreshMeta();
+              const suggest = require('./sms-suggest-mode');
+              if (recoveredMeta.agent_decision_id) {
+                await suggest.resolveSuggestionAfterSend({
+                  decisionId: recoveredMeta.agent_decision_id,
+                  sentBody: msg.message_body,
+                  reviewedBy: msg.admin_user_id || 'Admin',
+                });
+              }
+              if (Array.isArray(recoveredMeta.parked_decision_ids) && recoveredMeta.parked_decision_ids.length) {
+                await suggest.ignoreParkedSuggestions({
+                  decisionIds: recoveredMeta.parked_decision_ids,
+                  reviewedBy: msg.admin_user_id || 'Admin',
+                });
+              }
+              logger.warn(`[scheduled-sms] Settled ${msg.id} as sent after post-accept error`);
+            } else {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: failedAt });
+              const failedMeta = await readFreshMeta().catch(() => ({}));
+              await require('./sms-suggest-mode').reopenScheduledSuggestions({
+                decisionIds: [failedMeta.agent_decision_id, ...(Array.isArray(failedMeta.parked_decision_ids) ? failedMeta.parked_decision_ids : [])],
+                reason: 'Scheduled send failed — suggestion reopened.',
+              });
+            }
+          } catch (recoverErr) {
+            // Leave the row in 'sending' — recoverStaleScheduledSmsClaims
+            // settles or retries it with the same provider-row proof.
+            logger.error(`[scheduled-sms] Post-failure recovery errored for ${msg.id}: ${recoverErr.message}`);
+          }
         }
       }
+
+      // Fast holding-state recovery (30-min orphan window): an
+      // immediate-send claim has no backing sms_log row, so a crash
+      // mid-send would otherwise hide the composer card until the nightly
+      // sweep. Guarded updates — racing the nightly run is harmless.
+      await require('./sms-suggest-mode').recoverSuggestionHoldingStates().catch((recErr) => {
+        logger.warn(`[sms-suggest] fast recovery failed: ${recErr.message}`);
+      });
     } catch (err) {
       logger.error(`Scheduled SMS processing failed: ${err.message}`);
     }

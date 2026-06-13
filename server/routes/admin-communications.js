@@ -14,6 +14,17 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
+const { isEnabled } = require('../config/feature-gates');
+const {
+  SUGGEST_WORKFLOW,
+  HUMAN_REPLY_TYPES,
+  revertDraftsToShadow,
+  markSuggestionScheduled,
+  parkThreadSuggestions,
+  reopenScheduledSuggestions,
+  ignoreParkedSuggestions,
+  lockSuggestThread,
+} = require('../services/sms-suggest-mode');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -64,6 +75,39 @@ function normalizeReplyForComparison(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+// Shared by the immediate /sms and /schedule-sms routes: an Agent Review
+// draft may only resolve a decision the sender actually owns — pending,
+// phone-matched through its inbound sms_log or customer record, and (when a
+// customer is selected) belonging to that customer.
+async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId }) {
+  try {
+    const sentPhoneLast10 = normalizePhoneLast10(to);
+    const decision = await db('agent_decisions as ad')
+      .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+      .leftJoin('customers as c', 'ad.customer_id', 'c.id')
+      .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' })
+      .select(
+        'ad.id',
+        'ad.customer_id',
+        'ad.suggested_message',
+        's.from_phone as sms_from_phone',
+        's.to_phone as sms_to_phone',
+        'c.phone as customer_phone'
+      )
+      .first();
+    const decisionPhoneMatches = sentPhoneLast10 && [
+      decision?.sms_from_phone,
+      decision?.sms_to_phone,
+      decision?.customer_phone,
+    ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
+    const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
+    if (decision?.id && customerMatches && decisionPhoneMatches) return decision;
+  } catch (verifyErr) {
+    logger.warn(`[agent-review] failed to verify inbox draft decision ownership: ${verifyErr.message}`);
+  }
+  return null;
+}
+
 async function findSingleCustomerForPhone(phone) {
   // Compare on the last 10 digits so stored formats ('+19415551234',
   // '9415551234', '(941) 555-1234') all match the same dialable number —
@@ -109,6 +153,8 @@ async function resolveSmsLogCustomerFallbacks(rows) {
 
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
+  let claimedDecisionId = null;
+  let parkedThreadIds = [];
   try {
     const {
       to,
@@ -154,38 +200,59 @@ router.post('/sms', async (req, res, next) => {
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      try {
-        const sentPhoneLast10 = normalizePhoneLast10(to);
-        const decision = await db('agent_decisions as ad')
-          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-          .leftJoin('customers as c', 'ad.customer_id', 'c.id')
-          .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' })
-          .select(
-            'ad.id',
-            'ad.customer_id',
-            'ad.suggested_message',
-            's.from_phone as sms_from_phone',
-            's.to_phone as sms_to_phone',
-            'c.phone as customer_phone'
-          )
-          .first();
-        const decisionPhoneMatches = sentPhoneLast10 && [
-          decision?.sms_from_phone,
-          decision?.sms_to_phone,
-          decision?.customer_phone,
-        ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
-        const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
-        if (decision?.id && customerMatches && decisionPhoneMatches) {
-          verifiedAgentDecision = decision;
-        }
-      } catch (verifyErr) {
-        logger.warn(`[agent-review] failed to verify inbox draft decision ownership: ${verifyErr.message}`);
+      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      // A supplied draft id that fails verification means the card the
+      // operator is acting on is stale — most often another operator just
+      // handled the same suggestion. Sending anyway risks a duplicate reply.
+      if (!verifiedAgentDecision) {
+        return res.status(409).json({ error: 'This Agent Review draft was just handled elsewhere — refresh the thread before sending.' });
       }
     }
     const verifiedAgentDraft = normalizeReplyForComparison(verifiedAgentDecision?.suggested_message)
       ? verifiedAgentDecision.suggested_message
       : null;
 
+    if (verifiedAgentDecision) {
+      // Claim BEFORE the provider send — verification alone lets two admins
+      // pass on the same pending card and both text the customer. The
+      // guarded single UPDATE is the atomic claim; the loser 409s.
+      // 'scheduled' = claimed-for-send: reopened below on blocked/failed/
+      // exception, resolved accepted/corrected on success, and the orphan
+      // sweep reopens it if the process dies in between.
+      const claimed = await db('agent_decisions')
+        .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
+        .update({
+          status: 'scheduled',
+          correction_note: 'Claimed for an immediate send from the SMS inbox.',
+          updated_at: new Date(),
+        });
+      if (!claimed) {
+        return res.status(409).json({ error: 'This Agent Review draft was just handled elsewhere — refresh the thread before sending.' });
+      }
+      claimedDecisionId = verifiedAgentDecision.id;
+    }
+
+    // Park the thread's OTHER pending suggestions before the provider call
+    // (same as the scheduled path): the post-send sweep can't protect the
+    // seconds while Twilio runs, and a parallel admin could still fetch and
+    // send the same card. Success resolves them as ignored; blocked/failed/
+    // exception reopens them; a crash mid-send is bounded by the 30-min
+    // orphan recovery.
+    try {
+      const parkPhoneLast10 = normalizePhoneLast10(to);
+      if (parkPhoneLast10) {
+        parkedThreadIds = await db.transaction(async (trx) => {
+          await lockSuggestThread(trx, parkPhoneLast10);
+          return parkThreadSuggestions(
+            { phoneLast10: parkPhoneLast10, excludeDecisionId: verifiedAgentDecision?.id }, trx
+          );
+        });
+      }
+    } catch (parkErr) {
+      logger.warn(`[sms-suggest] pre-send park failed: ${parkErr.message}`);
+    }
+
+    const sendStartedAt = new Date();
     const result = await sendCustomerMessage({
       to,
       body: cleanBody,
@@ -199,6 +266,10 @@ router.post('/sms', async (req, res, next) => {
         original_message_type: messageType || 'manual',
         adminUserId: req.technicianId,
         agentDecisionId: verifiedAgentDecision?.id || undefined,
+        // Parked ids ride into the provider-created sms_log row (same as
+        // the scheduled path) so a crash between Twilio's accept and the
+        // post-send resolution recovers as ignored, not reopened.
+        parkedDecisionIds: parkedThreadIds.length ? parkedThreadIds : undefined,
         agentDraft: verifiedAgentDraft || undefined,
         suggestedReply: verifiedAgentDraft || undefined,
         fromNumber: fromNumber || undefined,
@@ -208,6 +279,11 @@ router.post('/sms', async (req, res, next) => {
       },
     });
     if (result.blocked || result.sent === false) {
+      // The reply never left — release the claim and the parked cards.
+      await reopenScheduledSuggestions({
+        decisionIds: [claimedDecisionId, ...parkedThreadIds],
+        reason: 'Send was blocked or failed — suggestion reopened.',
+      });
       return res.status(422).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
@@ -218,7 +294,8 @@ router.post('/sms', async (req, res, next) => {
       const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
       try {
         await db('agent_decisions')
-          .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
+          .where({ id: verifiedAgentDecision.id })
+          .whereIn('status', ['scheduled', 'pending_review'])
           .update({
             status: draftMatched ? 'accepted' : 'corrected',
             human_verdict: draftMatched ? 'accepted' : 'corrected',
@@ -234,8 +311,74 @@ router.post('/sms', async (req, res, next) => {
       }
     }
 
+    // Suggestions parked before the provider call resolve as ignored — the
+    // operator saw them and chose their own reply; their drafts return to
+    // the judge pool against the reply that just went out.
+    if (parkedThreadIds.length) {
+      await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
+    }
+
+    // Belt-and-braces sweep for cards published BETWEEN the park commit and
+    // send completion (the thread lock releases when the park transaction
+    // commits, and a publish can land while Twilio runs). Phone-scoped
+    // through the suggestion's inbound sms_log row — the same ownership
+    // match the composer card fetch uses. Cutoff on the INBOUND's timestamp
+    // vs send start: a suggestion for a customer message that arrived while
+    // the send was in flight was never on the operator's screen and must
+    // keep its card.
+    try {
+      const ignoredPhoneLast10 = normalizePhoneLast10(to);
+      if (ignoredPhoneLast10) {
+        await db.transaction(async (trx) => {
+          // Same thread lock the drafter's publish takes: a publish that
+          // hasn't committed yet will land AFTER this sweep and re-check
+          // the (now committed) outbound in its answered guard.
+          await lockSuggestThread(trx, ignoredPhoneLast10);
+
+          // s is always the suggestion's INBOUND row — from_phone is the
+          // customer; matching to_phone (the Waves line) would sweep every
+          // suggestion that arrived on that line.
+          const staleQuery = trx('agent_decisions as ad')
+            .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+            .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+            .where('s.created_at', '<', sendStartedAt)
+            .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
+          if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
+          const stale = await staleQuery.select('ad.id', 'ad.entity_id');
+          if (stale.length) {
+            // Revert only rows the guarded UPDATE actually changed: a parallel
+            // operator can send one of these suggestions between the SELECT
+            // and the UPDATE, and that draft must stay out of the judge pool.
+            const ignored = await trx('agent_decisions')
+              .whereIn('id', stale.map((r) => r.id))
+              .where('status', 'pending_review')
+              .update({
+                status: 'ignored',
+                human_verdict: 'ignored',
+                correction_note: 'Staff sent their own reply from the SMS inbox.',
+                reviewed_by: req.technicianId || 'Admin',
+                reviewed_at: new Date(),
+                updated_at: new Date(),
+              })
+              .returning(['id', 'entity_id']);
+            await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
+          }
+        });
+      }
+    } catch (ignoreErr) {
+      logger.warn(`[sms-suggest] failed to mark pending suggestions ignored: ${ignoreErr.message}`);
+    }
+
     res.json(result);
   } catch (err) {
+    // Guarded reopen: anything the send actually resolved before the throw
+    // is no longer 'scheduled' and no-ops here.
+    if (claimedDecisionId || parkedThreadIds.length) {
+      await reopenScheduledSuggestions({
+        decisionIds: [claimedDecisionId, ...parkedThreadIds],
+        reason: 'Send errored — suggestion reopened.',
+      });
+    }
     notifyTwilioFailure({
       channel: 'sms',
       direction: 'outbound',
@@ -491,7 +634,14 @@ router.get('/agent-draft', async (req, res, next) => {
       .where('ad.source_channel', 'sms')
       .where('ad.status', 'pending_review')
       .whereNotNull('ad.suggested_message')
-      .whereRaw("NULLIF(TRIM(ad.suggested_message), '') IS NOT NULL")
+      .whereRaw("NULLIF(TRIM(ad.suggested_message), '') IS NOT NULL");
+
+    // Fail closed on rollback: with the suggest-mode gate off, existing
+    // pending house-voice cards must stop surfacing too — not just stop
+    // being created.
+    if (!isEnabled('smsSuggestMode')) q = q.whereNot('ad.workflow', SUGGEST_WORKFLOW);
+
+    q = q
       .select(
         'ad.id',
         'ad.workflow',
@@ -934,7 +1084,7 @@ router.post('/rewrite-sms', async (req, res) => {
 // through sendCustomerMessage (same path as the immediate /sms route).
 router.post('/schedule-sms', async (req, res, next) => {
   try {
-    const { to, body, scheduledFor, customerId, fromNumber, from, messageType } = req.body || {};
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft } = req.body || {};
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
       return res.status(400).json({ error: 'to, body, scheduledFor required' });
@@ -972,19 +1122,81 @@ router.post('/schedule-sms', async (req, res, next) => {
       if (fallback) trustedCustomerId = fallback.id;
     }
 
-    const [row] = await db('sms_log')
-      .insert({
-        customer_id: trustedCustomerId,
-        direction: 'outbound',
-        from_phone: chosenFrom,
-        to_phone: to,
-        message_body: cleanBody,
-        status: 'scheduled',
-        message_type: messageType || 'manual',
-        admin_user_id: req.technicianId || null,
-        scheduled_for: sendAt,
-      })
-      .returning(['id', 'scheduled_for']);
+    // An Agent Review draft can be scheduled instead of sent now. Carry the
+    // verified decision id on the scheduled row so the 5-min dispatch cron
+    // resolves it (accepted/corrected) when the send actually fires —
+    // otherwise the suggestion stays pending and gets miscounted as
+    // ignored/expired despite a human-approved send.
+    let scheduledAgentDecision = null;
+    if (agentDecisionId && agentDraft) {
+      scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      // Stale card — most often another operator just handled the same
+      // suggestion. Queueing anyway would schedule a duplicate reply with
+      // no decision linkage to resolve or cancel.
+      if (!scheduledAgentDecision) {
+        return res.status(409).json({ error: 'This Agent Review draft was just handled elsewhere — refresh the thread before scheduling.' });
+      }
+    }
+
+    // Queue + park in ONE transaction: the used decision AND every other
+    // pending house-voice suggestion on this thread move to 'scheduled', so
+    // nothing stays actionable in the composer while the queued reply
+    // waits. Fire resolves the used one and ignores the parked ones;
+    // cancel/failure reopens them all. A park failure rolls the queue
+    // insert back — never a queued send with a still-actionable card.
+    let row;
+    try {
+      row = await db.transaction(async (trx) => {
+        // Same thread lock as the drafter's publish and the post-send
+        // sweep — park + queue commit atomically with respect to both.
+        await lockSuggestThread(trx, normalizePhoneLast10(to) || to);
+
+        let usedDecisionId = null;
+        if (scheduledAgentDecision) {
+          const parkedUsed = await markSuggestionScheduled(
+            { decisionId: scheduledAgentDecision.id, scheduledFor: sendAt }, trx
+          );
+          // 0 rows = a concurrent request claimed/resolved this decision
+          // between verification and the guarded park. Queueing anyway
+          // would double-send the same reply — abort and roll back.
+          if (parkedUsed === 0) {
+            const conflict = new Error('This Agent Review draft was just handled elsewhere — refresh the thread before sending.');
+            conflict.statusCode = 409;
+            throw conflict;
+          }
+          usedDecisionId = scheduledAgentDecision.id;
+        }
+        const parkedIds = await parkThreadSuggestions(
+          { phoneLast10: normalizePhoneLast10(to), excludeDecisionId: scheduledAgentDecision?.id }, trx
+        );
+
+        const metadata = (usedDecisionId || parkedIds.length)
+          ? JSON.stringify({
+            agent_decision_id: usedDecisionId || undefined,
+            parked_decision_ids: parkedIds.length ? parkedIds : undefined,
+          })
+          : null;
+
+        const [inserted] = await trx('sms_log')
+          .insert({
+            customer_id: trustedCustomerId,
+            direction: 'outbound',
+            from_phone: chosenFrom,
+            to_phone: to,
+            message_body: cleanBody,
+            status: 'scheduled',
+            message_type: messageType || 'manual',
+            admin_user_id: req.technicianId || null,
+            scheduled_for: sendAt,
+            metadata,
+          })
+          .returning(['id', 'scheduled_for']);
+        return inserted;
+      });
+    } catch (scheduleErr) {
+      if (scheduleErr.statusCode === 409) return res.status(409).json({ error: scheduleErr.message });
+      throw scheduleErr;
+    }
 
     res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });
   } catch (err) { next(err); }
@@ -1012,7 +1224,82 @@ router.get('/scheduled', async (req, res, next) => {
 // DELETE /api/admin/communications/scheduled/:id — cancel scheduled message
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
-    await db('sms_log').where({ id: req.params.id, status: 'scheduled' }).del();
+    // Atomic delete-with-returning: if the dispatch cron claimed the row
+    // (status flipped to 'sending') between any read and this delete, zero
+    // rows return and we must NOT reopen — the SMS is about to send and
+    // fire-time resolution owns the decisions.
+    const deleted = await db('sms_log')
+      .where({ id: req.params.id, status: 'scheduled' })
+      .del(['id', 'metadata', 'to_phone', 'created_at']);
+
+    const row = deleted?.[0];
+    if (row) {
+      const meta = parseJson(row.metadata, {});
+      const decisionIds = [
+        meta.agent_decision_id,
+        ...(Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : []),
+      ].filter(Boolean);
+
+      if (decisionIds.length) {
+        const threadLast10 = normalizePhoneLast10(row.to_phone);
+        let resolution = 'reopen';
+        if (threadLast10) {
+          await db.transaction(async (trx) => {
+            await lockSuggestThread(trx, threadLast10);
+            // Another queued staff reply on this thread will still answer
+            // the customer — reopening now would put an actionable card on
+            // top of it. Re-park the decisions behind the surviving row:
+            // its fire ignores them, its cancel/failure reopens them.
+            // Prefer a still-'scheduled' sibling: a 'sending' one has been
+            // claimed by the cron, which now re-reads metadata after every
+            // terminal update — so a transfer onto it still resolves, but
+            // an unclaimed row avoids even that window.
+            const sibling = await trx('sms_log')
+              .whereIn('status', ['scheduled', 'sending'])
+              .whereIn('message_type', HUMAN_REPLY_TYPES)
+              .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+              .orderByRaw("CASE WHEN status = 'scheduled' THEN 0 ELSE 1 END")
+              .orderBy('scheduled_for', 'asc')
+              .first('id');
+            if (sibling) {
+              await trx('sms_log')
+                .where({ id: sibling.id })
+                .update({
+                  metadata: trx.raw(
+                    `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{parked_decision_ids}', COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) || ?::jsonb)`,
+                    [JSON.stringify(decisionIds)]
+                  ),
+                });
+              resolution = 'transferred';
+              return;
+            }
+            // No live sibling — but one may have JUST flipped sending→sent
+            // while this cancel ran. The thread was answered since these
+            // decisions were parked, so they resolve as ignored (drafts
+            // back to the judge), not reopened onto an answered thread.
+            const sentSibling = await trx('sms_log')
+              .where({ direction: 'outbound' })
+              .whereIn('status', ['queued', 'sent', 'delivered'])
+              .whereIn('message_type', HUMAN_REPLY_TYPES)
+              .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+              .where('created_at', '>', row.created_at)
+              .first('id');
+            if (sentSibling) resolution = 'ignore';
+          });
+        }
+        if (resolution === 'ignore') {
+          await ignoreParkedSuggestions({ decisionIds, reviewedBy: req.technicianId || 'Admin' });
+        } else if (resolution === 'reopen') {
+          // No surviving or just-sent reply — the customer was never
+          // answered, the cards return to the composer.
+          await reopenScheduledSuggestions({
+            decisionIds,
+            reason: 'Scheduled send cancelled from the SMS inbox — suggestion reopened.',
+          });
+        }
+      }
+    }
+
     res.json({ success: true });
   } catch (err) { next(err); }
 });

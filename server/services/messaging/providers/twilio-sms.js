@@ -114,6 +114,8 @@ async function sendViaTwilio(input) {
       media: input.metadata && input.metadata.media,
       customerLocationId: input.metadata && input.metadata.customerLocationId,
       agentDecisionId: input.metadata && input.metadata.agentDecisionId,
+      parkedDecisionIds: input.metadata && input.metadata.parkedDecisionIds,
+      scheduledSmsLogId: input.metadata && input.metadata.scheduled_sms_log_id,
       agentDraft: input.metadata && input.metadata.agentDraft,
       suggestedReply: input.metadata && input.metadata.suggestedReply,
       // Preserve admin attribution. services/twilio.js writes

@@ -477,8 +477,24 @@ const TwilioService = {
           status: "sent",
           message_type: options.messageType || "manual",
           admin_user_id: options.adminUserId || null,
-          metadata: options.media
-            ? JSON.stringify({ media: options.media })
+          // Decision linkage makes the sent row recoverable: if the process
+          // dies after Twilio accepts but before the caller resolves the
+          // Agent Review decisions (composer send or scheduled-SMS cron),
+          // the nightly suggest sweep resolves the used decision and ignores
+          // the parked ones from this linkage instead of reopening cards on
+          // an answered thread.
+          // scheduled_sms_log_id ties this provider row back to the queued
+          // row that dispatched it, so stale-claim recovery can prove the
+          // send happened instead of retrying (double-send) or reopening.
+          metadata: (options.media || options.agentDecisionId || options.scheduledSmsLogId || (Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length))
+            ? JSON.stringify({
+              ...(options.media ? { media: options.media } : {}),
+              ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
+              ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
+                ? { parked_decision_ids: options.parkedDecisionIds }
+                : {}),
+              ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+            })
             : null,
         });
       } catch (logErr) {
