@@ -145,6 +145,18 @@ function sumPrecipInches(dailySums) {
   return roundedNumber(total, 2);
 }
 
+// Open-Meteo's et0_fao_evapotranspiration follows daily_units — 'inch' when we
+// request precipitation_unit=inch, but 'mm' by default. Convert mm → inches so a
+// ~40 mm week can never be mistaken for a 40" target. Unknown unit defaults to
+// inches (matches our request).
+function et0SumToInches(sum, unit) {
+  const n = Number(sum);
+  if (sum == null || !Number.isFinite(n)) return null;
+  return String(unit || 'inch').toLowerCase().includes('mm')
+    ? roundedNumber(n / 25.4, 2)
+    : roundedNumber(n, 2);
+}
+
 // { start, end } YYYY-MM-DD for the `days`-day window ending ON serviceDate.
 function rainWindowEndingOn(serviceDate, days = 7) {
   const ymd = (serviceDate instanceof Date ? serviceDate.toISOString() : String(serviceDate || '')).slice(0, 10);
@@ -210,7 +222,10 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
       ? sumPrecipInches(arr) : null;
     const value = {
       rainInches: sumIfFull(daily.precipitation_sum),
-      et0Inches: sumIfFull(daily.et0_fao_evapotranspiration),
+      et0Inches: et0SumToInches(
+        sumIfFull(daily.et0_fao_evapotranspiration),
+        payload?.daily_units?.et0_fao_evapotranspiration,
+      ),
     };
     _rainCache.set(key, { at: Date.now(), value });
     return value;
@@ -227,6 +242,7 @@ module.exports = {
   fetchOpenMeteoConditions,
   fetchServiceWeekWeather,
   sumPrecipInches,
+  et0SumToInches,
   rainWindowEndingOn,
   normalizeFawnConditions,
   weatherCodeLabel,

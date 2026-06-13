@@ -1,4 +1,22 @@
-const { sumPrecipInches, rainWindowEndingOn } = require('../services/service-report/application-conditions');
+const { sumPrecipInches, et0SumToInches, rainWindowEndingOn } = require('../services/service-report/application-conditions');
+
+describe('et0SumToInches (unit safety)', () => {
+  test('inch unit (our request) passes through', () => {
+    expect(et0SumToInches(1.57, 'inch')).toBe(1.57);
+    expect(et0SumToInches(1.57, 'in')).toBe(1.57);
+  });
+  test('mm unit converts so a ~40mm week is not read as 40 inches', () => {
+    expect(et0SumToInches(40, 'mm')).toBe(1.57); // 40 / 25.4
+  });
+  test('missing unit defaults to inches (matches the request)', () => {
+    expect(et0SumToInches(1.5, null)).toBe(1.5);
+    expect(et0SumToInches(1.5, undefined)).toBe(1.5);
+  });
+  test('null/invalid sum → null', () => {
+    expect(et0SumToInches(null, 'inch')).toBeNull();
+    expect(et0SumToInches('x', 'mm')).toBeNull();
+  });
+});
 
 describe('sumPrecipInches', () => {
   test('sums all numeric days', () => {
