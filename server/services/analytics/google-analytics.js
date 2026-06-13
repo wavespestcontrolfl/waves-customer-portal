@@ -87,6 +87,159 @@ function defaultDateRange(startDate, endDate) {
   return { startDate: formatDate(startDate), endDate: formatDate(endDate) };
 }
 
+function normalizeGa4Date(value) {
+  const raw = String(value || '');
+  const match = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+  return raw.slice(0, 10);
+}
+
+function metricNumber(row, index, fallback = 0) {
+  const value = Number(row?.metricValues?.[index]?.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function dimensionValue(row, index, fallback = '') {
+  const value = row?.dimensionValues?.[index]?.value;
+  return value == null ? fallback : String(value);
+}
+
+function makeDateMap(rows, rowMapper) {
+  const map = new Map();
+  for (const row of rows || []) {
+    const date = normalizeGa4Date(dimensionValue(row, 0));
+    if (!date) continue;
+    map.set(date, rowMapper(row, date));
+  }
+  return map;
+}
+
+async function runGa4Report(client, requestBody) {
+  return client.properties.runReport({
+    property: `properties/${propertyId}`,
+    requestBody,
+  });
+}
+
+async function getDailyConversions(client, startDate, endDate) {
+  const response = await runGa4Report(client, {
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [{ name: 'date' }],
+    metrics: [{ name: 'conversions' }],
+    orderBys: [{ dimension: { dimensionName: 'date' } }],
+    limit: 10000,
+  });
+
+  return makeDateMap(response.data.rows, (row) => Math.round(metricNumber(row, 0)));
+}
+
+async function getDailyDevicePct(client, startDate, endDate) {
+  const response = await runGa4Report(client, {
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [
+      { name: 'date' },
+      { name: 'deviceCategory' },
+    ],
+    metrics: [{ name: 'sessions' }],
+    orderBys: [
+      { dimension: { dimensionName: 'date' } },
+      { metric: { metricName: 'sessions' }, desc: true },
+    ],
+    limit: 10000,
+  });
+
+  const totals = new Map();
+  const byDate = new Map();
+  for (const row of response.data.rows || []) {
+    const date = normalizeGa4Date(dimensionValue(row, 0));
+    const device = dimensionValue(row, 1).toLowerCase();
+    const sessions = metricNumber(row, 0);
+    if (!date) continue;
+    totals.set(date, (totals.get(date) || 0) + sessions);
+    if (!byDate.has(date)) byDate.set(date, {});
+    byDate.get(date)[device] = (byDate.get(date)[device] || 0) + sessions;
+  }
+
+  const map = new Map();
+  for (const [date, devices] of byDate.entries()) {
+    const total = totals.get(date) || 0;
+    map.set(date, {
+      mobile_pct: total > 0 ? parseFloat((((devices.mobile || 0) / total) * 100).toFixed(2)) : 0,
+      desktop_pct: total > 0 ? parseFloat((((devices.desktop || 0) / total) * 100).toFixed(2)) : 0,
+    });
+  }
+  return map;
+}
+
+async function getDailyTopLandingPages(client, startDate, endDate) {
+  const response = await runGa4Report(client, {
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [
+      { name: 'date' },
+      { name: 'landingPage' },
+    ],
+    metrics: [{ name: 'sessions' }],
+    orderBys: [
+      { dimension: { dimensionName: 'date' } },
+      { metric: { metricName: 'sessions' }, desc: true },
+    ],
+    limit: 10000,
+  });
+
+  const topByDate = new Map();
+  for (const row of response.data.rows || []) {
+    const date = normalizeGa4Date(dimensionValue(row, 0));
+    if (!date || topByDate.has(date)) continue;
+    topByDate.set(date, dimensionValue(row, 1) || null);
+  }
+  return topByDate;
+}
+
+async function getDailyTrafficSources(client, startDate, endDate) {
+  const response = await runGa4Report(client, {
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [
+      { name: 'date' },
+      { name: 'sessionSource' },
+      { name: 'sessionMedium' },
+    ],
+    metrics: [
+      { name: 'sessions' },
+      { name: 'totalUsers' },
+      { name: 'conversions' },
+    ],
+    orderBys: [
+      { dimension: { dimensionName: 'date' } },
+      { metric: { metricName: 'sessions' }, desc: true },
+    ],
+    limit: 10000,
+  });
+
+  const rows = [];
+  const topByDate = new Map();
+  for (const row of response.data.rows || []) {
+    const date = normalizeGa4Date(dimensionValue(row, 0));
+    if (!date) continue;
+
+    const source = dimensionValue(row, 1, '(not set)').substring(0, 100);
+    const medium = dimensionValue(row, 2, '(not set)').substring(0, 100);
+    const record = {
+      date,
+      source,
+      medium,
+      sessions: Math.round(metricNumber(row, 0)),
+      users: Math.round(metricNumber(row, 1)),
+      conversions: Math.round(metricNumber(row, 2)),
+    };
+    rows.push(record);
+
+    const currentTop = topByDate.get(date);
+    if (!currentTop || record.sessions > currentTop.sessions) topByDate.set(date, record);
+  }
+
+  return { rows, topByDate };
+}
+
 // ── 1. Traffic Overview ─────────────────────────────────────────────
 async function getTrafficOverview(startDate, endDate) {
   try {
@@ -102,6 +255,7 @@ async function getTrafficOverview(startDate, endDate) {
         metrics: [
           { name: 'sessions' },
           { name: 'totalUsers' },
+          { name: 'newUsers' },
           { name: 'screenPageViews' },
           { name: 'bounceRate' },
           { name: 'averageSessionDuration' },
@@ -114,9 +268,10 @@ async function getTrafficOverview(startDate, endDate) {
       date: row.dimensionValues[0].value,
       sessions: parseInt(row.metricValues[0].value),
       users: parseInt(row.metricValues[1].value),
-      pageviews: parseInt(row.metricValues[2].value),
-      bounceRate: parseFloat(parseFloat(row.metricValues[3].value).toFixed(4)),
-      avgSessionDuration: parseFloat(parseFloat(row.metricValues[4].value).toFixed(2)),
+      newUsers: parseInt(row.metricValues[2].value),
+      pageviews: parseInt(row.metricValues[3].value),
+      bounceRate: parseFloat(parseFloat(row.metricValues[4].value).toFixed(4)),
+      avgSessionDuration: parseFloat(parseFloat(row.metricValues[5].value).toFixed(2)),
     }));
 
     // Compute totals
@@ -124,10 +279,11 @@ async function getTrafficOverview(startDate, endDate) {
       (acc, r) => {
         acc.sessions += r.sessions;
         acc.users += r.users;
+        acc.newUsers += r.newUsers;
         acc.pageviews += r.pageviews;
         return acc;
       },
-      { sessions: 0, users: 0, pageviews: 0 }
+      { sessions: 0, users: 0, newUsers: 0, pageviews: 0 }
     );
 
     const avgBounce = rows.length > 0
@@ -424,74 +580,63 @@ async function syncDailyData(days = 3) {
     // 1. Get daily overview
     const overview = await getTrafficOverview(startStr, endStr);
 
-    // 2. Get sources for top source/medium per day
-    const sourcesResult = await getTrafficBySource(startStr, endStr);
-    const topSource = sourcesResult.data && sourcesResult.data[0];
+    // 2. Get per-day source/device/landing/conversion dimensions for DB trends.
+    const [
+      dailyConversions,
+      dailyDevices,
+      dailyLandingPages,
+      dailySources,
+    ] = await Promise.all([
+      getDailyConversions(client, startStr, endStr),
+      getDailyDevicePct(client, startStr, endStr),
+      getDailyTopLandingPages(client, startStr, endStr),
+      getDailyTrafficSources(client, startStr, endStr),
+    ]);
 
-    // 3. Get device breakdown for mobile/desktop pct
-    const devices = await getDeviceBreakdown(startStr, endStr);
-    const deviceMap = {};
-    if (devices.data) {
-      for (const d of devices.data) {
-        deviceMap[d.device.toLowerCase()] = d.pct || 0;
-      }
-    }
-
-    // 4. Get top landing page
-    const landingPages = await getTopLandingPages(startStr, endStr, 1);
-    const topLanding = landingPages.data && landingPages.data[0];
-
-    // 5. Get conversions total
-    const conversions = await getConversions(startStr, endStr);
-    const totalConversions = conversions.data
-      ? conversions.data.reduce((s, r) => s + r.count, 0)
-      : 0;
-
-    // 6. Upsert daily rows
+    // 3. Upsert daily rows.
     if (overview.daily && overview.daily.length > 0) {
       for (const day of overview.daily) {
-        const dateStr = day.date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3');
+        const dateStr = normalizeGa4Date(day.date);
+        const topSource = dailySources.topByDate.get(dateStr);
+        const devicePct = dailyDevices.get(dateStr) || {};
         await db('ga4_daily_metrics')
           .insert({
             date: dateStr,
             sessions: day.sessions,
             users: day.users,
-            new_users: 0,
+            new_users: day.newUsers || 0,
             pageviews: day.pageviews,
             bounce_rate: parseFloat((day.bounceRate * 100).toFixed(2)),
             avg_session_duration: day.avgSessionDuration,
-            conversions: totalConversions,
+            conversions: dailyConversions.get(dateStr) || 0,
             top_source: topSource ? topSource.source : null,
             top_medium: topSource ? topSource.medium : null,
-            top_landing_page: topLanding ? topLanding.landingPage : null,
-            mobile_pct: deviceMap.mobile || 0,
-            desktop_pct: deviceMap.desktop || 0,
+            top_landing_page: dailyLandingPages.get(dateStr) || null,
+            mobile_pct: devicePct.mobile_pct || 0,
+            desktop_pct: devicePct.desktop_pct || 0,
           })
           .onConflict('date')
           .merge();
       }
     }
 
-    // 7. Upsert traffic source rows
-    if (sourcesResult.data && sourcesResult.data.length > 0) {
-      for (const src of sourcesResult.data) {
-        // Store aggregated sources with the end date
+    // 4. Upsert traffic source rows by day.
+    if (dailySources.rows.length > 0) {
+      for (const src of dailySources.rows) {
         await db('ga4_traffic_sources')
-          .insert({
-            date: endStr,
-            source: (src.source || '').substring(0, 100),
-            medium: (src.medium || '').substring(0, 100),
-            sessions: src.sessions,
-            users: src.users,
-            conversions: src.conversions || 0,
-          })
-          .onConflict(db.raw('(date, source, medium)'))
+          .insert(src)
+          .onConflict(['date', 'source', 'medium'])
           .merge();
       }
     }
 
     logger.info(`[GA4] Sync complete: ${overview.daily ? overview.daily.length : 0} daily rows`);
-    return { synced: true, period: { start: startStr, end: endStr }, rows: overview.daily ? overview.daily.length : 0 };
+    return {
+      synced: true,
+      period: { start: startStr, end: endStr },
+      rows: overview.daily ? overview.daily.length : 0,
+      sourceRows: dailySources.rows.length,
+    };
   } catch (err) {
     logger.error(`[GA4] syncDailyData failed: ${err.message}`);
     return { synced: false, error: err.message };

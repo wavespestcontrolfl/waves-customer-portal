@@ -407,6 +407,7 @@ router.get('/opportunities', async (req, res, next) => {
 const RankTracker = require('../services/seo/rank-tracker');
 const SERPAnalyzer = require('../services/seo/serp-analyzer');
 const BacklinkMonitor = require('../services/seo/backlink-monitor');
+const GscLinksImporter = require('../services/seo/gsc-links-importer');
 const AIOverviewTracker = require('../services/seo/ai-overview-tracker');
 const ContentQA = require('../services/seo/content-qa');
 const CannibalizationDetector = require('../services/seo/cannibalization');
@@ -523,6 +524,23 @@ router.post('/backlinks/scan', requireAdmin, async (req, res, next) => {
   try {
     const result = await BacklinkMonitor.scan();
     await BacklinkMonitor.takeSnapshot();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.post('/backlinks/import-gsc-links', requireAdmin, async (req, res, next) => {
+  try {
+    const csv = req.body?.csv || req.body?.csvData || req.body?.data;
+    if (!csv || typeof csv !== 'string') {
+      return res.status(400).json({ error: 'csv body field is required' });
+    }
+    const apply = req.body.apply === false || req.body.apply === 'false' ? false : true;
+
+    const result = await GscLinksImporter.importCsv(csv, {
+      apply,
+      defaultTargetUrl: req.body.defaultTargetUrl || 'https://wavespestcontrol.com/',
+      sourceLabel: req.body.sourceLabel || 'gsc_links_export',
+    });
     res.json(result);
   } catch (err) { next(err); }
 });
