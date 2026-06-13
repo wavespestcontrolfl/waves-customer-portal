@@ -661,6 +661,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :15 — Shadow backfill (brand-voice loop accelerator). Drafts
+  // house-voice replies for HISTORICAL inbounds that already have a human
+  // reply and judges them in the same pass — compresses months of
+  // per-intent score accumulation into days. Self-terminating: once
+  // history is exhausted every run is a single cheap no-op query. Batch
+  // sizes env-tunable (SHADOW_BACKFILL_BATCH / _SINCE_DAYS / _JUDGE_BATCH).
+  // =========================================================================
+  cron.schedule('15 * * * *', async () => {
+    if (!isEnabled('shadowBackfill')) return;
+    logger.info('Running: Shadow backfill batch');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { runShadowBackfill } = require('./sms-shadow-backfill');
+      await runExclusive('shadow-backfill', () => runShadowBackfill());
+    } catch (err) {
+      logger.error(`Shadow backfill failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Purge stripe_webhook_events older than 90 days.
   // Stripe's retry window is 72h max, so anything past 90d is just historical
   // noise; the table grows ~50–500 rows/day and never shrinks otherwise.
