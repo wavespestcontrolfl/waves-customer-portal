@@ -41,7 +41,7 @@ async function runForUrl(url, options = {}) {
   const canonicalUrl = live.html ? aiGate._internals.extractCanonical(live.html) : null;
   const robotsMeta = live.html ? aiGate._internals.extractRobotsMeta(live.html) : { raw: '', noindex: false };
   const inferredInboundLinks = internalInboundLinks == null
-    ? await countPendingInboundLinks(url).catch(() => 0)
+    ? await countRecordedOrLiveInboundLinks(url, fetchFn).catch(() => 0)
     : internalInboundLinks;
 
   let sitemapResult = { present: false, error: 'sitemap_manager_unavailable' };
@@ -323,6 +323,75 @@ async function countPendingInboundLinks(url) {
   return Number(row?.count || 0);
 }
 
+async function countRecordedOrLiveInboundLinks(url, fetchFn = fetch) {
+  const recorded = await countPendingInboundLinks(url);
+  if (recorded > 0) return recorded;
+  return countKnownLiveInboundLinks(url, fetchFn);
+}
+
+async function countKnownLiveInboundLinks(url, fetchFn = fetch) {
+  const parsed = safeUrl(url);
+  if (!parsed) return 0;
+
+  const sources = knownInboundSourceUrls(parsed)
+    .filter((source) => source !== parsed.href);
+  let count = 0;
+  for (const source of sources) {
+    const live = await fetchHtml(source, fetchFn);
+    if (!live.ok || !live.html) continue;
+    if (htmlHasCrawlableLinkTo(live.html, url, source)) count += 1;
+  }
+  return count;
+}
+
+function knownInboundSourceUrls(parsedTargetUrl) {
+  return [
+    new URL('/blog/', parsedTargetUrl.origin).href,
+    new URL('/', parsedTargetUrl.origin).href,
+  ];
+}
+
+function htmlHasCrawlableLinkTo(html = '', targetUrl, sourceUrl) {
+  const target = comparableInternalUrl(targetUrl, sourceUrl);
+  if (!target) return false;
+  const anchors = String(html || '').matchAll(/<a\b([^>]*)>/gi);
+  for (const match of anchors) {
+    const attrs = match[1] || '';
+    const rel = attrValue(attrs, 'rel');
+    if (rel.split(/\s+/).some((value) => value.toLowerCase() === 'nofollow')) continue;
+    const href = attrValue(attrs, 'href');
+    if (!href) continue;
+    if (comparableInternalUrl(href, sourceUrl) === target) return true;
+  }
+  return false;
+}
+
+function comparableInternalUrl(href, baseUrl) {
+  const parsed = safeUrl(href, baseUrl);
+  const base = safeUrl(baseUrl);
+  if (!parsed || !base || canonicalHost(parsed.hostname) !== canonicalHost(base.hostname)) return null;
+  const path = parsed.pathname.replace(/\/+$/, '') || '/';
+  return `${canonicalHost(parsed.hostname)}${path.toLowerCase()}`;
+}
+
+function canonicalHost(hostname = '') {
+  return String(hostname || '').trim().toLowerCase().replace(/^www\./, '');
+}
+
+function attrValue(attrs = '', name = '') {
+  const escaped = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = String(attrs || '').match(new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s>]+))`, 'i'));
+  return match ? (match[2] || match[3] || match[4] || '').trim() : '';
+}
+
+function safeUrl(value, baseUrl) {
+  try {
+    return new URL(String(value || '').trim(), baseUrl);
+  } catch {
+    return null;
+  }
+}
+
 function inboundLinkTargetVariants(url) {
   const raw = String(url || '').trim();
   const normalized = normalizeUrl(raw);
@@ -467,6 +536,8 @@ module.exports = {
   _internals: {
     fetchHtml,
     fetchRobotsTxt,
+    countKnownLiveInboundLinks,
+    htmlHasCrawlableLinkTo,
     inboundLinkTargetVariants,
     mergeRawInspection,
     parseJsonObject,

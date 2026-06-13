@@ -19,11 +19,17 @@ describe('admin content generation normalization', () => {
     });
   });
 
-  test('normalizes supported target_sites and rejects unsupported domains', () => {
+  test('pins blog target_sites to the hub and rejects unsupported domains', () => {
     expect(normalizeBlogUpdates({
       target_sites: ['https://www.wavespestcontrol.com/blog/', 'palmettoflpestcontrol.com'],
     })).toEqual({
-      target_sites: ['wavespestcontrol.com', 'palmettoflpestcontrol.com'],
+      target_sites: ['wavespestcontrol.com'],
+    });
+
+    expect(normalizeBlogUpdates({
+      target_sites: [],
+    })).toEqual({
+      target_sites: ['wavespestcontrol.com'],
     });
 
     expect(() => normalizeBlogUpdates({

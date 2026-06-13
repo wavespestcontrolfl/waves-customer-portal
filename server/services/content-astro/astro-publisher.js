@@ -45,6 +45,7 @@ function isBlogTarget(filePath) {
 }
 const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
 const HUB_ORIGIN = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+const BLOG_HUB_DOMAINS = Object.freeze(['wavespestcontrol.com']);
 
 // A hero already committed to the Astro repo — either the relative /images/blog
 // path or its absolute hub URL. These are NOT re-fetched on republish (the
@@ -66,6 +67,21 @@ function absoluteHeroUrl(ref) {
   if (/^https?:\/\//i.test(ref)) return ref;
   if (ref.startsWith('/')) return `${HUB_ORIGIN}${ref}`;
   return null;
+}
+
+function hubOnlyBlogDomains() {
+  return [...BLOG_HUB_DOMAINS];
+}
+
+function stampHubOnlyBlogDomains(frontmatter) {
+  const tracking = frontmatter.tracking
+    && typeof frontmatter.tracking === 'object'
+    && !Array.isArray(frontmatter.tracking)
+    ? frontmatter.tracking
+    : {};
+  frontmatter.domains = hubOnlyBlogDomains();
+  frontmatter.tracking = { ...tracking, domains: hubOnlyBlogDomains() };
+  return frontmatter;
 }
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
@@ -128,20 +144,10 @@ async function buildFrontmatter(post) {
   const technicallyReviewedDate = dateOnly(post.technically_reviewed_at);
   const factCheckedDate = dateOnly(post.fact_checked_at);
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
-  const targetSites = normalizeTargetSites(post.target_sites);
   const relatedServices = normalizeArray(post.related_services);
-  // Automated blog posts (idea generator / demand miner / content calendar)
-  // target the hub only — they're general SWFL educational content, not
-  // spoke-domain material. Without an explicit target the empty-list default
-  // would fan them across every spoke domain, so pin automated, untargeted
-  // posts to wavespestcontrol.com. Manually-authored posts keep the existing
-  // empty-means-astro-default behavior (so the "publish to all domains" option
-  // still works for hand-curated content).
-  const AUTOMATED_BLOG_SOURCES = new Set(['ai_generated', 'demand_mined', 'calendar']);
-  const effectiveTargets = targetSites.length > 0
-    ? targetSites
-    : (AUTOMATED_BLOG_SOURCES.has(post.source) ? ['wavespestcontrol.com'] : []);
-  const domains = effectiveTargets.length > 0 ? effectiveTargets : undefined;
+  // Blog posts from this publisher are hub-only. Spoke/service pages can still
+  // carry spoke domains, but blog content should not fan out to city spokes.
+  const domains = hubOnlyBlogDomains();
 
   const data = {
     title: post.title,
@@ -154,13 +160,9 @@ async function buildFrontmatter(post) {
     service_areas_tag: serviceAreas.length > 0 ? serviceAreas : undefined,
     related_services: relatedServices,
     spoke_links: normalizeArray(post.spoke_links),
-    // Per-post spoke targeting. Written as `domains` to match the existing
-    // Astro convention — src/pages/[...slug].astro already has a
-    // `domainMatches()` filter that reads this field. Absent/empty keeps
-    // the astro defaults ("hub sees it, spokes don't") so old posts that
-    // never set target_sites keep their current behavior on the detail
-    // route. The list route (src/pages/blog.astro) is being updated in a
-    // matching commit in the astro repo to honor `domains` too.
+    // Per-post domain targeting. For publisher-created blogs this is always
+    // hub-only; spoke/domain-specific pages live in the service/location
+    // collections, not the blog collection.
     domains,
     author: author ? {
       name: author.name,
@@ -190,7 +192,7 @@ async function buildFrontmatter(post) {
     canonical,
     schema_types: schemaTypesForContent(post.content, ['Article']),
     disclosure: { type: 'pricing-transparency' },
-    tracking: domains ? { domains } : undefined,
+    tracking: { domains: hubOnlyBlogDomains() },
   };
 
   // Drop undefined keys so YAML output stays clean.
@@ -498,14 +500,6 @@ async function publishAstro(postId) {
     // schema validation, so a generated post could ship "$39/month" or a
     // spoke-domain brand leak with nothing but the prompt stopping it. Block
     // P0/P1 here too — body + editable meta are checked.
-    // target_sites semantics: a non-empty list targets those domains, but an
-    // EMPTY/null list renders on ALL spoke domains (backward-compat — see the
-    // target_sites migration + admin "publish to ALL 15 domains" warning).
-    // buildFrontmatter omits data.domains when target_sites is empty, so expand
-    // that to the full spoke list here — otherwise the brand-token guard would
-    // wrongly treat an all-domains post as hub-only and let a literal-brand leak
-    // ship to every spoke. (New posts default to hub-only targeting, so this
-    // mainly catches legacy/cleared rows — exactly the multi-domain case.)
     const guardrailDomains = (Array.isArray(data.domains) && data.domains.length > 0)
       ? data.domains
       : SPOKE_SITE_KEYS;
@@ -811,6 +805,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
   frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
+  stampHubOnlyBlogDomains(frontmatter);
 
   // Hero contract: the writer agent's emit_draft tool only constrains
   // `frontmatter` to "object", while the binding blog schema REQUIRES
@@ -1272,6 +1267,7 @@ async function mergeAstro(postId) {
     if (pr.state !== 'open') {
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
+    if (!isUnpublish) await assertOpenPublishPrIsHubOnly(post, pr);
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
 
     const result = await gh.mergePr(post.astro_pr_number, {
@@ -1292,6 +1288,46 @@ async function mergeAstro(postId) {
     });
     throw err;
   }
+}
+
+async function assertOpenPublishPrIsHubOnly(post, pr) {
+  const ref = post.astro_branch_name || pr?.head?.ref;
+  const slug = post.slug || slugify(post.title);
+  const resolved = await resolveExistingAstroFileAtRef(`${ASTRO_BLOG_DIR}/${slug}`, ref);
+  if (!resolved) {
+    throw new Error(`Astro PR #${pr.number} could not be verified as hub-only; republish the post before merge`);
+  }
+
+  const data = fm.parse(resolved.file.content)?.data || {};
+  const tracking = data.tracking && typeof data.tracking === 'object' && !Array.isArray(data.tracking)
+    ? data.tracking
+    : {};
+  const trackingHasDomains = Object.prototype.hasOwnProperty.call(tracking, 'domains');
+  if (
+    !isExplicitHubOnlyDomains(data.domains)
+    || (trackingHasDomains && !isExplicitHubOnlyDomains(tracking.domains))
+  ) {
+    throw new Error(
+      `Astro PR #${pr.number} was created with non-hub blog publish targets; republish the post before merge`,
+    );
+  }
+}
+
+async function resolveExistingAstroFileAtRef(pathOrBase, ref) {
+  if (!pathOrBase || !ref) return null;
+  const base = String(pathOrBase).replace(/\.mdx?$/, '');
+  const exts = isBlogTarget(`${base}.md`) ? ['.mdx', '.md'] : ['.md'];
+  for (const ext of exts) {
+    const file = await gh.getFile(`${base}${ext}`, ref);
+    if (file) return { path: `${base}${ext}`, file };
+  }
+  return null;
+}
+
+function isExplicitHubOnlyDomains(value) {
+  const raw = normalizeArray(value);
+  const normalized = normalizeSpokeSites(value);
+  return raw.length === 1 && normalized.length === 1 && normalized[0] === 'wavespestcontrol.com';
 }
 
 // ── Internal links (post-merge) ────────────────────────────────────
@@ -1559,11 +1595,7 @@ function cloudflarePreviewUrl(branch) {
 
 function liveUrlForPost(post) {
   const slug = post.slug || slugify(post.title);
-  const targets = normalizeTargetSites(post.target_sites);
-  const firstTarget = targets[0] || 'wavespestcontrol.com';
-  const origin = firstTarget === 'wavespestcontrol.com'
-    ? (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com')
-    : `https://${firstTarget}`;
+  const origin = process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com';
   return `${origin.replace(/\/$/, '')}/${slug}/`;
 }
 

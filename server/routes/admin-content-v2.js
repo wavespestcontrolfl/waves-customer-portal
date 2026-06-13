@@ -8,7 +8,7 @@ const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { normalizeSpokeSites, invalidSpokeSites } = require('../services/content-astro/spoke-sites');
+const { invalidSpokeSites } = require('../services/content-astro/spoke-sites');
 const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
 const internalLinkReviewQueue = require('../services/content/internal-link-review-queue');
 const { isEnabled } = require('../config/feature-gates');
@@ -32,6 +32,7 @@ const CONTENT_LIMITS = {
 
 const ALLOWED_CONTENT_TYPES = new Set(['blog_post', 'page_refresh', 'pest_pressure', 'gbp_post', 'service_page']);
 const ALLOWED_TARGET_CITIES = new Set(['Lakewood Ranch', 'Parrish', 'Bradenton', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Port Charlotte']);
+const HUB_BLOG_TARGET_SITES = ['wavespestcontrol.com'];
 
 const BLOG_UPDATE_FIELDS = new Set([
   'title',
@@ -68,7 +69,7 @@ function normalizeBlogUpdates(body) {
     if (invalid.length > 0) {
       throw operationalBadRequest(`target_sites contains unsupported domains: ${invalid.join(', ')}`);
     }
-    updates.target_sites = normalizeSpokeSites(updates.target_sites);
+    updates.target_sites = [...HUB_BLOG_TARGET_SITES];
   }
   return updates;
 }
