@@ -6,6 +6,12 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
 
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
+// Term statuses that represent a paid, still-current prepay period for BILLING
+// suppression. Renewal decisions flip an in-window term to renewed/switch_plan
+// (still covered through term_end) — those must stay billing-suppressed, so this
+// set is broader than ACTIVE_STATUSES (which drives renewal alerts). It excludes
+// payment_pending (unpaid) and cancelled (renewal decline / refund / termination).
+const BILLING_COVERED_STATUSES = ['active', 'renewal_pending', 'renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
 const DEFAULT_ALERT_DAYS = 30;
@@ -776,8 +782,76 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
   return term || null;
 }
 
+/**
+ * Customer IDs whose prepay coverage is active on `asOf` (ET date string;
+ * defaults to today). A customer in this set has paid for the current period up
+ * front and MUST be excluded from monthly billing even when active +
+ * monthly_rate > 0 + autopay on. The paid coverage term — not a zeroed
+ * monthly_rate — is the billing-suppression source of truth, so monthly_rate
+ * stays on the profile for renewal/reporting math.
+ *
+ * Coverage = today within [term_start, term_end] AND a BILLING_COVERED_STATUSES
+ * term AND the prepay invoice is not void/refunded. Keying on the paid invoice
+ * (rather than only ACTIVE_STATUSES) keeps renewal-decided terms — renewed /
+ * switch_plan, still covered through term_end — suppressed, while a refund
+ * (invoice flips to refunded) correctly re-enables monthly billing.
+ */
+async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
+  if (!(await annualPrepayTableExists())) return new Set();
+  const today = dateOnly(asOf) || etDateString();
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const rows = await conn('annual_prepay_terms as t')
+    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.term_start', '<=', today)
+    .where('t.term_end', '>=', today)
+    // Covered = a paid-coverage status, OR a payment_pending term whose invoice
+    // is in fact paid (webhook/reconcile lag). activatePaidPendingTerms() is the
+    // canonical recovery (run before this in the billing cron); this OR-branch
+    // is the belt-and-suspenders guard if that sync hasn't caught up.
+    .where(function statusGuard() {
+      this.whereIn('t.status', BILLING_COVERED_STATUSES)
+        .orWhere(function paidPending() {
+          this.where('t.status', PAYMENT_PENDING_STATUS)
+            .andWhere(function invoicePaid() {
+              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+            });
+        })
+        // A 'cancelled' status is overloaded: a renewal *lapse* decision
+        // (renewal_decision='cancel') still leaves the already-paid term current
+        // through term_end, whereas a refund sets status='cancelled' with a NULL
+        // renewal_decision. Keep the lapsed-but-still-paid customer suppressed;
+        // the invoice/payment refund exclusions below still drop true refunds.
+        .orWhere(function lapsedRenewalStillInTerm() {
+          this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
+        });
+    })
+    // Exclude void/refunded prepay invoices…
+    .whereRaw(
+      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    // …and any term whose prepay payment was FULLY refunded. The Stripe refund
+    // webhook (charge.refunded) flips a full refund to status='refunded' /
+    // refund_status='full' on the payment row — it does NOT flip invoices.status
+    // or set refunded_at — so detect it on the payment via the invoice's Stripe
+    // identifiers. Partial refunds (status stays 'paid') keep coverage.
+    .whereRaw(
+      `not exists (
+        select 1 from payments p
+        where (p.status = 'refunded' or p.refund_status = 'full')
+          and (
+            (p.stripe_payment_intent_id is not null and p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+            or (p.stripe_charge_id is not null and p.stripe_charge_id = i.stripe_charge_id)
+          )
+      )`,
+    )
+    .distinct('t.customer_id');
+  return new Set(rows.map((r) => String(r.customer_id)));
+}
+
 module.exports = {
   createTermForAnnualPrepay,
+  getActivelyCoveredCustomerIds,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   syncTermForInvoicePayment,
