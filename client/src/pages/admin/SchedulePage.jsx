@@ -492,6 +492,13 @@ function createCompletionIdempotencyKey(serviceId) {
   return `complete_${serviceId}_${randomPart}`;
 }
 
+export function shouldResetCompletionIdempotencyKey(error) {
+  const status = Number(error?.status);
+  if (!Number.isFinite(status) || status < 400 || status >= 500) return false;
+  if (status !== 409) return true;
+  return error?.code === "lawn_assessment_stale";
+}
+
 function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
 }
@@ -8185,7 +8192,7 @@ export function CompletionPanel({
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
-      if (e?.status >= 400 && e.status < 500 && e.status !== 409) {
+      if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
       }
       const billingRequired =
