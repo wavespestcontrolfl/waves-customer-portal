@@ -86,6 +86,19 @@ describe('sms shadow drafter — prompt contract', () => {
     expect(prompt).toContain('no reply warranted'); // courtesy acks may draft an empty reply
   });
 
+  test('v2 fact-discipline rule targets the fabrication modes the judge flagged', () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain('FACT DISCIPLINE');
+    // the specific failure modes from the v1 draft_unsafe cohort
+    expect(prompt).toMatch(/arrival window/i);
+    expect(prompt).toMatch(/Name a technician/i);
+    expect(prompt).toMatch(/trap caught|what was found/i);
+    expect(prompt).toMatch(/cadence|frequency/i);
+    expect(prompt).toMatch(/billing event/i);
+    // and the safe fallback is framed as correct, not a failure
+    expect(prompt).toMatch(/confirm and follow up|get right back/i);
+  });
+
   test('user prompt carries thread, intent, and scheduling-intent caution', () => {
     const context = {
       summary: 'Dale Cooper — Quarterly Pest, Sarasota',
@@ -152,7 +165,7 @@ describe('sms shadow drafter — structural unsendability', () => {
 
   test('telemetry identity constants are stable for the judge pass', () => {
     expect(DRAFTER).toBe('house_voice');
-    expect(PROMPT_VERSION).toBe('house_voice_v1');
+    expect(PROMPT_VERSION).toBe('house_voice_v2');
     expect(INTENDED_ACTION_TYPES).toContain('escalate');
     expect(INTENDED_ACTION_TYPES).toContain('none');
   });

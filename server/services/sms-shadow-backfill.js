@@ -39,7 +39,11 @@ const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { hasSchedulingIntent } = require('./sms-intent');
 
-const BACKFILL_PROMPT_VERSION = 'house_voice_v1_backfill';
+// v2 (06-13): tracks the drafter's hardened v2 fact-discipline prompt. The
+// ~50 candidates already drafted under v1 keep 'house_voice_v1_backfill';
+// the remaining backfill runs under v2 — a same-context (backfill) cohort
+// to compare draft_unsafe rates against the v1 cohort.
+const BACKFILL_PROMPT_VERSION = 'house_voice_v2_backfill';
 const REPLY_WINDOW_HOURS = 24; // mirror of the judge's pairing window
 
 // Inbound message_types the live webhook handles in a branch that returns
