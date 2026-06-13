@@ -36,10 +36,11 @@ describe('recommendedInchesPerWeek (grass × season, v1 lookup)', () => {
     expect(recommendedInchesPerWeek('St. Augustine', 12)).toBe(0.75); // cool
   });
 
-  test('drought-tolerant grasses recommend less; unknown falls back to default', () => {
+  test('drought-tolerant grasses recommend less; unknown defaults to St. Augustine', () => {
     expect(recommendedInchesPerWeek('bahia', 6)).toBe(0.75);
     expect(recommendedInchesPerWeek('zoysia', 6)).toBe(1);
-    expect(recommendedInchesPerWeek(null, 6)).toBe(1);
+    expect(recommendedInchesPerWeek(null, 6)).toBe(1.25);   // St. Augustine default
+    expect(recommendedFromEt0(1.6, null)).toBe(1.25);        // 1.6 × 0.8 (St. Aug Kc)
   });
 });
 

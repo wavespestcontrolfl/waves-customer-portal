@@ -25,7 +25,9 @@ const PEAK_INCHES_BY_GRASS = {
   centipede: 0.75,
   seashore_paspalum: 1.0,
 };
-const DEFAULT_PEAK_INCHES = 1.0;
+// Unknown/untracked grass defaults to St. Augustine — SWFL's dominant turf (the
+// vision model assumes it too), and grass type is rarely captured per customer.
+const DEFAULT_PEAK_INCHES = PEAK_INCHES_BY_GRASS.st_augustine; // 1.25"
 
 // Season multiplier by ET demand. SWFL months are grouped into peak demand
 // (Jun–Sep), shoulder (Apr–May, Oct–Nov), and cool/dormant (Dec–Mar).
@@ -71,7 +73,8 @@ const CROP_COEFFICIENT_BY_GRASS = {
   centipede: 0.45,
   seashore_paspalum: 0.7,
 };
-const DEFAULT_CROP_COEFFICIENT = 0.6;
+// Unknown grass → St. Augustine Kc (see DEFAULT_PEAK_INCHES rationale).
+const DEFAULT_CROP_COEFFICIENT = CROP_COEFFICIENT_BY_GRASS.st_augustine; // 0.8
 
 // ET₀-based weekly target (inches) = reference ET₀ for the week × turf Kc. Null
 // when ET₀ is unavailable so the caller falls back to the seasonal lookup.
