@@ -98,6 +98,23 @@ describe('computeMembershipContext', () => {
     ]);
   });
 
+  test('a customer row with NO existing services is NOT flagged existing (keeps prepay eligible)', async () => {
+    // Regression: a brand-new pest/lawn signup whose customer row already
+    // exists (created at intake/onsite) carries zero qualifying recurring
+    // services. It must render as a NEW customer so the annual-prepay option
+    // and the WaveGuard setup fee are not suppressed by the existing-customer
+    // guard in estimate-public / estimate-converter.
+    const database = fakeDb({ scheduledRows: [] });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx).toMatchObject({ isExistingCustomer: false });
+    expect(ctx.existingServiceKeys).toEqual([]);
+  });
+
   test('falls back to scheduled estimated_price when there is no paid history', async () => {
     const database = fakeDb({ scheduledRows: futurePestRows(), paidInvoices: [] });
 
