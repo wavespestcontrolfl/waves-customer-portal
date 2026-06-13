@@ -4346,13 +4346,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ? 'suppressed_delivery_mode'
         : (sendCompletionSms ? (svc.cust_phone ? 'not_sent' : 'no_phone') : 'not_requested'));
     const completionSmsType = finalRecordNotes.completionSmsType || finalRecordNotes.sentSmsType || null;
+    // A freshly created, unpaid completion invoice needs an in-person collection
+    // path (the mobile payment sheet) whenever it isn't covered by
+    // prepay/autopay/already-paid and the link wasn't already sent. This must NOT
+    // be gated on the SMS template: with includePayLink=false the report-only
+    // 'service_complete' template is sent ALONGSIDE an unpaid invoice, so the
+    // old `completionSmsType !== 'service_complete'` exclusion (a pre-PR proxy
+    // for "no-bill completion", redundant with the !!invoice/suppress checks)
+    // would strand that invoice with neither a pay link nor an in-person prompt.
     const invoicePaymentActionRequired = !!invoice
       && invoice.status !== 'paid'
       && !prepaidCovered
       && !alreadyPaid
       && !autopayCoversVisit
-      && !suppressCompletionInvoiceLink
-      && completionSmsType !== 'service_complete';
+      && !suppressCompletionInvoiceLink;
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
