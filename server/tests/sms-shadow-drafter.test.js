@@ -165,7 +165,7 @@ describe('sms shadow drafter — structural unsendability', () => {
 
   test('telemetry identity constants are stable for the judge pass', () => {
     expect(DRAFTER).toBe('house_voice');
-    expect(PROMPT_VERSION).toBe('house_voice_v3');
+    expect(PROMPT_VERSION).toBe('house_voice_v4');
     expect(INTENDED_ACTION_TYPES).toContain('escalate');
     expect(INTENDED_ACTION_TYPES).toContain('none');
   });

@@ -17,9 +17,20 @@ describe('verifier — prompt contract', () => {
     expect(p).toMatch(/found, caught, treated/i);
     expect(p).toMatch(/billing event/i);
     // acknowledgments/deferrals must NOT be treated as violations
-    expect(p).toMatch(/confirm or follow up are NOT violations/i);
+    expect(p).toMatch(/confirm.{0,8}follow up are fine/i);
     expect(p).toContain('"supported"');
     expect(p).toContain('"violations"');
+  });
+
+  test('v4 verifier is skeptical by default and grounds the literal-only customer source', () => {
+    const p = buildVerifierSystemPrompt();
+    // skeptical default — must not give the draft the benefit of the doubt
+    expect(p).toMatch(/default to flagging/i);
+    expect(p).toMatch(/skeptical|UNSAFE unless/i);
+    // literal-only customer source — the exact failures it must now catch
+    expect(p).toMatch(/literally wrote|literal words/i);
+    expect(p).toMatch(/flying bugs/i);   // spiders ≠ flying bugs
+    expect(p).toMatch(/pickup/i);        // a name ≠ a pickup request
   });
 
   test('user prompt carries facts, the customer message, and the draft under check', () => {
@@ -35,8 +46,12 @@ describe('verifier — prompt contract', () => {
     expect(p).toContain('See you Tuesday at 2 PM!');
   });
 
-  test('system prompt treats the customer message as a valid fact source', () => {
-    expect(buildVerifierSystemPrompt()).toMatch(/customer'?s own current message is also a valid source/i);
+  test('the customer message is still a valid source — just literal-only', () => {
+    // The Codex-P1 fix (verifier sees the inbound) must survive the v4
+    // tightening: the customer's words still ground the draft, but only what
+    // they literally said.
+    const p = buildVerifierSystemPrompt();
+    expect(p).toMatch(/customer.{0,30}LITERALLY wrote/i);
   });
 });
 

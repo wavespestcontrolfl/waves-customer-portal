@@ -27,12 +27,13 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 
 const DRAFTER = 'house_voice';
-// v3 (06-13): the v2 prompt-hardening was a null result (32% draft_unsafe
-// unchanged) — negative instructions can't beat the completion instinct. v3
-// keeps the v2 prompt but wraps drafting in an adversarial verify→revise
-// loop (generateGroundedDraft + sms-draft-verifier). Bumped so the judge
-// partitions v3 vs the 32% v1=v2 baseline.
-const PROMPT_VERSION = 'house_voice_v3';
+// v4 (06-13): v3's verify loop ran but the verifier was too lenient —
+// passed all 18 backfill drafts incl. 3 blatant fabrications (zero
+// revisions fired). v4 keeps the loop, makes the verifier aggressively
+// strict (skeptical default, per-claim grounding, literal-only customer
+// source). Bumped so the judge partitions v4 vs v3 (verifier-lenient) and
+// the v1/v2 baselines.
+const PROMPT_VERSION = 'house_voice_v4';
 const SHADOW_STATUS = 'shadow';
 
 const INTENDED_ACTION_TYPES = [
