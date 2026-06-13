@@ -6,6 +6,7 @@ const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = 
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
+const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -217,7 +218,13 @@ function roundInches(value) {
   return n == null ? null : Math.round(n * 100) / 100;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {} } = {}) {
+function monthFromServiceDate(serviceDate) {
+  if (!serviceDate) return null;
+  const m = Number(String(serviceDate).slice(5, 7));
+  return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
+}
+
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null } = {}) {
   const irrigationInchesPerWeek = firstNumber(
     turfProfile?.irrigation_inches_per_week,
     assessment.irrigation_inches_per_week,
@@ -239,8 +246,17 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
   const dailyInputs = [irrigationInchesPerDay, rainfallInchesToday].filter((value) => value != null);
   const weeklyInputs = [irrigationInchesPerWeek, rainfallInches7d].filter((value) => value != null);
 
-  if (!dailyInputs.length && !weeklyInputs.length) return null;
+  const grassType = turfProfile?.grass_type || assessment.grass_type || null;
+  const irrigationAdvice = buildIrrigationAdvice({
+    grassType,
+    month: monthFromServiceDate(serviceDate),
+    irrigationInchesPerWeek,
+    rainfallInches7d,
+  });
 
+  // Always return a context for lawn reports: even with no inputs we carry the
+  // grass×season recommendation so the report can prompt the customer to add
+  // their irrigation schedule.
   return {
     irrigationInchesPerWeek: roundInches(irrigationInchesPerWeek),
     irrigationInchesPerDay: roundInches(irrigationInchesPerDay),
@@ -248,11 +264,12 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     rainfallInches7d: roundInches(rainfallInches7d),
     effectiveInchesToday: dailyInputs.length ? roundInches(dailyInputs.reduce((sum, value) => sum + value, 0)) : null,
     effectiveInches7d: rainfallInches7d == null ? null : roundInches(weeklyInputs.reduce((sum, value) => sum + value, 0)),
-    targetInchesPerWeek: 1,
-    targetInchesPerDay: roundInches(1 / 7),
+    targetInchesPerWeek: irrigationAdvice.recommendedInchesPerWeek,
+    targetInchesPerDay: roundInches(irrigationAdvice.recommendedInchesPerWeek / 7),
     rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
       ? 'fawn_daily_observation'
       : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
+    irrigationAdvice,
   };
 }
 
@@ -1652,6 +1669,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     turfProfile,
     propertyPrefs,
     fawnSnapshot,
+    serviceDate: assessment.service_date,
   });
 
   return {
