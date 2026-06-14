@@ -6279,11 +6279,17 @@ function TreeShrubCloseoutBlock({
 // Keep this in lockstep with the server clamp.
 const SMS_RECAP_MAX_CHARS = 232;
 function smsRecapPreview(value) {
+  // Mirrors server sanitizeRecap's normalization chain exactly (same order) so
+  // the preview is byte-identical to the sent SMS even when the operator pastes
+  // outer quotes, smart quotes, or en/em dashes.
   let text = String(value || "")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/\s*-\s*Waves\s*$/i, "")
-    .trim();
+    .replace(/^["']+|["']+$/g, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, "-");
+  text = text.replace(/\s*-\s*Waves\s*$/i, "").trim();
   if (text.length > SMS_RECAP_MAX_CHARS) {
     const slice = text.slice(0, SMS_RECAP_MAX_CHARS);
     const lastStop = Math.max(slice.lastIndexOf(". "), slice.lastIndexOf("! "), slice.lastIndexOf("? "));
