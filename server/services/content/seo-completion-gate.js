@@ -121,7 +121,11 @@ function evaluate(input = {}) {
   if ([...(contract.includedInternalLinks || []), ...(contract.internalLinks || [])].some((link) => isGenericAnchor(link.anchorText))) {
     findings.push(finding('P2', 'P2_GENERIC_ANCHOR_TEXT', 'One or more internal links use generic anchor text.', 'Use descriptive anchors instead of click here, learn more, or this page.'));
   }
-  if (brief.city && countCityMentions(body, brief.city) < 1) {
+  // Spoke seeds carry city=null (to keep the facts gate "not applicable") but
+  // still target one city — fall back to the operator brief's city so the
+  // localization check verifies the real target, not nothing.
+  const localizationCity = brief.city || brief?.voice_constraints?.operator_brief?.city || null;
+  if (localizationCity && countCityMentions(body, localizationCity) < 1) {
     findings.push(finding('P2', 'P2_WEAK_LOCALIZATION', 'Draft has weak city/SWFL localization.', 'Add natural local context tied to the target city or Southwest Florida conditions.'));
   }
   if (!draft.frontmatter?.hero_image && !draft.frontmatter?.og_image) {

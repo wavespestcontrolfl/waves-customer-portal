@@ -581,8 +581,17 @@ function checkHubLinkPresent(draft, brief) {
   return { ok: false, reason: 'no_hub_link_found' };
 }
 
-function checkTwoPlusCityMentions(draft) {
+function checkTwoPlusCityMentions(draft, brief) {
   const body = String(draft.body || '').toLowerCase();
+  // A spoke/operator brief targets ONE city — verify the post actually localizes
+  // to THAT city (the manifest requires it twice), not just any two SWFL cities
+  // (a Sarasota spoke post must not pass on Bradenton+Venice mentions alone).
+  const targetCity = String(brief?.voice_constraints?.operator_brief?.city || '').trim().toLowerCase();
+  if (targetCity) {
+    const re = new RegExp(`\\b${targetCity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+    const n = (body.match(re) || []).length;
+    return n >= 2 ? { ok: true } : { ok: false, reason: `only_${n}_${targetCity.replace(/\s+/g, '_')}_mentions` };
+  }
   const cities = ['bradenton', 'sarasota', 'venice', 'parrish', 'lakewood ranch', 'north port', 'palmetto', 'port charlotte'];
   let count = 0;
   for (const c of cities) {

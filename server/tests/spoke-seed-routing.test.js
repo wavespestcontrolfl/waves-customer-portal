@@ -288,6 +288,26 @@ describe('Codex PR #1772 review fixes', () => {
   });
 });
 
+describe('Codex PR #1772 round 5 fixes (#2 link-planning, #4 city localization)', () => {
+  test('#2: targetForRun skips post-merge link planning for a spoke-only (off-hub) canonical', () => {
+    const { _internals: poller } = require('../services/content/autonomous-pr-poller');
+    const mk = (canonical) => ({ action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ frontmatter: { canonical } }) });
+    expect(poller.targetForRun(mk('https://www.wavespestcontrol.com/pest-control/x/')).planLinks).toBe(true);
+    expect(poller.targetForRun(mk('https://www.sarasotaflpestcontrol.com/pest-control/x/')).planLinks).toBe(false);
+  });
+
+  test('#4: checkTwoPlusCityMentions verifies the TARGET city for a spoke brief', () => {
+    const { _internals: qg } = require('../services/content/content-quality-gate');
+    const spokeBrief = { voice_constraints: { operator_brief: { city: 'Sarasota' } } };
+    expect(qg.checkTwoPlusCityMentions({ body: 'Sarasota condos. In Sarasota, roaches thrive.' }, spokeBrief).ok).toBe(true);
+    expect(qg.checkTwoPlusCityMentions({ body: 'Only one Sarasota mention here.' }, spokeBrief).ok).toBe(false);
+    // the gap Codex flagged: other-city mentions no longer let a Sarasota spoke pass
+    expect(qg.checkTwoPlusCityMentions({ body: 'Bradenton and Venice are nearby cities.' }, spokeBrief).ok).toBe(false);
+    // non-spoke briefs keep the generic two-distinct-cities behavior
+    expect(qg.checkTwoPlusCityMentions({ body: 'We serve Bradenton and Venice.' }, {}).ok).toBe(true);
+  });
+});
+
 describe('content-brief-builder: spoke overlay precedence + target_sites threading', () => {
   const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
 
