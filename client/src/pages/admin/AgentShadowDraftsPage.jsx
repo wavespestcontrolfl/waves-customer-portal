@@ -167,8 +167,20 @@ function IntentScoreCard({ row }) {
 const MODE_TONES = {
   shadow: { bg: "#F4F4F5", fg: D.zinc, label: "Shadow" },
   suggest: { bg: "#DCFCE7", fg: D.green, label: "Suggest" },
+  auto_send: { bg: "#DBEAFE", fg: D.blue, label: "Auto-send" },
   locked: { bg: "#FEE2E2", fg: D.red, label: "Escalation — always shadow" },
 };
+
+// One step DOWN the ladder shadow → suggest → auto_send, or shadow → suggest
+// up. The toggle only ever steps shadow⇄suggest or demotes auto_send→suggest:
+// promoting INTO auto_send is eligibility-gated (graduation must clear it) and
+// happens through the API, never a one-click here. Keyed by current mode.
+const MODE_TOGGLE = {
+  shadow: { next: "suggest", label: "Enable suggest" },
+  suggest: { next: "shadow", label: "Back to shadow" },
+  auto_send: { next: "suggest", label: "Back to suggest" },
+};
+const modeToggle = (mode) => MODE_TOGGLE[mode] || MODE_TOGGLE.shadow;
 
 // Phase E readiness: shows how close an intent is to its next ladder rung, or
 // a green chip when it has earned it. Recommend-only — flips stay manual.
@@ -217,7 +229,8 @@ function IntentModeCard({ row, busy, onToggle }) {
               borderRadius: 6,
               border: `1px solid ${D.border}`,
               background: D.card,
-              color: row.mode === "suggest" ? D.zinc : D.green,
+              // Green = stepping UP from shadow; zinc = stepping down a rung.
+              color: row.mode === "shadow" ? D.green : D.zinc,
               fontSize: 12,
               fontWeight: 750,
               padding: "0 10px",
@@ -225,7 +238,7 @@ function IntentModeCard({ row, busy, onToggle }) {
               opacity: busy ? 0.6 : 1,
             }}
           >
-            {row.mode === "suggest" ? "Back to shadow" : "Enable suggest"}
+            {modeToggle(row.mode).label}
           </button>
         )}
       </div>
@@ -283,7 +296,11 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   }, [load]);
 
   const toggleMode = useCallback(async (row) => {
-    const nextMode = row.mode === "suggest" ? "shadow" : "suggest";
+    // Step shadow⇄suggest, or demote auto_send→suggest — always an explicit,
+    // correctly-labeled action (never an accidental demote of an active
+    // autonomous-send intent). Promotion into auto_send is eligibility-gated
+    // and goes through the API, not this toggle.
+    const nextMode = modeToggle(row.mode).next;
     setModeBusy(row.intent);
     setError("");
     try {

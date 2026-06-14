@@ -126,7 +126,19 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       .returning('id');
     if (!row?.id) return null;
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10 };
+    // Park every OTHER pending house-voice suggestion on this thread, exactly
+    // as the manual/scheduled send paths do: an autonomous reply answers the
+    // thread, so a stale Agent Review card must not stay clickable and send a
+    // second, out-of-context reply. Same lock → atomic with the claim. The ids
+    // are carried into the send metadata below, so the EXISTING suggestion
+    // recovery sweep reconciles them on a crash (ignored behind the sent row,
+    // reopened if the send never lands) — no auto-send-specific recovery needed
+    // for the parked rows.
+    const parkedIds = threadLast10
+      ? await suggest.parkThreadSuggestions({ phoneLast10: threadLast10 }, trx)
+      : [];
+
+    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds };
   });
 }
 
@@ -201,9 +213,18 @@ async function maybeAutoSend(params = {}) {
       return { sent: false, reason: 'not_eligible' };
     }
 
-    // (5)+(6) Claim under the lock + guard-gauntlet.
+    // (5)+(6) Claim under the lock + guard-gauntlet (also parks sibling cards).
     const claim = await claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion });
     if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
+    const parkedIds = claim.parkedIds || [];
+
+    // A blocked/failed/errored send means the customer was NOT answered — the
+    // parked sibling cards must come back. A confirmed send means the thread
+    // WAS answered autonomously — they resolve as ignored (drafts return to the
+    // judge), exactly like the manual send's post-send sweep.
+    const reopenParked = async (reason) => {
+      if (parkedIds.length) await suggest.reopenScheduledSuggestions({ decisionIds: parkedIds, reason });
+    };
 
     // (7) Send via the policy-checked provider path (quiet hours, consent,
     //     suppression, identity trust all enforced upstream).
@@ -222,22 +243,26 @@ async function maybeAutoSend(params = {}) {
         metadata: {
           original_message_type: AUTOSEND_MESSAGE_TYPE,
           agentDecisionId: claim.decisionId,
+          parkedDecisionIds: parkedIds.length ? parkedIds : undefined,
           fromNumber: claim.fromNumber || undefined,
         },
       });
     } catch (err) {
       await failClaim(claim.decisionId, `send threw: ${err.message}`);
+      await reopenParked('Auto-send errored before delivery — suggestion reopened.');
       logger.warn(`[sms-auto-send] send threw (decision ${claim.decisionId}): ${err.message}`);
       return { sent: false, reason: 'send_error' };
     }
 
     if (result?.sent) {
       await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId });
+      if (parkedIds.length) await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
       logger.info(`[sms-auto-send] SENT customer=${customerId || 'unknown'} intent=${intent} decision=${claim.decisionId} sid=${result.providerMessageId || 'n/a'}`);
       return { sent: true, decisionId: claim.decisionId, providerMessageId: result.providerMessageId || null };
     }
 
     await failClaim(claim.decisionId, result?.reason || result?.code || 'provider did not send');
+    await reopenParked('Auto-send did not go out — suggestion reopened.');
     logger.info(`[sms-auto-send] NOT sent customer=${customerId || 'unknown'} intent=${intent} reason=${result?.code || 'not_sent'}`);
     return { sent: false, reason: result?.code || 'not_sent' };
   } catch (err) {
