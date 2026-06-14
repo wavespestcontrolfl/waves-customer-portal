@@ -45,6 +45,22 @@ const PhotoService = {
   },
 
   /**
+   * Fetch a photo's raw bytes from S3 as base64 (for vision/OCR input).
+   * Returns { data, mimeType } or throws.
+   */
+  async getPhotoBase64(s3Key) {
+    const res = await s3Client.send(new GetObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: s3Key,
+    }));
+    const bytes = await res.Body.transformToByteArray();
+    return {
+      data: Buffer.from(bytes).toString('base64'),
+      mimeType: res.ContentType || 'image/jpeg',
+    };
+  },
+
+  /**
    * Delete a photo from S3
    */
   async deletePhoto(s3Key) {

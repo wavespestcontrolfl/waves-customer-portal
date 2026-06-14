@@ -27,6 +27,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
+const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
@@ -2543,6 +2544,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
     let record;
+    let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
     if (resumingCommittedCompletion) {
       record = await db('service_records').where({ id: claim.serviceRecordId }).first();
@@ -2865,7 +2867,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               logger.warn(`[turf-height] optional gauge photo skipped for service=${req.params.serviceId}: ${photoErr.message}`);
             }
           }
-          await createTurfHeightReading(trx, {
+          const turfReading = await createTurfHeightReading(trx, {
             serviceRecordId: record.id,
             customerId: svc.customer_id,
             grassType: turfRow?.grass_type || 'unknown',
@@ -2873,6 +2875,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             gaugePhotoId,
             createdBy: req.technicianId,
           });
+          // Only cross-check when a gauge photo exists; OCR runs after commit.
+          if (gaugePhotoId && turfReading?.id) turfOcrReadingId = turfReading.id;
         }
 
         // Typed activity score — in the same trx as the record so retries
@@ -3286,6 +3290,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         );
       });
         durableCompletionCommitted = true;
+        // Gauge-photo OCR cross-check — fire-and-forget AFTER the visit commits
+        // (re-reads the reading from the committed row; never blocks completion).
+        if (turfOcrReadingId) {
+          setImmediate(() => TurfHeightOcr.processReadingOcr(turfOcrReadingId));
+        }
       } catch (err) {
         if (preCommitCompletionPhotoRows.length) {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);

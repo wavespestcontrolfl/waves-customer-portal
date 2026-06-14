@@ -25,6 +25,7 @@ import {
   ChevronRight,
   DatabaseZap,
   Bot,
+  Sprout,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
 
@@ -61,6 +62,7 @@ const SECTIONS = [
     section: "Field & Equipment",
     items: [
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
+      { path: "/admin/turf-height", icon: Sprout, label: "Turf Height Review" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
       { path: "/admin/compliance", icon: ClipboardCheck, label: "Compliance" },
     ],
