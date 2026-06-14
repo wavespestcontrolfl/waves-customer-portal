@@ -120,6 +120,18 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
     expect(hub.tracking).toEqual({ foo: 1, domains: ['wavespestcontrol.com'] }); // preserves existing tracking keys
   });
 
+  test('syncDraftPublishTarget writes the resolved canonical + domains back onto the original draft (PR-poller reconciliation)', () => {
+    // The poller reads draft_payload.frontmatter.canonical; the publisher resolves
+    // the spoke canonical on a clone, so the original draft must be synced.
+    const draft = { frontmatter: { canonical: 'https://www.wavespestcontrol.com/pest-control/x-sarasota/', domains: ['wavespestcontrol.com'] }, body: '...' };
+    const finalFm = { canonical: 'https://www.sarasotaflpestcontrol.com/pest-control/x-sarasota/', domains: ['sarasotaflpestcontrol.com'] };
+    _internals.syncDraftPublishTarget(draft, finalFm);
+    expect(draft.frontmatter.canonical).toBe('https://www.sarasotaflpestcontrol.com/pest-control/x-sarasota/');
+    expect(draft.frontmatter.domains).toEqual(['sarasotaflpestcontrol.com']);
+    // tolerant of a draft without frontmatter (no throw)
+    expect(() => _internals.syncDraftPublishTarget({}, finalFm)).not.toThrow();
+  });
+
   test('canonical helpers honor the spoke origin (self-canonical spoke URL)', () => {
     const slug = 'pest-control/german-roaches-sarasota-condos';
     expect(_internals.canonicalUrlForSlug(slug)).toBe('https://www.wavespestcontrol.com/pest-control/german-roaches-sarasota-condos/');

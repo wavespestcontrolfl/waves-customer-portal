@@ -115,6 +115,20 @@ function blogOriginForSpoke(spokeKey) {
   return spokeKey ? `https://www.${spokeKey}` : HUB_ORIGIN;
 }
 
+// Write the resolved publish target (canonical + domains) back onto the ORIGINAL
+// draft frontmatter so the persisted autonomous_runs.draft_payload reflects what
+// was actually published — the PR poller / post-merge reconciliation read
+// draft_payload.frontmatter.canonical to resolve the merged target. (The
+// publisher resolves these on a clone, so the original draft would otherwise
+// keep the writer's hub-defaulted canonical.)
+function syncDraftPublishTarget(draft, frontmatter) {
+  if (draft && draft.frontmatter && typeof draft.frontmatter === 'object' && !Array.isArray(draft.frontmatter)) {
+    if (frontmatter.canonical) draft.frontmatter.canonical = frontmatter.canonical;
+    if (Array.isArray(frontmatter.domains)) draft.frontmatter.domains = [...frontmatter.domains];
+  }
+  return draft;
+}
+
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
 const SCHEMA_TYPES = new Set(['Article', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
@@ -980,6 +994,15 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const canonical = assertCanonicalMatchesSlug(sourceFrontmatter, slug, blogOrigin);
   const frontmatter = normalizeAutonomousBlogFrontmatter(sourceFrontmatter, brief, body, { slug, canonical });
   stampBlogDomains(frontmatter, spokeTarget);
+  // Keep the persisted run payload consistent with what we ACTUALLY publish.
+  // The runner stores this same `draft` object in autonomous_runs.draft_payload,
+  // and autonomous-pr-poller.targetForRun resolves the merged target from
+  // draft_payload.frontmatter.canonical. We resolved the canonical/domains on a
+  // clone (sourceFrontmatter) above, so without this write-back a spoke PR would
+  // reconcile against the hub URL the agent emitted (which the spoke never
+  // renders) and park forever. Mutate the original draft's canonical + domains
+  // to the resolved values before the runner persists it.
+  syncDraftPublishTarget(draft, frontmatter);
 
   // Hero contract: the writer agent's emit_draft tool only constrains
   // `frontmatter` to "object", while the binding blog schema REQUIRES
@@ -2235,5 +2258,6 @@ module.exports = {
     blogOriginForSpoke,
     stampBlogDomains,
     stampHubOnlyBlogDomains,
+    syncDraftPublishTarget,
   },
 };
