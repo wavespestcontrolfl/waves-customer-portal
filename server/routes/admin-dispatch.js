@@ -2063,7 +2063,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // completed visit isn't 422'd if the flag flips on afterward.
     const TURF_HEIGHT_OVERRIDE_REASONS = ['no_gauge_on_truck', 'gauge_unreadable', 'not_applicable'];
     const turfHeightFlagOn = await isUserFeatureEnabled(req.technicianId, 'turf-height-capture', false).catch(() => false);
-    const turfHeightRequired = turfHeightFlagOn && reportServiceLine === 'lawn' && !isIncompleteVisit;
+    // Exempt typed-findings lawn jobs (e.g. one_time_lawn_treatment): the client
+    // hides TurfHeightCapture when isTypedFindings, so the server must not require
+    // a field the UI never renders (matches client isLawn = !isTypedFindings && lawn).
+    const turfHeightRequired = turfHeightFlagOn && reportServiceLine === 'lawn'
+      && !isIncompleteVisit && !typedFindingsType;
     const turfHeightOverride = turfHeightRequired
       && TURF_HEIGHT_OVERRIDE_REASONS.includes(turfHeightOverrideReason)
       ? turfHeightOverrideReason : null;

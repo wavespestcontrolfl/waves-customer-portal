@@ -1878,13 +1878,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
   // Mowing height-of-cut — surfaced at the top level (not inside lawnAssessment)
   // so it shows on lawn reports even when there's no vision assessment. Null when
-  // not a lawn visit or no reading was captured.
-  const mowingHeight = serviceLine === 'lawn'
-    ? buildMowingHeightContext(
-      await getTurfHeightForVisit(service.id, knex),
-      await getTurfHeightTrend(service.customer_id, 12, knex),
-    )
-    : null;
+  // not a lawn visit or no reading was captured. The trend is capped at THIS
+  // report's reading time so a long-lived report token can't expose later visits.
+  let mowingHeight = null;
+  if (serviceLine === 'lawn') {
+    const turfReading = await getTurfHeightForVisit(service.id, knex);
+    const turfTrend = turfReading
+      ? await getTurfHeightTrend(service.customer_id, 12, knex, turfReading.measured_at)
+      : [];
+    mowingHeight = buildMowingHeightContext(turfReading, turfTrend);
+  }
   const lawnProgramOverview = await loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService);
   const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
 

@@ -85,13 +85,19 @@ async function getLatestTurfHeight(customerId, knex = db) {
   }
 }
 
-/** Ordered height history for a customer (trend sparkline). Newest first. */
-async function getTurfHeightTrend(customerId, limit = 12, knex = db) {
+/**
+ * Ordered height history for a customer (trend sparkline). Newest first.
+ * `beforeMeasuredAt` caps the window so a long-lived (immutable) report token can
+ * only ever reveal readings as-of that report's visit — never later ones. The
+ * live portal card passes no cap.
+ */
+async function getTurfHeightTrend(customerId, limit = 12, knex = db, beforeMeasuredAt = null) {
   if (!customerId) return [];
   const n = Math.min(Math.max(parseInt(limit, 10) || 12, 1), 60);
   try {
-    return await knex('turf_height_readings')
-      .where({ customer_id: customerId })
+    let q = knex('turf_height_readings').where({ customer_id: customerId });
+    if (beforeMeasuredAt) q = q.where('measured_at', '<=', beforeMeasuredAt);
+    return await q
       .orderBy('measured_at', 'desc')
       .limit(n)
       .select('id', 'manual_height_in', 'range_status', 'target_min_in', 'target_max_in', 'measured_at');
