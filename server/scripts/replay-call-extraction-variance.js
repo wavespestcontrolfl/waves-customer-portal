@@ -57,6 +57,7 @@ const FIELD_SEVERITY = Object.entries(FIELD_GROUPS).reduce((acc, [severity, fiel
 const COMPARED_FIELDS = Object.keys(FIELD_SEVERITY);
 const EXPECTATION_KEYS = new Set([
   'current_status',
+  'current_scheduling_status',
   'current_would_auto_route',
   'legacy_scheduled_created',
   'route_changed_vs_legacy_schedule',
@@ -324,6 +325,18 @@ function evaluateFixtureExpectation(result, fixtureCase) {
       check('current_status', result.current.status === expect.current_status, result.current.status, expect.current_status);
     } else {
       fixtureError('invalid_current_status', expect.current_status, 'string');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_scheduling_status')) {
+    if (typeof expect.current_scheduling_status === 'string') {
+      check(
+        'current_scheduling_status',
+        result.current.schedulingStatus === expect.current_scheduling_status,
+        result.current.schedulingStatus,
+        expect.current_scheduling_status
+      );
+    } else {
+      fixtureError('invalid_current_scheduling_status', expect.current_scheduling_status, 'string');
     }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'current_would_auto_route')) {

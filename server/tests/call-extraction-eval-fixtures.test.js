@@ -4,6 +4,7 @@ const path = require('path');
 const fixturePath = path.join(__dirname, '../fixtures/call-extraction-eval/reviewed-calls.json');
 const ALLOWED_EXPECTATION_KEYS = new Set([
   'current_status',
+  'current_scheduling_status',
   'current_would_auto_route',
   'legacy_scheduled_created',
   'route_changed_vs_legacy_schedule',
@@ -61,11 +62,11 @@ describe('call extraction eval fixtures', () => {
       .toContain('name_email_mismatch');
     expect(byId['historical-schedule-date-time-was-wrong'].expect.legacy_schedule_variance_fields)
       .toEqual(['scheduled_date', 'window_start']);
-    expect(byId['missed-booking-recovery-monday-11'].expect.current_would_auto_route)
-      .toBe(true);
+    expect(byId['missed-booking-recovery-monday-11'].expect.current_scheduling_status)
+      .toBe('confirmed');
     expect(byId['name-email-mismatch-guard-useful'].expect.current_flags_include)
       .toContain('name_email_mismatch');
     expect(byId['short-call-missing-address-correct-triage'].expect.current_flags_include)
-      .toEqual(expect.arrayContaining(['address_unverifiable', 'missing_service_address']));
+      .toEqual(expect.arrayContaining(['missing_service_address', 'low_confidence_address']));
   });
 });

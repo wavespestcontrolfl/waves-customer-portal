@@ -16,6 +16,7 @@ function validResult(overrides = {}) {
       status: 'valid',
       wouldAutoRoute: true,
       flags: [],
+      schedulingStatus: 'confirmed',
     },
     legacy: {
       scheduledCreated: false,
@@ -42,19 +43,21 @@ describe('call extraction replay variance reporting', () => {
         status: 'valid',
         wouldAutoRoute: false,
         flags: ['name_email_mismatch'],
+        schedulingStatus: 'confirmed',
       },
     });
 
     expect(evaluateFixtureExpectation(result, {
       expect: {
         current_status: 'valid',
+        current_scheduling_status: 'confirmed',
         current_would_auto_route: false,
         current_flags_include: ['name_email_mismatch'],
         current_flags_exclude: ['address_unverifiable'],
       },
     })).toMatchObject({
       status: 'pass',
-      checked: 4,
+      checked: 5,
       failures: [],
     });
   });
@@ -98,12 +101,16 @@ describe('call extraction replay variance reporting', () => {
     expect(evaluateFixtureExpectation(validResult(), {
       expect: {
         current_status: 'valid',
+        current_scheduling_status: false,
         current_flags_exclude: [],
       },
     })).toMatchObject({
       status: 'fail',
       checked: 1,
-      failures: [expect.objectContaining({ name: 'fixture_error:invalid_current_flags_exclude' })],
+      failures: expect.arrayContaining([
+        expect.objectContaining({ name: 'fixture_error:invalid_current_scheduling_status' }),
+        expect.objectContaining({ name: 'fixture_error:invalid_current_flags_exclude' }),
+      ]),
     });
   });
 
