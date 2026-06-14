@@ -6682,6 +6682,9 @@ router.put('/:token/select-tier', async (req, res, next) => {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    // Reconcile before this handler recomputes + persists, so a stale
+    // "existing customer" classification isn't written back into estimate_data.
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     const { selectedTier } = req.body;
     const ALLOWED_TIERS = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -6773,6 +6776,9 @@ router.put('/:token/preferences', async (req, res, next) => {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    // Reconcile before this handler recomputes + persists, so a stale
+    // "existing customer" classification isn't written back into estimate_data.
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     // Only accept known pref keys; coerce to boolean.
     const patch = {};
