@@ -43,6 +43,8 @@
       "expect": {
         "current_status": "valid",
         "current_scheduling_status": "confirmed",
+        "current_schedule_date": "2026-06-15",
+        "current_schedule_window_start": "11:00",
         "legacy_scheduled_created": false
       }
     },
@@ -69,8 +71,7 @@
         "current_would_auto_route": false,
         "appointment_candidate_changed_vs_legacy": true,
         "current_flags_include": [
-          "missing_service_address",
-          "low_confidence_address"
+          "missing_service_address"
         ]
       }
     }

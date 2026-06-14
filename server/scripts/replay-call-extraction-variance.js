@@ -58,6 +58,8 @@ const COMPARED_FIELDS = Object.keys(FIELD_SEVERITY);
 const EXPECTATION_KEYS = new Set([
   'current_status',
   'current_scheduling_status',
+  'current_schedule_date',
+  'current_schedule_window_start',
   'current_would_auto_route',
   'legacy_scheduled_created',
   'route_changed_vs_legacy_schedule',
@@ -298,8 +300,9 @@ function isStringArray(value) {
   return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.trim());
 }
 
-function evaluateFixtureExpectation(result, fixtureCase) {
+function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
   const expect = fixtureCase?.expect;
+  const currentSchedule = context.currentSchedule || {};
 
   const failures = [];
   const checks = [];
@@ -337,6 +340,30 @@ function evaluateFixtureExpectation(result, fixtureCase) {
       );
     } else {
       fixtureError('invalid_current_scheduling_status', expect.current_scheduling_status, 'string');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_schedule_date')) {
+    if (typeof expect.current_schedule_date === 'string') {
+      check(
+        'current_schedule_date',
+        currentSchedule.scheduled_date === expect.current_schedule_date,
+        currentSchedule.scheduled_date || null,
+        expect.current_schedule_date
+      );
+    } else {
+      fixtureError('invalid_current_schedule_date', expect.current_schedule_date, 'string');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_schedule_window_start')) {
+    if (typeof expect.current_schedule_window_start === 'string') {
+      check(
+        'current_schedule_window_start',
+        normalizeTime(currentSchedule.window_start) === normalizeTime(expect.current_schedule_window_start),
+        currentSchedule.window_start || null,
+        expect.current_schedule_window_start
+      );
+    } else {
+      fixtureError('invalid_current_schedule_window_start', expect.current_schedule_window_start, 'string');
     }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'current_would_auto_route')) {
@@ -873,6 +900,7 @@ async function replayCall(call, context) {
   const legacyScheduledServiceVariances = currentFlat
     ? compareScheduledService(scheduled, currentFlat, includeValues)
     : [];
+  const currentSchedule = currentFlat ? etScheduleParts(currentFlat.preferred_date_time) : {};
 
   const legacyAppointmentCandidate = appointmentCandidate(legacyFlat);
   const currentAppointmentCandidate = appointmentCandidate(currentFlat || {});
@@ -928,7 +956,7 @@ async function replayCall(call, context) {
     result.fixture = {
       caseId: fixtureCase.id,
       reviewedOutcome: fixtureCase.reviewed_outcome || null,
-      expectation: evaluateFixtureExpectation(result, fixtureCase),
+      expectation: evaluateFixtureExpectation(result, fixtureCase, { currentSchedule }),
     };
   }
   return result;

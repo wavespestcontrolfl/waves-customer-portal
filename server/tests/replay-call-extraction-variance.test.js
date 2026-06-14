@@ -51,13 +51,20 @@ describe('call extraction replay variance reporting', () => {
       expect: {
         current_status: 'valid',
         current_scheduling_status: 'confirmed',
+        current_schedule_date: '2026-06-15',
+        current_schedule_window_start: '11:00',
         current_would_auto_route: false,
         current_flags_include: ['name_email_mismatch'],
         current_flags_exclude: ['address_unverifiable'],
       },
+    }, {
+      currentSchedule: {
+        scheduled_date: '2026-06-15',
+        window_start: '11:00',
+      },
     })).toMatchObject({
       status: 'pass',
-      checked: 5,
+      checked: 7,
       failures: [],
     });
   });
@@ -102,6 +109,7 @@ describe('call extraction replay variance reporting', () => {
       expect: {
         current_status: 'valid',
         current_scheduling_status: false,
+        current_schedule_window_start: false,
         current_flags_exclude: [],
       },
     })).toMatchObject({
@@ -109,6 +117,7 @@ describe('call extraction replay variance reporting', () => {
       checked: 1,
       failures: expect.arrayContaining([
         expect.objectContaining({ name: 'fixture_error:invalid_current_scheduling_status' }),
+        expect.objectContaining({ name: 'fixture_error:invalid_current_schedule_window_start' }),
         expect.objectContaining({ name: 'fixture_error:invalid_current_flags_exclude' }),
       ]),
     });
