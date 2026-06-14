@@ -7632,20 +7632,49 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
     ...(Array.isArray(recurring.services) ? recurring.services : []),
     ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
   ];
+  const recurringRowsRequireQuote = recurringServices.some((row) => (
+    row?.quoteRequired === true
+    || row?.requiresCustomQuote === true
+    || row?.quote_required === true
+    || row?.requires_custom_quote === true
+  ));
+  const recurringRowsHaveDollarAmount = recurringServices.some((row) => firstPositiveNumber(
+    row?.mo,
+    row?.monthly,
+    row?.monthlyTotal,
+    row?.monthly_total,
+    row?.monthlyBase,
+    row?.monthlyAfterDiscount,
+    row?.monthlyAfterCredits,
+    row?.ann,
+    row?.annual,
+    row?.annualTotal,
+    row?.annual_total,
+    row?.annualAfterDiscount,
+    row?.annualAfterCredits,
+    row?.perTreatment,
+    row?.perVisit,
+    row?.perApp,
+    row?.pa,
+    row?.price,
+  ) != null);
   const hasRecurringAmount = [
-    recurring.serviceCount,
-    nestedRecurring.serviceCount,
     recurring.monthlyTotal,
     recurring.grandTotal,
     recurring.annualAfterDiscount,
+    recurring.annualTotal,
+    nestedRecurring.monthlyTotal,
+    nestedRecurring.grandTotal,
+    nestedRecurring.annualAfterDiscount,
+    nestedRecurring.annualTotal,
     estimate.monthly_total,
     estimate.annual_total,
     estimate.monthlyTotal,
     estimate.annualTotal,
-  ].some((value) => Number(value || 0) > 0);
+  ].some((value) => Number(value || 0) > 0) || recurringRowsHaveDollarAmount;
   const oneTimeBreakdown = normalizeOneTimeBreakdown(estData);
 
-  return recurringServices.length === 0
+  return !recurringRowsRequireQuote
     && !hasRecurringAmount
     && oneTimeBreakdown.items.length > 0
     && Number(oneTimeBreakdown.total || 0) > 0;

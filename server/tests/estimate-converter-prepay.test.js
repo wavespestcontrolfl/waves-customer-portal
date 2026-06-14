@@ -7,9 +7,11 @@ const {
   nonDiscountableRecurringAnnualFloor,
   resolveFirstApplicationAmount,
   resolveAnnualPrepayDraftAmount,
+  recurringServicesFromEstimateData,
   shouldAttachScheduledServiceToStandardDraftInvoice,
   shouldIncludeWaveGuardSetupFeeForRecurring,
   shouldCreateDraftInvoiceForRecurring,
+  shouldSuppressRecurringConversion,
 } = require('../services/estimate-converter');
 
 describe('estimate converter annual prepay amount', () => {
@@ -114,6 +116,99 @@ describe('estimate converter annual prepay amount', () => {
       billingTerm: 'prepay_annual',
       recurringServices: lawnOnly,
     })).toBe(true);
+  });
+
+  test('suppresses recurring conversion only for zero-dollar standard accepts', () => {
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 0,
+      oneTimeTotal: 249,
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control', mo: 0 }],
+    })).toBe(true);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 0,
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control', mo: 0 }],
+    })).toBe(false);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 89,
+    })).toBe(false);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 0,
+      oneTimeTotal: 249,
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control', mo: 89 }],
+    })).toBe(false);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 0,
+      oneTimeTotal: 249,
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control', mo: 0, quoteRequired: true }],
+    })).toBe(false);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 0,
+      oneTimeTotal: 249,
+      estimateData: { result: { recurring: { monthlyTotal: 89 } } },
+    })).toBe(false);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 0,
+      oneTimeTotal: 249,
+      estimateData: {
+        result: {
+          results: {
+            recurring: {
+              services: [{ service: 'pest_control', name: 'Pest Control', mo: 89 }],
+            },
+          },
+        },
+      },
+    })).toBe(false);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'standard',
+      monthlyRate: 0,
+      estimateData: { result: { oneTime: { total: 249 } } },
+    })).toBe(true);
+    expect(shouldSuppressRecurringConversion({
+      billingTerm: 'prepay_annual',
+      monthlyRate: 0,
+      oneTimeTotal: 249,
+    })).toBe(false);
+  });
+
+  test('merges duplicate recurring service rows and keeps the richest row', () => {
+    const rows = recurringServicesFromEstimateData({
+      recurring: {
+        services: [{ service: 'pest_control', name: 'Pest Control' }],
+      },
+      result: {
+        recurring: {
+          services: [{
+            service: 'pest_control',
+            name: 'Pest Control',
+            mo: 0,
+            frequency: 'quarterly',
+            visitsPerYear: 4,
+            estimatedDurationMinutes: 60,
+          }],
+        },
+        results: {
+          recurring: {
+            services: [{ service: 'pest_control', name: 'Pest Control', mo: 89 }],
+          },
+        },
+      },
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(expect.objectContaining({
+      mo: 89,
+      frequency: 'quarterly',
+      visitsPerYear: 4,
+      estimatedDurationMinutes: 60,
+    }));
   });
 
   test('pay-per-application invoice prefers accepted first application amount', () => {
