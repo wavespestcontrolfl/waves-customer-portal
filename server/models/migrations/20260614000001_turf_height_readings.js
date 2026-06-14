@@ -25,8 +25,8 @@ exports.up = async function up(knex) {
     t.decimal('target_min_in', 3, 1).notNullable();     // band snapshot at capture
     t.decimal('target_max_in', 3, 1).notNullable();
     t.text('range_status').notNullable();               // in_range|below|above
-    t.uuid('gauge_photo_id').notNullable()
-      .references('id').inTable('service_photos');      // reuses the s3_key model
+    t.uuid('gauge_photo_id')                            // optional — reuses the s3_key model
+      .references('id').inTable('service_photos');
     t.timestamp('measured_at', { useTz: true }).notNullable();
     t.uuid('created_by').notNullable()
       .references('id').inTable('technicians');

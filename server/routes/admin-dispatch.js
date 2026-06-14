@@ -25,7 +25,7 @@ const { detectServiceLine, getServiceLineConfig } = require('../services/service
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
-const { isAllowedHeight } = require('../services/service-report/turf-height');
+const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
@@ -2053,10 +2053,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const reportConfig = getServiceLineConfig(reportServiceLine);
 
     // Turf height-of-cut capture gate (flag-gated; UAT → rollout). A LAWN visit
-    // cannot close without a maintained-height reading + gauge photo unless the
-    // tech logs a reason-coded override. detectServiceLine keeps this strictly
-    // off pest / rodent / mosquito completions. Flag OFF by default → no change
-    // to existing completions until UAT enables it.
+    // cannot close without a maintained-height READING unless the tech logs a
+    // reason-coded override. The gauge photo is OPTIONAL (not gated).
+    // detectServiceLine keeps this strictly off pest / rodent / mosquito
+    // completions. Flag OFF by default → no change to existing completions.
     const TURF_HEIGHT_OVERRIDE_REASONS = ['no_gauge_on_truck', 'gauge_unreadable', 'not_applicable'];
     const turfHeightFlagOn = await runtimeServiceReportFlag(req, 'turf-height-capture', 'TURF_HEIGHT_CAPTURE', false);
     const turfHeightRequired = turfHeightFlagOn && reportServiceLine === 'lawn' && !isIncompleteVisit;
@@ -2064,17 +2064,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && TURF_HEIGHT_OVERRIDE_REASONS.includes(turfHeightOverrideReason)
       ? turfHeightOverrideReason : null;
     if (turfHeightRequired && !turfHeightOverride) {
-      if (!gaugePhoto || manualHeightIn == null) {
+      if (manualHeightIn == null) {
         return res.status(422).json({
-          error: 'A turf height reading and gauge photo are required to close a lawn visit.',
+          error: 'A turf height reading is required to close a lawn visit.',
           code: 'turf_height_required',
           overrideReasons: TURF_HEIGHT_OVERRIDE_REASONS,
         });
       }
-      if (!isAllowedHeight(manualHeightIn)) {
+      if (!isValidHeight(manualHeightIn)) {
         return res.status(422).json({
-          error: 'Turf height must be a valid gauge increment.',
-          code: 'turf_height_invalid_increment',
+          error: 'Turf height must be between 0.5 and 8 inches.',
+          code: 'turf_height_invalid',
         });
       }
     }
@@ -2833,19 +2833,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // error ROLLBACK TO SAVEPOINT discards just the reading so the billing
         // commit is never poisoned (the gate already validated the data; a
         // failure here is logged + backfillable). OCR (PR2) fills ocr_* later.
-        if (turfHeightRequired && !turfHeightOverride && manualHeightIn != null && gaugePhoto) {
+        if (turfHeightRequired && !turfHeightOverride && manualHeightIn != null) {
           try {
             await trx.transaction(async (sp) => {
               const turfRow = await sp('customer_turf_profiles')
                 .where({ customer_id: svc.customer_id, active: true }).first();
-              const gaugeUpload = await uploadServicePhotoDataUrls({
-                serviceRecordId: record.id,
-                photos: [gaugePhoto],
-                photoType: 'progress',
-                knex: sp,
-              });
-              const gaugePhotoId = gaugeUpload?.photos?.[0]?.id;
-              if (!gaugePhotoId) throw new Error('gauge photo upload returned no id');
+              // Gauge photo is OPTIONAL — upload + chain it only when provided.
+              let gaugePhotoId = null;
+              if (gaugePhoto) {
+                const gaugeUpload = await uploadServicePhotoDataUrls({
+                  serviceRecordId: record.id,
+                  photos: [gaugePhoto],
+                  photoType: 'progress',
+                  knex: sp,
+                });
+                gaugePhotoId = gaugeUpload?.photos?.[0]?.id || null;
+              }
               await createTurfHeightReading(sp, {
                 serviceRecordId: record.id,
                 customerId: svc.customer_id,

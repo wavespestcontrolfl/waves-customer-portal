@@ -6307,7 +6307,6 @@ function smsRecapPreview(value) {
 // Turfchek II gauge stops + grass→ideal-band map. Mirror of
 // server/services/service-report/turf-height.js (the server snapshots the
 // authoritative band on submit; this drives the tech's live status preview).
-const TURF_ALLOWED_HEIGHTS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5];
 const TURF_HEIGHT_BANDS = {
   st_augustine: { min: 3.5, max: 4.0 },
   bahia: { min: 3.0, max: 4.0 },
@@ -6324,7 +6323,7 @@ function turfBandFor(grassType) {
 }
 
 // Tech-facing height-of-cut capture (lawn completion, behind the feature flag).
-// Constrained increment stepper + required gauge photo + live range status, or a
+// Numeric height entry + live range status + OPTIONAL gauge photo, or a
 // reason-coded override. value = { heightIn, gaugePhoto, overrideReason }.
 function TurfHeightCapture({ service, value, onChange, disabled }) {
   const [grassType, setGrassType] = useState(null);
@@ -6361,13 +6360,24 @@ function TurfHeightCapture({ service, value, onChange, disabled }) {
 
   return (
     <div style={{ opacity: disabled ? 0.6 : 1 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, opacity: overridden ? 0.45 : 1 }}>
-        {TURF_ALLOWED_HEIGHTS.map((stop) => (
-          <CPChip key={stop} selected={value.heightIn === stop}
-            onClick={disabled || overridden ? undefined : () => onChange({ ...value, heightIn: stop, overrideReason: null })}>
-            {stop}&#8243;
-          </CPChip>
-        ))}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: overridden ? 0.45 : 1 }}>
+        <input
+          type="number"
+          inputMode="decimal"
+          step="0.25"
+          min="0.5"
+          max="8"
+          value={value.heightIn ?? ""}
+          disabled={disabled || overridden}
+          placeholder="e.g. 4"
+          onChange={(e) => onChange({
+            ...value,
+            heightIn: e.target.value === "" ? null : Number(e.target.value),
+            overrideReason: null,
+          })}
+          style={{ width: 96, height: 38, padding: "0 12px", borderRadius: 8, border: `1px solid ${CP_M.hairline}`, fontFamily: CP_FONT, fontSize: 15, color: CP_M.ink, background: CP_M.card }}
+        />
+        <span style={{ fontFamily: CP_FONT, fontSize: 14, color: CP_M.ink4 }}>inches</span>
       </div>
       {statusMeta && !overridden && (
         <div style={{ marginTop: 10, fontFamily: CP_FONT, fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{statusMeta.text}</div>
@@ -6376,10 +6386,10 @@ function TurfHeightCapture({ service, value, onChange, disabled }) {
         <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onPickPhoto} disabled={disabled || overridden} />
         <button type="button" onClick={() => fileRef.current?.click()} disabled={disabled || overridden}
           style={{ height: 36, padding: "0 14px", borderRadius: 999, background: value.gaugePhoto ? CP_M.ink : CP_M.card, color: value.gaugePhoto ? CP_M.actionFg : CP_M.ink, border: `1px solid ${CP_M.hairline}`, fontFamily: CP_FONT, fontSize: 13, fontWeight: 500, cursor: disabled || overridden ? "default" : "pointer" }}>
-          {value.gaugePhoto ? "✓ Gauge photo added" : "Add gauge photo"}
+          {value.gaugePhoto ? "✓ Gauge photo added" : "Add gauge photo (optional)"}
         </button>
         {!value.gaugePhoto && !overridden && (
-          <span style={{ marginLeft: 10, fontFamily: CP_FONT, fontSize: 12, color: CP_M.ink4 }}>Required — gauge scale + canopy line visible.</span>
+          <span style={{ marginLeft: 10, fontFamily: CP_FONT, fontSize: 12, color: CP_M.ink4 }}>Optional — gauge scale + canopy line visible.</span>
         )}
       </div>
       <div style={{ marginTop: 14, fontFamily: CP_FONT, fontSize: 12, color: CP_M.ink4 }}>

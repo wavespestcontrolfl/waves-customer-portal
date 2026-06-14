@@ -1,6 +1,7 @@
 const {
-  ALLOWED_HEIGHTS_IN,
-  isAllowedHeight,
+  MIN_HEIGHT_IN,
+  MAX_HEIGHT_IN,
+  isValidHeight,
   resolveHeightBand,
   mowTriggerInches,
   computeRangeStatus,
@@ -8,23 +9,22 @@ const {
   buildMowingHeightContext,
 } = require('../services/service-report/turf-height');
 
-describe('turf-height: allowed gauge increments', () => {
-  test('accepts only the Turfchek II stops', () => {
-    expect(isAllowedHeight(0.5)).toBe(true);
-    expect(isAllowedHeight(2.25)).toBe(true);  // 1/4" zone
-    expect(isAllowedHeight(3.5)).toBe(true);   // 1/2" zone
-    expect(isAllowedHeight(5.5)).toBe(true);
+describe('turf-height: numeric range validation (free entry)', () => {
+  test('accepts any reading within range, including off-stop values', () => {
+    expect(isValidHeight(0.5)).toBe(true);
+    expect(isValidHeight(3.7)).toBe(true);  // free numeric entry, not a preset stop
+    expect(isValidHeight(4)).toBe(true);
+    expect(isValidHeight(8.0)).toBe(true);
   });
-  test('rejects off-grid values + the gaps above 2.5"', () => {
-    expect(isAllowedHeight(2.75)).toBe(false); // 1/4" steps stop at 2.5"
-    expect(isAllowedHeight(3.25)).toBe(false);
-    expect(isAllowedHeight(4.2)).toBe(false);
-    expect(isAllowedHeight(0)).toBe(false);
-    expect(isAllowedHeight('x')).toBe(false);
-    expect(isAllowedHeight(null)).toBe(false);
+  test('rejects out-of-range / non-numeric', () => {
+    expect(isValidHeight(0.25)).toBe(false); // below min
+    expect(isValidHeight(8.5)).toBe(false);  // above max
+    expect(isValidHeight(0)).toBe(false);
+    expect(isValidHeight('x')).toBe(false);
+    expect(isValidHeight(null)).toBe(false);
   });
-  test('the set is exactly the gauge spec', () => {
-    expect(ALLOWED_HEIGHTS_IN).toEqual([0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5]);
+  test('range matches the DB CHECK bounds', () => {
+    expect([MIN_HEIGHT_IN, MAX_HEIGHT_IN]).toEqual([0.5, 8.0]);
   });
 });
 
@@ -73,9 +73,14 @@ describe('turf-height: buildReadingFields (snapshot assembly)', () => {
       target_min_in: 3.5, target_max_in: 4.0, range_status: 'above', grass_defaulted: true,
     });
   });
-  test('throws invalid_increment on an off-gauge value (service-layer guard)', () => {
-    expect(() => buildReadingFields('st_augustine', 3.75)).toThrow(/must be one of/);
-    try { buildReadingFields('st_augustine', 3.75); } catch (e) { expect(e.code).toBe('invalid_increment'); }
+  test('accepts a free off-stop value (e.g. 3.7")', () => {
+    expect(buildReadingFields('st_augustine', 3.7)).toEqual({
+      target_min_in: 3.5, target_max_in: 4.0, range_status: 'in_range', grass_defaulted: false,
+    });
+  });
+  test('throws invalid_height on an out-of-range value (service-layer guard)', () => {
+    expect(() => buildReadingFields('st_augustine', 9)).toThrow(/between 0.5 and 8/);
+    try { buildReadingFields('st_augustine', 0.2); } catch (e) { expect(e.code).toBe('invalid_height'); }
   });
 });
 

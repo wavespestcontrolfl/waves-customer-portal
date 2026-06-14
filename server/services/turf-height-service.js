@@ -26,7 +26,8 @@ const READING_COLUMNS = [
  * completion transaction so the reading commits atomically with the service
  * record. `gaugePhotoId` is an already-uploaded service_photos.id (the handler
  * uploads the gauge image the same way it uploads completion photos, which
- * chains it). Throws `invalid_increment` if the manual value is off-gauge.
+ * chains it) when one is provided — the gauge photo is OPTIONAL. Throws
+ * `invalid_height` if the manual value is out of range.
  */
 async function createTurfHeightReading(knex, {
   serviceRecordId,

@@ -19,10 +19,10 @@
  */
 
 // Turfchek II rough height-of-cut gauge resolution: 1/4" steps 0.5–2.5",
-// 1/2" steps 2.5–5.5". The manual picker is constrained to EXACTLY this set.
-const ALLOWED_HEIGHTS_IN = [
-  0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5,
-];
+// 1/2" steps 2.5–5.5". The tech enters the reading numerically (no preset stop
+// list — operator preference), validated to a sane range; the DB CHECK mirrors it.
+const MIN_HEIGHT_IN = 0.5;
+const MAX_HEIGHT_IN = 8.0;
 
 // Ideal maintained height-of-cut band (inches) by CANONICAL grass_type key
 // (the only six values customer_turf_profiles.grass_type can hold). UF/IFAS,
@@ -47,10 +47,11 @@ function normalizeGrassKey(grassType) {
     .replace(/[^a-z_]/g, '');
 }
 
-// App + service layer increment guard (the DB CHECK is only a 0.5–8.0 floor/ceiling).
-function isAllowedHeight(value) {
+// App + service layer range guard (mirrors the DB CHECK). Free numeric entry —
+// any reading in [0.5, 8.0]″ is valid.
+function isValidHeight(value) {
   const n = Number(value);
-  return Number.isFinite(n) && ALLOWED_HEIGHTS_IN.includes(n);
+  return Number.isFinite(n) && n >= MIN_HEIGHT_IN && n <= MAX_HEIGHT_IN;
 }
 
 // Resolve the target band for a grass type. `defaulted: true` means the grass
@@ -83,13 +84,12 @@ function computeRangeStatus(manualHeightIn, band) {
 }
 
 // Assemble the persisted/snapshotted fields for a reading from the manual gauge
-// value + the property's grass type: guards the increment, snapshots the target
-// band, and computes range status. The picker should prevent a bad increment,
-// but the service guards too — throws `invalid_increment` if it slips through.
+// value + the property's grass type: range-guards the value, snapshots the target
+// band, and computes range status. Throws `invalid_height` if out of range.
 function buildReadingFields(grassType, manualHeightIn) {
-  if (!isAllowedHeight(manualHeightIn)) {
-    const err = new Error(`manual_height_in must be one of: ${ALLOWED_HEIGHTS_IN.join(', ')}`);
-    err.code = 'invalid_increment';
+  if (!isValidHeight(manualHeightIn)) {
+    const err = new Error(`manual_height_in must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches`);
+    err.code = 'invalid_height';
     throw err;
   }
   const band = resolveHeightBand(grassType);
@@ -131,11 +131,12 @@ function buildMowingHeightContext(reading, trend = []) {
 }
 
 module.exports = {
-  ALLOWED_HEIGHTS_IN,
+  MIN_HEIGHT_IN,
+  MAX_HEIGHT_IN,
   HEIGHT_BAND_BY_GRASS,
   DEFAULT_HEIGHT_BAND,
   normalizeGrassKey,
-  isAllowedHeight,
+  isValidHeight,
   resolveHeightBand,
   mowTriggerInches,
   computeRangeStatus,
