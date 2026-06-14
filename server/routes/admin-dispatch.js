@@ -916,16 +916,19 @@ function serializeJsonb(value) {
 }
 
 function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 2 }) {
+  // The stored recap is now full-length (so the service report reads completely);
+  // tighten it to SMS-sized, complete-sentence copy before composing the message.
+  const recap = CompletionRecap.smsRecap(recapText);
   const tail = `${body || ''}${suffix || ''}`.trim();
-  if (!recapText) return { body: tail, truncated: false };
+  if (!recap) return { body: tail, truncated: false };
 
-  const full = `${recapText}\n\n${tail}`;
+  const full = `${recap}\n\n${tail}`;
   if (countSegments(full).segmentCount <= maxSegments) return { body: full, truncated: false };
   if (countSegments(tail).segmentCount > maxSegments) return { body: tail, truncated: false };
 
   const marker = '...';
   const separator = '\n\n';
-  const chars = Array.from(recapText);
+  const chars = Array.from(recap);
   let low = 0;
   let high = chars.length;
   let best = tail;

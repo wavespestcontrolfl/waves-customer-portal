@@ -25,6 +25,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
 }));
 jest.mock('../services/completion-recap', () => ({
+  ...jest.requireActual('../services/completion-recap'),
   generateRecap: jest.fn().mockResolvedValue({ recap: 'Service complete.', source: 'test' }),
 }));
 jest.mock('../services/service-completion-profiles', () => ({

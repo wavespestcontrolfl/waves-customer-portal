@@ -1229,6 +1229,16 @@ function lawnScoreValue(value) {
   return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
 }
 
+// Legacy lawn assessments (pre single-voice fix) joined each photo's/model's
+// observations with ' | ', which surfaced as contradictory run-on prose on the
+// report. The current pipeline stores a single primary voice; collapse any
+// legacy join to its first segment so old reports read as one voice too.
+function singleVoiceObservation(value) {
+  const text = String(value || '');
+  const idx = text.indexOf(' | ');
+  return idx === -1 ? text : text.slice(0, idx).trim();
+}
+
 function calculateLawnOverallScore(row = {}) {
   const explicit = lawnScoreValue(row.overall_score);
   if (explicit != null) return explicit;
@@ -1756,7 +1766,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     photos,
     beforeAfter,
     recommendations: parseJsonObject(assessment.recommendations),
-    observations: assessment.observations || '',
+    observations: singleVoiceObservation(assessment.observations),
     aiSummary: assessment.ai_summary || null,
     // Explicit vision overwatering tell (mushrooms/standing water/algae), persisted
     // in composite_scores. Cross-checked with the water-balance surplus on the
@@ -2290,6 +2300,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  singleVoiceObservation,
   parseJsonObject,
   parseJsonArray,
   uniqueStrings,

@@ -26,7 +26,7 @@ const logger = require('./logger');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { generateRecap } = require('./completion-recap');
+const { generateRecap, smsRecap } = require('./completion-recap');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -381,7 +381,9 @@ async function submitRecap({
     try {
       const msg = await sendCustomerMessage({
         to: svc.cust_phone,
-        body: recapText,
+        // recapText is the full recap (stored for the service report); the SMS
+        // gets the tightened, sentence-complete version.
+        body: smsRecap(recapText),
         channel: 'sms',
         audience: 'customer',
         purpose: 'service_completion',
