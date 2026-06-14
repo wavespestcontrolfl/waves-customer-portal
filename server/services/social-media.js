@@ -727,7 +727,12 @@ const SocialMediaService = {
       && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     const instagramCanConsume =
       SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
-    const gbpCanConsume = SOCIAL_FLAGS.gbpEnabled;
+    // gbpEnabled alone isn't enough: without OAuth client creds, postToGBP
+    // fails in _getHeaders ("No GBP credentials for location") AFTER the image
+    // is generated — so a GBP-only deploy with the flag on but creds missing
+    // would burn image credits with no profile able to consume the media.
+    // gbpService.configured mirrors the Instagram credential check above.
+    const gbpCanConsume = SOCIAL_FLAGS.gbpEnabled && gbpService.configured;
     const canConsumeGeneratedImage = hasImageHosting && (instagramCanConsume || gbpCanConsume);
     // Skip generation entirely on a dry run — nothing gets posted, so an
     // image would just burn credits.
