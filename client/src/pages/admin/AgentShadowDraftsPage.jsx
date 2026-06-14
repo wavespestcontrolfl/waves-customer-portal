@@ -197,7 +197,7 @@ function GraduationNote({ g }) {
         <span style={{ background: "#DCFCE7", color: D.green, fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Ready — enable suggest</span>
       )}
       {g.eligibleFor === "auto_send" && (
-        <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Send-ready — auto-send rung ships next</span>
+        <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Earned the auto-send rung</span>
       )}
       {!g.eligibleFor && rungLabel && (
         <span style={{ color: D.muted }}>
@@ -209,10 +209,13 @@ function GraduationNote({ g }) {
   );
 }
 
-function IntentModeCard({ row, busy, onToggle }) {
+function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
   const tone = row.locked ? MODE_TONES.locked : MODE_TONES[row.mode] || MODE_TONES.shadow;
   const s = row.suggest || {};
   const hasHistory = (s.suggested || 0) > 0;
+  // The intent has EARNED auto-send and is sitting at suggest → offer the
+  // one-click promote. The server re-checks eligibility (409 if it slipped).
+  const canPromote = !row.locked && row.mode === "suggest" && row.graduation?.eligibleFor === "auto_send";
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -253,6 +256,32 @@ function IntentModeCard({ row, busy, onToggle }) {
         </div>
       )}
       {!row.locked && row.graduation && <GraduationNote g={row.graduation} />}
+      {canPromote && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onPromote(row)}
+          style={{
+            minHeight: 30,
+            borderRadius: 6,
+            border: `1px solid #1D4ED8`,
+            background: "#1D4ED8",
+            color: "#FFFFFF",
+            fontSize: 12,
+            fontWeight: 800,
+            padding: "0 12px",
+            cursor: busy ? "default" : "pointer",
+            opacity: busy ? 0.6 : 1,
+          }}
+        >
+          {busy ? "Enabling…" : "Enable auto-send →"}
+        </button>
+      )}
+      {(canPromote || row.mode === "auto_send") && autoSendGateOff && (
+        <div style={{ fontSize: 11, color: D.amber }}>
+          GATE_SMS_AUTO_SEND is off — the mode saves, but drafts keep going to the review queue until the gate is enabled.
+        </div>
+      )}
       {row.updatedBy && row.updatedBy !== "migration" && (
         <div style={{ fontSize: 11, color: D.muted }}>
           Set by {row.updatedBy} · {timeLabel(row.updatedAt)}{row.reason ? ` · ${row.reason}` : ""}
@@ -325,6 +354,37 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     }
   }, []);
 
+  const promoteToAutoSend = useCallback(async (row) => {
+    // Enabling autonomous customer sends — confirm deliberately.
+    const ok = window.confirm(
+      `Enable AUTONOMOUS auto-send for "${intentLabel(row.intent)}"?\n\n` +
+      `Verified house-voice drafts for this intent will be sent to customers automatically, with NO human review. ` +
+      `The server re-checks readiness on every send, and escalation / scheduling messages never auto-send.` +
+      (modes?.autoSendGateEnabled === false
+        ? `\n\nNote: GATE_SMS_AUTO_SEND is currently OFF, so drafts keep going to the review queue until the gate is enabled.`
+        : ``)
+    );
+    if (!ok) return;
+    setModeBusy(row.intent);
+    setError("");
+    try {
+      const updated = await adminFetch(`/admin/agents/intent-modes/${encodeURIComponent(row.intent)}`, {
+        method: "PUT",
+        body: JSON.stringify({ mode: "auto_send", reason: "Promoted to auto-send from the readiness chip." }),
+      });
+      setModes((current) => current
+        ? { ...current, intents: current.intents.map((r) => (r.intent === updated.intent ? { ...r, ...updated, graduation: null } : r)) }
+        : current);
+      const fresh = await adminFetch("/admin/agents/intent-modes");
+      setModes(fresh);
+    } catch (err) {
+      // The server 409s if eligibility slipped between render and click.
+      setError(err.message || "Failed to enable auto-send.");
+    } finally {
+      setModeBusy("");
+    }
+  }, [modes]);
+
   const intents = useMemo(() => (scores?.intents || []).map((row) => row.intent), [scores]);
   const drafts = data?.drafts || [];
 
@@ -368,7 +428,14 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
             )}
             <div className="shadow-scores-grid">
               {modes.intents.map((row) => (
-                <IntentModeCard key={row.intent} row={row} busy={modeBusy === row.intent} onToggle={toggleMode} />
+                <IntentModeCard
+                  key={row.intent}
+                  row={row}
+                  busy={modeBusy === row.intent}
+                  onToggle={toggleMode}
+                  onPromote={promoteToAutoSend}
+                  autoSendGateOff={modes.autoSendGateEnabled === false}
+                />
               ))}
             </div>
           </div>

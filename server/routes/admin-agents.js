@@ -1487,6 +1487,11 @@ router.get('/intent-modes', async (req, res, next) => {
     res.json({
       generatedAt: new Date().toISOString(),
       gateEnabled: require('../config/feature-gates').isEnabled('smsSuggestMode'),
+      // Whether the Phase E auto-send executor gate is on. Promoting an intent
+      // to auto_send while this is off is harmless (drafts degrade to a
+      // suggestion card), but the UI surfaces it so the operator isn't
+      // surprised that nothing auto-sends yet.
+      autoSendGateEnabled: require('../config/feature-gates').isEnabled('smsAutoSend'),
       thresholds: graduation.THRESHOLDS,
       intents: [...byIntent.values()].sort((a, b) => a.intent.localeCompare(b.intent)),
     });
