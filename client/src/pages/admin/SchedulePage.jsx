@@ -6271,6 +6271,38 @@ function TreeShrubCloseoutBlock({
   );
 }
 
+// Mirror of server `completion-recap.smsRecap` (server/services/completion-recap.js).
+// The stored recap is now full-length (so the service report reads completely),
+// and the dispatch/pest-recap SMS paths cap it to a sentence-complete ~232 chars
+// at send. The operator's SMS preview must show that SAME capped copy — otherwise
+// the tech approves a full recap while the customer receives the shortened one.
+// Keep this in lockstep with the server clamp.
+const SMS_RECAP_MAX_CHARS = 232;
+function smsRecapPreview(value) {
+  // Mirrors server sanitizeRecap's normalization chain exactly (same order) so
+  // the preview is byte-identical to the sent SMS even when the operator pastes
+  // outer quotes, smart quotes, en/em dashes, or an already-signed recap.
+  let text = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[–—]/g, "-");
+  text = text.replace(/^["']+|["']+$/g, "");
+  text = text.replace(/\s*-\s*Waves\s*$/i, "").trim();
+  text = text
+    .replace(/^["']+|["']+$/g, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim();
+  if (text.length > SMS_RECAP_MAX_CHARS) {
+    const slice = text.slice(0, SMS_RECAP_MAX_CHARS);
+    const lastStop = Math.max(slice.lastIndexOf(". "), slice.lastIndexOf("! "), slice.lastIndexOf("? "));
+    text = lastStop >= Math.floor(SMS_RECAP_MAX_CHARS / 2)
+      ? slice.slice(0, lastStop + 1).trim()
+      : slice.replace(/\s+\S*$/, "").trim();
+  }
+  return text ? `${text} - Waves` : "";
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -6577,7 +6609,7 @@ export function CompletionPanel({
     effectiveSendSms &&
     (oneTimeRecapOnly || reviewTiming === "now");
   const smsPreview = [
-    customerRecap.trim(),
+    smsRecapPreview(customerRecap),
     !isIncompleteVisit && willSendPayLink ? "[pay link inserted]" : "",
     reviewSendsWithCompletionSms ? "[review link inserted]" : "",
   ]

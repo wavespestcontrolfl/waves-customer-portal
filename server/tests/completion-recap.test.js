@@ -5,6 +5,8 @@ const {
   generateRecap,
   normalizeOutcome,
   sanitizeRecap,
+  smsRecap,
+  SMS_RECAP_MAX_CHARS,
 } = require('../services/completion-recap');
 
 describe('completion recap', () => {
@@ -74,6 +76,44 @@ describe('completion recap', () => {
     const recap = sanitizeRecap('“We checked the garage and entry points today.” — Waves');
 
     expect(recap).toBe('"We checked the garage and entry points today." - Waves');
+  });
+
+  // Regression: sanitizeRecap used to hard-truncate at 232 chars UNCONDITIONALLY,
+  // chopping the stored recap mid-sentence ("...we also noticed some.") — which
+  // then surfaced on the full-page service report. The stored/report recap must
+  // now be the COMPLETE text; only the SMS variant is capped.
+  const longRecap = "Today's lawn visit focused on treating nutsedge across the front, back, and side yards as well as the landscape beds. You should start to see the sedge yellow and decline over the next couple of weeks. We also noticed some thinning near the driveway that we will keep an eye on.";
+
+  test('sanitizeRecap keeps the full recap (no length cap) by default', () => {
+    const recap = sanitizeRecap(longRecap);
+    expect(recap.length).toBeGreaterThan(SMS_RECAP_MAX_CHARS);
+    expect(recap).toContain('thinning near the driveway');
+    expect(recap.endsWith(' - Waves')).toBe(true);
+    expect(recap).not.toMatch(/noticed some\. - Waves$/); // not the old mid-sentence cut
+  });
+
+  test('smsRecap caps to SMS size on a sentence boundary (no mid-word cut)', () => {
+    const sms = smsRecap(longRecap);
+    const body = sms.replace(/ - Waves$/, '');
+    expect(body.length).toBeLessThanOrEqual(SMS_RECAP_MAX_CHARS);
+    expect(/[.!?]$/.test(body)).toBe(true);        // ends on a complete sentence
+    expect(body).not.toMatch(/\bsom$|\bnotice$/);  // never a dangling fragment
+    expect(sms.endsWith(' - Waves')).toBe(true);
+  });
+
+  test('smsRecap is idempotent on an already-signed full recap', () => {
+    expect(smsRecap(sanitizeRecap(longRecap))).toBe(smsRecap(longRecap));
+  });
+
+  // Regression (Codex P3): a pasted recap that is already quoted AND signed must
+  // not leave a dangling quote once the signoff is stripped.
+  test('sanitizeRecap unwraps quotes around a signed recap without a dangling quote', () => {
+    expect(sanitizeRecap('"We checked the garage." - Waves')).toBe('We checked the garage. - Waves');
+    expect(sanitizeRecap("'We treated the lawn today.' - Waves")).toBe('We treated the lawn today. - Waves');
+    // Signoff wrapped INSIDE the quotes must not double-sign.
+    expect(sanitizeRecap('"We treated the lawn today. - Waves"')).toBe('We treated the lawn today. - Waves');
+    // A genuine inner quote (not a wrapper) is preserved.
+    expect(sanitizeRecap('We noted "minor" weed pressure. - Waves')).toBe('We noted "minor" weed pressure. - Waves');
   });
 
   test('generated deterministic recap includes signoff without exposing technician notes', async () => {

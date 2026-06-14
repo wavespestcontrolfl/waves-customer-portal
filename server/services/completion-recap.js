@@ -32,15 +32,47 @@ function sentenceJoin(parts) {
   return parts.map(cleanText).filter(Boolean).join(' ');
 }
 
-function sanitizeRecap(value) {
-  let text = cleanText(value)
+const SMS_RECAP_MAX_CHARS = 232;
+
+// Trim to `maxLength`, preferring the last sentence boundary so copy never ends
+// mid-thought; falls back to a clean word boundary. Only applied to SMS-sized copy.
+function clampRecap(text, maxLength) {
+  if (text.length <= maxLength) return text;
+  const slice = text.slice(0, maxLength);
+  const lastStop = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('! '), slice.lastIndexOf('? '));
+  if (lastStop >= Math.floor(maxLength / 2)) return slice.slice(0, lastStop + 1).trim();
+  return slice.replace(/\s+\S*$/, '').trim();
+}
+
+// Normalize a recap. By default returns the FULL text (no length cap) — this is
+// what we store and render on the service report. Pass { maxLength } for
+// SMS-sized copy. The 232-char cap was previously UNCONDITIONAL, which chopped
+// the stored recap mid-sentence and surfaced on the report ("...noticed some.").
+function sanitizeRecap(value, { maxLength = null } = {}) {
+  // Normalize dashes first so an em-dash signoff ("text — Waves") is recognized.
+  let text = cleanText(value).replace(/[–—]/g, '-');
+  // Strip wrapping quotes BOTH before and after removing the "- Waves" signoff.
+  // A pasted, already-signed + quoted recap ("text." - Waves) hides its closing
+  // quote behind the signoff, so a single pre-strip would leave it dangling once
+  // the signoff is removed (Codex P3); a recap quoted AROUND the signoff
+  // ("text - Waves") needs the pre-strip so the signoff is then at the edge.
+  // Smart→straight runs last so a smart-quoted recap keeps its (converted) quotes
+  // rather than being unwrapped.
+  text = text.replace(/^["']+|["']+$/g, '');
+  text = text.replace(/\s*-\s*Waves\s*$/i, '').trim();
+  text = text
     .replace(/^["']+|["']+$/g, '')
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
-    .replace(/[–—]/g, '-');
-  text = text.replace(/\s*-\s*Waves\s*$/i, '').trim();
-  if (text.length > 232) text = text.slice(0, 232).replace(/\s+\S*$/, '').trim();
+    .trim();
+  if (typeof maxLength === 'number' && maxLength > 0) text = clampRecap(text, maxLength);
   return text ? `${text} - Waves` : '';
+}
+
+// SMS-sized recap: complete-sentence copy capped for messaging. The service
+// report uses the full recap; the completion SMS gets this tightened version.
+function smsRecap(value) {
+  return sanitizeRecap(value, { maxLength: SMS_RECAP_MAX_CHARS });
 }
 
 function deterministicRecap(input = {}) {
@@ -160,7 +192,7 @@ async function generateRecap(input = {}) {
 
 function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
   return [
-    cleanText(recap),
+    smsRecap(recap),
     willInvoice ? '[pay link inserted]' : '',
     willReview && !willInvoice ? '[review link inserted]' : '',
   ].filter(Boolean).join('\n\n');
@@ -173,4 +205,6 @@ module.exports = {
   generateRecap,
   normalizeOutcome,
   sanitizeRecap,
+  smsRecap,
+  SMS_RECAP_MAX_CHARS,
 };
