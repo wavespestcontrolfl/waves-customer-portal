@@ -97,19 +97,22 @@ function hubLinkAnchorRanges(text) {
   return ranges;
 }
 
-function brandTokenFinding(body, domains) {
+// allowHubAnchor: the literal hub brand may appear ONLY as the anchor text of a
+// hub-pointing markdown link — the intentional branded-local spoke→hub anchor.
+// This exemption applies to BODY markdown only; editable meta (title/
+// description) is not rendered as a link, so it is scanned with no exemption
+// (any literal hub brand in a spoke's meta is a real leak).
+function brandTokenFinding(text, domains, { allowHubAnchor = false } = {}) {
   const list = (Array.isArray(domains) ? domains : [])
     .map((d) => String(d || '').trim().toLowerCase())
     .filter((d) => d && !HUB_DOMAINS.has(d)); // only spoke domains make it multi-domain
   if (list.length === 0) return null; // hub-only page — literal brand is fine
-  const text = String(body || '');
-  // The literal hub brand is allowed ONLY when it is the anchor text of a link
-  // pointing at the hub (the intentional branded-local spoke→hub anchor). Any
-  // OTHER occurrence on a spoke page is a real brand leak.
-  const allowed = hubLinkAnchorRanges(text);
+  const body = String(text || '');
+  if (!/\bWaves\s+Pest\s+Control\b/.test(body)) return null;
+  const allowed = allowHubAnchor ? hubLinkAnchorRanges(body) : [];
   const brandRe = /\bWaves\s+Pest\s+Control\b/g;
   let match;
-  while ((match = brandRe.exec(text)) !== null) {
+  while ((match = brandRe.exec(body)) !== null) {
     const start = match.index;
     const end = start + match[0].length;
     const insideHubAnchor = allowed.some(([a, b]) => a <= start && end <= b);
@@ -237,9 +240,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   const publishableText = editableMeta ? `${body}\n${editableMeta}` : body;
 
   const findings = [
-    // Price + brand-token must cover everything that ships: body AND meta.
+    // Price must cover everything that ships: body AND meta.
     priceFinding(publishableText),
-    brandTokenFinding(publishableText, effectiveDomains),
+    // Brand-token covers body AND meta too, but the hub-anchor exemption applies
+    // ONLY to body markdown — editable meta is scanned strictly (a literal hub
+    // brand in a spoke's title/description is a real leak, not an anchor).
+    brandTokenFinding(body, effectiveDomains, { allowHubAnchor: true }),
+    editableMeta ? brandTokenFinding(editableMeta, effectiveDomains, { allowHubAnchor: false }) : null,
     // FAQ + keyword density are body-section concerns only.
     // operatorFaqException is a NARROW, opt-in override of the FAQ-blocked
     // policy: only the autonomous runner sets it, and only for an

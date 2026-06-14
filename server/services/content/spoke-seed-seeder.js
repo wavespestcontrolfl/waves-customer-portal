@@ -69,10 +69,30 @@ function normalizeTargetSite(value) {
   return spokeKeys.length > 0 ? spokeKeys[0] : null;
 }
 
-// Coarse engine service category from the slug prefix (mirrors
-// intercept-brief-seeder.serviceForBrief). Lawn spokes get 'lawn'.
+// A FAQ-policy-blocked pest topic → its SPECIFIC blocked service id (the same
+// ids content-guardrails.FAQ_BLOCKED_SERVICES enforces). Carrying this onto the
+// opportunity's `service` (instead of the coarse 'pest') means every RUNTIME
+// guard — content-guardrails.evaluate + content-quality-gate, which key on
+// `service` — sees the blocked topic and rejects an FAQ even if the writer
+// emits one the manifest never asked for. Coarse 'pest' would hide it.
+const BLOCKED_TOPIC_SERVICE = [
+  [/\bbed[\s-]?bugs?\b/i, 'bed-bug'],
+  [/\b(?:cockroach(?:es)?|roach(?:es)?)\b/i, 'cockroach'],
+  [/\b(?:rodents?|rats?|mice|mouse)\b/i, 'rodent'],
+  [/\bspiders?\b/i, 'spider'],
+  [/\b(?:wasps?|hornets?)\b/i, 'wasp'],
+  [/\b(?:termites?|drywood)\b/i, 'termite'],
+];
+
+// Engine service category. A blocked pest topic resolves to its specific
+// blocked id (so the runtime FAQ guards see it); otherwise the coarse category
+// from the slug prefix (mirrors intercept-brief-seeder.serviceForBrief).
 function serviceForBrief(brief) {
   const slug = String(brief.slug || brief.page_url || '');
+  const topic = briefTopicText(brief);
+  for (const [re, id] of BLOCKED_TOPIC_SERVICE) {
+    if (re.test(topic)) return id;
+  }
   if (slug.includes('/lawn-care/')) return 'lawn';
   if (slug.includes('/termite/')) return 'termite';
   return 'pest';

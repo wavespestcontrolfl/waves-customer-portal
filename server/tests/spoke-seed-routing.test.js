@@ -52,7 +52,7 @@ describe('spoke-seed-seeder: manifest + rows', () => {
     const row = seeder._internals.rowForBrief(m.briefs[0], m, { now });
     expect(row.bucket).toBe('operator_intercept'); // inherits router bypass + serp/gsc exemptions
     expect(row.city).toBeNull(); // facts gate "not applicable" (locality via target_sites + outline)
-    expect(row.service).toBe('pest');
+    expect(row.service).toBe('bed-bug'); // blocked pest topic → specific blocked service id (not coarse 'pest')
     expect(row.dedupe_key).toBe('spoke:v1:SAR1');
     expect(row.signal_metadata.operator_pinned).toBe(true);
     expect(row.signal_metadata.spoke_seed).toBe(true);
@@ -240,6 +240,34 @@ describe('Codex PR #1772 review fixes', () => {
     expect(r.reason).toBe('host_mismatch');
     expect(r.ok).toBe(true); // fail-soft, not an error
   });
+
+  test('P1-r2: a blocked pest topic carries its specific service id → runtime FAQ guard catches a writer-emitted FAQ', () => {
+    const m = seeder.loadManifest();
+    // SAR1 = bed bugs → service 'bed-bug'; SAR2 = carpenter ants → coarse 'pest'
+    expect(seeder._internals.serviceForBrief(m.briefs[0])).toBe('bed-bug');
+    expect(seeder._internals.serviceForBrief(m.briefs[1])).toBe('pest');
+    // content-guardrails now sees the blocked service and P0s an FAQ the writer added anyway
+    const guardrails = require('../services/content/content-guardrails');
+    const faqBody = 'Bed bugs in Sarasota condos.\n## Frequently Asked Questions\n### Do bed bugs bite?\nYes.';
+    const r = guardrails.evaluate({ frontmatter: {}, body: faqBody }, { service: 'bed-bug', operatorFaqException: false });
+    expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(true);
+    // coarse 'pest' would NOT catch it (the bug Codex flagged)
+    const r2 = guardrails.evaluate({ frontmatter: {}, body: faqBody }, { service: 'pest', operatorFaqException: false });
+    expect(r2.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
+  });
+
+  test('P1-r2: brand-token hub-anchor exemption applies to body only, NOT editable meta', () => {
+    const guardrails = require('../services/content/content-guardrails');
+    const spoke = ['sarasotaflpestcontrol.com'];
+    const hubAnchor = '[Waves Pest Control](https://www.wavespestcontrol.com/pest-control-sarasota-fl/)';
+    const leak = (r) => r.findings.some((f) => f.code === 'BRAND_TOKEN_LEAK');
+    // body anchor → allowed
+    expect(leak(guardrails.evaluate({ frontmatter: { domains: spoke }, body: `In Sarasota, ${hubAnchor} helps.` }, { domains: spoke }))).toBe(false);
+    // same string in meta title → NOT exempt (meta isn't rendered as a link) → leak
+    expect(leak(guardrails.evaluate({ frontmatter: { domains: spoke, metaTitle: hubAnchor }, body: 'Clean Sarasota body.' }, { domains: spoke }))).toBe(true);
+    // a literal brand in meta_description on a spoke → leak
+    expect(leak(guardrails.evaluate({ frontmatter: { domains: spoke, meta_description: 'Waves Pest Control serves Sarasota.' }, body: 'Clean body.' }, { domains: spoke }))).toBe(true);
+  });
 });
 
 describe('content-brief-builder: spoke overlay precedence + target_sites threading', () => {
@@ -248,7 +276,9 @@ describe('content-brief-builder: spoke overlay precedence + target_sites threadi
   test('_composeBrief routes a spoke-seed opportunity through the spoke overlay and threads target_sites', () => {
     const builder = new ContentBriefBuilder();
     const m = seeder.loadManifest();
-    const row = seeder._internals.rowForBrief(m.briefs[0], m, { now: new Date('2026-06-14T12:00:00Z') });
+    // SAR2 (carpenter ants) keeps the coarse 'pest' service, so the house
+    // service hub links still merge in alongside the curated city hub link.
+    const row = seeder._internals.rowForBrief(m.briefs[1], m, { now: new Date('2026-06-14T12:00:00Z') });
     const opportunity = {
       id: 100,
       bucket: row.bucket,
@@ -263,7 +293,7 @@ describe('content-brief-builder: spoke overlay precedence + target_sites threadi
 
     expect(brief.target_sites).toEqual(['sarasotaflpestcontrol.com']);
     expect(brief.voice_constraints.operator_brief.spoke_seed).toBe(true);
-    expect(brief.voice_constraints.operator_brief.slug).toBe('/pest-control/bed-bugs-siesta-key-vacation-rentals-sarasota/');
+    expect(brief.voice_constraints.operator_brief.slug).toBe('/pest-control/carpenter-ants-sarasota-coastal-live-oaks/');
     // the hub city link leads the required internal links, service hub link merged for the hard check
     expect(brief.internal_links_to_add).toContain('https://www.wavespestcontrol.com/pest-control-sarasota-fl/');
     expect(brief.internal_links_to_add.some((l) => l.startsWith('/pest-control'))).toBe(true);
