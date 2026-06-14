@@ -5,6 +5,7 @@ const {
   mowTriggerInches,
   computeRangeStatus,
   buildReadingFields,
+  buildMowingHeightContext,
 } = require('../services/service-report/turf-height');
 
 describe('turf-height: allowed gauge increments', () => {
@@ -75,6 +76,31 @@ describe('turf-height: buildReadingFields (snapshot assembly)', () => {
   test('throws invalid_increment on an off-gauge value (service-layer guard)', () => {
     expect(() => buildReadingFields('st_augustine', 3.75)).toThrow(/must be one of/);
     try { buildReadingFields('st_augustine', 3.75); } catch (e) { expect(e.code).toBe('invalid_increment'); }
+  });
+});
+
+describe('turf-height: buildMowingHeightContext (report/card payload)', () => {
+  const reading = {
+    manual_height_in: '5.0', target_min_in: '3.5', target_max_in: '4.0',
+    range_status: 'above', grass_type: 'st_augustine', measured_at: '2026-06-12T10:00:00Z',
+    verification_status: 'pending',
+  };
+  test('shapes the display payload from a reading row', () => {
+    const ctx = buildMowingHeightContext(reading, []);
+    expect(ctx).toMatchObject({
+      heightIn: 5.0, unit: 'in', band: { min: 3.5, max: 4.0 }, bandLabel: '3.5–4″',
+      status: 'above', mowTriggerIn: 6.0, grassType: 'st_augustine', verificationStatus: 'pending',
+    });
+  });
+  test('maps + filters the trend rows', () => {
+    const ctx = buildMowingHeightContext(reading, [
+      { manual_height_in: '4.0', range_status: 'in_range', measured_at: 't1' },
+      { manual_height_in: null, range_status: 'below', measured_at: 't2' }, // dropped
+    ]);
+    expect(ctx.trend).toEqual([{ heightIn: 4.0, status: 'in_range', measuredAt: 't1' }]);
+  });
+  test('null reading → null (surface hides the module)', () => {
+    expect(buildMowingHeightContext(null)).toBeNull();
   });
 });
 

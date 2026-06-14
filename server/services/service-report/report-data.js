@@ -7,6 +7,8 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
+const { buildMowingHeightContext } = require('./turf-height');
+const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
@@ -1874,6 +1876,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  // Mowing height-of-cut — surfaced at the top level (not inside lawnAssessment)
+  // so it shows on lawn reports even when there's no vision assessment. Null when
+  // not a lawn visit or no reading was captured.
+  const mowingHeight = serviceLine === 'lawn'
+    ? buildMowingHeightContext(
+      await getTurfHeightForVisit(service.id, knex),
+      await getTurfHeightTrend(service.customer_id, 12, knex),
+    )
+    : null;
   const lawnProgramOverview = await loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService);
   const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
 
@@ -2280,6 +2291,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     protocol,
     advisory,
     lawnAssessment,
+    mowingHeight,
     lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
     proofMoments: approvedVisualMoments,

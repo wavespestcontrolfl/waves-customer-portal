@@ -101,6 +101,35 @@ function buildReadingFields(grassType, manualHeightIn) {
   };
 }
 
+// Build the report/card display payload for a reading (+ trend rows). Pure: the
+// caller fetches the rows. Returns null when there's no reading so the surface
+// hides the module. Status copy is left to each surface (report neutral; card
+// brand-warm advisory) — the data layer exposes the raw status + band only.
+function buildMowingHeightContext(reading, trend = []) {
+  if (!reading) return null;
+  const band = { min: Number(reading.target_min_in), max: Number(reading.target_max_in) };
+  const heightIn = Number(reading.manual_height_in);
+  return {
+    heightIn,
+    unit: 'in',
+    band,
+    bandLabel: `${band.min}–${band.max}″`,
+    status: reading.range_status || computeRangeStatus(heightIn, band),
+    mowTriggerIn: mowTriggerInches(band),
+    grassType: reading.grass_type || null,
+    measuredAt: reading.measured_at || null,
+    verificationStatus: reading.verification_status || 'pending', // internal QA marker only
+    trend: (Array.isArray(trend) ? trend : [])
+      .filter((r) => r && r.manual_height_in != null && r.manual_height_in !== ''
+        && Number.isFinite(Number(r.manual_height_in)))
+      .map((r) => ({
+        heightIn: Number(r.manual_height_in),
+        status: r.range_status || null,
+        measuredAt: r.measured_at || null,
+      })),
+  };
+}
+
 module.exports = {
   ALLOWED_HEIGHTS_IN,
   HEIGHT_BAND_BY_GRASS,
@@ -111,4 +140,5 @@ module.exports = {
   mowTriggerInches,
   computeRangeStatus,
   buildReadingFields,
+  buildMowingHeightContext,
 };
