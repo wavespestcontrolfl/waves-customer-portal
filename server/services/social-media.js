@@ -211,6 +211,15 @@ function normalizeUrl(url) {
   }
 }
 
+// A GBP post that fails *with media attached* may have failed because
+// Google rejected or couldn't fetch the image — those are worth a text-only
+// retry. Auth/quota/validation failures are not media-related and would just
+// fail again, so the retry skips them.
+function isGbpMediaError(error) {
+  return /media|photo|image|picture|thumbnail|source.?url|download|unable to (fetch|access)|could not.*(fetch|access|download)|aspect ratio|resolution|dimension|file (size|format)/i
+    .test(String(error || ''));
+}
+
 // ── Advisory Lock for RSS Ingestion ──
 const RSS_LOCK_ID = 839201;  // arbitrary stable int for pg_advisory_lock
 
@@ -710,8 +719,12 @@ const SocialMediaService = {
     // image. Without S3 hosting + at least one consumer, generating would
     // spend image credits and discard the result.
     let generatedImageUrl = imageUrl || null;
+    // SOCIAL_MEDIA_CDN_DOMAIN is required too: uploadImageToS3 returns null
+    // without it (private S3 URLs aren't publicly fetchable), so generating
+    // an image without a CDN just burns credits and discards the result.
     const hasImageHosting =
-      !!config.s3.accessKeyId && !!config.s3.secretAccessKey && !!config.s3.bucket;
+      !!config.s3.accessKeyId && !!config.s3.secretAccessKey && !!config.s3.bucket
+      && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     const instagramCanConsume =
       SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
     const gbpCanConsume = SOCIAL_FLAGS.gbpEnabled;
@@ -829,8 +842,8 @@ const SocialMediaService = {
         let r = await postToGBP(loc.id, gbpContent, link, gbpImageUrl);
         // Media is best-effort: if Google rejects or can't fetch the image,
         // retry text-only so an image problem doesn't block a post that would
-        // otherwise have succeeded.
-        if (!r.success && gbpImageUrl) {
+        // otherwise have succeeded. Other failures (auth/quota) skip the retry.
+        if (!r.success && gbpImageUrl && isGbpMediaError(r.error)) {
           logger.warn(`[social] GBP post with image failed for ${loc.name} (${r.error}); retrying text-only`);
           r = await postToGBP(loc.id, gbpContent, link, null);
         }
@@ -983,3 +996,4 @@ module.exports.validateContent = validateContent;
 module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.postToGBP = postToGBP;
+module.exports.isGbpMediaError = isGbpMediaError;

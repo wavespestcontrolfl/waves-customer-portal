@@ -11,6 +11,7 @@ jest.mock('../services/social-media', () => ({
   postToGBP: jest.fn(),
   generateImage: jest.fn(),
   uploadImageToS3: jest.fn(),
+  isGbpMediaError: (e) => /media|photo|image|download|fetch/i.test(String(e || '')),
   assertSocialPublishingReady: jest.fn(),
   SOCIAL_FLAGS: { dryRun: false },
 }));
@@ -237,6 +238,19 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).toHaveBeenNthCalledWith(2, 'sarasota', expect.any(String), expect.any(String), null);
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
+  });
+
+  test('non-media post failure does NOT retry text-only (auth/quota would just fail again)', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    social.postToGBP.mockResolvedValue({ platform: 'gbp', location: 'sarasota', success: false, error: 'PERMISSION_DENIED' });
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.postToGBP).toHaveBeenCalledTimes(1);
+    expect(result.claim).toBe('release');
+    expect(result.patch.outcome).toBe('failed_publish');
   });
 
   test('image generation failure still posts (text-only), does not block publish', async () => {

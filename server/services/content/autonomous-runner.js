@@ -1903,9 +1903,10 @@ class AutonomousRunner {
 
     const t2 = Date.now();
     let result = await social.postToGBP(location.id, content, link, gbpImageUrl);
-    // Media is best-effort: if the post fails with an image attached, retry
+    // Media is best-effort: if the post fails because of the image, retry
     // text-only so an image problem doesn't block an otherwise-valid post.
-    if (!result?.success && gbpImageUrl) {
+    // Non-media failures (auth/quota) skip the retry — they'd just fail again.
+    if (!result?.success && gbpImageUrl && social.isGbpMediaError?.(result?.error)) {
       logger.warn(`[autonomous-runner] GBP post with image failed (${result?.error}); retrying text-only`);
       result = await social.postToGBP(location.id, content, link, null);
     }
