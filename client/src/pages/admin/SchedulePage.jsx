@@ -35,7 +35,7 @@ import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
-import { useFeatureFlag } from "../../hooks/useFeatureFlag";
+import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -6448,8 +6448,10 @@ export function CompletionPanel({
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   const [servicePhotos, setServicePhotos] = useState([]);
-  // Turf height-of-cut capture (lawn completion, behind the flag).
-  const turfHeightFlag = useFeatureFlag("turf-height-capture");
+  // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
+  // submit so a lawn visit can't be completed before the flag state is known —
+  // otherwise a pre-load submit hides the field the server still requires (422).
+  const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null, overrideReason: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
@@ -7883,6 +7885,13 @@ export function CompletionPanel({
 
   async function handleSubmit() {
     if (submitting) return;
+    // The turf-height flag drives a server-required field on lawn visits; don't
+    // submit until its state is loaded, or a pre-load submit hides the field the
+    // server still enforces (422). The flag is session-cached so this rarely waits.
+    if (isLawn && !turfHeightFlagReady) {
+      alert("Completion options are still loading — please try again in a moment.");
+      return;
+    }
     if (calibrationAdvisory) {
       const proceed = window.confirm(
         `${

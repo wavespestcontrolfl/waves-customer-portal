@@ -1836,7 +1836,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
-    knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
+    knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at')
+      .then(async (rows) => {
+        // Drop the turf-height gauge image — a measurement/QA artifact (uploaded
+        // as a 'progress' photo), never a customer-facing field photo. Fail-soft.
+        try {
+          const gauge = await knex('turf_height_readings')
+            .where({ service_record_id: service.id })
+            .whereNotNull('gauge_photo_id')
+            .first('gauge_photo_id');
+          return gauge?.gauge_photo_id
+            ? rows.filter((p) => String(p.id) !== String(gauge.gauge_photo_id))
+            : rows;
+        } catch { return rows; }
+      })
+      .catch(() => []),
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
   ]);
