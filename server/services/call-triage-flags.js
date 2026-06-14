@@ -22,15 +22,19 @@ const NON_NAME_EMAIL_AFFIXES = new Set([
   'home', 'work', 'family', 'personal', 'official', 'real', 'team', 'group',
   'online', 'here', 'only', 'usa', 'dev', 'biz', 'llc', 'inc', 'mail', 'email',
 ]);
+const EMAIL_PREFIX_NAME_EQUIVALENTS = new Map([
+  ['ronnie', 'ronni'],
+]);
 
 function nameTokenMatchesEmailLocal(token, local) {
   const t = String(token || '').replace(/[^a-z]/g, '');
   if (t.length < 3) return false;
   if (local.includes(t)) return true;
 
-  // Common spoken/extracted spelling drift: Ronni is often extracted as
-  // Ronnie, while the email local-part remains ronnir (first name + initial).
-  if (t.length >= 5 && t.endsWith('e') && local.startsWith(t.slice(0, -1))) {
+  // Known spoken/extracted spelling drift from reviewed call ground truth:
+  // Ronni is often extracted as Ronnie while the email remains ronnir.
+  const equivalentPrefix = EMAIL_PREFIX_NAME_EQUIVALENTS.get(t);
+  if (equivalentPrefix && local.startsWith(equivalentPrefix)) {
     return true;
   }
 

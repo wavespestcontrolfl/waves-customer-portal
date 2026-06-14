@@ -37,6 +37,7 @@ describe('address normalizer', () => {
     expect(normalizeLeadAddress({ raw: '456 Harbor Road, Sarasota, FL 34236' }).line1).toBe('456 Harbor Rd');
     expect(normalizeLeadAddress({ raw: '789 Ridge Parkway, Sarasota, FL 34236' }).line1).toBe('789 Ridge Pkwy');
     expect(normalizeLeadAddress({ raw: '101 Shore Dr., Sarasota, FL 34236' }).line1).toBe('101 Shore Dr');
+    expect(normalizeLeadAddress({ raw: '202 Oak Grove, Sarasota, FL 34236' }).line1).toBe('202 Oak Grv');
   });
 
   test('splits comma-free addresses with suffix aliases introduced for normalization', () => {
@@ -77,6 +78,13 @@ describe('address normalizer', () => {
       state: 'FL',
       zip: '32025',
       fullAddress: '123 Main St, Lake City, FL 32025',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Grove City FL 34224' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Grove City',
+      state: 'FL',
+      zip: '34224',
+      fullAddress: '123 Main St, Grove City, FL 34224',
     });
   });
 

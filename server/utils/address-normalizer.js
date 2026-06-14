@@ -78,9 +78,38 @@ const STREET_SUFFIX_ALIASES = {
   vis: 'VIS',
 };
 const LEGACY_STREET_SPLIT_SUFFIXES = ['aly', 'alley'];
-const STREET_SUFFIXES = new Set([
-  ...Object.keys(STREET_SUFFIX_ALIASES),
-  ...Object.values(STREET_SUFFIX_ALIASES).map((suffix) => suffix.toLowerCase()),
+// Comma-free raw address splitting needs stronger boundary markers than display
+// normalization; city-prone suffixes like harbor/beach/grove stay normalize-only.
+const STREET_SPLIT_SUFFIX_ALIAS_KEYS = [
+  'street', 'st',
+  'avenue', 'ave',
+  'road', 'rd',
+  'drive', 'dr',
+  'boulevard', 'blvd',
+  'lane', 'ln',
+  'court', 'ct',
+  'circle', 'cir',
+  'way',
+  'place', 'pl',
+  'terrace', 'ter',
+  'trail', 'trl',
+  'parkway', 'pkwy',
+  'highway', 'hwy',
+  'loop',
+  'pass',
+  'path',
+  'run',
+  'walk',
+  'point', 'pt',
+  'cove', 'cv',
+  'causeway', 'cswy',
+  'crossing', 'xing',
+  'plaza', 'plz',
+  'ridge', 'rdg',
+  'glen', 'gln',
+];
+const STREET_SPLIT_SUFFIXES = new Set([
+  ...STREET_SPLIT_SUFFIX_ALIAS_KEYS.flatMap((key) => [key, STREET_SUFFIX_ALIASES[key]?.toLowerCase()].filter(Boolean)),
   ...LEGACY_STREET_SPLIT_SUFFIXES,
 ]);
 const US_STATE_ABBREVIATIONS = {
@@ -244,7 +273,7 @@ function splitStreetAndCity(value) {
   const suffixIndices = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i].replace(/[.,]/g, '').toLowerCase();
-    if (STREET_SUFFIXES.has(token)) {
+    if (STREET_SPLIT_SUFFIXES.has(token)) {
       suffixIndices.push(i);
     }
   }
