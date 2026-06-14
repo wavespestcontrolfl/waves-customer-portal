@@ -145,6 +145,15 @@ async function assertSocialPublishingReady(platform) {
     }
   }
 
+  // GBP client creds are per-location (GBP_CLIENT_ID_*/GBP_CLIENT_SECRET_*),
+  // so they can't live in PLATFORM_ENV_REQS' static list. Without them,
+  // postToGBP fails in _getHeaders ("No GBP credentials for location") — and
+  // callers that gate image generation on this readiness check would burn
+  // image credits first. Bail here so the post is parked, not retried.
+  if (platform === 'gbp' && !gbpService.configured) {
+    return { ready: false, reason: 'GBP OAuth client credentials not configured for any location' };
+  }
+
   return { ready: true };
 }
 

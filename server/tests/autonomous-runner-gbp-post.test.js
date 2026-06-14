@@ -302,6 +302,25 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).not.toHaveBeenCalled();
   });
 
+  test('GBP not ready (no OAuth creds) parks WITHOUT generating an image', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    // Image hosting is fully configured (beforeEach), so the readiness gate is
+    // the only thing that can stop generation — postToGBP would otherwise fail
+    // with "No GBP credentials for location" after credits were already spent.
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.assertSocialPublishingReady.mockResolvedValue({
+      ready: false,
+      reason: 'GBP OAuth client credentials not configured for any location',
+    });
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(result.claim).toBe('pending');
+    expect(result.patch.skip_reason).toBe('gbp_post_social_not_ready');
+    expect(social.generateImage).not.toHaveBeenCalled();
+    expect(social.postToGBP).not.toHaveBeenCalled();
+  });
+
   test('post failure releases the claim for retry (failed_publish)', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
