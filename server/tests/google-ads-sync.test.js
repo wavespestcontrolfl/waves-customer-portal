@@ -14,7 +14,11 @@ jest.mock('../services/logger', () => ({
 }));
 
 const mockCustomerQuery = jest.fn();
-const mockCustomerFactory = jest.fn(() => ({ query: mockCustomerQuery }));
+const mockMutateResources = jest.fn();
+const mockCustomerFactory = jest.fn(() => ({
+  query: mockCustomerQuery,
+  mutateResources: mockMutateResources,
+}));
 const mockGoogleAdsApi = jest.fn(() => ({ Customer: mockCustomerFactory }));
 
 jest.mock('google-ads-api', () => ({
@@ -24,9 +28,9 @@ jest.mock('google-ads-api', () => ({
       2: 'ENABLED',
       3: 'PAUSED',
       4: 'REMOVED',
-      ENABLED: 'ENABLED',
-      PAUSED: 'PAUSED',
-      REMOVED: 'REMOVED',
+      ENABLED: 2,
+      PAUSED: 3,
+      REMOVED: 4,
     },
   },
 }), { virtual: true });
@@ -90,5 +94,71 @@ describe('Google Ads campaign sync', () => {
       daily_budget_current: 5,
     }));
     expect(mockInsert.mock.calls[0][0]).not.toHaveProperty('daily_budget');
+  });
+
+  test('enables campaigns using the current mutateResources update format', async () => {
+    mockMutateResources.mockResolvedValue({});
+
+    const result = await GoogleAds.enableCampaign('22594274874');
+
+    expect(result).toEqual({
+      success: true,
+      platformCampaignId: '22594274874',
+      status: 'active',
+    });
+    expect(mockMutateResources).toHaveBeenCalledWith([{
+      entity: 'campaign',
+      operation: 'update',
+      resource: {
+        resource_name: 'customers/3393936713/campaigns/22594274874',
+        status: 2,
+      },
+    }]);
+  });
+
+  test('pauses campaigns using the current mutateResources update format', async () => {
+    mockMutateResources.mockResolvedValue({});
+
+    const result = await GoogleAds.pauseCampaign('22594274874');
+
+    expect(result).toEqual({
+      success: true,
+      platformCampaignId: '22594274874',
+      status: 'paused',
+    });
+    expect(mockMutateResources).toHaveBeenCalledWith([{
+      entity: 'campaign',
+      operation: 'update',
+      resource: {
+        resource_name: 'customers/3393936713/campaigns/22594274874',
+        status: 3,
+      },
+    }]);
+  });
+
+  test('updates campaign budgets using the current mutateResources update format', async () => {
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: {
+        id: '22594274874',
+        campaign_budget: 'customers/3393936713/campaignBudgets/987654321',
+      },
+    }]);
+    mockMutateResources.mockResolvedValue({});
+
+    const result = await GoogleAds.updateBudget('22594274874', 5);
+
+    expect(result).toEqual({
+      success: true,
+      platformCampaignId: '22594274874',
+      dailyBudget: 5,
+    });
+    expect(mockMutateResources).toHaveBeenCalledWith([{
+      entity: 'campaign_budget',
+      operation: 'update',
+      resource: {
+        resource_name: 'customers/3393936713/campaignBudgets/987654321',
+        amount_micros: 5000000,
+      },
+    }]);
   });
 });

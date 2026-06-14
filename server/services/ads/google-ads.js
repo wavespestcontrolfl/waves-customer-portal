@@ -355,10 +355,12 @@ async function pauseCampaign(platformCampaignId) {
 
     await customer.mutateResources([
       {
-        _resource: 'CampaignOperation',
-        _operation: 'update',
-        resource_name: `customers/${process.env.GOOGLE_ADS_CUSTOMER_ID}/campaigns/${platformCampaignId}`,
-        status: enums.CampaignStatus.PAUSED,
+        entity: 'campaign',
+        operation: 'update',
+        resource: {
+          resource_name: `customers/${process.env.GOOGLE_ADS_CUSTOMER_ID}/campaigns/${platformCampaignId}`,
+          status: enums.CampaignStatus.PAUSED,
+        },
       },
     ]);
 
@@ -382,10 +384,12 @@ async function enableCampaign(platformCampaignId) {
 
     await customer.mutateResources([
       {
-        _resource: 'CampaignOperation',
-        _operation: 'update',
-        resource_name: `customers/${process.env.GOOGLE_ADS_CUSTOMER_ID}/campaigns/${platformCampaignId}`,
-        status: enums.CampaignStatus.ENABLED,
+        entity: 'campaign',
+        operation: 'update',
+        resource: {
+          resource_name: `customers/${process.env.GOOGLE_ADS_CUSTOMER_ID}/campaigns/${platformCampaignId}`,
+          status: enums.CampaignStatus.ENABLED,
+        },
       },
     ]);
 
@@ -424,10 +428,12 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
 
     await customer.mutateResources([
       {
-        _resource: 'CampaignBudgetOperation',
-        _operation: 'update',
-        resource_name: budgetResourceName,
-        amount_micros: amountMicros,
+        entity: 'campaign_budget',
+        operation: 'update',
+        resource: {
+          resource_name: budgetResourceName,
+          amount_micros: amountMicros,
+        },
       },
     ]);
 
