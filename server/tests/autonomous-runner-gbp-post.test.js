@@ -9,6 +9,9 @@ jest.mock('../services/social-media', () => ({
   generateContent: jest.fn(),
   validateContent: jest.fn(),
   postToGBP: jest.fn(),
+  generateImage: jest.fn(),
+  uploadImageToS3: jest.fn(),
+  isGbpMediaError: (e) => /media|photo|image|download|fetch/i.test(String(e || '')),
   assertSocialPublishingReady: jest.fn(),
   SOCIAL_FLAGS: { dryRun: false },
 }));
@@ -59,9 +62,18 @@ beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
   delete process.env.AUTONOMOUS_GBP_POST_DAILY_CAP;
   delete process.env.AUTO_PUBLISH_GBP_POST;
+  // Image hosting ready by default so the image-path tests exercise generation.
+  process.env.S3_BUCKET = 'test-bucket';
+  process.env.AWS_ACCESS_KEY_ID = 'test-key';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  process.env.SOCIAL_MEDIA_CDN_DOMAIN = 'cdn.example.com';
   social.SOCIAL_FLAGS.dryRun = false;
   social.generateContent.mockResolvedValue('Sarasota ghost ants are peaking. Schedule an inspection.');
   social.validateContent.mockReturnValue({ valid: true, issues: [] });
+  // Default: image generation yields nothing → posts go out text-only (the
+  // pre-existing behavior). The image-attached path is covered explicitly below.
+  social.generateImage.mockResolvedValue(null);
+  social.uploadImageToS3.mockResolvedValue(null);
   social.assertSocialPublishingReady.mockResolvedValue({ ready: true });
   social.postToGBP.mockResolvedValue({ platform: 'gbp', location: 'sarasota', success: true, postId: 'accounts/1/locations/2/localPosts/3' });
 });
@@ -107,11 +119,15 @@ describe('_handleGbpPostAction', () => {
     const run = { shadow_mode: false };
     const result = await runner._handleGbpPostAction(baseBrief(), run);
 
+    // Readiness is checked for the TARGET location, not just globally, so a
+    // partial GBP setup can't burn an image on an unconfigured profile.
+    expect(social.assertSocialPublishingReady).toHaveBeenCalledWith('gbp', 'sarasota');
     expect(social.postToGBP).toHaveBeenCalledTimes(1);
     expect(social.postToGBP).toHaveBeenCalledWith(
       'sarasota',
       'Sarasota ghost ants are peaking. Schedule an inspection.',
-      'https://www.wavespestcontrol.com/pest-control-sarasota-fl/'
+      'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
+      null
     );
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
@@ -167,7 +183,7 @@ describe('_handleGbpPostAction', () => {
     expect(social.generateContent).toHaveBeenCalledWith('gbp', expect.objectContaining({
       locationName: 'North Port',
     }));
-    expect(social.postToGBP).toHaveBeenCalledWith('venice', expect.any(String), expect.anything());
+    expect(social.postToGBP).toHaveBeenCalledWith('venice', expect.any(String), expect.anything(), null);
   });
 
   test('unmapped city parks for manual routing without generating', async () => {
@@ -196,7 +212,75 @@ describe('_handleGbpPostAction', () => {
       baseBrief({ target_url: 'https://sarasotaexterminator.com/some-page/' }),
       run
     );
-    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), null);
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), null, null);
+  });
+
+  test('attaches a generated CDN image to the GBP post when image generation succeeds', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.uploadImageToS3).toHaveBeenCalledTimes(1);
+    expect(social.postToGBP).toHaveBeenCalledWith(
+      'sarasota',
+      expect.any(String),
+      'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
+      'https://cdn.example.com/social-media/gbp.jpg'
+    );
+  });
+
+  test('image-attached post that Google rejects retries text-only and completes', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    social.postToGBP
+      .mockResolvedValueOnce({ platform: 'gbp', location: 'sarasota', success: false, error: 'media fetch failed' })
+      .mockResolvedValueOnce({ platform: 'gbp', location: 'sarasota', success: true, postId: 'accounts/1/locations/2/localPosts/3' });
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.postToGBP).toHaveBeenCalledTimes(2);
+    expect(social.postToGBP).toHaveBeenNthCalledWith(1, 'sarasota', expect.any(String), expect.any(String), 'https://cdn.example.com/social-media/gbp.jpg');
+    expect(social.postToGBP).toHaveBeenNthCalledWith(2, 'sarasota', expect.any(String), expect.any(String), null);
+    expect(result.claim).toBe('complete');
+    expect(result.patch.outcome).toBe('completed_published');
+  });
+
+  test('skips image generation when image hosting is not configured (no CDN)', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    delete process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.generateImage).not.toHaveBeenCalled();
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+  });
+
+  test('non-media post failure does NOT retry text-only (auth/quota would just fail again)', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    social.postToGBP.mockResolvedValue({ platform: 'gbp', location: 'sarasota', success: false, error: 'PERMISSION_DENIED' });
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.postToGBP).toHaveBeenCalledTimes(1);
+    expect(result.claim).toBe('release');
+    expect(result.patch.outcome).toBe('failed_publish');
+  });
+
+  test('image generation failure still posts (text-only), does not block publish', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockRejectedValue(new Error('image provider down'));
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(result.claim).toBe('complete');
+    expect(result.patch.outcome).toBe('completed_published');
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
   });
 
   test('validation failure parks with the rejected copy in notes', async () => {
@@ -218,6 +302,25 @@ describe('_handleGbpPostAction', () => {
     expect(result.claim).toBe('pending');
     expect(result.patch.skip_reason).toBe('gbp_post_social_not_ready');
     expect(result.patch.reviewer_notes).toContain('paused by admin');
+    expect(social.postToGBP).not.toHaveBeenCalled();
+  });
+
+  test('GBP not ready (no OAuth creds) parks WITHOUT generating an image', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    // Image hosting is fully configured (beforeEach), so the readiness gate is
+    // the only thing that can stop generation — postToGBP would otherwise fail
+    // with "No GBP credentials for location" after credits were already spent.
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.assertSocialPublishingReady.mockResolvedValue({
+      ready: false,
+      reason: 'GBP OAuth client credentials not configured for any location',
+    });
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(result.claim).toBe('pending');
+    expect(result.patch.skip_reason).toBe('gbp_post_social_not_ready');
+    expect(social.generateImage).not.toHaveBeenCalled();
     expect(social.postToGBP).not.toHaveBeenCalled();
   });
 

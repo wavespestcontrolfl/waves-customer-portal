@@ -1860,7 +1860,7 @@ class AutonomousRunner {
       };
     }
 
-    const ready = await social.assertSocialPublishingReady('gbp');
+    const ready = await social.assertSocialPublishingReady('gbp', location.id);
     if (!ready.ready) {
       return {
         claim: 'pending',
@@ -1885,8 +1885,36 @@ class AutonomousRunner {
       };
     }
 
+    // Best-effort image so the GBP post isn't a flat text card. The image
+    // pipeline (generate -> S3 -> CDN) is the same one publishToAll uses for
+    // Instagram; on any failure we fall through to a text-only post (the
+    // prior behavior) rather than blocking the publish. Gate on image hosting
+    // first — uploadImageToS3 returns null without S3 + a CDN domain, so
+    // generating without it would just burn credits.
+    const imageHostingReady =
+      !!process.env.S3_BUCKET && !!process.env.AWS_ACCESS_KEY_ID
+      && !!process.env.AWS_SECRET_ACCESS_KEY && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    let gbpImageUrl = null;
+    try {
+      if (imageHostingReady && social.generateImage && social.uploadImageToS3) {
+        const img = await social.generateImage(title);
+        if (img?.base64) {
+          gbpImageUrl = await social.uploadImageToS3(img.base64, `gbp-${location.id}-${Date.now()}.jpg`);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-runner] GBP image generation failed (posting text-only): ${err.message}`);
+    }
+
     const t2 = Date.now();
-    const result = await social.postToGBP(location.id, content, link);
+    let result = await social.postToGBP(location.id, content, link, gbpImageUrl);
+    // Media is best-effort: if the post fails because of the image, retry
+    // text-only so an image problem doesn't block an otherwise-valid post.
+    // Non-media failures (auth/quota) skip the retry — they'd just fail again.
+    if (!result?.success && gbpImageUrl && social.isGbpMediaError?.(result?.error)) {
+      logger.warn(`[autonomous-runner] GBP post with image failed (${result?.error}); retrying text-only`);
+      result = await social.postToGBP(location.id, content, link, null);
+    }
     run.publish_ms = Date.now() - t2;
     if (!result?.success) {
       return {

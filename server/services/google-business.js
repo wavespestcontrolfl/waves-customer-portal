@@ -227,6 +227,17 @@ class GoogleBusinessService {
     return configured;
   }
 
+  /**
+   * Whether a single location can actually publish: client ID/secret + a
+   * refresh token (the same readiness _getClient enforces). Use this before
+   * spending image-generation credits on a post bound to one location —
+   * `this.configured` only proves *some* location has client creds, not the
+   * target one.
+   */
+  async isLocationConfigured(locationId) {
+    return !!(await this._getClient(locationId));
+  }
+
   // =========================================================================
   // REVIEWS
   // =========================================================================
