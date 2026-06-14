@@ -104,8 +104,11 @@ async function callGeminiGaugeOcr(base64Image, mimeType) {
 function buildConsensus(modelResults) {
   const models = (Array.isArray(modelResults) ? modelResults : []).filter(Boolean);
   const readable = models.filter((m) => m.readable && Number.isFinite(Number(m.height_in)));
+  // modelCount = how many models actually RESPONDED (returned a result object).
+  // 0 means every call failed/was skipped (infra) — distinct from "responded but
+  // couldn't read the gauge" (readableCount 0, modelCount > 0).
   if (!readable.length) {
-    return { ocr_height_in: null, ocr_confidence: 0, ocr_models: models, readableCount: 0 };
+    return { ocr_height_in: null, ocr_confidence: 0, ocr_models: models, readableCount: 0, modelCount: models.length };
   }
   if (readable.length === 1) {
     return {
@@ -113,6 +116,7 @@ function buildConsensus(modelResults) {
       ocr_confidence: round2(readable[0].confidence * 0.7),
       ocr_models: models,
       readableCount: 1,
+      modelCount: models.length,
     };
   }
   const heights = readable.map((m) => Number(m.height_in));
@@ -120,7 +124,7 @@ function buildConsensus(modelResults) {
   const maxDiff = Math.max(...heights) - Math.min(...heights); // disagreement between models
   let confidence = readable.reduce((s, m) => s + m.confidence, 0) / readable.length;
   if (maxDiff > DISCREPANCY_IN) confidence *= 0.5;
-  return { ocr_height_in: round2(mean), ocr_confidence: round2(confidence), ocr_models: models, readableCount: readable.length };
+  return { ocr_height_in: round2(mean), ocr_confidence: round2(confidence), ocr_models: models, readableCount: readable.length, modelCount: models.length };
 }
 
 /** Reconcile OCR consensus vs the manual source of truth → verification_status. */
@@ -158,6 +162,14 @@ async function processReadingOcr(readingId, knex = db) {
     if (!image?.data) return;
 
     const consensus = await runGaugeOcr(image.data, image.mimeType);
+    // Fail-soft: if NO model produced any output (missing API keys, provider or
+    // network errors), this is an infrastructure miss, not an unreadable gauge.
+    // Leave the reading 'pending' so a later completion-resume can retry it,
+    // rather than persisting 'ocr_failed' and flooding the human review queue.
+    if (!consensus.modelCount) {
+      logger.warn(`[turf-ocr] reading ${readingId}: no model responded — leaving pending for retry`);
+      return;
+    }
     const status = reconcile(reading.manual_height_in, consensus);
     await knex('turf_height_readings').where({ id: readingId }).update({
       ocr_height_in: consensus.ocr_height_in,

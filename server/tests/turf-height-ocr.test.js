@@ -40,6 +40,16 @@ describe('turf-ocr: buildConsensus', () => {
     expect(c.ocr_height_in).toBeNull();
     expect(c.readableCount).toBe(0);
   });
+  test('modelCount separates infra miss (no responders) from unreadable gauge', () => {
+    // both calls failed / were skipped → no model responded (infra) → stay pending
+    const infra = buildConsensus([null, null]);
+    expect(infra.modelCount).toBe(0);
+    expect(infra.readableCount).toBe(0);
+    // both responded but neither could read the gauge → genuine ocr_failed
+    const unreadable = buildConsensus([m('claude', null, 0, false), m('gemini', 3, 0.2, false)]);
+    expect(unreadable.modelCount).toBe(2);
+    expect(unreadable.readableCount).toBe(0);
+  });
 });
 
 describe('turf-ocr: reconcile vs manual (source of truth)', () => {

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { formatETDate } from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -23,7 +24,9 @@ function fmtIn(v) {
 }
 function fmtDate(v) {
   if (!v) return "—";
-  try { return new Date(v).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+  // The portal is Eastern Time end-to-end — pin display to ET so a late-evening
+  // service never renders on the wrong calendar day in another browser timezone.
+  try { return formatETDate(v, { month: "short", day: "numeric", year: "numeric" }); }
   catch { return "—"; }
 }
 
@@ -39,9 +42,9 @@ export default function TurfHeightReviewPage() {
   const load = useCallback(() => {
     setLoading(true);
     adminFetch("/admin/turf-height/review")
-      .then((r) => r.json())
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((d) => { setItems(d.items || []); setError(null); })
-      .catch(() => setError("Failed to load the review queue."))
+      .catch(() => setError("Failed to load the review queue — the query may be broken, not empty."))
       .finally(() => setLoading(false));
   }, []);
 

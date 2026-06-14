@@ -41,8 +41,7 @@ router.get('/review', async (req, res, next) => {
         'sp.s3_key as gauge_s3_key',
         'c.first_name as cust_first',
         'c.last_name as cust_last',
-      )
-      .catch(() => []);
+      );
 
     const items = await Promise.all(rows.map(async (r) => ({
       id: r.id,

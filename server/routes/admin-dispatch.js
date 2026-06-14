@@ -3290,11 +3290,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         );
       });
         durableCompletionCommitted = true;
-        // Gauge-photo OCR cross-check — fire-and-forget AFTER the visit commits
-        // (re-reads the reading from the committed row; never blocks completion).
-        if (turfOcrReadingId) {
-          setImmediate(() => TurfHeightOcr.processReadingOcr(turfOcrReadingId));
-        }
       } catch (err) {
         if (preCommitCompletionPhotoRows.length) {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
@@ -3314,6 +3309,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // execution we can now run best-effort follow-up alerts and tracking;
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
+
+    // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
+    // durably committed. Runs on BOTH first-run and durable-resume paths. On
+    // resume the reading was written in a prior pass (so turfOcrReadingId is
+    // null here); recover any reading that never got cross-checked — i.e. the
+    // process exited before this point — instead of leaving it stuck 'pending'
+    // and invisible to the review queue. QA only; never blocks completion.
+    if (!turfOcrReadingId && resumingCommittedCompletion && record?.id) {
+      try {
+        const pendingTurf = await db('turf_height_readings')
+          .where({ service_record_id: record.id, verification_status: 'pending' })
+          .whereNotNull('gauge_photo_id')
+          .first('id');
+        turfOcrReadingId = pendingTurf?.id || null;
+      } catch (turfErr) {
+        logger.warn(`[turf-height] resume OCR re-arm lookup failed for service_record=${record.id}: ${turfErr.message}`);
+      }
+    }
+    if (turfOcrReadingId) {
+      const ocrReadingId = turfOcrReadingId;
+      setImmediate(() => {
+        void TurfHeightOcr.processReadingOcr(ocrReadingId)
+          .catch((err) => logger.error(`[turf-height] OCR cross-check failed for reading=${ocrReadingId}: ${err.message}`));
+      });
+    }
 
     if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
       completionPhotoUploadResult = await uploadServicePhotoDataUrls({
