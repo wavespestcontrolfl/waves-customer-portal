@@ -71,6 +71,19 @@ async function getTurfHeightForVisit(serviceRecordId, knex = db) {
   }
 }
 
+/** The customer's most recent reading (customer card), or null. Fail-soft. */
+async function getLatestTurfHeight(customerId, knex = db) {
+  if (!customerId) return null;
+  try {
+    return await knex('turf_height_readings')
+      .where({ customer_id: customerId })
+      .orderBy('measured_at', 'desc')
+      .first(READING_COLUMNS);
+  } catch {
+    return null;
+  }
+}
+
 /** Ordered height history for a customer (trend sparkline). Newest first. */
 async function getTurfHeightTrend(customerId, limit = 12, knex = db) {
   if (!customerId) return [];
@@ -89,5 +102,6 @@ async function getTurfHeightTrend(customerId, limit = 12, knex = db) {
 module.exports = {
   createTurfHeightReading,
   getTurfHeightForVisit,
+  getLatestTurfHeight,
   getTurfHeightTrend,
 };
