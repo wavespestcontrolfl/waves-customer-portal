@@ -40,6 +40,15 @@ const VALID_MODES = ['shadow', 'suggest', 'auto_send'];
 const AUTO_SEND_MODE = 'auto_send';
 const ESCALATION_INTENTS = new Set(['customer_issue_needs_review']);
 
+// Redaction placeholders the corpus redactors emit ([name], [phone], …). A
+// draft must NEVER reach a customer with one — the few-shot exemplars contain
+// them, and prompt instructions alone aren't a guarantee. This is the
+// deterministic, verifier-independent guard the delivery paths fail closed on.
+const REDACTION_PLACEHOLDER_RE = /\[(name|phone|email|ssn|card|address|url|zip)\]/i;
+function hasRedactionPlaceholder(text) {
+  return REDACTION_PLACEHOLDER_RE.test(String(text || ''));
+}
+
 const SUGGESTED_STATUS = 'suggested';
 const SUGGEST_WORKFLOW = 'sms_house_voice_suggest';
 const SUGGEST_AGENT_NAME = 'House Voice Drafter';
@@ -652,6 +661,7 @@ module.exports = {
   HUMAN_REPLY_TYPES,
   SENT_STATUSES,
   isEscalationIntent,
+  hasRedactionPlaceholder,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
