@@ -35,6 +35,7 @@ import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -6303,6 +6304,101 @@ function smsRecapPreview(value) {
   return text ? `${text} - Waves` : "";
 }
 
+// Turfchek II gauge stops + grass→ideal-band map. Mirror of
+// server/services/service-report/turf-height.js (the server snapshots the
+// authoritative band on submit; this drives the tech's live status preview).
+const TURF_ALLOWED_HEIGHTS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5];
+const TURF_HEIGHT_BANDS = {
+  st_augustine: { min: 3.5, max: 4.0 },
+  bahia: { min: 3.0, max: 4.0 },
+  bermuda: { min: 1.0, max: 2.0 },
+  zoysia: { min: 1.5, max: 2.0 },
+};
+const TURF_OVERRIDE_REASONS = [
+  { code: "no_gauge_on_truck", label: "No gauge on truck" },
+  { code: "gauge_unreadable", label: "Gauge unreadable" },
+  { code: "not_applicable", label: "Not applicable" },
+];
+function turfBandFor(grassType) {
+  return TURF_HEIGHT_BANDS[grassType] || TURF_HEIGHT_BANDS.st_augustine;
+}
+
+// Tech-facing height-of-cut capture (lawn completion, behind the feature flag).
+// Constrained increment stepper + required gauge photo + live range status, or a
+// reason-coded override. value = { heightIn, gaugePhoto, overrideReason }.
+function TurfHeightCapture({ service, value, onChange, disabled }) {
+  const [grassType, setGrassType] = useState(null);
+  const fileRef = useRef(null);
+  useEffect(() => {
+    let live = true;
+    if (!service?.customerId) return undefined;
+    adminFetch(`/admin/customers/${service.customerId}/turf-profile`)
+      .then((d) => { if (live) setGrassType(d?.profile?.grass_type || "unknown"); })
+      .catch(() => { if (live) setGrassType("unknown"); });
+    return () => { live = false; };
+  }, [service?.customerId]);
+
+  const band = turfBandFor(grassType);
+  const bandLabel = `${band.min}–${band.max}″`;
+  const overridden = !!value.overrideReason;
+  const h = value.heightIn;
+  const status = h == null ? null : (h < band.min ? "below" : (h > band.max ? "above" : "in_range"));
+  const statusMeta = {
+    in_range: { color: CP_M.ink, text: `In range (ideal ${bandLabel})` },
+    above: { color: CP_M.ink, text: `Above ideal ${bandLabel}` },
+    below: { color: "#C8102E", text: `Below ideal ${bandLabel} — scalping risk` },
+  }[status];
+
+  async function onPickPhoto(e) {
+    const file = (e.target.files || [])[0];
+    if (!file) return;
+    try {
+      const photo = await prepareCompletionPhoto(file);
+      onChange({ ...value, gaugePhoto: { data: photo.data, name: photo.name || "turf-gauge.jpg" }, overrideReason: null });
+    } catch { alert("Could not prepare the gauge photo."); }
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  return (
+    <div style={{ opacity: disabled ? 0.6 : 1 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, opacity: overridden ? 0.45 : 1 }}>
+        {TURF_ALLOWED_HEIGHTS.map((stop) => (
+          <CPChip key={stop} selected={value.heightIn === stop}
+            onClick={disabled || overridden ? undefined : () => onChange({ ...value, heightIn: stop, overrideReason: null })}>
+            {stop}&#8243;
+          </CPChip>
+        ))}
+      </div>
+      {statusMeta && !overridden && (
+        <div style={{ marginTop: 10, fontFamily: CP_FONT, fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{statusMeta.text}</div>
+      )}
+      <div style={{ marginTop: 14 }}>
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onPickPhoto} disabled={disabled || overridden} />
+        <button type="button" onClick={() => fileRef.current?.click()} disabled={disabled || overridden}
+          style={{ height: 36, padding: "0 14px", borderRadius: 999, background: value.gaugePhoto ? CP_M.ink : CP_M.card, color: value.gaugePhoto ? CP_M.actionFg : CP_M.ink, border: `1px solid ${CP_M.hairline}`, fontFamily: CP_FONT, fontSize: 13, fontWeight: 500, cursor: disabled || overridden ? "default" : "pointer" }}>
+          {value.gaugePhoto ? "✓ Gauge photo added" : "Add gauge photo"}
+        </button>
+        {!value.gaugePhoto && !overridden && (
+          <span style={{ marginLeft: 10, fontFamily: CP_FONT, fontSize: 12, color: CP_M.ink4 }}>Required — gauge scale + canopy line visible.</span>
+        )}
+      </div>
+      <div style={{ marginTop: 14, fontFamily: CP_FONT, fontSize: 12, color: CP_M.ink4 }}>
+        Can&rsquo;t capture a reading?
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
+          {TURF_OVERRIDE_REASONS.map((r) => (
+            <CPChip key={r.code} selected={value.overrideReason === r.code}
+              onClick={disabled ? undefined : () => onChange(value.overrideReason === r.code
+                ? { ...value, overrideReason: null }
+                : { heightIn: null, gaugePhoto: null, overrideReason: r.code })}>
+              {r.label}
+            </CPChip>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -6342,6 +6438,9 @@ export function CompletionPanel({
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   const [servicePhotos, setServicePhotos] = useState([]);
+  // Turf height-of-cut capture (lawn completion, behind the flag).
+  const turfHeightFlag = useFeatureFlag("turf-height-capture");
+  const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null, overrideReason: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
@@ -8144,6 +8243,13 @@ export function CompletionPanel({
           caption: photo.caption || null,
           ...(photo.captionSource === "ai" ? { aiTags: { captionSource: "ai" } } : {}),
         })),
+        // Turf height-of-cut (lawn only, behind the flag). The server gates +
+        // snapshots the authoritative band; off-flag/non-lawn these are inert.
+        ...(turfHeightFlag && isLawn ? {
+          manualHeightIn: turfHeight.heightIn,
+          gaugePhoto: turfHeight.gaugePhoto,
+          turfHeightOverrideReason: turfHeight.overrideReason,
+        } : {}),
       };
       if (isCustomerConcernInteraction(customerInteraction) && customerConcern) {
         body.customerConcernText = customerConcern;
@@ -9033,6 +9139,16 @@ export function CompletionPanel({
                   service={service}
                   disabled={isIncompleteVisit || submitting}
                   onConfirmed={handleLawnAssessmentConfirmed}
+                />
+              </Field>
+            )}
+            {isLawn && turfHeightFlag && !quickComplete && (
+              <Field label="Mowing height (gauge reading)">
+                <TurfHeightCapture
+                  service={service}
+                  value={turfHeight}
+                  onChange={setTurfHeight}
+                  disabled={isIncompleteVisit || submitting}
                 />
               </Field>
             )}
@@ -11047,6 +11163,18 @@ export function CompletionPanel({
                 service={service}
                 disabled={isIncompleteVisit || submitting}
                 onConfirmed={handleLawnAssessmentConfirmed}
+              />
+            </div>
+          )}
+          {isLawn && turfHeightFlag && !quickComplete && (
+            <div style={{ marginBottom: 20 }}>
+              {" "}
+              <label style={labelStyle}>Mowing height (gauge reading)</label>{" "}
+              <TurfHeightCapture
+                service={service}
+                value={turfHeight}
+                onChange={setTurfHeight}
+                disabled={isIncompleteVisit || submitting}
               />
             </div>
           )}
