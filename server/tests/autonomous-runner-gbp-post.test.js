@@ -222,6 +222,23 @@ describe('_handleGbpPostAction', () => {
     );
   });
 
+  test('image-attached post that Google rejects retries text-only and completes', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    social.postToGBP
+      .mockResolvedValueOnce({ platform: 'gbp', location: 'sarasota', success: false, error: 'media fetch failed' })
+      .mockResolvedValueOnce({ platform: 'gbp', location: 'sarasota', success: true, postId: 'accounts/1/locations/2/localPosts/3' });
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.postToGBP).toHaveBeenCalledTimes(2);
+    expect(social.postToGBP).toHaveBeenNthCalledWith(1, 'sarasota', expect.any(String), expect.any(String), 'https://cdn.example.com/social-media/gbp.jpg');
+    expect(social.postToGBP).toHaveBeenNthCalledWith(2, 'sarasota', expect.any(String), expect.any(String), null);
+    expect(result.claim).toBe('complete');
+    expect(result.patch.outcome).toBe('completed_published');
+  });
+
   test('image generation failure still posts (text-only), does not block publish', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
