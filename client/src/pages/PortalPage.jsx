@@ -739,14 +739,14 @@ function PortalMowingHeight({ mowing }) {
         <span style={{ fontFamily: FONTS.serif, fontSize: 30, lineHeight: 1, color: B.navy }}>{mowing.heightIn}&Prime;</span>
         {meta.pill && (
           <span style={{
-            fontSize: 11, fontWeight: 700, color: '#fff', background: meta.color, borderRadius: 999,
+            fontSize: 14, fontWeight: 700, color: '#fff', background: meta.color, borderRadius: 999,
             padding: '3px 10px', fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: '0.03em',
           }}>{meta.pill}</span>
         )}
-        <span style={{ fontSize: 13, color: B.textCaption, fontFamily: FONTS.body }}>Ideal {mowing.bandLabel}</span>
+        <span style={{ fontSize: 14, color: B.textCaption, fontFamily: FONTS.body }}>Ideal {mowing.bandLabel}</span>
       </div>
       {meta.copy && (
-        <div style={{ marginTop: 6, fontSize: 13.5, color: B.textBody, fontFamily: FONTS.body, lineHeight: 1.5 }}>
+        <div style={{ marginTop: 6, fontSize: 16, color: B.textBody, fontFamily: FONTS.body, lineHeight: 1.5 }}>
           {meta.copy}
         </div>
       )}
