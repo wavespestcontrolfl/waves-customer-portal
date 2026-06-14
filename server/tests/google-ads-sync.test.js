@@ -21,8 +21,12 @@ jest.mock('google-ads-api', () => ({
   GoogleAdsApi: mockGoogleAdsApi,
   enums: {
     CampaignStatus: {
+      2: 'ENABLED',
+      3: 'PAUSED',
+      4: 'REMOVED',
       ENABLED: 'ENABLED',
       PAUSED: 'PAUSED',
+      REMOVED: 'REMOVED',
     },
   },
 }), { virtual: true });
@@ -58,6 +62,7 @@ describe('Google Ads campaign sync', () => {
     mockInsertReturning.mockResolvedValue([{
       id: 'uuid-1',
       platform_campaign_id: '22594274874',
+      status: 'paused',
       daily_budget_base: 5,
       daily_budget_current: 5,
     }]);
@@ -65,7 +70,7 @@ describe('Google Ads campaign sync', () => {
       campaign: {
         id: '22594274874',
         name: 'Waves Pest Control - GBP Search',
-        status: 'PAUSED',
+        status: 3,
         advertising_channel_type: 'SEARCH',
       },
       campaign_budget: {
@@ -76,9 +81,11 @@ describe('Google Ads campaign sync', () => {
     const results = await GoogleAds.syncCampaigns();
 
     expect(results).toHaveLength(1);
+    expect(results[0].status).toBe('paused');
     expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({
       platform: 'google_ads',
       platform_campaign_id: '22594274874',
+      status: 'paused',
       daily_budget_base: 5,
       daily_budget_current: 5,
     }));
