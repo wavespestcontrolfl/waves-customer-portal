@@ -530,10 +530,28 @@ class AutonomousRunner {
       // opportunities can never set this.
       const operatorFaqException = opp.bucket === OPERATOR_INTERCEPT_BUCKET
         && brief?.voice_constraints?.operator_brief?.faq_required === true;
+      // For NEW spoke-targeted posts the publisher stamps frontmatter.domains to
+      // the spoke AFTER these gates run, so the draft's own frontmatter still
+      // reads hub-only here. Pass the brief's resolved spoke domains explicitly
+      // so the brand-token guard enforces against the domain the post will
+      // ACTUALLY publish to — the intentional hub-link anchor is exempt, any
+      // other literal-brand mention on the spoke still fails. Refresh keeps the
+      // live-page domains hydrated above.
+      const spokeDomains = Array.isArray(brief.target_sites) ? brief.target_sites.filter(Boolean) : [];
+      const guardDomains = liveDomains != null
+        ? liveDomains
+        : (spokeDomains.length ? spokeDomains : null);
+      // A spoke seed keeps the coarse 'pest' service for the link gates but tags
+      // a FAQ-blocked pest topic on operator_brief.faq_blocked_topic; fold it
+      // into the service the FAQ-blocked guard sees (faqBlockedFinding already
+      // accepts an array) so a writer-added FAQ on a blocked topic still P0s.
+      const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
+      const baseService = opp.service || brief.service || null;
+      const guardService = faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService;
       const guardResult = contentGuardrails.evaluate(draft, {
-        service: opp.service || brief.service || null,
+        service: guardService,
         primaryKeyword: brief.target_keyword || null,
-        domains: liveDomains,
+        domains: guardDomains,
         operatorFaqException,
       });
       run.content_guardrails_result = guardResult;

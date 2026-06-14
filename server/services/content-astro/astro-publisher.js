@@ -31,7 +31,7 @@ const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
 const factCheckGate = require('../content/fact-check-gate');
 const { normalizeContentUrl } = require('../content/content-registry');
-const { normalizeSpokeSites, SPOKE_SITE_KEYS } = require('./spoke-sites');
+const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
 const { etDateString } = require('../../utils/datetime-et');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -75,14 +75,60 @@ function hubOnlyBlogDomains() {
 }
 
 function stampHubOnlyBlogDomains(frontmatter) {
+  return stampBlogDomains(frontmatter, null);
+}
+
+// Stamp the post's domain targeting. A `spokeKey` (a single non-hub spoke from
+// the fleet) renders the post ONLY on that spoke with a self-canonical spoke
+// URL; null is the hub-only default. Both top-level `domains` and
+// `tracking.domains` are set (the Astro build reads top-level; tracking mirrors
+// it for the multi-domain analytics layer).
+function stampBlogDomains(frontmatter, spokeKey) {
+  const domains = spokeKey ? [spokeKey] : hubOnlyBlogDomains();
   const tracking = frontmatter.tracking
     && typeof frontmatter.tracking === 'object'
     && !Array.isArray(frontmatter.tracking)
     ? frontmatter.tracking
     : {};
-  frontmatter.domains = hubOnlyBlogDomains();
-  frontmatter.tracking = { ...tracking, domains: hubOnlyBlogDomains() };
+  frontmatter.domains = [...domains];
+  frontmatter.tracking = { ...tracking, domains: [...domains] };
   return frontmatter;
+}
+
+// Resolve the single spoke a blog post targets, from the composed brief
+// (top-level target_sites, or the persisted operator_brief copy). Spoke routing
+// is only well-defined for EXACTLY ONE non-hub spoke (single-domain render +
+// self-canonical); a hub target, an empty target, or multiple spokes all fall
+// back to the hub-only blog policy.
+function resolveSpokeTarget(brief = {}) {
+  const fromBrief = normalizeSpokeSites(brief.target_sites);
+  const fromOverlay = normalizeSpokeSites(brief?.voice_constraints?.operator_brief?.target_sites);
+  const sites = (fromBrief.length ? fromBrief : fromOverlay)
+    .filter((k) => !BLOG_HUB_DOMAINS.includes(k));
+  return sites.length === 1 ? sites[0] : null;
+}
+
+// The canonical origin a blog post publishes under: the spoke's own canonical
+// origin (from the fleet map, mirroring the Astro build's SITE_DOMAIN) when
+// spoke-targeted, else the hub origin. Never assumes a host prefix at the call
+// site — spokeSiteOrigin owns the www/apex decision per domains.json.
+function blogOriginForSpoke(spokeKey) {
+  if (!spokeKey) return HUB_ORIGIN;
+  return spokeSiteOrigin(spokeKey) || HUB_ORIGIN;
+}
+
+// Write the resolved publish target (canonical + domains) back onto the ORIGINAL
+// draft frontmatter so the persisted autonomous_runs.draft_payload reflects what
+// was actually published — the PR poller / post-merge reconciliation read
+// draft_payload.frontmatter.canonical to resolve the merged target. (The
+// publisher resolves these on a clone, so the original draft would otherwise
+// keep the writer's hub-defaulted canonical.)
+function syncDraftPublishTarget(draft, frontmatter) {
+  if (draft && draft.frontmatter && typeof draft.frontmatter === 'object' && !Array.isArray(draft.frontmatter)) {
+    if (frontmatter.canonical) draft.frontmatter.canonical = frontmatter.canonical;
+    if (Array.isArray(frontmatter.domains)) draft.frontmatter.domains = [...frontmatter.domains];
+  }
+  return draft;
 }
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
@@ -938,9 +984,27 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const branchSlug = slugify(slug.replace(/\//g, '-'));
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
-  const canonical = assertCanonicalMatchesSlug(sourceFrontmatter, slug);
+  // Spoke routing: a curated spoke-seed brief publishes the post on its single
+  // spoke domain with a SELF-canonical spoke URL (the publisher owns domain
+  // routing, so it overrides the hub-defaulted canonical the writer emits).
+  // Non-spoke briefs keep the hub-only blog policy unchanged.
+  const spokeTarget = resolveSpokeTarget(brief);
+  const blogOrigin = blogOriginForSpoke(spokeTarget);
+  if (spokeTarget) {
+    sourceFrontmatter.canonical = canonicalUrlForSlug(slug, blogOrigin);
+  }
+  const canonical = assertCanonicalMatchesSlug(sourceFrontmatter, slug, blogOrigin);
   const frontmatter = normalizeAutonomousBlogFrontmatter(sourceFrontmatter, brief, body, { slug, canonical });
-  stampHubOnlyBlogDomains(frontmatter);
+  stampBlogDomains(frontmatter, spokeTarget);
+  // Keep the persisted run payload consistent with what we ACTUALLY publish.
+  // The runner stores this same `draft` object in autonomous_runs.draft_payload,
+  // and autonomous-pr-poller.targetForRun resolves the merged target from
+  // draft_payload.frontmatter.canonical. We resolved the canonical/domains on a
+  // clone (sourceFrontmatter) above, so without this write-back a spoke PR would
+  // reconcile against the hub URL the agent emitted (which the spoke never
+  // renders) and park forever. Mutate the original draft's canonical + domains
+  // to the resolved values before the runner persists it.
+  syncDraftPublishTarget(draft, frontmatter);
 
   // Hero contract: the writer agent's emit_draft tool only constrains
   // `frontmatter` to "object", while the binding blog schema REQUIRES
@@ -1897,17 +1961,17 @@ function slugPathFromFrontmatter(frontmatter) {
   return pathname;
 }
 
-function canonicalUrlForSlug(slug) {
-  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
-  return `${hub}/${slug}/`;
+function canonicalUrlForSlug(slug, origin = HUB_ORIGIN) {
+  const base = String(origin || HUB_ORIGIN).replace(/\/$/, '');
+  return `${base}/${slug}/`;
 }
 
 function normalizeCanonicalPath(pathname) {
   return `/${String(pathname || '').replace(/^\/+|\/+$/g, '')}/`;
 }
 
-function assertCanonicalMatchesSlug(frontmatter, slug) {
-  const expected = canonicalUrlForSlug(slug);
+function assertCanonicalMatchesSlug(frontmatter, slug, origin = HUB_ORIGIN) {
+  const expected = canonicalUrlForSlug(slug, origin);
   const supplied = String(frontmatter?.canonical || '').trim();
   const expectedUrl = new URL(expected);
   if (!supplied) {
@@ -2192,5 +2256,10 @@ module.exports = {
     isCodexAuthor,
     contentHasFaqSection,
     schemaTypesForContent,
+    resolveSpokeTarget,
+    blogOriginForSpoke,
+    stampBlogDomains,
+    stampHubOnlyBlogDomains,
+    syncDraftPublishTarget,
   },
 };

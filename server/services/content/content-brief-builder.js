@@ -25,6 +25,7 @@ const router = require('./decision-router');
 const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
+const spokeSeeder = require('./spoke-seed-seeder');
 
 // ── keyword overlap helpers for customer-cluster topic match ────────
 
@@ -479,9 +480,17 @@ class ContentBriefBuilder {
     // anchors, and the full binding instruction block rides in
     // voice_constraints.operator_brief (a persisted jsonb column, so the
     // writer agent's get_content_brief tool returns it intact).
-    const interceptOverlay = interceptSeeder.isOperatorIntercept(opportunity)
+    // Curated spoke-seed briefs (spoke-seed-seeder) take precedence: they share
+    // the operator_intercept bucket (so isOperatorIntercept is also true), but
+    // get a spoke-LOCAL overlay (city-local binding rules + branded-local hub
+    // link + target_sites) instead of the competitor-comparison overlay.
+    const spokeOverlay = spokeSeeder.isSpokeSeed(opportunity)
+      ? spokeSeeder.buildSpokeOverlay({ opportunity, pageType, requiredSections, schemaTypes })
+      : null;
+    const interceptOverlay = !spokeOverlay && interceptSeeder.isOperatorIntercept(opportunity)
       ? interceptSeeder.buildOperatorOverlay({ opportunity, pageType, requiredSections, schemaTypes })
       : null;
+    const operatorOverlay = spokeOverlay || interceptOverlay;
 
     return {
       facts_pack: factsPack,
@@ -493,6 +502,11 @@ class ContentBriefBuilder {
       city: opportunity.city || null,
       service: opportunity.service || null,
       page_type: pageType,
+      // Spoke targeting: the spoke domain(s) this post renders on (empty for
+      // hub posts). Sourced from the seeded signal_metadata so it survives a
+      // content_briefs round-trip; the Astro publisher reads it to stamp
+      // frontmatter.domains + a self-canonical spoke URL.
+      target_sites: spokeSeeder.targetSitesFor(opportunity),
 
       final_score: decision.final_score,
       score_breakdown: decision.score_breakdown,
@@ -549,21 +563,22 @@ class ContentBriefBuilder {
           }
         : null,
 
-      required_sections: interceptOverlay ? interceptOverlay.required_sections : requiredSections,
-      schema_types: interceptOverlay ? interceptOverlay.schema_types : schemaTypes,
-      // For intercept supporting blogs the operator links are REQUIRED and
+      required_sections: operatorOverlay ? operatorOverlay.required_sections : requiredSections,
+      schema_types: operatorOverlay ? operatorOverlay.schema_types : schemaTypes,
+      // For operator/spoke supporting blogs the curated links are REQUIRED and
       // lead the list, but the standard service-hub links are merged in too —
-      // several manifest link maps carry no hub URL, and replacing the house
-      // links outright would leave the quality gate's hub_link_present check
-      // dependent on the writer inventing one. Refresh briefs keep the
-      // operator list verbatim (the editable surface is the existing page).
-      internal_links_to_add: interceptOverlay
+      // a curated hub link may be a CITY page (not in SERVICE_HUB_LINKS), so
+      // merging the house service links keeps the quality gate's
+      // hub_link_present check satisfied without the writer inventing one.
+      // Refresh briefs keep the operator list verbatim (the editable surface is
+      // the existing page).
+      internal_links_to_add: operatorOverlay
         ? (pageType === 'supporting-blog'
           ? Array.from(new Set([
-            ...interceptOverlay.internal_links,
+            ...operatorOverlay.internal_links,
             ...this._internalLinksFor(opportunity, pageType),
           ]))
-          : interceptOverlay.internal_links)
+          : operatorOverlay.internal_links)
         : this._internalLinksFor(opportunity, pageType),
       seo_requirements: buildSeoRequirements({
         page_type: pageType,
@@ -572,8 +587,8 @@ class ContentBriefBuilder {
         service: opportunity.service || null,
       }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
-      voice_constraints: interceptOverlay
-        ? { ...aeo.voiceConstraints, operator_brief: interceptOverlay.operator_brief }
+      voice_constraints: operatorOverlay
+        ? { ...aeo.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
         : aeo.voiceConstraints,
 
       publish_window: nextWeekday9amET().toISOString(),

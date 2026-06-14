@@ -120,6 +120,17 @@ function parseJsonObject(value) {
  * Internal-link planning only applies to NEW pages — rewrite/refresh
  * targets are already part of the corpus and keep their inbound links.
  */
+// Hosts the post-merge internal-link planner operates on (hub only). A
+// spoke-only post is self-canonical on its spoke domain and renders ONLY there
+// (domains: [spoke]), so hub pages must not be asked to link to it — those links
+// would 404 on the hub. (Mirrors internal-link-planner's ALLOWED_SITE_HOSTS.)
+const PLANNER_HUB_HOSTS = new Set(['www.wavespestcontrol.com', 'wavespestcontrol.com']);
+function canonicalIsOffHub(url) {
+  const raw = String(url || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return false; // relative/empty → keep existing (hub) behavior
+  try { return !PLANNER_HUB_HOSTS.has(new URL(raw).hostname.toLowerCase()); } catch { return true; }
+}
+
 function targetForRun(run) {
   const draft = parseJsonObject(run.draft_payload);
   const frontmatter = draft.frontmatter || {};
@@ -132,7 +143,9 @@ function targetForRun(run) {
     keyword: frontmatter.primary_keyword || null,
     city: Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : null,
     title: frontmatter.title || draft.title || null,
-    planLinks: isNewPage,
+    // Skip post-merge hub-internal-link planning for spoke-only posts — they
+    // render only on their spoke, so proposing hub→spoke-path links 404s.
+    planLinks: isNewPage && !canonicalIsOffHub(url),
   };
 }
 

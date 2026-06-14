@@ -77,6 +77,19 @@ function normalizeSpokeSites(value) {
   return out;
 }
 
+// Canonical publish origin for a spoke key. EVERY fleet domain canonicalizes on
+// its `www` host — this mirrors `siteUrl` in the Astro repo's
+// src/data/domains.json (the SITE_DOMAIN each Cloudflare Pages build serves), so
+// a spoke blog post is self-canonical at exactly the host its build renders. If
+// a spoke ever canonicalizes on its apex host, change it here (single source for
+// the portal side) rather than assuming www at the call site. Returns null for
+// an unknown key.
+function spokeSiteOrigin(value) {
+  const key = normalizeSpokeSiteKey(value);
+  if (!key || !SPOKE_SITE_KEY_SET.has(key)) return null;
+  return `https://www.${key}`;
+}
+
 function invalidSpokeSites(value) {
   const invalid = [];
   for (const item of arrayFromValue(value)) {
@@ -91,4 +104,5 @@ module.exports = {
   SPOKE_SITE_KEYS,
   normalizeSpokeSites,
   invalidSpokeSites,
+  spokeSiteOrigin,
 };
