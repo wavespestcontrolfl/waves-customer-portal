@@ -103,8 +103,11 @@ describe('sms shadow drafter — prompt contract', () => {
     const prompt = buildSystemPrompt();
     expect(prompt).toContain(CUSTOMER_SMS_HOUSE_VOICE);
     expect(AGENT_CONFIG.system).toContain(CUSTOMER_SMS_HOUSE_VOICE);
-    expect(prompt).toContain('INTERNAL EVALUATION ONLY');
-    expect(prompt).toContain('never be sent');
+    // The draft is treated as customer-facing (it may be auto-sent once an
+    // intent graduates), so the prompt must instruct send-safe output — NOT
+    // the old "internal evaluation only, never sent" framing.
+    expect(prompt).toContain('safe and correct to send AS-IS');
+    expect(prompt).not.toContain('never be sent');
     expect(prompt).toContain('no reply warranted'); // courtesy acks may draft an empty reply
   });
 

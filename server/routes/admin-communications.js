@@ -274,11 +274,17 @@ router.post('/sms', async (req, res, next) => {
             // marker the auto-send's own guard (threadHasLiveAnswer) sees, so an
             // auto-send claiming AFTER we release the lock won't fire during our
             // provider window. Deleted once the send resolves (below / in catch).
+            // sms_log.from_phone is NOT NULL, but the route lets callers omit
+            // fromNumber (TwilioService picks the location default later).
+            // Resolve the same default here so a gate-on send doesn't throw on
+            // the reservation insert.
+            const reservationFrom = fromNumber
+              || TWILIO_NUMBERS.getOutboundNumber(resolveLocation(customer?.city || '')?.id);
             const [resv] = await trx('sms_log')
               .insert({
                 customer_id: trustedCustomerId || null,
                 direction: 'outbound',
-                from_phone: fromNumber || null,
+                from_phone: reservationFrom,
                 to_phone: to,
                 message_body: cleanBody,
                 status: 'sending',
@@ -1237,6 +1243,19 @@ router.post('/schedule-sms', async (req, res, next) => {
         // Same thread lock as the drafter's publish and the post-send
         // sweep — park + queue commit atomically with respect to both.
         await lockSuggestThread(trx, normalizePhoneLast10(to) || to);
+
+        // Don't queue a reply while an autonomous house-voice reply (Phase E)
+        // is mid-send to this thread — it could land as a duplicate when this
+        // one dispatches. The 'scheduled' sms_log row inserted below is itself
+        // the marker the auto-send's guard sees, so this check only needs to
+        // cover the reverse race (auto claimed first). Gated → no-op while
+        // auto-send is dormant.
+        if (isEnabled('smsAutoSend')
+          && await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: normalizePhoneLast10(to), customerId: trustedCustomerId })) {
+          const conflict = new Error('An automated reply is going out to this conversation right now — refresh in a moment before scheduling.');
+          conflict.statusCode = 409;
+          throw conflict;
+        }
 
         let usedDecisionId = null;
         if (scheduledAgentDecision) {

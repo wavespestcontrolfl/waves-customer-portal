@@ -48,7 +48,7 @@ const INTENDED_ACTION_TYPES = [
 ];
 
 function buildSystemPrompt() {
-  return `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This draft is for INTERNAL EVALUATION ONLY — it will never be sent. Draft exactly what you would send if you were live.
+  return `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 

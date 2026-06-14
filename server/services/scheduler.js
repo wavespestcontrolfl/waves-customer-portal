@@ -1302,6 +1302,13 @@ function initScheduledJobs() {
       await require('./sms-suggest-mode').recoverSuggestionHoldingStates().catch((recErr) => {
         logger.warn(`[sms-suggest] fast recovery failed: ${recErr.message}`);
       });
+      // Same cadence for auto-send: a stranded 'sending' claim or manual-send
+      // reservation would otherwise block auto-sends on the thread until the
+      // daily sweep. Both are guarded + 30-min-windowed, so running every 5 min
+      // is harmless.
+      await require('./sms-auto-send').reconcileAutoSendClaims().catch((recErr) => {
+        logger.warn(`[sms-auto-send] fast reconcile failed: ${recErr.message}`);
+      });
     } catch (err) {
       logger.error(`Scheduled SMS processing failed: ${err.message}`);
     }
