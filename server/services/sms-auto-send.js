@@ -89,13 +89,18 @@ function isRealProviderSend(result) {
 }
 
 /**
- * Pure: is this draft's action set safe to send with no human? True only when
- * there are no intended actions, or every one is 'none' (a pure courtesy
- * no-op). Any actionable type → false (fail closed). Tolerates an array of
- * {type} objects or bare strings.
+ * Pure: is this draft's action set safe to send with no human? Safe ONLY when
+ * actions are absent (null/undefined) or an empty array, or every entry is
+ * 'none' (a pure courtesy no-op). A PRESENT non-array payload is malformed
+ * model output — fail closed (a raw `{type:'send_payment_link'}` object would
+ * otherwise read as "not an array → safe" before the parser sanitizes it to
+ * []). Any actionable/unknown type → false. Tolerates {type} objects or bare
+ * strings inside the array.
  */
 function autoSendActionsSafe(intendedActions) {
-  if (!Array.isArray(intendedActions) || intendedActions.length === 0) return true;
+  if (intendedActions == null) return true;
+  if (!Array.isArray(intendedActions)) return false; // present-but-malformed → unsafe
+  if (intendedActions.length === 0) return true;
   return intendedActions.every((a) => {
     const type = typeof a === 'string' ? a : a && a.type;
     return type === SAFE_AUTO_SEND_ACTION;
@@ -412,10 +417,24 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
     logger.warn(`[sms-auto-send] orphan reconcile failed: ${err.message}`);
   }
 
-  if (resolved || failed) {
-    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims`);
+  // Sweep orphaned manual-send reservations: a 'sending' marker the manual
+  // /sms path persists under the lock and normally deletes after its send, but
+  // a crash mid-send could strand one and block auto-sends to that thread.
+  let reservationsCleared = 0;
+  try {
+    reservationsCleared = await db('sms_log')
+      .where({ direction: 'outbound', status: 'sending' })
+      .whereRaw("metadata->>'manual_send_reservation' = 'true'")
+      .where('created_at', '<', cutoff)
+      .del();
+  } catch (err) {
+    logger.warn(`[sms-auto-send] reservation sweep failed: ${err.message}`);
   }
-  return { resolved, failed };
+
+  if (resolved || failed || reservationsCleared) {
+    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims, cleared ${reservationsCleared} stale reservations`);
+  }
+  return { resolved, failed, reservationsCleared };
 }
 
 module.exports = {

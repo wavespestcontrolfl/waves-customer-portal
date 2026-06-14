@@ -55,6 +55,15 @@ jest.mock('../services/sms-suggest-mode', () => ({
 jest.mock('../services/sms-auto-send', () => ({
   hasActiveAutoSendClaim: jest.fn(async () => false),
 }));
+// Controllable gates: the auto-send interlock (claim check + reservation row)
+// is gated on smsAutoSend, OFF by default so the manual send path is unchanged
+// for the existing tests. One test flips it on via mockGates.smsAutoSend.
+const mockGates = { smsAutoSend: false };
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (gate) => (gate === 'smsAutoSend' ? mockGates.smsAutoSend : true),
+  gates: {},
+  logGateStatus: jest.fn(),
+}));
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => (
   jest.fn().mockImplementation(() => ({
@@ -155,6 +164,7 @@ describe('admin communications SMS route', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.mockReset();
+    mockGates.smsAutoSend = false;
   });
 
   test('cleans rewrite model labels and quotes before returning SMS copy', () => {
@@ -296,6 +306,8 @@ describe('admin communications SMS route', () => {
   });
 
   test('refuses a manual send while an autonomous reply is mid-send to the thread', async () => {
+    // The auto-send interlock is only active when Phase E auto-send is enabled.
+    mockGates.smsAutoSend = true;
     // An auto-send claim is in flight for this thread (it reserved under the
     // shared lock). The manual send must back off, not race its provider
     // window — both would reach the customer.

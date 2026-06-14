@@ -65,10 +65,18 @@ describe('autoSendPreflight — precondition ordering (the gate to an autonomous
 });
 
 describe('autoSendActionsSafe — only a pure no-op draft auto-sends', () => {
-  test('no actions / empty / non-array → safe', () => {
+  test('absent (null/undefined) or empty array → safe', () => {
     expect(autoSendActionsSafe(undefined)).toBe(true);
     expect(autoSendActionsSafe(null)).toBe(true);
     expect(autoSendActionsSafe([])).toBe(true);
+  });
+
+  test('a PRESENT non-array payload is malformed → NOT safe (fail closed)', () => {
+    // raw model output like {type:'send_payment_link'} sanitizes to [] later;
+    // treating the malformed object as "not an array → safe" would leak it.
+    expect(autoSendActionsSafe({ type: 'send_payment_link' })).toBe(false);
+    expect(autoSendActionsSafe('escalate')).toBe(false);
+    expect(autoSendActionsSafe(42)).toBe(false);
   });
 
   test("only 'none' actions → safe", () => {
