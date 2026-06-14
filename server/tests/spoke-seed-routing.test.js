@@ -182,13 +182,16 @@ describe('Codex PR #1772 review fixes', () => {
     return p;
   };
 
-  test('P1: checkHubLinkPresent accepts the brief curated hub_link (city page, not in SERVICE_HUB_LINKS)', () => {
+  test('P1: checkHubLinkPresent REQUIRES the curated hub link when present (city page, not in SERVICE_HUB_LINKS)', () => {
     const { _internals: qg } = require('../services/content/content-quality-gate');
     const brief = { voice_constraints: { operator_brief: { hub_link: 'https://www.wavespestcontrol.com/pest-control-sarasota-fl/' } } };
     const body = 'the team at [Waves Pest Control in Sarasota](https://www.wavespestcontrol.com/pest-control-sarasota-fl/) can help';
     expect(qg.checkHubLinkPresent({ body }, brief).ok).toBe(true);
     expect(qg.checkHubLinkPresent({ body: 'no hub link here at all' }, brief).ok).toBe(false);
-    // existing SERVICE_HUB_LINKS behavior unchanged
+    // a GENERIC service link must NOT satisfy a curated-backlink brief (R4 fix):
+    // the curated spoke→hub link is the contract and can't be skipped.
+    expect(qg.checkHubLinkPresent({ body: 'see /pest-control-services/ for details' }, brief).ok).toBe(false);
+    // non-curated briefs still fall back to SERVICE_HUB_LINKS (unchanged)
     expect(qg.checkHubLinkPresent({ body: 'see /pest-control-services/ for details' }, {}).ok).toBe(true);
   });
 
@@ -208,10 +211,12 @@ describe('Codex PR #1772 review fixes', () => {
     const ov1 = seeder.buildSpokeOverlay({
       opportunity: { signal_metadata: sar1.signal_metadata },
       pageType: 'supporting-blog',
-      requiredSections: ['FAQ section (2–3 questions)', 'final CTA to relevant city/service page'],
+      requiredSections: ['hub link in intro', 'FAQ section (2–3 questions)', 'final CTA to relevant city/service page'],
       schemaTypes: ['Article', 'BreadcrumbList'],
     });
     expect(ov1.required_sections.some((s) => /faq|frequently asked|common questions/i.test(s))).toBe(false);
+    // the default "hub link in intro" is dropped — the binding places one hub link near the end (R4 fix)
+    expect(ov1.required_sections.some((s) => /hub link/i.test(s))).toBe(false);
     expect(ov1.schema_types).not.toContain('FAQPage');
 
     const sar2 = seeder._internals.rowForBrief(m.briefs[1], m, { now: NOW }); // carpenter ants — FAQ in outline + schema

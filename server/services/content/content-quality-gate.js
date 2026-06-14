@@ -563,16 +563,21 @@ function checkHubLinkPresent(draft, brief) {
   // /termite-inspection/, rodent → /rodent-control/) must never fail the
   // gate for linking exactly where it was told to. Lazy require avoids any
   // load-order coupling with content-brief-builder.
+  // Spoke-seed / operator briefs carry a CURATED hub link (the most-relevant hub
+  // city/service page, e.g. /pest-control-sarasota-fl/) that is NOT in the fixed
+  // SERVICE_HUB_LINKS set. When present it is the AUTHORITATIVE backlink target
+  // for the post (the branded-local spoke→hub link is the contract), so REQUIRE
+  // exactly that link — a generic service link the brief also carries must not
+  // let the draft skip the curated backlink.
+  const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link;
+  if (curatedHubLink) {
+    return body.includes(String(curatedHubLink))
+      ? { ok: true }
+      : { ok: false, reason: 'no_curated_hub_link_found' };
+  }
   const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
   const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
   if (hubs.some((h) => body.includes(h))) return { ok: true };
-  // Spoke-seed / operator briefs carry a CURATED hub link (the most-relevant
-  // hub city/service page, e.g. /pest-control-sarasota-fl/) that is NOT in the
-  // fixed SERVICE_HUB_LINKS set. That curated link is the authoritative hub
-  // target for the post, so a draft that links exactly where the brief told it
-  // to must satisfy this gate too.
-  const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link;
-  if (curatedHubLink && body.includes(String(curatedHubLink))) return { ok: true };
   return { ok: false, reason: 'no_hub_link_found' };
 }
 

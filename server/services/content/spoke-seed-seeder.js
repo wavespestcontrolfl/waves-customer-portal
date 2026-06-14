@@ -272,6 +272,10 @@ function targetSitesFor(opportunity = {}) {
 // ── brief overlay (consumed by content-brief-builder) ────────────────
 
 const FAQ_SECTION_RE = /\bfaq\b|frequently asked|common questions/i;
+// Default supporting-blog structural sections a spoke overlay must NOT inherit:
+// FAQ (governed by the manifest outline) and the intro hub link (the binding
+// instructions place exactly one branded-local hub link near the end).
+const SPOKE_DROP_STRUCTURAL_RE = /\bfaq\b|frequently asked|common questions|hub link/i;
 
 /**
  * Build the overlay content-brief-builder applies when composing a brief for a
@@ -292,11 +296,13 @@ function buildSpokeOverlay({ opportunity, pageType, requiredSections = [], schem
   const outline = Array.isArray(payload.outline) ? [...payload.outline] : [];
   const outlineHasFaq = outline.some((s) => FAQ_SECTION_RE.test(String(s || '')));
   const structural = requiredSections.filter((s) => {
-    // FAQ on a spoke post is governed SOLELY by the manifest outline — drop the
-    // default supporting-blog FAQ section so a topic that doesn't request an FAQ
-    // (e.g. the bed-bug seed, whose coarse 'pest' service hides it from the
-    // FAQ-blocked guard) never silently gains one.
-    if (FAQ_SECTION_RE.test(String(s || ''))) return false;
+    // FAQ and hub-link placement on a spoke post are governed by the manifest
+    // outline + the binding instructions (exactly ONE branded-local hub link
+    // near the end). Drop the default supporting-blog FAQ section (so a no-FAQ
+    // topic like bed bugs never silently gains one) AND the default
+    // "hub link in intro" section (which would contradict the single end-placed
+    // hub link and produce duplicate/misplaced links).
+    if (SPOKE_DROP_STRUCTURAL_RE.test(String(s || ''))) return false;
     return !outline.includes(s);
   });
 
