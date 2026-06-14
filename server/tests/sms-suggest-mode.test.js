@@ -11,11 +11,28 @@ const {
   SUGGEST_WORKFLOW,
   EXPIRY_HOURS,
   isEscalationIntent,
+  hasRedactionPlaceholder,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
   classifySendVerdict,
 } = require('../services/sms-suggest-mode');
+
+describe('hasRedactionPlaceholder — never deliver a copied corpus placeholder', () => {
+  test('detects every redaction token the corpus redactors emit', () => {
+    for (const tok of ['name', 'phone', 'email', 'ssn', 'card', 'address', 'url', 'zip']) {
+      expect(hasRedactionPlaceholder(`Hello [${tok}]! Thanks for reaching out.`)).toBe(true);
+    }
+    expect(hasRedactionPlaceholder('Hi [Name], welcome')).toBe(true); // case-insensitive
+  });
+
+  test('a clean reply (no placeholder) passes', () => {
+    expect(hasRedactionPlaceholder('Hello Dana! Your next service is Tuesday.')).toBe(false);
+    expect(hasRedactionPlaceholder('')).toBe(false);
+    expect(hasRedactionPlaceholder(null)).toBe(false);
+    expect(hasRedactionPlaceholder('See item [1] on your invoice')).toBe(false); // unrelated brackets
+  });
+});
 
 const ELIGIBLE = {
   reply: 'Hello Dana! Your next service is scheduled — reply here with any questions.',

@@ -318,6 +318,14 @@ async function maybeAutoSend(params = {}) {
       return { sent: false, reason: 'action_required' };
     }
 
+    // (3.6) Defense in depth at the autonomy boundary: never send a reply that
+    //       carries a redaction placeholder ([name], [phone], …) copied from a
+    //       few-shot exemplar. Deterministic, independent of the LLM verifier.
+    if (suggest.hasRedactionPlaceholder(reply)) {
+      logger.warn(`[sms-auto-send] reply carries a redaction placeholder — refusing auto-send (intent=${intent})`);
+      return { sent: false, reason: 'redaction_placeholder' };
+    }
+
     // (4) Server-enforced graduation eligibility — re-checked live every send.
     const graduation = require('./sms-graduation');
     const elig = await graduation.evaluateAutoSendEligibility({ intent });

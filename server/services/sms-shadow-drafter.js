@@ -444,12 +444,21 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       })
       .returning('id');
 
+    // A draft that copied a redaction placeholder ([name], [phone], …) from a
+    // few-shot exemplar must NEVER reach a customer — keep it shadow (the judge
+    // still covers it), never suggest or auto-send. Deterministic and
+    // verifier-independent, so it holds even with SHADOW_DRAFT_VERIFY off.
+    const replyHasPlaceholder = suggestMode.hasRedactionPlaceholder(parsed.reply);
+    if (replyHasPlaceholder) {
+      logger.warn(`[sms-shadow] draft copied a redaction placeholder — kept shadow, never delivered (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+    }
+
     // Only verified-clean drafts (verify loop converged) may leave the silent
     // shadow lane — a draft still asserting unsupported facts after the
     // revision budget is never shown to a human OR sent to a customer; it
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
-    if (row?.id && converged) {
+    if (row?.id && converged && !replyHasPlaceholder) {
       if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,
