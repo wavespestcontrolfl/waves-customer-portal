@@ -1179,10 +1179,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     nearWater: waterProximity,
     waterProximity,
     waterDistance,
-    // FEMA NFHL flood-zone evidence (cached with the record). Evidence-only:
-    // wiring this into inferFoundation (its documented "properties in flood
-    // zones" exception) moves the termite/WDO modifiers, so that promotion
-    // is a later, gated step.
+    // FEMA NFHL flood-zone evidence (cached with the record). SFHA now feeds
+    // inferFoundation (its documented "properties in flood zones" exception)
+    // CONSERVATIVELY: an SFHA zone downgrades an unknown foundation slab->UNKNOWN
+    // to raise a field-verify flag, but UNKNOWN leaves every termite/WDO
+    // modifier unchanged — no automatic pricing movement until a tech confirms.
     floodZone: rc?._floodZone?.floodZone || null,
     floodZoneSubtype: rc?._floodZone?.floodZoneSubtype || null,
     inSpecialFloodHazardArea: rc?._floodZone?.sfha ?? null,
@@ -1685,6 +1686,14 @@ function inferFoundation(rc, ai) {
     if (rc.yearBuilt < 1960) return 'UNKNOWN'; // could be raised — field verify
   }
 
+  // FEMA special-flood-hazard-area homes (A/AE/V/VE) are built to base flood
+  // elevation and are frequently elevated (stem-wall/pilings) rather than
+  // slab. Don't auto-assume slab — downgrade to UNKNOWN so the field-verify
+  // flag fires. Conservative by design: UNKNOWN keeps calcFoundationTermiteAdj
+  // at $0 and calcWDOTimeMult at 1.0 (same as SLAB), so NO pricing modifier
+  // moves until a tech confirms the foundation on site.
+  if (rc?._floodZone?.sfha === true) return 'UNKNOWN';
+
   // Default SWFL assumption
   return 'SLAB';
 }
@@ -1883,12 +1892,22 @@ function calcPestPressureMult(pressure) {
 function buildFieldVerifyFlags(rc, ai) {
   const flags = [];
 
-  // Foundation unknown on older homes
-  if (rc?.yearBuilt && rc.yearBuilt < 1970 &&
-      (!rc?.foundationType || rc.foundationType === 'UNKNOWN')) {
+  // Foundation unknown on older homes, or in a FEMA flood zone where slab is
+  // an unsafe default. else-if keeps this to a SINGLE foundationType flag
+  // (two would double-count in the win/loss byFlagField slice); the pre-1970
+  // reason wins when both apply. The CRAWLSPACE/RAISED check further down only
+  // fires when county data is authoritative, so it never overlaps these.
+  const foundationUnverified = !rc?.foundationType || rc.foundationType === 'UNKNOWN';
+  if (rc?.yearBuilt && rc.yearBuilt < 1970 && foundationUnverified) {
     flags.push({
       field: 'foundationType',
       reason: 'Pre-1970 home — foundation type not in records, could be raised/crawlspace',
+      priority: 'HIGH'
+    });
+  } else if (rc?._floodZone?.sfha === true && foundationUnverified) {
+    flags.push({
+      field: 'foundationType',
+      reason: `FEMA flood zone ${rc._floodZone.floodZone || 'SFHA'} — homes in special flood hazard areas are often elevated (stem-wall/pilings), not slab; verify foundation before termite/WDO`,
       priority: 'HIGH'
     });
   }

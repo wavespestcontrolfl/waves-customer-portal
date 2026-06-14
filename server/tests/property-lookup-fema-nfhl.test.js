@@ -157,13 +157,35 @@ describe('profile surfacing (evidence-only)', () => {
     expect(profile.inSpecialFloodHazardArea).toBeNull();
   });
 
-  test('pricing modifiers and foundation are identical with and without flood evidence', () => {
+  test('SFHA downgrades foundation to UNKNOWN for field-verify but does NOT move pricing modifiers', () => {
     const withFlood = buildEnrichedProfile(
       rc({ floodZone: 'VE', floodZoneSubtype: 'COASTAL HIGH HAZARD', sfha: true }), {}, 27.1, -82.4, null,
     );
     const without = buildEnrichedProfile(rc(null), {}, 27.1, -82.4, null);
+    // Conservative posture: foundation flips slab->UNKNOWN so a tech verifies,
+    // but every pricing modifier (termite adj, WDO mult, ...) stays identical.
+    expect(without.foundationType).toBe('SLAB');
+    expect(withFlood.foundationType).toBe('UNKNOWN');
     expect(withFlood.modifiers).toEqual(without.modifiers);
-    expect(withFlood.foundationType).toBe(without.foundationType);
+    expect(withFlood.modifiers.termiteFoundationAdj).toBe(0);
+  });
+
+  test('SFHA raises a foundationType field-verify flag (single, non-duplicated)', () => {
+    const withFlood = buildEnrichedProfile(
+      rc({ floodZone: 'AE', floodZoneSubtype: 'COASTAL FLOODPLAIN', sfha: true }), {}, 27.1, -82.4, null,
+    );
+    const foundationFlags = withFlood.fieldVerifyFlags.filter((f) => f.field === 'foundationType');
+    expect(foundationFlags).toHaveLength(1);
+    expect(foundationFlags[0].priority).toBe('HIGH');
+    expect(foundationFlags[0].reason).toMatch(/flood zone AE/i);
+  });
+
+  test('non-SFHA flood zone (X) leaves foundation as slab with no foundation flag', () => {
+    const profile = buildEnrichedProfile(
+      rc({ floodZone: 'X', floodZoneSubtype: 'AREA OF MINIMAL FLOOD HAZARD', sfha: false }), {}, 27.1, -82.4, null,
+    );
+    expect(profile.foundationType).toBe('SLAB');
+    expect(profile.fieldVerifyFlags.filter((f) => f.field === 'foundationType')).toHaveLength(0);
   });
 });
 
