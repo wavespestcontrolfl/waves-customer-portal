@@ -52,7 +52,7 @@ describe('spoke-seed-seeder: manifest + rows', () => {
     const row = seeder._internals.rowForBrief(m.briefs[0], m, { now });
     expect(row.bucket).toBe('operator_intercept'); // inherits router bypass + serp/gsc exemptions
     expect(row.city).toBeNull(); // facts gate "not applicable" (locality via target_sites + outline)
-    expect(row.service).toBe('bed-bug'); // blocked pest topic → specific blocked service id (not coarse 'pest')
+    expect(row.service).toBe('pest'); // coarse service stays intact for the link/SEO gates
     expect(row.dedupe_key).toBe('spoke:v1:SAR1');
     expect(row.signal_metadata.operator_pinned).toBe(true);
     expect(row.signal_metadata.spoke_seed).toBe(true);
@@ -241,19 +241,32 @@ describe('Codex PR #1772 review fixes', () => {
     expect(r.ok).toBe(true); // fail-soft, not an error
   });
 
-  test('P1-r2: a blocked pest topic carries its specific service id → runtime FAQ guard catches a writer-emitted FAQ', () => {
+  test('P1-r2: blocked topic rides on faq_blocked_topic (service stays coarse), runtime FAQ guard catches a writer FAQ', () => {
     const m = seeder.loadManifest();
-    // SAR1 = bed bugs → service 'bed-bug'; SAR2 = carpenter ants → coarse 'pest'
-    expect(seeder._internals.serviceForBrief(m.briefs[0])).toBe('bed-bug');
-    expect(seeder._internals.serviceForBrief(m.briefs[1])).toBe('pest');
-    // content-guardrails now sees the blocked service and P0s an FAQ the writer added anyway
+    // service stays coarse so the link/SEO gates keep working...
+    expect(seeder._internals.serviceForBrief(m.briefs[0])).toBe('pest');
+    // ...but the blocked topic is detected separately and surfaced on the overlay
+    expect(seeder._internals.blockedTopicIdFor(m.briefs[0])).toBe('bed-bug'); // SAR1
+    expect(seeder._internals.blockedTopicIdFor(m.briefs[1])).toBeNull(); // SAR2 carpenter ants
+    const row = seeder._internals.rowForBrief(m.briefs[0], m, { now: NOW });
+    const ov = seeder.buildSpokeOverlay({ opportunity: { signal_metadata: row.signal_metadata }, pageType: 'supporting-blog', requiredSections: [], schemaTypes: ['Article'] });
+    expect(ov.operator_brief.faq_blocked_topic).toBe('bed-bug');
+
+    // content-guardrails: coarse 'pest' alone does NOT catch a writer FAQ (the gap Codex flagged)...
     const guardrails = require('../services/content/content-guardrails');
     const faqBody = 'Bed bugs in Sarasota condos.\n## Frequently Asked Questions\n### Do bed bugs bite?\nYes.';
-    const r = guardrails.evaluate({ frontmatter: {}, body: faqBody }, { service: 'bed-bug', operatorFaqException: false });
-    expect(r.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(true);
-    // coarse 'pest' would NOT catch it (the bug Codex flagged)
-    const r2 = guardrails.evaluate({ frontmatter: {}, body: faqBody }, { service: 'pest', operatorFaqException: false });
-    expect(r2.findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
+    expect(guardrails.evaluate({ frontmatter: {}, body: faqBody }, { service: 'pest' }).findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(false);
+    // ...but folding faq_blocked_topic into the service array does (as the runner now does)
+    expect(guardrails.evaluate({ frontmatter: {}, body: faqBody }, { service: ['pest', 'bed-bug'] }).findings.some((f) => f.code === 'FAQ_BLOCKED_SERVICE')).toBe(true);
+  });
+
+  test('P1-r3: blogOriginForSpoke uses the fleet canonical origin (www per domains.json), not a bare concat', () => {
+    const { _internals } = require('../services/content-astro/astro-publisher');
+    const { spokeSiteOrigin } = require('../services/content-astro/spoke-sites');
+    expect(spokeSiteOrigin('sarasotaflpestcontrol.com')).toBe('https://www.sarasotaflpestcontrol.com');
+    expect(spokeSiteOrigin('not-a-spoke.com')).toBeNull();
+    expect(_internals.blogOriginForSpoke('sarasotaflpestcontrol.com')).toBe('https://www.sarasotaflpestcontrol.com');
+    expect(_internals.blogOriginForSpoke(null)).toBe('https://www.wavespestcontrol.com');
   });
 
   test('P1-r2: brand-token hub-anchor exemption applies to body only, NOT editable meta', () => {

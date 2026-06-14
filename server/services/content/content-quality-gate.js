@@ -420,6 +420,9 @@ function faqPolicyTopicFields(draft, brief) {
     brief?.customer_signal?.topic,
     draft?.frontmatter?.category,
     draft?.frontmatter?.tag,
+    // Spoke seeds carry the coarse 'pest' service (so link gates work) but tag
+    // a blocked pest topic here so the FAQ-blocked policy still applies.
+    brief?.voice_constraints?.operator_brief?.faq_blocked_topic,
   ];
 }
 

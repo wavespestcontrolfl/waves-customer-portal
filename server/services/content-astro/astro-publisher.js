@@ -31,7 +31,7 @@ const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
 const factCheckGate = require('../content/fact-check-gate');
 const { normalizeContentUrl } = require('../content/content-registry');
-const { normalizeSpokeSites, SPOKE_SITE_KEYS } = require('./spoke-sites');
+const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
 const { etDateString } = require('../../utils/datetime-et');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -108,11 +108,13 @@ function resolveSpokeTarget(brief = {}) {
   return sites.length === 1 ? sites[0] : null;
 }
 
-// The canonical origin a blog post publishes under: a spoke's own www origin
-// when spoke-targeted (so the post is self-canonical on its spoke), else the
-// hub origin.
+// The canonical origin a blog post publishes under: the spoke's own canonical
+// origin (from the fleet map, mirroring the Astro build's SITE_DOMAIN) when
+// spoke-targeted, else the hub origin. Never assumes a host prefix at the call
+// site — spokeSiteOrigin owns the www/apex decision per domains.json.
 function blogOriginForSpoke(spokeKey) {
-  return spokeKey ? `https://www.${spokeKey}` : HUB_ORIGIN;
+  if (!spokeKey) return HUB_ORIGIN;
+  return spokeSiteOrigin(spokeKey) || HUB_ORIGIN;
 }
 
 // Write the resolved publish target (canonical + domains) back onto the ORIGINAL

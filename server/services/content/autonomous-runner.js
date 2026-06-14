@@ -541,8 +541,15 @@ class AutonomousRunner {
       const guardDomains = liveDomains != null
         ? liveDomains
         : (spokeDomains.length ? spokeDomains : null);
+      // A spoke seed keeps the coarse 'pest' service for the link gates but tags
+      // a FAQ-blocked pest topic on operator_brief.faq_blocked_topic; fold it
+      // into the service the FAQ-blocked guard sees (faqBlockedFinding already
+      // accepts an array) so a writer-added FAQ on a blocked topic still P0s.
+      const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
+      const baseService = opp.service || brief.service || null;
+      const guardService = faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService;
       const guardResult = contentGuardrails.evaluate(draft, {
-        service: opp.service || brief.service || null,
+        service: guardService,
         primaryKeyword: brief.target_keyword || null,
         domains: guardDomains,
         operatorFaqException,

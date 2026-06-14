@@ -70,11 +70,13 @@ function normalizeTargetSite(value) {
 }
 
 // A FAQ-policy-blocked pest topic → its SPECIFIC blocked service id (the same
-// ids content-guardrails.FAQ_BLOCKED_SERVICES enforces). Carrying this onto the
-// opportunity's `service` (instead of the coarse 'pest') means every RUNTIME
-// guard — content-guardrails.evaluate + content-quality-gate, which key on
-// `service` — sees the blocked topic and rejects an FAQ even if the writer
-// emits one the manifest never asked for. Coarse 'pest' would hide it.
+// ids content-guardrails.FAQ_BLOCKED_SERVICES enforces). This is carried
+// SEPARATELY as operator_brief.faq_blocked_topic — NOT as the row's `service`,
+// which must stay the coarse category ('pest') so the service/SEO link gates
+// (SERVICE_HUB_LINKS lookup, seo-completion-gate's service-link requirement)
+// keep working. The runtime FAQ guards (content-guardrails.evaluate +
+// content-quality-gate) read faq_blocked_topic so they reject an FAQ even on a
+// coarse-'pest' bed-bug post the writer wasn't asked to give one.
 const BLOCKED_TOPIC_SERVICE = [
   [/\bbed[\s-]?bugs?\b/i, 'bed-bug'],
   [/\b(?:cockroach(?:es)?|roach(?:es)?)\b/i, 'cockroach'],
@@ -84,15 +86,18 @@ const BLOCKED_TOPIC_SERVICE = [
   [/\b(?:termites?|drywood)\b/i, 'termite'],
 ];
 
-// Engine service category. A blocked pest topic resolves to its specific
-// blocked id (so the runtime FAQ guards see it); otherwise the coarse category
-// from the slug prefix (mirrors intercept-brief-seeder.serviceForBrief).
-function serviceForBrief(brief) {
-  const slug = String(brief.slug || brief.page_url || '');
+function blockedTopicIdFor(brief) {
   const topic = briefTopicText(brief);
   for (const [re, id] of BLOCKED_TOPIC_SERVICE) {
     if (re.test(topic)) return id;
   }
+  return null;
+}
+
+// Coarse engine service category from the slug prefix (mirrors
+// intercept-brief-seeder.serviceForBrief). Lawn spokes get 'lawn'.
+function serviceForBrief(brief) {
+  const slug = String(brief.slug || brief.page_url || '');
   if (slug.includes('/lawn-care/')) return 'lawn';
   if (slug.includes('/termite/')) return 'termite';
   return 'pest';
@@ -335,6 +340,10 @@ function buildSpokeOverlay({ opportunity, pageType, requiredSections = [], schem
     schema_types: Array.isArray(payload.schema_types) ? payload.schema_types : [],
     verify_notes: Array.isArray(payload.verify_notes) ? payload.verify_notes : [],
     faq_required: (Array.isArray(payload.schema_types) && payload.schema_types.includes('FAQPage')) || outlineHasFaq,
+    // The specific FAQ-blocked service id for a blocked pest topic (else null).
+    // The runtime FAQ guards read this so an FAQ the writer adds anyway is
+    // rejected, while the row's coarse `service` stays intact for link gates.
+    faq_blocked_topic: blockedTopicIdFor(payload),
     cta_directives: ctaDirectives,
     byline: {
       key: payload.byline || 'adam',
@@ -395,6 +404,7 @@ module.exports = {
   _internals: {
     normalizeTargetSite,
     serviceForBrief,
+    blockedTopicIdFor,
     dedupeKeyFor,
     availableAtFor,
     rowForBrief,
