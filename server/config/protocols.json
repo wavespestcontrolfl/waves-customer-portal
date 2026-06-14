@@ -1,4 +1,66 @@
 {
+  "operations": {
+    "prepay": {
+      "name": "Prepay Protocol",
+      "summary": "Use this for annual WaveGuard prepay and scheduled-service prepaid credits. Annual prepay is an account billing term; scheduled-service prepaid is a visit or series payment stamp.",
+      "sections": [
+        {
+          "title": "Annual prepay eligibility",
+          "items": [
+            "Available only for recurring estimates.",
+            "Do not use with invoice-mode estimates.",
+            "Do not use when the estimate offers a one-time choice; customer must accept through the public estimate link so recurring vs one-time is recorded.",
+            "Eligible mixes include recurring pest, lawn-only recurring plans, and termite-bait-only recurring plans."
+          ]
+        },
+        {
+          "title": "Customer-link acceptance",
+          "items": [
+            "Customer chooses Pay the year upfront after selecting a slot or linked appointment.",
+            "System marks the estimate accepted, activates the customer, skips onboarding, and creates a draft annual prepay invoice.",
+            "System creates an annual_prepay_terms row in payment_pending status tied to that invoice.",
+            "If the annual term cannot be created, acceptance returns an error instead of pretending the prepay invoice is ready."
+          ]
+        },
+        {
+          "title": "Manual verbal annual prepay",
+          "items": [
+            "Use Mark annual prepay only after the customer has verbally approved paying the year upfront.",
+            "This creates the pending annual prepay invoice and renewal term but does not text, email, or auto-schedule the customer.",
+            "Review and send the invoice from Admin Invoices.",
+            "Do not use the standard Mark Won button for annual prepay; that path is for monthly/manual invoice follow-up."
+          ]
+        },
+        {
+          "title": "Invoice review and payment",
+          "items": [
+            "Draft annual prepay invoices should show Annual Prepay status and coverage dates on invoice views.",
+            "Coverage activates only after the invoice is paid.",
+            "Manual payment, Stripe payment, void, refund, and cancellation paths sync the annual term status.",
+            "Customer 360 should show payment_pending until payment clears."
+          ]
+        },
+        {
+          "title": "Renewal and cancellation",
+          "items": [
+            "Active and renewal_pending annual terms surface in recurring renewal alerts near term end or last scheduled service.",
+            "Use Contacted, Renew, Switch, or Cancel from the renewal alert to record the decision.",
+            "Voiding or refunding an undecided annual prepay invoice cancels the linked term.",
+            "Do not schedule beyond the paid term without renewal approval or plan switch."
+          ]
+        },
+        {
+          "title": "Scheduled-service prepaid credits",
+          "items": [
+            "Use Mark prepaid on an appointment when cash, check, Zelle, phone card, or another off-invoice payment was collected for a visit or recurring series.",
+            "Apply to entire series only when the collected amount covers the plan, not just today’s visit.",
+            "Prepaid credits reduce the completion invoice and create a paid ledger row when the visit is charged/completed.",
+            "Rescheduled, skipped, cancelled, no-show, and completed rows do not receive new prepaid stamps."
+          ]
+        }
+      ]
+    }
+  },
   "lawn": {
     "st_augustine": {
       "name": "ST. AUGUSTINE (v4.0 — unified SWFL protocol)",

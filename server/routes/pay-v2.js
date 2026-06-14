@@ -113,6 +113,13 @@ router.get('/:token', async (req, res, next) => {
     const lineItems = data.line_items || [];
     const productsApplied = data.products_applied || [];
     const photos = data.service_photos || [];
+    const annualPrepayTerm = data.annual_prepay_term || null;
+    const annualPrepay = data.annual_prepay
+      ? {
+          ...data.annual_prepay,
+          renewalDecision: annualPrepayTerm?.renewalDecision || null,
+        }
+      : null;
     const attachments = await InvoiceAttachments.list(data.id).catch((err) => {
       logger.warn(`[pay-v2] attachment list failed for invoice ${data.id}: ${err.message}`);
       return [];
@@ -132,12 +139,12 @@ router.get('/:token', async (req, res, next) => {
         taxAmount: parseFloat(data.tax_amount),
         total: parseFloat(data.total),
         dueDate: data.due_date,
-        annualPrepay: data.annual_prepay || null,
         paidAt: data.paid_at,
         cardBrand: data.card_brand,
         cardLastFour: data.card_last_four,
         receiptUrl: data.receipt_url,
         notes: data.notes,
+        annualPrepay,
         attachments: attachments.map((a) => ({
           id: a.id,
           fileName: a.file_name,

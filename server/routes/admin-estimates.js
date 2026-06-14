@@ -1309,6 +1309,7 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
       estimateId: req.params.id,
       adminUserId: req.technicianId,
       source: req.body?.source || 'verbal_yes',
+      billingTerm: req.body?.billingTerm || 'standard',
     });
     clearRouteCacheForRequest(req, ['/admin/dashboard']);
     res.json({ success: true, ...result });

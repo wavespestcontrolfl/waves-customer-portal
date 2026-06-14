@@ -170,6 +170,27 @@ function todayDateInput() {
 function fmtCurrency(v) {
   return "$" + parseFloat(v || 0).toFixed(2);
 }
+
+function formatAnnualPrepayStatusLabel(term = {}) {
+  const status = String(term.status || "").toLowerCase();
+  const invoiceStatus = String(term.prepayInvoiceStatus || "").toLowerCase();
+  if (status === "payment_pending") {
+    return invoiceStatus ? `Prepay pending · invoice ${invoiceStatus}` : "Prepay pending";
+  }
+  if (status === "active") return "Paid annual prepay";
+  if (status === "renewal_pending") return "Renewal pending";
+  if (status === "cancelled" || status === "canceled") return "Cancelled";
+  if (status === "refunded") return "Refunded";
+  return status ? status.replace(/_/g, " ") : "Annual prepay";
+}
+
+function annualPrepayStatusClass(term = {}) {
+  const status = String(term.status || "").toLowerCase();
+  if (status === "active") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (status === "renewal_pending" || status === "payment_pending") return "bg-amber-50 text-amber-700 border-amber-200";
+  if (["cancelled", "canceled", "refunded"].includes(status)) return "bg-zinc-100 text-zinc-600 border-zinc-200";
+  return "bg-zinc-50 text-zinc-700 border-zinc-200";
+}
 function getAdminRole() {
   try {
     return (
@@ -1921,9 +1942,13 @@ export default function Customer360ProfileV2({
   const upcomingScheduled = data.upcomingScheduled || scheduled;
   const accountProperties = data.accountProperties || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
-  const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || annualPrepayTerms[0] || null;
-  const activeAnnualPrepayStatus = activeAnnualPrepayTerm?.status
-    ? activeAnnualPrepayTerm.status.replace(/_/g, " ")
+  const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
+  const displayedAnnualPrepayTerm = activeAnnualPrepayTerm
+    || annualPrepayTerms.find((t) => t.status === "payment_pending")
+    || annualPrepayTerms[0]
+    || null;
+  const displayedAnnualPrepayStatus = displayedAnnualPrepayTerm?.status
+    ? displayedAnnualPrepayTerm.status.replace(/_/g, " ")
     : null;
 
   const updateNotificationPrefs = async (patch) => {
@@ -2829,29 +2854,39 @@ export default function Customer360ProfileV2({
                       {fmtDate(lastPayment.payment_date)}
                     </div>
                   )}
-                  {activeAnnualPrepayTerm && (
+                  {displayedAnnualPrepayTerm && (
                     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-                      <div className="text-12 font-medium text-zinc-900">
-                        {activeAnnualPrepayTerm.planLabel || "Annual Prepay"}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="text-12 font-medium text-zinc-900">
+                          {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
+                        </div>
+                        <span className={`shrink-0 border rounded-sm px-1.5 py-0.5 text-10 font-medium ${annualPrepayStatusClass(displayedAnnualPrepayTerm)}`}>
+                          {formatAnnualPrepayStatusLabel(displayedAnnualPrepayTerm)}
+                        </span>
                       </div>
-                      {activeAnnualPrepayStatus && (
+                      {displayedAnnualPrepayStatus && (
                         <div className="text-11 text-ink-secondary mt-0.5 capitalize">
-                          Status: {activeAnnualPrepayStatus}
+                          Status: {displayedAnnualPrepayStatus}
                         </div>
                       )}
                       <div className="text-11 text-ink-secondary mt-0.5">
-                        Term ends {fmtDate(activeAnnualPrepayTerm.termEnd)}
-                        {activeAnnualPrepayTerm.lastScheduledServiceDate
-                          ? ` · last scheduled ${fmtDate(activeAnnualPrepayTerm.lastScheduledServiceDate)}`
+                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
+                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
+                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
                           : ""}
                       </div>
-                      {activeAnnualPrepayTerm.renewalDecision && (
+                      {displayedAnnualPrepayTerm.prepayInvoiceNumber && (
+                        <div className="text-11 text-ink-secondary mt-0.5">
+                          Invoice {displayedAnnualPrepayTerm.prepayInvoiceNumber}
+                          {displayedAnnualPrepayTerm.prepayInvoiceTotal != null
+                            ? ` · ${fmtCurrency(displayedAnnualPrepayTerm.prepayInvoiceTotal)}`
+                            : ""}
+                        </div>
+                      )}
+                      {displayedAnnualPrepayTerm.renewalDecision && (
                         <div className="text-11 text-ink-secondary mt-0.5">
                           Decision:{" "}
-                          {activeAnnualPrepayTerm.renewalDecision.replace(
-                            "_",
-                            " ",
-                          )}
+                          {displayedAnnualPrepayTerm.renewalDecision.replace(/_/g, " ")}
                         </div>
                       )}
                     </div>

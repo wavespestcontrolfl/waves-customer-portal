@@ -588,6 +588,39 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed) {
     );
 }
 
+async function annualPrepayInvoiceTableExists() {
+  if (!db.schema?.hasTable) return false;
+  return db.schema
+    .hasTable("annual_prepay_terms")
+    .catch(() => false);
+}
+
+async function loadAnnualPrepayTermForInvoice(invoiceId) {
+  if (!invoiceId) return null;
+  const exists = await annualPrepayInvoiceTableExists();
+  if (!exists) return null;
+  const term = await db("annual_prepay_terms")
+    .where({ prepay_invoice_id: invoiceId })
+    .first();
+  if (!term) return null;
+  return {
+    id: term.id,
+    customerId: term.customer_id,
+    sourceEstimateId: term.source_estimate_id,
+    prepayInvoiceId: term.prepay_invoice_id,
+    planLabel: term.plan_label,
+    monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
+    prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+    termStart: term.term_start,
+    termEnd: term.term_end,
+    status: term.status,
+    lastScheduledServiceId: term.last_scheduled_service_id,
+    lastScheduledServiceDate: term.last_scheduled_service_date,
+    renewalDecision: term.renewal_decision,
+    renewalDecisionAt: term.renewal_decision_at,
+  };
+}
+
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
 // ══════════════════════════════════════════════════════════════
@@ -1328,6 +1361,7 @@ const InvoiceService = {
         "property_type",
       )
       .first();
+    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
 
     const line_items =
       typeof invoice.line_items === "string"
@@ -1352,6 +1386,7 @@ const InvoiceService = {
         typeof invoice.service_photos === "string"
           ? JSON.parse(invoice.service_photos)
           : invoice.service_photos || [],
+      annual_prepay_term: annualPrepayTerm,
     };
   },
 
@@ -1974,7 +2009,14 @@ const InvoiceService = {
           ? JSON.parse(invoice.line_items)
           : invoice.line_items,
     });
-    return { ...invoice, customer, active_payment_plan: activePaymentPlan, annual_prepay };
+    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
+    return {
+      ...invoice,
+      customer,
+      active_payment_plan: activePaymentPlan,
+      annual_prepay,
+      annual_prepay_term: annualPrepayTerm,
+    };
   },
 
   async list({
@@ -1999,6 +2041,7 @@ const InvoiceService = {
     const normalizedStatus = String(status || "")
       .trim()
       .toLowerCase();
+    const hasAnnualPrepayTerms = await annualPrepayInvoiceTableExists();
     const directStatuses = new Set([
       "draft",
       "scheduled",
@@ -2064,13 +2107,20 @@ const InvoiceService = {
       return q;
     };
 
-    const query = applyFilters(
-      db("invoices").leftJoin(
-        "customers",
-        "invoices.customer_id",
-        "customers.id",
-      ),
-    ).select(
+    const listBase = db("invoices").leftJoin(
+      "customers",
+      "invoices.customer_id",
+      "customers.id",
+    );
+    if (hasAnnualPrepayTerms) {
+      listBase.leftJoin(
+        "annual_prepay_terms as apt",
+        "apt.prepay_invoice_id",
+        "invoices.id",
+      );
+    }
+
+    const selectColumns = [
       "invoices.*",
       "customers.first_name",
       "customers.last_name",
@@ -2097,7 +2147,19 @@ const InvoiceService = {
           ORDER BY pp.created_at DESC
           LIMIT 1
         ) AS active_payment_plan`),
-    );
+    ];
+    if (hasAnnualPrepayTerms) {
+      selectColumns.push(
+        "apt.id as annual_prepay_id",
+        "apt.status as annual_prepay_status",
+        "apt.plan_label as annual_prepay_plan_label",
+        "apt.term_start as annual_prepay_term_start",
+        "apt.term_end as annual_prepay_term_end",
+        "apt.prepay_amount as annual_prepay_amount",
+      );
+    }
+
+    const query = applyFilters(listBase).select(...selectColumns);
 
     if (sort === "oldest") {
       query

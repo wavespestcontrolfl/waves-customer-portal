@@ -606,6 +606,44 @@ function ProtocolMixCard({
   );
 }
 
+function PrepayProtocolCard({ protocol }) {
+  if (!protocol) return null;
+  return (
+    <Card className="overflow-hidden">
+      <div className="px-4 py-3 border-b border-hairline border-zinc-200 bg-zinc-50 flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-14 font-medium tracking-label uppercase text-ink-primary">
+            {protocol.name || "Prepay Protocol"}
+          </div>
+          {protocol.summary && (
+            <div className="text-12 text-ink-secondary mt-1 leading-normal max-w-4xl">
+              {protocol.summary}
+            </div>
+          )}
+        </div>
+        <Badge tone="neutral">Admin workflow</Badge>
+      </div>
+      <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+        {(protocol.sections || []).map((section) => (
+          <div key={section.title} className="rounded-sm border-hairline border-zinc-200 p-3 bg-white">
+            <div className="text-12 font-medium u-label text-zinc-900 mb-2">
+              {section.title}
+            </div>
+            <ul className="space-y-1.5">
+              {(section.items || []).map((item) => (
+                <li key={item} className="text-12 text-ink-secondary leading-normal flex gap-2">
+                  <span className="mt-[7px] h-1 w-1 rounded-full bg-zinc-500 flex-shrink-0" />
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 export default function ProtocolReferenceTabV2() {
   const [programs, setPrograms] = useState(null);
   const [selectedTrack, setSelectedTrack] = useState(null);
@@ -754,6 +792,7 @@ export default function ProtocolReferenceTabV2() {
   const safetyRules = isLawnTrack
     ? TRACK_SAFETY_RULES[selectedTrack] || []
     : trackData?.safety_rules || [];
+  const prepayProtocol = programs?.operations?.prepay || null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -762,6 +801,7 @@ export default function ProtocolReferenceTabV2() {
         Tech-facing WaveGuard protocols with label-rate mix math, equipment
         calibration, tank fill, and mixing order.
       </div>{" "}
+      <PrepayProtocolCard protocol={prepayProtocol} />
       <div className="flex gap-2 flex-wrap overflow-x-auto">
         {lawnTracks.map((t) => {
           const active = selectedTrack === t.key;
