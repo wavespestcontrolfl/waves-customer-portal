@@ -23,10 +23,15 @@ describe('sms shadow drafter — response parsing', () => {
   });
 
   describe('auto_send_safe — computed from RAW actions, before sanitize drops unknowns', () => {
-    test('no actions / empty / only none → safe', () => {
+    test('a well-formed empty / only-none action list → safe', () => {
       expect(parseShadowResponse('{"reply":"hi","intended_actions":[]}').auto_send_safe).toBe(true);
-      expect(parseShadowResponse('{"reply":"hi"}').auto_send_safe).toBe(true);
       expect(parseShadowResponse('{"reply":"","intended_actions":[{"type":"none"}]}').auto_send_safe).toBe(true);
+    });
+
+    test('an OMITTED intended_actions field is a broken contract → NOT safe', () => {
+      // The prompt requires the field; a response that drops it must not
+      // auto-send (it is the only signal that no follow-up action is needed).
+      expect(parseShadowResponse('{"reply":"hi"}').auto_send_safe).toBe(false);
     });
 
     test('a recognized actionable type → NOT safe', () => {

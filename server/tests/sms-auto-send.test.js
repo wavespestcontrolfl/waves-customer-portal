@@ -64,11 +64,16 @@ describe('autoSendPreflight — precondition ordering (the gate to an autonomous
   });
 });
 
-describe('autoSendActionsSafe — only a pure no-op draft auto-sends', () => {
-  test('absent (null/undefined) or empty array → safe', () => {
-    expect(autoSendActionsSafe(undefined)).toBe(true);
-    expect(autoSendActionsSafe(null)).toBe(true);
+describe('autoSendActionsSafe — only a well-formed no-op draft auto-sends', () => {
+  test('a present, empty array → safe (the model declared no action)', () => {
     expect(autoSendActionsSafe([])).toBe(true);
+  });
+
+  test('an ABSENT field (null/undefined) is a broken contract → NOT safe', () => {
+    // The prompt requires intended_actions; a response that drops it is
+    // malformed and must not auto-send (the field is the only no-action signal).
+    expect(autoSendActionsSafe(undefined)).toBe(false);
+    expect(autoSendActionsSafe(null)).toBe(false);
   });
 
   test('a PRESENT non-array payload is malformed → NOT safe (fail closed)', () => {

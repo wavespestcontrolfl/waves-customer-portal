@@ -409,10 +409,14 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
-        } else if (result?.reason === 'action_required') {
-          // A verified draft that still needs a human action (escalate / send
-          // a link / book) must reach a person — not auto-send, and not vanish
-          // into silent shadow. Downgrade it one rung to a suggestion card.
+        } else if (result?.reason !== 'guarded_or_claimed' && result?.reason !== 'ineligible_base') {
+          // Fail closed to a HUMAN: a verified draft that couldn't auto-send —
+          // needs a follow-up action, the intent is no longer eligible, the
+          // readiness signal was unavailable, or the send was blocked/failed —
+          // must still reach a person, not vanish into silent shadow. Downgrade
+          // it one rung to a suggestion card. Only guard/duplicate misses
+          // (thread already answered, a newer inbound, or another auto-send in
+          // flight) correctly stay shadow for the judge.
           const decisionId = await suggestMode.publishSuggestion({
             draftId: row.id,
             customerId: customer.id,

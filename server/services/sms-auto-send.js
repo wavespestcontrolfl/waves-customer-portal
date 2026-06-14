@@ -89,17 +89,18 @@ function isRealProviderSend(result) {
 }
 
 /**
- * Pure: is this draft's action set safe to send with no human? Safe ONLY when
- * actions are absent (null/undefined) or an empty array, or every entry is
- * 'none' (a pure courtesy no-op). A PRESENT non-array payload is malformed
- * model output — fail closed (a raw `{type:'send_payment_link'}` object would
- * otherwise read as "not an array → safe" before the parser sanitizes it to
- * []). Any actionable/unknown type → false. Tolerates {type} objects or bare
- * strings inside the array.
+ * Pure: is this draft's action set safe to send with no human? The prompt
+ * contract REQUIRES an intended_actions array, and it is the only signal that a
+ * draft needs follow-up (escalate / book / link). So safe ONLY when the field
+ * is a well-formed array that is empty or contains nothing but 'none'. Anything
+ * else fails closed: an ABSENT field (null/undefined — a malformed response
+ * that dropped the contract), a non-array payload (e.g. a raw
+ * `{type:'send_payment_link'}` that would later sanitize to []), or any
+ * actionable/unknown type. Tolerates {type} objects or bare strings in the
+ * array.
  */
 function autoSendActionsSafe(intendedActions) {
-  if (intendedActions == null) return true;
-  if (!Array.isArray(intendedActions)) return false; // present-but-malformed → unsafe
+  if (!Array.isArray(intendedActions)) return false; // absent or malformed → unsafe
   if (intendedActions.length === 0) return true;
   return intendedActions.every((a) => {
     const type = typeof a === 'string' ? a : a && a.type;
@@ -147,6 +148,15 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     await suggest.lockSuggestThread(trx, threadLast10 || customerId);
 
     if (await suggest.threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt: inbound.created_at })) {
+      return null;
+    }
+
+    // Interlock against OTHER auto-sends on the thread: a second draft (e.g. a
+    // rapid second inbound) must not claim while a prior auto-send is still
+    // mid-provider-call — that would fire duplicate / out-of-order autonomous
+    // replies. Under the same lock as the prior claim's commit, so they
+    // serialize: one autonomous reply in flight per thread at a time.
+    if (await hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
       return null;
     }
 
