@@ -819,7 +819,12 @@ const SocialMediaService = {
           continue;
         }
 
-        const r = await postToGBP(loc.id, gbpContent, link);
+        // Reuse the image already generated + uploaded to the CDN for this
+        // run (see generatedImageUrl above) so GBP posts carry a photo too —
+        // a GBP local post without media renders as a flat text card and its
+        // "Learn more" CTA is easy to miss. Same public URL Instagram uses.
+        const gbpImageUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
+        const r = await postToGBP(loc.id, gbpContent, link, gbpImageUrl);
         platformResults.push({ ...r, content: gbpContent });
       } catch (err) {
         platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: err.message });

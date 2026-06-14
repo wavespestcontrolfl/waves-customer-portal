@@ -9,6 +9,8 @@ jest.mock('../services/social-media', () => ({
   generateContent: jest.fn(),
   validateContent: jest.fn(),
   postToGBP: jest.fn(),
+  generateImage: jest.fn(),
+  uploadImageToS3: jest.fn(),
   assertSocialPublishingReady: jest.fn(),
   SOCIAL_FLAGS: { dryRun: false },
 }));
@@ -62,6 +64,10 @@ beforeEach(() => {
   social.SOCIAL_FLAGS.dryRun = false;
   social.generateContent.mockResolvedValue('Sarasota ghost ants are peaking. Schedule an inspection.');
   social.validateContent.mockReturnValue({ valid: true, issues: [] });
+  // Default: image generation yields nothing → posts go out text-only (the
+  // pre-existing behavior). The image-attached path is covered explicitly below.
+  social.generateImage.mockResolvedValue(null);
+  social.uploadImageToS3.mockResolvedValue(null);
   social.assertSocialPublishingReady.mockResolvedValue({ ready: true });
   social.postToGBP.mockResolvedValue({ platform: 'gbp', location: 'sarasota', success: true, postId: 'accounts/1/locations/2/localPosts/3' });
 });
@@ -111,7 +117,8 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).toHaveBeenCalledWith(
       'sarasota',
       'Sarasota ghost ants are peaking. Schedule an inspection.',
-      'https://www.wavespestcontrol.com/pest-control-sarasota-fl/'
+      'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
+      null
     );
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
@@ -167,7 +174,7 @@ describe('_handleGbpPostAction', () => {
     expect(social.generateContent).toHaveBeenCalledWith('gbp', expect.objectContaining({
       locationName: 'North Port',
     }));
-    expect(social.postToGBP).toHaveBeenCalledWith('venice', expect.any(String), expect.anything());
+    expect(social.postToGBP).toHaveBeenCalledWith('venice', expect.any(String), expect.anything(), null);
   });
 
   test('unmapped city parks for manual routing without generating', async () => {
@@ -196,7 +203,34 @@ describe('_handleGbpPostAction', () => {
       baseBrief({ target_url: 'https://sarasotaexterminator.com/some-page/' }),
       run
     );
-    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), null);
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), null, null);
+  });
+
+  test('attaches a generated CDN image to the GBP post when image generation succeeds', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.uploadImageToS3).toHaveBeenCalledTimes(1);
+    expect(social.postToGBP).toHaveBeenCalledWith(
+      'sarasota',
+      expect.any(String),
+      'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
+      'https://cdn.example.com/social-media/gbp.jpg'
+    );
+  });
+
+  test('image generation failure still posts (text-only), does not block publish', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.generateImage.mockRejectedValue(new Error('image provider down'));
+    const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(result.claim).toBe('complete');
+    expect(result.patch.outcome).toBe('completed_published');
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
   });
 
   test('validation failure parks with the rejected copy in notes', async () => {

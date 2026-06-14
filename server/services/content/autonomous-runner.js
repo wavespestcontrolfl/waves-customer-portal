@@ -1885,8 +1885,24 @@ class AutonomousRunner {
       };
     }
 
+    // Best-effort image so the GBP post isn't a flat text card. The image
+    // pipeline (generate -> S3 -> CDN) is the same one publishToAll uses for
+    // Instagram; on any failure we fall through to a text-only post (the
+    // prior behavior) rather than blocking the publish.
+    let gbpImageUrl = null;
+    try {
+      if (social.generateImage && social.uploadImageToS3) {
+        const img = await social.generateImage(title);
+        if (img?.base64) {
+          gbpImageUrl = await social.uploadImageToS3(img.base64, `gbp-${location.id}-${Date.now()}.jpg`);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-runner] GBP image generation failed (posting text-only): ${err.message}`);
+    }
+
     const t2 = Date.now();
-    const result = await social.postToGBP(location.id, content, link);
+    const result = await social.postToGBP(location.id, content, link, gbpImageUrl);
     run.publish_ms = Date.now() - t2;
     if (!result?.success) {
       return {
