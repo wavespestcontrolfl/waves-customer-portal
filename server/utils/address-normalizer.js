@@ -1,5 +1,5 @@
 const DIRECTIONALS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
-const CITY_PREFIX_TOKENS = new Set(['st', 'lake', 'key']);
+const CITY_PREFIX_TOKENS = new Set(['st', 'lake', 'key', 'ridge']);
 const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
   'space', 'ste', 'suite', 'unit',

@@ -86,6 +86,13 @@ describe('address normalizer', () => {
       zip: '34224',
       fullAddress: '123 Main St, Grove City, FL 34224',
     });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Ridge Wood Heights FL 34231' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Ridge Wood Heights',
+      state: 'FL',
+      zip: '34231',
+      fullAddress: '123 Main St, Ridge Wood Heights, FL 34231',
+    });
   });
 
   test('prefers structured Google address components over raw typed text', () => {
