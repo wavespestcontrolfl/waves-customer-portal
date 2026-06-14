@@ -226,6 +226,20 @@ function bridgeStatusLabel(status) {
   return labels[status] || "Unknown";
 }
 
+function bridgeDisplayStatus(match) {
+  if (match?.status === "already_bridged" && match.callLog?.googleAdsLeadMatched === false) {
+    return "Needs Lead";
+  }
+  return bridgeStatusLabel(match?.status);
+}
+
+function bridgeDisplayTone(match) {
+  if (match?.status === "already_bridged" && match.callLog?.googleAdsLeadMatched === false) {
+    return D.amber;
+  }
+  return bridgeStatusTone(match?.status);
+}
+
 // =========================================================================
 // OVERVIEW TAB
 // =========================================================================
@@ -432,7 +446,7 @@ function CallBridgeTab() {
       setData(result);
       setMessage({
         tone: result.appliedCount > 0 ? D.green : D.amber,
-        text: `${fmtInt(result.appliedCount || 0)} call${Number(result.appliedCount || 0) === 1 ? "" : "s"} bridged`,
+        text: `${fmtInt(result.appliedCount || 0)} bridge update${Number(result.appliedCount || 0) === 1 ? "" : "s"} applied`,
       });
     } catch (e) {
       setMessage({ tone: D.red, text: e.message || "Bridge apply failed" });
@@ -452,8 +466,22 @@ function CallBridgeTab() {
   const summary = data?.summary || {};
   const matches = data?.matches || [];
   const readyCount = Number(summary.ready || 0);
+  const leadRetryCount = matches.filter((match) => (
+    match.status === "already_bridged"
+    && !!match.callLog
+    && match.callLog.googleAdsLeadMatched === false
+  )).length;
+  const applyCount = readyCount + leadRetryCount;
   const configured = data?.configured !== false;
   const targetNumber = data?.targetNumber?.formatted || "(941) 318-7612";
+  const canApply = configured && applyCount > 0 && !applying;
+  const applyLabel = applying
+    ? "Applying..."
+    : (readyCount > 0 && leadRetryCount > 0)
+      ? "Apply ready + retry leads"
+      : leadRetryCount > 0
+        ? "Retry lead attribution"
+        : "Apply ready matches";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -520,19 +548,19 @@ function CallBridgeTab() {
           </button>
           <button
             onClick={applyBridge}
-            disabled={!configured || readyCount === 0 || applying}
+            disabled={!canApply}
             style={{
               padding: "8px 12px",
               borderRadius: 8,
-              border: `1px solid ${configured && readyCount > 0 ? D.green : D.border}`,
-              background: configured && readyCount > 0 ? D.green : D.bg,
-              color: configured && readyCount > 0 ? D.white : D.muted,
+              border: `1px solid ${canApply ? D.green : D.border}`,
+              background: canApply ? D.green : D.bg,
+              color: canApply ? D.white : D.muted,
               fontSize: 12,
               fontWeight: 700,
-              cursor: configured && readyCount > 0 && !applying ? "pointer" : "not-allowed",
+              cursor: canApply ? "pointer" : "not-allowed",
             }}
           >
-            {applying ? "Applying..." : "Apply ready matches"}
+            {applyLabel}
           </button>
         </div>
       </div>
@@ -560,7 +588,11 @@ function CallBridgeTab() {
       }}>
         <KpiCard label="Google Calls" value={fmtInt(summary.googleCalls)} />
         <KpiCard label="Ready Matches" value={fmtInt(summary.ready)} color={D.green} />
-        <KpiCard label="Already Bridged" value={fmtInt(summary.alreadyBridged)} />
+        <KpiCard
+          label="Already Bridged"
+          value={fmtInt(summary.alreadyBridged)}
+          sub={leadRetryCount > 0 ? { text: `${fmtInt(leadRetryCount)} lead retries`, color: D.amber } : null}
+        />
         <KpiCard label="Main-Line CRM Calls" value={fmtInt(summary.crmMainLineCalls)} />
       </div>
 
@@ -618,11 +650,11 @@ function CallBridgeTab() {
                         <span style={{ color: D.muted }}>No CRM match</span>
                       )}
                     </td>
-                    <td style={{ ...tdR, color: bridgeStatusTone(match.status), fontWeight: 700 }}>
+                    <td style={{ ...tdR, color: bridgeDisplayTone(match), fontWeight: 700 }}>
                       {fmtInt(match.confidence)}%
                     </td>
-                    <td style={{ ...tdR, color: bridgeStatusTone(match.status), fontWeight: 700 }}>
-                      {bridgeStatusLabel(match.status)}
+                    <td style={{ ...tdR, color: bridgeDisplayTone(match), fontWeight: 700 }}>
+                      {bridgeDisplayStatus(match)}
                     </td>
                   </tr>
                 ))}
