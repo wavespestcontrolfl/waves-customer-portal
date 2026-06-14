@@ -1009,6 +1009,32 @@ function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live', over
   return <div className="lawn-water-line lawn-water-balance" data-water-status={advice.status}>{message}</div>;
 }
 
+// Mowing height-of-cut block: Waves measures the maintained height of cut during
+// the visit and advises against the grass's ideal band. We don't mow, so the copy
+// speaks to how the lawn is being kept — never "we'll fix it". `below` is the
+// only alert state (scalping/stress). The QA marker is internal-only (never on
+// the customer 'live' surface).
+function LawnMowingHeight({ mowing, grassLabel = 'lawn', mode = 'live' }) {
+  if (!mowing || mowing.heightIn == null) return null;
+  const h = <strong>{mowing.heightIn}&Prime;</strong>;
+  const band = mowing.bandLabel;
+  let message;
+  if (mowing.status === 'below') {
+    message = <>Your {grassLabel} is being cut low at {h} (ideal {band}) — raising the mower helps avoid scalping and stress.</>;
+  } else if (mowing.status === 'above') {
+    message = <>Your {grassLabel} is running a bit long at {h} — easing toward the {band} range keeps it healthiest.</>;
+  } else {
+    message = <>Your {grassLabel} is being kept at {h} — right in the ideal {band} range.</>;
+  }
+  const showQa = mode !== 'live' && mowing.verificationStatus && mowing.verificationStatus !== 'verified';
+  return (
+    <div className="lawn-water-line lawn-mowing-height" data-mowing-status={mowing.status}>
+      <span className="lawn-mowing-label">Mowing height</span> {message}
+      {showQa && <span className="lawn-mowing-qa"> · QA: {mowing.verificationStatus}</span>}
+    </div>
+  );
+}
+
 function lawnAssessmentBody(assessment = {}) {
   const snapshotSummary = String(assessment.snapshot?.summary || '').trim();
   if (snapshotSummary) return snapshotSummary;
@@ -1307,7 +1333,7 @@ function LawnTrendChart({ trend = [], summary }) {
   );
 }
 
-function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
+function LawnAssessmentCard({ assessment, mode, token, embedded = false, mowingHeight = null }) {
   useEffect(() => {
     if (mode !== 'live' || !assessment) return;
     trackReportEvent(token, 'lawn_assessment_viewed');
@@ -1357,6 +1383,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
         <LawnTrendChart trend={assessment.trend || []} summary={assessment.customerSummary} />
       </div>
       <LawnWaterBalance water={assessment.waterContext} grassLabel={grassLabel} mode={mode} overwateringObserved={overwateringObserved} />
+      <LawnMowingHeight mowing={mowingHeight} grassLabel={grassLabel} mode={mode} />
       <div className="lawn-score-grid">
         {metricRows.map(([label, value]) => (
           <div className="lawn-score-cell" key={label}>
@@ -6886,6 +6913,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-weight: 600;
         }
+        .lawn-mowing-height .lawn-mowing-label {
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          font-size: 11px;
+          color: var(--muted);
+          margin-right: 4px;
+        }
+        .lawn-mowing-height[data-mowing-status="below"] {
+          border-color: var(--red);
+          color: var(--red);
+        }
+        .lawn-mowing-height .lawn-mowing-qa {
+          color: var(--muted);
+          font-weight: 500;
+        }
         .lawn-trend-chart {
           width: 100%;
           max-width: 420px;
@@ -7403,6 +7445,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mode={mode}
               token={token}
               embedded
+              mowingHeight={data.mowingHeight}
             />
           )}
         </section>
