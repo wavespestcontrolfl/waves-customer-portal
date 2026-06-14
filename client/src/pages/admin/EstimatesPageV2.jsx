@@ -64,6 +64,7 @@ import {
   Link as LinkIcon,
   RotateCw,
   CalendarPlus,
+  DollarSign,
 } from "lucide-react";
 
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
@@ -1666,7 +1667,7 @@ function EstimatePipelineViewV2() {
     async (e) => {
       if (
         !window.confirm(
-          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup invoice is created — schedule the visit on the calendar and draft any invoice manually.`,
+          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`,
         )
       )
         return;
@@ -1681,6 +1682,36 @@ function EstimatePipelineViewV2() {
         }
       } catch (err) {
         window.alert("Mark accepted failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const markEstimateAnnualPrepayAccepted = useCallback(
+    async (e) => {
+      const annualAmount = e.annualTotal > 0
+        ? e.annualTotal
+        : (e.monthlyTotal || 0) * 12;
+      if (
+        !window.confirm(
+          `Mark ${e.customerName || "this customer"} as accepted for annual prepay?\n\nThis activates the customer, creates a pending annual prepay invoice${annualAmount > 0 ? ` for about $${annualAmount.toFixed(2)}` : ""}, and creates the renewal term. The customer is NOT texted, NOT emailed, and NOT auto-scheduled.`,
+        )
+      )
+        return;
+      try {
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({
+            source: "verbal_annual_prepay",
+            billingTerm: "prepay_annual",
+          }),
+        });
+        refreshEstimates();
+        if (result?.warnings?.length) {
+          window.alert(`Marked annual prepay accepted, but:\n\n${result.warnings.join("\n")}`);
+        }
+      } catch (err) {
+        alert(`Failed to mark annual prepay accepted: ${err.message}`);
       }
     },
     [refreshEstimates],
@@ -2246,6 +2277,17 @@ function EstimatePipelineViewV2() {
                           </Button>
                         )}
 
+                        {canMarkEstimateAnnualPrepay(e) && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            onClick={() => markEstimateAnnualPrepayAccepted(e)}
+                          >
+                            Annual Prepay
+                          </Button>
+                        )}
+
                         {e.status === "accepted" && !e.archivedAt && (
                           <>
                             <Button
@@ -2373,6 +2415,12 @@ function EstimatePipelineViewV2() {
                                   window.alert("Send failed: " + err.message);
                                 }
                               },
+                            },
+                            canMarkEstimateAnnualPrepay(e) && {
+                              key: "annual-prepay",
+                              label: "Mark annual prepay",
+                              icon: <DollarSign size={16} strokeWidth={1.75} />,
+                              onClick: () => markEstimateAnnualPrepayAccepted(e),
                             },
                             (e.status === "sent" ||
                               e.status === "viewed") && {
@@ -2718,6 +2766,10 @@ function canMarkEstimateWon(estimate) {
   );
 }
 
+function canMarkEstimateAnnualPrepay(estimate) {
+  return canMarkEstimateWon(estimate) && Number(estimate.monthlyTotal || 0) > 0;
+}
+
 // Row in the mobile list. Mirrors CustomersPageV2 directory row: 64px white
 // bordered card, name + sub left, trailing Call / Text actions when phone is
 // present. Row tap is currently a no-op — action sheet will land in a
@@ -2729,6 +2781,7 @@ function MobileEstimateRow({
   onOpenCustomerPanel,
   onSend,
   onMarkAccepted,
+  onMarkAnnualPrepayAccepted,
   onDeleted,
   onAudit,
   onSendBooking,
@@ -3033,6 +3086,12 @@ function MobileEstimateRow({
             icon: <Check size={16} strokeWidth={1.75} />,
             onClick: () => onMarkAccepted?.(estimate),
           },
+          canMarkEstimateAnnualPrepay(estimate) && {
+            key: "annual-prepay",
+            label: "Mark annual prepay",
+            icon: <DollarSign size={16} strokeWidth={1.75} />,
+            onClick: () => onMarkAnnualPrepayAccepted?.(estimate),
+          },
           (estimate.status === "sent" || estimate.status === "viewed") && {
             key: "copy-link",
             label: "Copy estimate link",
@@ -3130,7 +3189,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     async (e) => {
       if (
         !window.confirm(
-          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup invoice is created — schedule the visit on the calendar and draft any invoice manually.`,
+          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`,
         )
       )
         return;
@@ -3145,6 +3204,36 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
         }
       } catch (err) {
         window.alert("Mark accepted failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const markEstimateAnnualPrepayAccepted = useCallback(
+    async (e) => {
+      const annualAmount = e.annualTotal > 0
+        ? e.annualTotal
+        : (e.monthlyTotal || 0) * 12;
+      if (
+        !window.confirm(
+          `Mark ${e.customerName || "this customer"} as accepted for annual prepay?\n\nThis activates the customer, creates a pending annual prepay invoice${annualAmount > 0 ? ` for about $${annualAmount.toFixed(2)}` : ""}, and creates the renewal term. The customer is NOT texted, NOT emailed, and NOT auto-scheduled.`,
+        )
+      )
+        return;
+      try {
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({
+            source: "verbal_annual_prepay",
+            billingTerm: "prepay_annual",
+          }),
+        });
+        refreshEstimates();
+        if (result?.warnings?.length) {
+          window.alert(`Marked annual prepay accepted, but:\n\n${result.warnings.join("\n")}`);
+        }
+      } catch (err) {
+        alert(`Failed to mark annual prepay accepted: ${err.message}`);
       }
     },
     [refreshEstimates],
@@ -3457,6 +3546,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
               onMarkAccepted={markEstimateAccepted}
+              onMarkAnnualPrepayAccepted={markEstimateAnnualPrepayAccepted}
               onDeleted={refreshEstimates}
               onAudit={(estimate, focus = "all") =>
                 setAuditTarget({ estimate, focus })

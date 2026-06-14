@@ -5707,6 +5707,9 @@ router.put('/:token/accept', async (req, res, next) => {
     if (annualPrepaySelected && billByInvoice) {
       return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
     }
+    if (annualPrepaySelected && !slotId && !existingAppointmentId) {
+      return res.status(400).json({ error: 'annual prepay requires selecting a service appointment first' });
+    }
     if (billByInvoice && !estimate.customer_id && !estimate.customer_phone) {
       return res.status(400).json({ error: 'invoice-mode estimates require a linked customer or customer phone before online acceptance' });
     }
@@ -5964,7 +5967,9 @@ router.put('/:token/accept', async (req, res, next) => {
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
-    // SMS / notifications / auto-conversion are fired AFTER the commit below.
+    // Customer-facing sends and notifications fire AFTER the commit below.
+    // Annual-prepay conversion is intentionally inside the transaction so the
+    // accepted state cannot commit without its prepay invoice + term.
     const txResult = await db.transaction(async (trx) => {
       const acceptedUpdates = {
         status: 'accepted',
@@ -6229,6 +6234,7 @@ router.put('/:token/accept', async (req, res, next) => {
       let invoicePayUrlResult = null;
       let invoiceServiceLabelResult = acceptedOneTimeServiceLabel || null;
       let invoiceKindResult = null;
+      let annualPrepayConversionResult = null;
       if (billByInvoice) {
         if (!customerId) {
           throw estimateAcceptError('invoice-mode acceptance requires a customer record before creating the invoice');
@@ -6300,6 +6306,33 @@ router.put('/:token/accept', async (req, res, next) => {
         invoiceKindResult = invoiceDraft.invoiceKind;
       }
 
+      if (annualPrepaySelected) {
+        if (!customerId) {
+          throw estimateAcceptError('annual prepay acceptance requires a customer record before creating the prepay invoice');
+        }
+        const EstimateConverter = require('../services/estimate-converter');
+        annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
+          database: trx,
+          billingTerm,
+          skipAutoSchedule: true,
+          skipMembershipEmail: true,
+          prepayInvoiceAmount: annualPrepayInvoiceAmount,
+          firstApplicationAmount: firstApplicationInvoiceAmount,
+          allowFirstApplicationFallback: false,
+          autoSendInvoice: false,
+          deferFollowUpReminderRegistration: true,
+        });
+        if (!annualPrepayConversionResult?.draftInvoiceId) {
+          throw new Error('Annual prepay invoice was not created');
+        }
+        invoiceModeResult = true;
+        invoiceIdResult = annualPrepayConversionResult.draftInvoiceId;
+        invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayInvoiceAmount || null;
+        invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
+        invoiceServiceLabelResult = 'Annual prepay';
+        invoiceKindResult = 'annual_prepay';
+      }
+
       return {
         customerId,
         onboardingToken,
@@ -6311,6 +6344,7 @@ router.put('/:token/accept', async (req, res, next) => {
         invoicePayUrl: invoicePayUrlResult,
         invoiceServiceLabel: invoiceServiceLabelResult,
         invoiceKind: invoiceKindResult,
+        annualPrepayConversion: annualPrepayConversionResult,
       };
     });
 
@@ -6322,7 +6356,23 @@ router.put('/:token/accept', async (req, res, next) => {
     let invoiceLinkDelivered = false;
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
-    const acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];
+    const annualPrepayConversion = txResult.annualPrepayConversion || null;
+    let acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];
+    if (annualPrepaySelected && acceptedAppointmentsToRegister.length) {
+      const appointmentIds = acceptedAppointmentsToRegister.map((appt) => appt?.id).filter(Boolean);
+      const refreshedRows = appointmentIds.length
+        ? await db('scheduled_services').whereIn('id', appointmentIds).select('*').catch((e) => {
+            logger.warn(`[estimate-accept] Appointment refresh after annual prepay conversion failed: ${e.message}`);
+            return [];
+          })
+        : [];
+      if (refreshedRows.length) {
+        const byId = new Map(refreshedRows.map((row) => [String(row.id), row]));
+        acceptedAppointmentsToRegister = acceptedAppointmentsToRegister.map((appt) => (
+          byId.get(String(appt.id)) || appt
+        ));
+      }
+    }
     for (const appointment of acceptedAppointmentsToRegister) {
       try {
         await registerAcceptedEstimateAppointmentReminder({
@@ -6332,6 +6382,20 @@ router.put('/:token/accept', async (req, res, next) => {
         });
       } catch (e) {
         logger.error(`[estimate-accept] Appointment reminder registration failed for ${appointment.id}: ${e.message}`);
+      }
+    }
+    const deferredFollowUpReminderRows = Array.isArray(annualPrepayConversion?.deferredFollowUpReminderRows)
+      ? annualPrepayConversion.deferredFollowUpReminderRows
+      : [];
+    for (const appointment of deferredFollowUpReminderRows) {
+      try {
+        await registerAcceptedEstimateAppointmentReminder({
+          appointment,
+          customerId,
+          serviceType: appointment.service_type,
+        });
+      } catch (e) {
+        logger.error(`[estimate-accept] Follow-up reminder registration failed for ${appointment.id}: ${e.message}`);
       }
     }
     if (customerId) {
@@ -6515,7 +6579,7 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
-    if (invoiceId && billByInvoice) {
+    if (invoiceId && (billByInvoice || annualPrepaySelected)) {
       try {
         const InvoiceService = require('../services/invoice');
         const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
@@ -6545,7 +6609,7 @@ router.put('/:token/accept', async (req, res, next) => {
     // scheduled_services rows + upgrades the customer's WaveGuard tier +
     // marks them active_customer. None of that applies for a single-visit
     // one-time booking. Reservation row (if any) already holds the slot.
-    if (customerId && !treatAsOneTime) {
+    if (customerId && !treatAsOneTime && !annualPrepaySelected) {
       try {
         const EstimateConverter = require('../services/estimate-converter');
         // In invoice-mode we generated the invoice inside the accept
@@ -6567,7 +6631,15 @@ router.put('/:token/accept', async (req, res, next) => {
           invoiceLinkDelivered = !!conversion.invoiceDelivery?.ok;
         }
         logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm}, invoiceMode=${billByInvoice})`);
-      } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
+      } catch (e) {
+        logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`);
+        if (annualPrepaySelected) {
+          return res.status(500).json({
+            error: 'Annual prepay setup could not be completed. Please contact the office so we can finish your prepay invoice.',
+            billingTerm,
+          });
+        }
+      }
     } else if (customerId && treatAsOneTime) {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }

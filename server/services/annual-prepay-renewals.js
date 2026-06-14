@@ -849,9 +849,35 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
   return new Set(rows.map((r) => String(r.customer_id)));
 }
 
+/**
+ * Customer IDs with an annual-prepay commitment whose invoice is still open.
+ * These customers have not paid for coverage yet, so they are not "actively
+ * covered"; the monthly billing cron still must not charge them while the
+ * annual-prepay invoice is pending review/payment.
+ */
+async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
+  if (!(await annualPrepayTableExists())) return new Set();
+  const today = dateOnly(asOf) || etDateString();
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const rows = await conn('annual_prepay_terms as t')
+    .join('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.status', PAYMENT_PENDING_STATUS)
+    .whereNotNull('t.prepay_invoice_id')
+    .where('t.term_end', '>=', today)
+    .whereRaw(
+      `lower(coalesce(i.status, 'draft')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    .whereRaw("lower(coalesce(i.status, 'draft')) <> 'paid'")
+    .whereNull('i.paid_at')
+    .distinct('t.customer_id');
+  return new Set(rows.map((r) => String(r.customer_id)));
+}
+
 module.exports = {
   createTermForAnnualPrepay,
   getActivelyCoveredCustomerIds,
+  getPaymentPendingCustomerIds,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   syncTermForInvoicePayment,

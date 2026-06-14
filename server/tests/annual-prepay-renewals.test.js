@@ -21,13 +21,17 @@ const AccountMembershipEmail = require('../services/account-membership-email');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { _private } = AnnualPrepayRenewals;
 
-function query({ first, returning, columnInfo } = {}) {
+function query({ first, returning, columnInfo, result = [] } = {}) {
   const q = {};
   [
+    'join',
+    'distinct',
     'whereIn',
     'whereNull',
+    'whereNotNull',
     'whereBetween',
     'whereNotIn',
+    'whereRaw',
     'orderBy',
     'select',
   ].forEach((method) => {
@@ -44,7 +48,7 @@ function query({ first, returning, columnInfo } = {}) {
   q.returning = jest.fn(async () => returning || []);
   q.columnInfo = jest.fn(async () => columnInfo || {});
   q.catch = jest.fn(() => Promise.resolve());
-  q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+  q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return q;
 }
 
@@ -123,6 +127,22 @@ describe('annual prepay renewal helpers', () => {
       term_end: '2026-12-31',
       last_scheduled_service_date: '2026-04-29',
     }, '2026-05-14', 30)).toBe(false);
+  });
+
+  test('pending billing suppression requires a real open invoice and unexpired term', async () => {
+    const pendingQuery = query({ result: [{ customer_id: 'customer-pending' }] });
+    setDbQueues({
+      'annual_prepay_terms as t': [pendingQuery],
+    });
+
+    await expect(AnnualPrepayRenewals.getPaymentPendingCustomerIds('2026-06-14')).resolves.toEqual(new Set(['customer-pending']));
+
+    expect(pendingQuery.join).toHaveBeenCalledWith('invoices as i', 'i.id', 't.prepay_invoice_id');
+    expect(pendingQuery.where).toHaveBeenCalledWith('t.status', 'payment_pending');
+    expect(pendingQuery.whereNotNull).toHaveBeenCalledWith('t.prepay_invoice_id');
+    expect(pendingQuery.where).toHaveBeenCalledWith('t.term_end', '>=', '2026-06-14');
+    expect(pendingQuery.whereNull).toHaveBeenCalledWith('i.paid_at');
+    expect(pendingQuery.distinct).toHaveBeenCalledWith('t.customer_id');
   });
 
   test('finds refunded invoice from payment metadata aliases before querying invoices', async () => {

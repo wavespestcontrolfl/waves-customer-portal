@@ -253,6 +253,52 @@ function StatusPill({ tone = 'neutral', children }) {
   );
 }
 
+function annualPrepayStatusLabel(term = {}) {
+  const status = String(term.status || '').toLowerCase();
+  if (status === 'payment_pending') return 'Prepay invoice pending';
+  if (status === 'active') return 'Annual prepay active';
+  if (status === 'renewal_pending') return 'Renewal pending';
+  if (status === 'cancelled' || status === 'canceled') return 'Cancelled';
+  if (status === 'refunded') return 'Refunded';
+  return status ? status.replace(/_/g, ' ') : 'Annual prepay';
+}
+
+function AnnualPrepayInvoicePanel({ term }) {
+  if (!term) return null;
+  const pending = term.status === 'payment_pending';
+  return (
+    <div style={{
+      ...subtlePanel,
+      padding: 14,
+      marginBottom: 18,
+      display: 'grid',
+      gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ ...eyebrow, color: pending ? '#9A6200' : 'var(--success)' }}>
+          {annualPrepayStatusLabel(term)}
+        </div>
+        {term.prepayAmount != null && (
+          <div style={{ fontFamily: FONTS.mono, fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>
+            {fmtCurrency(term.prepayAmount)}
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--text)' }}>
+        {term.planLabel || 'Annual prepay plan'}
+        {term.termStart || term.termEnd
+          ? ` · coverage ${fmtDate(term.termStart)} through ${fmtDate(term.termEnd)}`
+          : ''}
+      </div>
+      {pending && (
+        <div style={{ fontSize: 14, lineHeight: 1.45, color: 'var(--text-muted)' }}>
+          Annual prepaid coverage activates after this invoice is paid.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DetailBlock({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
@@ -1160,6 +1206,7 @@ export default function PayPageV2() {
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
+  const annualPrepay = invoice.annualPrepay || null;
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
   const serviceLabel = invoice.title || service.type || 'Service';
@@ -1297,6 +1344,8 @@ export default function PayPageV2() {
                 </div>
               </div>
             )}
+
+            <AnnualPrepayInvoicePanel term={annualPrepay} />
 
             <div style={{
               display: 'grid',
