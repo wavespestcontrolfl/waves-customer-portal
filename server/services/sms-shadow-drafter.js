@@ -413,22 +413,33 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // Fail closed to a HUMAN: a verified draft that couldn't auto-send —
           // needs a follow-up action, the intent is no longer eligible, the
           // readiness signal was unavailable, or the send was blocked/failed —
-          // must still reach a person, not vanish into silent shadow. Downgrade
-          // it one rung to a suggestion card. Only guard/duplicate misses
-          // (thread already answered, a newer inbound, or another auto-send in
-          // flight) correctly stay shadow for the judge.
-          const decisionId = await suggestMode.publishSuggestion({
-            draftId: row.id,
-            customerId: customer.id,
-            smsLogId,
-            inboundMessage,
+          // should reach a person, not vanish into silent shadow. But re-resolve
+          // the mode first: an admin may have demoted the intent (to shadow or
+          // suggest) while this draft generated, or the mode lookup failed
+          // closed (mode_not_autosend). Only surface a card if the intent STILL
+          // wants human/auto handling — a now-shadow intent must stay silent.
+          // (Guard/duplicate misses already stayed shadow above.)
+          const fallbackMode = await suggestMode.resolveDeliveryMode({
             reply: parsed.reply,
+            customerId: customer?.id || null,
+            smsLogId: smsLogId || null,
             intent: intentName,
-            confidence: intent?.confidence ?? null,
-            model: MODELS.FLAGSHIP,
-            promptVersion: PROMPT_VERSION,
+            schedulingIntent,
           });
-          if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+          if (fallbackMode === 'suggest' || fallbackMode === suggestMode.AUTO_SEND_MODE) {
+            const decisionId = await suggestMode.publishSuggestion({
+              draftId: row.id,
+              customerId: customer.id,
+              smsLogId,
+              inboundMessage,
+              reply: parsed.reply,
+              intent: intentName,
+              confidence: intent?.confidence ?? null,
+              model: MODELS.FLAGSHIP,
+              promptVersion: PROMPT_VERSION,
+            });
+            if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+          }
         }
       } else if (deliveryMode === 'suggest') {
         const decisionId = await suggestMode.publishSuggestion({
