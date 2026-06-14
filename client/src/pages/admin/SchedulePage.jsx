@@ -6271,6 +6271,29 @@ function TreeShrubCloseoutBlock({
   );
 }
 
+// Mirror of server `completion-recap.smsRecap` (server/services/completion-recap.js).
+// The stored recap is now full-length (so the service report reads completely),
+// and the dispatch/pest-recap SMS paths cap it to a sentence-complete ~232 chars
+// at send. The operator's SMS preview must show that SAME capped copy — otherwise
+// the tech approves a full recap while the customer receives the shortened one.
+// Keep this in lockstep with the server clamp.
+const SMS_RECAP_MAX_CHARS = 232;
+function smsRecapPreview(value) {
+  let text = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\s*-\s*Waves\s*$/i, "")
+    .trim();
+  if (text.length > SMS_RECAP_MAX_CHARS) {
+    const slice = text.slice(0, SMS_RECAP_MAX_CHARS);
+    const lastStop = Math.max(slice.lastIndexOf(". "), slice.lastIndexOf("! "), slice.lastIndexOf("? "));
+    text = lastStop >= Math.floor(SMS_RECAP_MAX_CHARS / 2)
+      ? slice.slice(0, lastStop + 1).trim()
+      : slice.replace(/\s+\S*$/, "").trim();
+  }
+  return text ? `${text} - Waves` : "";
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -6577,7 +6600,7 @@ export function CompletionPanel({
     effectiveSendSms &&
     (oneTimeRecapOnly || reviewTiming === "now");
   const smsPreview = [
-    customerRecap.trim(),
+    smsRecapPreview(customerRecap),
     !isIncompleteVisit && willSendPayLink ? "[pay link inserted]" : "",
     reviewSendsWithCompletionSms ? "[review link inserted]" : "",
   ]
