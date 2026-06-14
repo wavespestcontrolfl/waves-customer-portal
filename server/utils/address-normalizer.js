@@ -12,6 +12,79 @@ const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
   'space', 'ste', 'suite', 'unit',
 ]);
+const STREET_SUFFIX_ALIASES = {
+  street: 'ST',
+  st: 'ST',
+  avenue: 'AVE',
+  ave: 'AVE',
+  road: 'RD',
+  rd: 'RD',
+  drive: 'DR',
+  dr: 'DR',
+  boulevard: 'BLVD',
+  blvd: 'BLVD',
+  lane: 'LN',
+  ln: 'LN',
+  court: 'CT',
+  ct: 'CT',
+  circle: 'CIR',
+  cir: 'CIR',
+  way: 'WAY',
+  place: 'PL',
+  pl: 'PL',
+  terrace: 'TER',
+  ter: 'TER',
+  trail: 'TRL',
+  trl: 'TRL',
+  parkway: 'PKWY',
+  pkwy: 'PKWY',
+  highway: 'HWY',
+  hwy: 'HWY',
+  loop: 'LOOP',
+  pass: 'PASS',
+  path: 'PATH',
+  run: 'RUN',
+  walk: 'WALK',
+  point: 'PT',
+  pt: 'PT',
+  cove: 'CV',
+  cv: 'CV',
+  beach: 'BCH',
+  bch: 'BCH',
+  harbor: 'HBR',
+  hbr: 'HBR',
+  shore: 'SHR',
+  shores: 'SHRS',
+  isle: 'ISLE',
+  island: 'IS',
+  islands: 'ISS',
+  key: 'KY',
+  keys: 'KYS',
+  causeway: 'CSWY',
+  cswy: 'CSWY',
+  crossing: 'XING',
+  xing: 'XING',
+  plaza: 'PLZ',
+  plz: 'PLZ',
+  ridge: 'RDG',
+  rdg: 'RDG',
+  glen: 'GLN',
+  glens: 'GLNS',
+  green: 'GRN',
+  greens: 'GRNS',
+  grove: 'GRV',
+  groves: 'GRVS',
+  lake: 'LK',
+  lakes: 'LKS',
+  estate: 'EST',
+  estates: 'ESTS',
+  manor: 'MNR',
+  manors: 'MNRS',
+  village: 'VLG',
+  villages: 'VLGS',
+  vista: 'VIS',
+  vis: 'VIS',
+};
 const US_STATE_ABBREVIATIONS = {
   alabama: 'AL',
   alaska: 'AK',
@@ -104,6 +177,29 @@ function titleCaseWords(value) {
     .filter(Boolean)
     .map(titleToken)
     .join(' ');
+}
+
+function normalizeStreetLine(value) {
+  const tokens = titleCaseWords(value).split(' ').filter(Boolean);
+  if (!tokens.length) return '';
+
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    const key = tokens[i].replace(/[.,]/g, '').toLowerCase();
+    const alias = STREET_SUFFIX_ALIASES[key];
+    if (!alias) continue;
+
+    const tail = tokens.slice(i + 1);
+    const suffixIsTerminal = tail.length === 0;
+    const suffixBeforeDirection = tail.length > 0 && tail.every((token) => DIRECTIONALS.has(token.replace(/[.,]/g, '').toLowerCase()));
+    const nextToken = tail[0]?.replace(/[.,]/g, '').toLowerCase() || '';
+    const suffixBeforeUnit = !!tail[0] && (tail[0].startsWith('#') || UNIT_DESIGNATORS.has(nextToken));
+    if (!suffixIsTerminal && !suffixBeforeDirection && !suffixBeforeUnit) continue;
+
+    tokens[i] = titleToken(alias);
+    break;
+  }
+
+  return tokens.join(' ');
 }
 
 function normalizeState(value) {
@@ -226,7 +322,7 @@ function parseRawAddress(raw) {
   }
 
   return {
-    line1: titleCaseWords(line1),
+    line1: normalizeStreetLine(line1),
     city: titleCaseWords(city),
     state: state || '',
     zip,
@@ -238,7 +334,7 @@ function normalizeLeadAddress(input = {}) {
   const raw = cleanString(input.raw || input.address || components.formatted);
   const parsed = parseRawAddress(raw);
 
-  const line1 = titleCaseWords(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
+  const line1 = normalizeStreetLine(input.line1 || input.addressLine1 || input.address_line1 || components.line1 || parsed.line1);
   const city = titleCaseWords(input.city || components.city || parsed.city);
   const state = normalizeState(input.state || components.state || parsed.state || 'FL') || 'FL';
   const zip = normalizeZip(input.zip || components.zip || parsed.zip);
@@ -262,5 +358,7 @@ function normalizeLeadAddress(input = {}) {
 
 module.exports = {
   normalizeLeadAddress,
+  normalizeStreetLine,
   parseRawAddress,
+  STREET_SUFFIX_ALIASES,
 };

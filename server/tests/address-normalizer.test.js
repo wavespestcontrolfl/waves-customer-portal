@@ -4,11 +4,11 @@ describe('address normalizer', () => {
   test('splits the malformed Bill Waterman Parrish address into street/city/state/zip', () => {
     expect(normalizeLeadAddress({ raw: '17394 whiskey creek trail PArrish FL 34219' })).toMatchObject({
       raw: '17394 whiskey creek trail PArrish FL 34219',
-      line1: '17394 Whiskey Creek Trail',
+      line1: '17394 Whiskey Creek Trl',
       city: 'Parrish',
       state: 'FL',
       zip: '34219',
-      fullAddress: '17394 Whiskey Creek Trail, Parrish, FL 34219',
+      fullAddress: '17394 Whiskey Creek Trl, Parrish, FL 34219',
     });
   });
 
@@ -20,6 +20,23 @@ describe('address normalizer', () => {
       zip: '34219',
       fullAddress: '17394 Whiskey Crk Trl, Parrish, FL 34219',
     });
+  });
+
+  test('stores Terrace suffix as Ter for call/customer address consistency', () => {
+    expect(normalizeLeadAddress({ raw: '6905 Cumberland Terrace, Sarasota, FL 34243' })).toMatchObject({
+      line1: '6905 Cumberland Ter',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34243',
+      fullAddress: '6905 Cumberland Ter, Sarasota, FL 34243',
+    });
+  });
+
+  test('normalizes common terminal street suffix aliases', () => {
+    expect(normalizeLeadAddress({ raw: '123 Palm Avenue, Sarasota, FL 34236' }).line1).toBe('123 Palm Ave');
+    expect(normalizeLeadAddress({ raw: '456 Harbor Road, Sarasota, FL 34236' }).line1).toBe('456 Harbor Rd');
+    expect(normalizeLeadAddress({ raw: '789 Ridge Parkway, Sarasota, FL 34236' }).line1).toBe('789 Ridge Pkwy');
+    expect(normalizeLeadAddress({ raw: '101 Shore Dr., Sarasota, FL 34236' }).line1).toBe('101 Shore Dr');
   });
 
   test('prefers structured Google address components over raw typed text', () => {

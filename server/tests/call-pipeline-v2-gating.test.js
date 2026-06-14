@@ -885,6 +885,10 @@ describe('hasNameEmailMismatch', () => {
     expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'johnnyc@x.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Bob', last_name: null, email: 'bobfitness@x.com' })).toBe(false);
   });
+  test('terminal-e first-name spelling drift does not false-flag Ronni/Ronnie style emails', () => {
+    expect(hasNameEmailMismatch({ first_name: 'Ronni', last_name: null, email: 'ronnir@alum.mit.edu' })).toBe(false);
+    expect(hasNameEmailMismatch({ first_name: 'Ronnie', last_name: null, email: 'ronnir@alum.mit.edu' })).toBe(false);
+  });
   test('delimited role-mailbox segment is not a foreign name (Codex P2 — office.john@)', () => {
     expect(hasNameEmailMismatch({ first_name: 'John', last_name: 'Smith', email: 'office.john@x.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Maria', last_name: 'Rodriguez', email: 'sales.maria@x.com' })).toBe(false);

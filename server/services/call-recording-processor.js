@@ -357,6 +357,7 @@ const PRE_SLAB_NOT_YET_RE = /\b(?:not|without)\b.{0,40}\b(?:pre[-\s]?slab|presla
 const GENERIC_TERMITE_NEGATION_RE = /\b(?:no|without)\s+(?:active\s+)?termites?\b|\b(?:not|isn't|is not|wasn't|was not)\b[^.;,]{0,30}\btermites?\b|\btermites?\b[^.;,]{0,25}\b(?:isn't|is not|wasn't|was not|not (?:active|present|found|seen|an? issue|a problem)|no (?:activity|signs?|evidence|issue|problem|concern))\b/i;
 const POSITIVE_TERMITE_REQUEST_RE = /\btermite\s+(?:inspection|treatment|service)\b|\b(?:inspect(?:ion)?|treat(?:ment)?)\s+(?:for\s+)?termites?\b|\b(?:needs?|wants?|looking for|asked for|request(?:ed|ing)?|schedule|scheduled|book|booking|booked)\b.{0,50}\btermites?\b/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GENERIC_CALL_APPOINTMENT_SERVICE = 'Waves Appointment';
 
 function compactText(...parts) {
   return parts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
@@ -470,6 +471,18 @@ function hasFieldServiceRequestText(extracted = {}, value = '') {
 function hasFieldVisitIntent(extracted = {}, value = '') {
   if (hasFieldServiceRequestIntent(extracted, value)) return true;
   return NEW_FIELD_VISIT_INTENT_RE.test(String(value || ''));
+}
+
+function hasConfirmedGenericAppointment(extracted = {}, value = '') {
+  if (!extracted.appointment_confirmed || !extracted.preferred_date_time) return false;
+  const text = String(value || '');
+  if (!text.trim()) return false;
+  if (ADMIN_DOC_REQUEST_RE.test(text) || ADMIN_PAYMENT_REQUEST_RE.test(text)) return false;
+  if (ADMIN_FOLLOWUP_CONTEXT_RE.test(text) && !NEW_FIELD_VISIT_INTENT_RE.test(text)) return false;
+  return NEW_FIELD_VISIT_INTENT_RE.test(text)
+    || CONFIRMED_TIME_LOGISTICS_RE.test(text)
+    || /\b(?:appointment|visit|service call|schedule|scheduled|scheduling|booked|booking|set up|come out|tech|technician)\b/i.test(text)
+    || /\bput\s+(?:me|us|him|her|them|it)\s+down\b/i.test(text);
 }
 
 function hasAdministrativeOnlyContext(value, extracted = {}) {
@@ -683,6 +696,9 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   const service = shouldUsePreSlabDetail
     ? detailService
     : (shouldUseHistoryService ? historyService : (matchedService || requestedService || detailService));
+  if (!service && hasConfirmedGenericAppointment(extracted, fullContextText)) {
+    return { ok: true, reason: null, service: GENERIC_CALL_APPOINTMENT_SERVICE };
+  }
   if (!service) return { ok: false, reason: 'unsupported_service', service: null };
   return { ok: true, reason: null, service };
 }

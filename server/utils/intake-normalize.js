@@ -1,5 +1,6 @@
 const { normalizeEmail, collapseWhitespace } = require('./contact-normalize');
 const { toE164 } = require('./phone');
+const { normalizeStreetLine } = require('./address-normalizer');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -92,7 +93,7 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     last_name: cleanNullableText(source.last_name),
     email: cleanValidEmailOrNull(source.email),
     phone: normalizedPhone || null,
-    address_line1: cleanNullableText(source.address_line1),
+    address_line1: cleanNullableText(normalizeStreetLine(source.address_line1)),
     city: cleanNullableText(source.city),
     state: normalizeCallState(source.state),
     zip: normalizeZip(source.zip),

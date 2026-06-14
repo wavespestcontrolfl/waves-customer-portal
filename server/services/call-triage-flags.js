@@ -23,6 +23,20 @@ const NON_NAME_EMAIL_AFFIXES = new Set([
   'online', 'here', 'only', 'usa', 'dev', 'biz', 'llc', 'inc', 'mail', 'email',
 ]);
 
+function nameTokenMatchesEmailLocal(token, local) {
+  const t = String(token || '').replace(/[^a-z]/g, '');
+  if (t.length < 3) return false;
+  if (local.includes(t)) return true;
+
+  // Common spoken/extracted spelling drift: Ronni is often extracted as
+  // Ronnie, while the email local-part remains ronnir (first name + initial).
+  if (t.length >= 5 && t.endsWith('e') && local.startsWith(t.slice(0, -1))) {
+    return true;
+  }
+
+  return false;
+}
+
 // Detects when the extracted caller name is NOT corroborated by the email's
 // local-part — e.g. spoken "Jeanette" with email gennettryan@ (really Ryan
 // Gennett). We do NOT guess the right name (email-based inference is
@@ -55,7 +69,7 @@ function hasNameEmailMismatch(caller = {}) {
   )];
   if (tokens.length === 0) return false;          // no usable name to check
 
-  const present = tokens.filter((t) => local.includes(t));
+  const present = tokens.filter((t) => nameTokenMatchesEmailLocal(t, local));
 
   // (1) Not one extracted name token appears anywhere → uncorroborated name.
   // This is what caught the real incident (spoken "Jeanette", surname extracted
@@ -78,7 +92,7 @@ function hasNameEmailMismatch(caller = {}) {
       .filter((seg) => seg.length >= 4
         && !NON_NAME_EMAIL_AFFIXES.has(seg)
         && !GENERIC_EMAIL_LOCALPARTS.has(seg)) // a delimited role mailbox (office.john@) is not a name
-      .some((seg) => !tokens.some((t) => seg.includes(t) || t.includes(seg)));
+      .some((seg) => !tokens.some((t) => nameTokenMatchesEmailLocal(t, seg) || seg.includes(t) || t.includes(seg)));
     if (foreignSegment) return true;
   }
   return false;

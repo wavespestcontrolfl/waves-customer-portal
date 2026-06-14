@@ -798,7 +798,7 @@ describe('call recording appointment guardrails', () => {
     })).toMatchObject({ ok: true, service: 'Rodent Control' });
   });
 
-  test('does not use service history when the call has no explicit history reference', () => {
+  test('uses a generic Waves Appointment for broad confirmed scheduling without service-history inference', () => {
     expect(resolveSchedulableCallService({
       matched_service: null,
       requested_service: null,
@@ -814,8 +814,8 @@ describe('call recording appointment guardrails', () => {
         scheduledServices: [],
       },
     })).toMatchObject({
-      ok: false,
-      reason: 'unsupported_service',
+      ok: true,
+      service: 'Waves Appointment',
     });
   });
 
