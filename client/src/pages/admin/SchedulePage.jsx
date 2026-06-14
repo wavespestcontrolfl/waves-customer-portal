@@ -6980,6 +6980,15 @@ export function CompletionPanel({
     }
   }, [structuredCloseoutRequired, quickComplete]);
 
+  // A flagged lawn visit requires a turf-height reading the server enforces, so
+  // Quick complete (which hides the capture) can't apply — force it off so the
+  // tech always sees the required field (mirrors structuredCloseoutRequired).
+  useEffect(() => {
+    if (isLawn && turfHeightFlag && quickComplete) {
+      setQuickComplete(false);
+    }
+  }, [isLawn, turfHeightFlag, quickComplete]);
+
   // Lock body+html scroll while the panel is mounted. The panel is portaled
   // to document.body so its position:fixed overlay isn't trapped inside the
   // admin shell's -webkit-overflow-scrolling: touch container (iOS Safari

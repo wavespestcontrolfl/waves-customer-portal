@@ -17,8 +17,8 @@ exports.up = async function up(knex) {
     t.uuid('customer_id').notNullable()
       .references('id').inTable('customers');
     t.text('grass_type').notNullable();                 // canonical key snapshot
-    t.decimal('manual_height_in', 3, 1).notNullable();  // gauge reading, source of truth
-    t.decimal('ocr_height_in', 3, 1);                   // dual-model consensus (PR2)
+    t.decimal('manual_height_in', 4, 2).notNullable();  // gauge reading (¼" steps), source of truth
+    t.decimal('ocr_height_in', 4, 2);                   // dual-model consensus (PR2)
     t.jsonb('ocr_models');                              // [{model,height_in,confidence,readable}]
     t.decimal('ocr_confidence', 3, 2);                 // 0..1 consensus confidence
     t.text('verification_status').notNullable().defaultTo('pending'); // pending|verified|discrepancy|ocr_failed

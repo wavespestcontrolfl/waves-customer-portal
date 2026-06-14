@@ -2828,19 +2828,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
 
-        // Turf height reading — bundled with completion in an isolated SAVEPOINT
-        // (nested trx). On success it commits atomically with the record; on any
-        // error ROLLBACK TO SAVEPOINT discards just the reading so the billing
-        // commit is never poisoned (the gate already validated the data; a
-        // failure here is logged + backfillable). OCR (PR2) fills ocr_* later.
+        // Turf height reading. The READING itself is REQUIRED, so it goes in the
+        // outer completion txn (atomic) — a persistence failure aborts completion
+        // (the existing catch cleans up + the tech retries) rather than silently
+        // completing without the required reading. The OPTIONAL gauge photo runs
+        // in its own SAVEPOINT so a photo/S3 failure can't block the reading; its
+        // uploaded row is registered for cleanup if the outer txn later aborts.
         if (turfHeightRequired && !turfHeightOverride && manualHeightIn != null) {
-          try {
-            await trx.transaction(async (sp) => {
-              const turfRow = await sp('customer_turf_profiles')
-                .where({ customer_id: svc.customer_id, active: true }).first();
-              // Gauge photo is OPTIONAL — upload + chain it only when provided.
-              let gaugePhotoId = null;
-              if (gaugePhoto) {
+          const turfRow = await trx('customer_turf_profiles')
+            .where({ customer_id: svc.customer_id, active: true }).first();
+          let gaugePhotoId = null;
+          if (gaugePhoto) {
+            try {
+              await trx.transaction(async (sp) => {
                 const gaugeUpload = await uploadServicePhotoDataUrls({
                   serviceRecordId: record.id,
                   photos: [gaugePhoto],
@@ -2848,19 +2848,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                   knex: sp,
                 });
                 gaugePhotoId = gaugeUpload?.photos?.[0]?.id || null;
-              }
-              await createTurfHeightReading(sp, {
-                serviceRecordId: record.id,
-                customerId: svc.customer_id,
-                grassType: turfRow?.grass_type || 'unknown',
-                manualHeightIn,
-                gaugePhotoId,
-                createdBy: req.technicianId,
+                if (gaugeUpload?.photos?.length) {
+                  preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(gaugeUpload.photos);
+                }
               });
-            });
-          } catch (thErr) {
-            logger.warn(`[turf-height] reading skipped for service=${req.params.serviceId}: ${thErr.message}`);
+            } catch (photoErr) {
+              gaugePhotoId = null; // optional — never block the required reading
+              logger.warn(`[turf-height] optional gauge photo skipped for service=${req.params.serviceId}: ${photoErr.message}`);
+            }
           }
+          await createTurfHeightReading(trx, {
+            serviceRecordId: record.id,
+            customerId: svc.customer_id,
+            grassType: turfRow?.grass_type || 'unknown',
+            manualHeightIn,
+            gaugePhotoId,
+            createdBy: req.technicianId,
+          });
         }
 
         // Typed activity score — in the same trx as the record so retries
