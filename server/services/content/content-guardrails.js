@@ -77,13 +77,48 @@ function escapeRegExp(value) {
 // must therefore count as hub-only, not multi-domain.
 const HUB_DOMAINS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
 
-function brandTokenFinding(body, domains) {
+// Markdown links whose href is the hub origin → their anchor TEXT may carry the
+// literal hub brand. This is the one intentional brand surface on a spoke blog
+// post: the contextual spoke→hub link uses a branded-local anchor like "Waves
+// Pest Control in Sarasota" (per content-ops/anchor-and-content-playbook.md).
+// Mirrors the Phase-1 Astro brand-isolation blog exemption. Returns the
+// [start,end) character ranges of those anchor texts.
+function hubLinkAnchorRanges(text) {
+  const ranges = [];
+  const linkRe = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  let m;
+  while ((m = linkRe.exec(text)) !== null) {
+    let host;
+    try { host = new URL(m[2]).hostname.toLowerCase(); } catch { continue; }
+    if (!HUB_DOMAINS.has(host) && !HUB_DOMAINS.has(host.replace(/^www\./, ''))) continue;
+    const anchorStart = m.index + 1; // skip the opening '['
+    ranges.push([anchorStart, anchorStart + m[1].length]);
+  }
+  return ranges;
+}
+
+// allowHubAnchor: the literal hub brand may appear ONLY as the anchor text of a
+// hub-pointing markdown link — the intentional branded-local spoke→hub anchor.
+// This exemption applies to BODY markdown only; editable meta (title/
+// description) is not rendered as a link, so it is scanned with no exemption
+// (any literal hub brand in a spoke's meta is a real leak).
+function brandTokenFinding(text, domains, { allowHubAnchor = false } = {}) {
   const list = (Array.isArray(domains) ? domains : [])
     .map((d) => String(d || '').trim().toLowerCase())
     .filter((d) => d && !HUB_DOMAINS.has(d)); // only spoke domains make it multi-domain
   if (list.length === 0) return null; // hub-only page — literal brand is fine
-  if (/\bWaves\s+Pest\s+Control\b/.test(String(body || ''))) {
-    return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" instead of the {{brandName}} token — brand leaks across spoke domains.');
+  const body = String(text || '');
+  if (!/\bWaves\s+Pest\s+Control\b/.test(body)) return null;
+  const allowed = allowHubAnchor ? hubLinkAnchorRanges(body) : [];
+  const brandRe = /\bWaves\s+Pest\s+Control\b/g;
+  let match;
+  while ((match = brandRe.exec(body)) !== null) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const insideHubAnchor = allowed.some(([a, b]) => a <= start && end <= b);
+    if (!insideHubAnchor) {
+      return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" outside a hub-link anchor instead of the {{brandName}} token — brand leaks across spoke domains.');
+    }
   }
   return null;
 }
@@ -205,9 +240,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   const publishableText = editableMeta ? `${body}\n${editableMeta}` : body;
 
   const findings = [
-    // Price + brand-token must cover everything that ships: body AND meta.
+    // Price must cover everything that ships: body AND meta.
     priceFinding(publishableText),
-    brandTokenFinding(publishableText, effectiveDomains),
+    // Brand-token covers body AND meta too, but the hub-anchor exemption applies
+    // ONLY to body markdown — editable meta is scanned strictly (a literal hub
+    // brand in a spoke's title/description is a real leak, not an anchor).
+    brandTokenFinding(body, effectiveDomains, { allowHubAnchor: true }),
+    editableMeta ? brandTokenFinding(editableMeta, effectiveDomains, { allowHubAnchor: false }) : null,
     // FAQ + keyword density are body-section concerns only.
     // operatorFaqException is a NARROW, opt-in override of the FAQ-blocked
     // policy: only the autonomous runner sets it, and only for an

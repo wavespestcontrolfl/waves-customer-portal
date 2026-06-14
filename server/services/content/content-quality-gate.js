@@ -420,6 +420,9 @@ function faqPolicyTopicFields(draft, brief) {
     brief?.customer_signal?.topic,
     draft?.frontmatter?.category,
     draft?.frontmatter?.tag,
+    // Spoke seeds carry the coarse 'pest' service (so link gates work) but tag
+    // a blocked pest topic here so the FAQ-blocked policy still applies.
+    brief?.voice_constraints?.operator_brief?.faq_blocked_topic,
   ];
 }
 
@@ -560,16 +563,35 @@ function checkHubLinkPresent(draft, brief) {
   // /termite-inspection/, rodent → /rodent-control/) must never fail the
   // gate for linking exactly where it was told to. Lazy require avoids any
   // load-order coupling with content-brief-builder.
+  // Spoke-seed / operator briefs carry a CURATED hub link (the most-relevant hub
+  // city/service page, e.g. /pest-control-sarasota-fl/) that is NOT in the fixed
+  // SERVICE_HUB_LINKS set. When present it is the AUTHORITATIVE backlink target
+  // for the post (the branded-local spoke→hub link is the contract), so REQUIRE
+  // exactly that link — a generic service link the brief also carries must not
+  // let the draft skip the curated backlink.
+  const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link;
+  if (curatedHubLink) {
+    return body.includes(String(curatedHubLink))
+      ? { ok: true }
+      : { ok: false, reason: 'no_curated_hub_link_found' };
+  }
   const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
   const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
-  if (!hubs.some((h) => body.includes(h))) {
-    return { ok: false, reason: 'no_hub_link_found' };
-  }
-  return { ok: true };
+  if (hubs.some((h) => body.includes(h))) return { ok: true };
+  return { ok: false, reason: 'no_hub_link_found' };
 }
 
-function checkTwoPlusCityMentions(draft) {
+function checkTwoPlusCityMentions(draft, brief) {
   const body = String(draft.body || '').toLowerCase();
+  // A spoke/operator brief targets ONE city — verify the post actually localizes
+  // to THAT city (the manifest requires it twice), not just any two SWFL cities
+  // (a Sarasota spoke post must not pass on Bradenton+Venice mentions alone).
+  const targetCity = String(brief?.voice_constraints?.operator_brief?.city || '').trim().toLowerCase();
+  if (targetCity) {
+    const re = new RegExp(`\\b${targetCity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+    const n = (body.match(re) || []).length;
+    return n >= 2 ? { ok: true } : { ok: false, reason: `only_${n}_${targetCity.replace(/\s+/g, '_')}_mentions` };
+  }
   const cities = ['bradenton', 'sarasota', 'venice', 'parrish', 'lakewood ranch', 'north port', 'palmetto', 'port charlotte'];
   let count = 0;
   for (const c of cities) {

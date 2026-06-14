@@ -470,6 +470,39 @@ describe('blog uniqueness gating', () => {
       else process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = prevUniq;
     }
   });
+
+  test('blog dedup corpus is network-wide — loads the entire blog/ collection (all spoke domains), never domain-filtered', async () => {
+    // Every spoke is a build of the single wavespestcontrol-astro repo, so all
+    // spoke-tagged posts live in the same src/content/blog/ directory. The dedup
+    // corpus must stay UNFILTERED by domain: a new spoke post is compared against
+    // hub posts AND sibling-spoke posts. If a future change scopes this corpus to
+    // the current build domain, cross-spoke / spoke-vs-hub near-duplicates would
+    // slip through silently — this test fails closed against that regression.
+    const prevAstroDir = process.env.ASTRO_REPO_DIR;
+    delete process.env.ASTRO_REPO_DIR; // force the production GitHub corpus loader path
+    try {
+      const linkPlanner = {
+        loadAstroCorpusFromGitHub: jest.fn().mockResolvedValue([
+          { file: 'src/content/blog/get-rid-of-cockroaches.md', body: 'Hub-tagged post body.', url: '/pest-control/get-rid-of-cockroaches/' },
+          { file: 'src/content/blog/german-roaches-sarasota-condos.md', body: 'Sarasota-spoke-tagged post body.', url: '/pest-control/german-roaches-sarasota-condos/' },
+        ]),
+      };
+      const runner = loadRunnerWith({ queue: {}, briefBuilder: {}, dispatcher: {}, linkPlanner });
+
+      const corpus = await runner._loadBlogCorpus({ required: true });
+
+      // The whole blog collection is requested — no per-domain filter argument.
+      expect(linkPlanner.loadAstroCorpusFromGitHub).toHaveBeenCalledWith({ collections: ['blog'] });
+      // Both the hub post and the spoke-tagged post are in the comparison set.
+      expect(corpus.map((p) => p.file)).toEqual(expect.arrayContaining([
+        'src/content/blog/get-rid-of-cockroaches.md',
+        'src/content/blog/german-roaches-sarasota-condos.md',
+      ]));
+    } finally {
+      if (prevAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
+      else process.env.ASTRO_REPO_DIR = prevAstroDir;
+    }
+  });
 });
 
 // ── isShadow per-action env mapping ─────────────────────────────────

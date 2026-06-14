@@ -40,6 +40,16 @@ class IndexNowSubmitter {
    */
   async submit(url, { force = false, fetchFn = fetch } = {}) {
     if (!url || typeof url !== 'string') return { ok: false, status: 'rejected', error: 'invalid url' };
+    // IndexNow requires every submitted URL to share the host of the key file.
+    // This submitter only holds the hub host + key, so a spoke URL
+    // (sarasotaflpestcontrol.com, …) would 422 ("URLs don't match host") and the
+    // spoke has no key file anyway. Skip cleanly — spoke posts are still
+    // discovered via their sitemap + normal crawl.
+    let urlHost = null;
+    try { urlHost = new URL(url).hostname.toLowerCase(); } catch { urlHost = null; }
+    if (urlHost && urlHost !== String(DEFAULT_HOST).toLowerCase()) {
+      return { ok: true, status: 'skipped', reason: 'host_mismatch', host: urlHost };
+    }
     if (!process.env.INDEXNOW_KEY) {
       return { ok: false, status: 'rejected', error: 'INDEXNOW_KEY not set' };
     }
