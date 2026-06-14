@@ -29,8 +29,11 @@ const GoogleAds = require('../services/ads/google-ads');
 
 const {
   buildMatches,
+  leadMatchPlan,
+  mainLine,
   normalizeGoogleCallRow,
   parseGoogleDateTime,
+  phoneLast10,
   phoneVariants,
   scoreCallMatch,
 } = GoogleCallBridge._private;
@@ -63,12 +66,36 @@ describe('Google Ads call reporting bridge', () => {
   });
 
   test('builds phone variants for matching the main 7612 line safely', () => {
+    expect(mainLine()).toEqual(expect.objectContaining({
+      number: '+19413187612',
+      label: expect.stringContaining('Lakewood Ranch GBP'),
+    }));
     expect(phoneVariants('+19413187612')).toEqual(expect.arrayContaining([
       '+19413187612',
       '19413187612',
       '9413187612',
       '(941) 318-7612',
     ]));
+  });
+
+  test('plans lead attribution by stable customer id or caller phone, not call SID', () => {
+    expect(leadMatchPlan({
+      customerId: 'customer-1',
+      fromPhone: '+19415550100',
+      twilioCallSid: 'mutable-follow-up-sid',
+    })).toEqual({
+      strategy: 'customer_id',
+      customerId: 'customer-1',
+    });
+
+    expect(phoneLast10('(941) 555-0100')).toBe('9415550100');
+    expect(leadMatchPlan({
+      fromPhone: '(941) 555-0100',
+      twilioCallSid: 'mutable-follow-up-sid',
+    })).toEqual({
+      strategy: 'phone_last10',
+      phoneLast10: '9415550100',
+    });
   });
 
   test('scores a strong Google Ads to Twilio call match', () => {

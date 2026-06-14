@@ -4,6 +4,7 @@ const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { parseETDateTime, etDateString, addETDays, formatETTime } = require('../../utils/datetime-et');
 
 const GOOGLE_ADS_BRIDGE_SOURCE_NAME = 'Google Ads - Call Reporting Bridge';
+const GOOGLE_ADS_BRIDGE_LOCATION_ID = 'bradenton';
 const MIN_AUTO_BRIDGE_CONFIDENCE = 70;
 const MAX_MATCH_WINDOW_MINUTES = 20;
 
@@ -12,11 +13,11 @@ function getGoogleAds() {
 }
 
 function mainLine() {
-  return TWILIO_NUMBERS.locations?.['lakewood-ranch'] || {
-    number: '+19413187612',
-    formatted: '(941) 318-7612',
-    label: 'Lakewood Ranch - HQ (Pest)',
-  };
+  const line = TWILIO_NUMBERS.locations?.[GOOGLE_ADS_BRIDGE_LOCATION_ID];
+  if (!line?.number) {
+    throw new Error(`Google Ads call bridge target is not configured: TWILIO_NUMBERS.locations.${GOOGLE_ADS_BRIDGE_LOCATION_ID}`);
+  }
+  return line;
 }
 
 function phoneDigits(value) {
@@ -48,6 +49,22 @@ function areaCode(value) {
   const digits = phoneDigits(value);
   const ten = digits.length >= 10 ? digits.slice(-10) : digits;
   return ten.length >= 3 ? ten.slice(0, 3) : null;
+}
+
+function phoneLast10(value) {
+  const digits = phoneDigits(value);
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+function leadMatchPlan(callLog) {
+  if (callLog?.customerId) {
+    return { strategy: 'customer_id', customerId: callLog.customerId };
+  }
+  const last10 = phoneLast10(callLog?.fromPhone);
+  if (last10) {
+    return { strategy: 'phone_last10', phoneLast10: last10 };
+  }
+  return null;
 }
 
 function parseGoogleDateTime(value) {
@@ -307,6 +324,24 @@ async function ensureBridgeLeadSource() {
   return source;
 }
 
+async function findLeadForCall(callLog) {
+  const plan = leadMatchPlan(callLog);
+  if (!plan) return null;
+
+  let query = db('leads').select('id');
+  if (plan.strategy === 'customer_id') {
+    query = query.where({ customer_id: plan.customerId });
+  } else {
+    query = query.whereRaw(
+      "RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+      [plan.phoneLast10],
+    );
+  }
+
+  const lead = await query.orderBy('created_at', 'desc').first();
+  return lead?.id ? { ...plan, leadId: lead.id } : null;
+}
+
 function summarize(matches, crmCalls) {
   return {
     googleCalls: matches.length,
@@ -369,6 +404,10 @@ async function applyBridge(options = {}) {
         reasons: match.reasons,
         bridgedAt: now.toISOString(),
       };
+      const leadMatch = await findLeadForCall(match.callLog);
+      if (leadMatch) {
+        bridgePayload.leadMatch = leadMatch;
+      }
 
       await db('call_log')
         .where({ id: match.callLog.id })
@@ -386,9 +425,9 @@ async function applyBridge(options = {}) {
           updated_at: now,
         });
 
-      if (match.callLog.twilioCallSid) {
+      if (leadMatch?.leadId) {
         await db('leads')
-          .where({ twilio_call_sid: match.callLog.twilioCallSid })
+          .where({ id: leadMatch.leadId })
           .update({
             lead_source_id: bridgeSource?.id,
             updated_at: now,
@@ -417,8 +456,12 @@ module.exports = {
   _private: {
     areaCode,
     buildMatches,
+    findLeadForCall,
+    leadMatchPlan,
+    mainLine,
     normalizeGoogleCallRow,
     parseGoogleDateTime,
+    phoneLast10,
     phoneVariants,
     scoreCallMatch,
     shapeCallLog,
