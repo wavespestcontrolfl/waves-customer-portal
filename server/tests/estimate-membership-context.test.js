@@ -8,7 +8,9 @@ const { computeMembershipContext } = require('../services/estimate-membership-co
 // Minimal chainable knex fake: every chain method returns the builder;
 // first()/select() resolve canned rows per table.
 function fakeDb({
-  customer = { id: 'cust-1', first_name: 'Don', active: true },
+  // An actual WaveGuard plan member (waveguard_tier set) — the existing-service
+  // tier math only applies to real members, never to a lead with a stray visit.
+  customer = { id: 'cust-1', first_name: 'Don', active: true, waveguard_tier: 'Bronze' },
   scheduledRows = [],
   paidInvoices = [],
   prepaidTerm = null,
@@ -105,6 +107,41 @@ describe('computeMembershipContext', () => {
     // and the WaveGuard setup fee are not suppressed by the existing-customer
     // guard in estimate-public / estimate-converter.
     const database = fakeDb({ scheduledRows: [] });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx).toMatchObject({ isExistingCustomer: false });
+    expect(ctx.existingServiceKeys).toEqual([]);
+  });
+
+  test('a "No Plan" customer with a pending recurring visit is NOT flagged existing', async () => {
+    // Regression (Cristina Lipham): a lead/one-time buyer whose initial pest
+    // service auto-scheduled a quarterly follow-up has a recurring qualifying
+    // scheduled_services row, but no WaveGuard plan tier. They must render as a
+    // NEW customer — $99 setup charged, annual prepay offered — not get the
+    // member treatment off a single scheduled visit.
+    const database = fakeDb({
+      customer: { id: 'cust-1', first_name: 'Cristina', active: true, waveguard_tier: null },
+      scheduledRows: futurePestRows(),
+    });
+
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    expect(ctx).toMatchObject({ isExistingCustomer: false });
+    expect(ctx.existingServiceKeys).toEqual([]);
+  });
+
+  test('a one-time tier ("One-Time") does not count as plan membership', async () => {
+    const database = fakeDb({
+      customer: { id: 'cust-1', first_name: 'Cristina', active: true, waveguard_tier: 'One-Time' },
+      scheduledRows: futurePestRows(),
+    });
 
     const ctx = await computeMembershipContext(database, {
       customerId: 'cust-1',

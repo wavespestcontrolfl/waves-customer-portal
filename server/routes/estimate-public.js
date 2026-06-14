@@ -24,6 +24,7 @@ const {
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
 const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
 const {
   ensureDepositSatisfied,
   resolveDepositPolicyForEstimate,
@@ -5448,12 +5449,58 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
     .send(renderPage(token, estimate, estData, membership, opts));
 }
 
+// Existing-customer estimate treatment — waived WaveGuard setup fee and no
+// annual-prepay option — is frozen onto the estimate as estimate_data
+// .membershipSnapshot at send-time. That treatment must only apply to customers
+// who actually hold a WaveGuard plan today. A frozen snapshot can go stale: a
+// lead whose initial service auto-scheduled a recurring follow-up was once
+// misclassified as "existing," or a member's plan lapsed. Re-check the live
+// plan status and drop a stale "existing customer" snapshot so the estimate
+// renders the correct new-customer pricing ($99 setup + annual prepay). Mutates
+// estimate.estimate_data in place so every downstream consumer
+// (buildEstimateMembershipContext, buildPricingBundle's annual-prepay gate, the
+// server-HTML renderPage) sees the reconciled value. Never throws.
+async function reconcileFrozenMembershipSnapshot(estimate) {
+  try {
+    if (!estimate || !estimate.customer_id) return;
+    // Never reconcile an accepted or price-locked estimate: that deal was
+    // committed at the send-time classification, so a later plan lapse must
+    // not retroactively change the terms the customer accepted.
+    if (estimate.status === 'accepted' || estimate.price_locked_at) return;
+    const isString = typeof estimate.estimate_data === 'string';
+    const estData = isString
+      ? JSON.parse(estimate.estimate_data)
+      : (estimate.estimate_data || null);
+    const snapshot = estData && estData.membershipSnapshot;
+    if (!snapshot || !snapshot.isExistingCustomer) return;
+    if (await isActivePlanCustomer(db, estimate.customer_id)) return;
+    // Drop every frozen artifact derived from the stale "existing customer"
+    // classification, not just the snapshot: priorQualifyingServices is
+    // re-injected by extractEngineInputs() on every recompute (keeping the
+    // combined-tier discount), and sendSnapshot.pricingBundle is consulted by
+    // buildPricingBundle() before the runtime cache (returning the old bundle
+    // with no waivable setup fee). Leaving either behind lets the lead keep
+    // member pricing / undercharge even after the snapshot is gone.
+    delete estData.membershipSnapshot;
+    delete estData.priorQualifyingServices;
+    invalidateSendSnapshotPricingBundle(estData);
+    estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
+    // The runtime pricing cache key ignores estimate_data content, so bust it
+    // here to force a fresh recompute with the new-customer setup fee + annual
+    // prepay restored.
+    clearEstimatePricingCache(estimate.id);
+  } catch (err) {
+    logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);
+  }
+}
+
 async function handleEstimateView(req, res, next) {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) {
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     // V2 gate — when this estimate's row has use_v2_view=true, or when it
     // uses customer options only implemented in the React view, skip the
@@ -5614,6 +5661,7 @@ router.put('/:token/accept', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    await reconcileFrozenMembershipSnapshot(estimate);
     if (estimate.status === 'accepted') return res.json({ success: true, alreadyAccepted: true });
     if (!isEstimateAcceptActive(estimate)) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
@@ -6634,6 +6682,9 @@ router.put('/:token/select-tier', async (req, res, next) => {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    // Reconcile before this handler recomputes + persists, so a stale
+    // "existing customer" classification isn't written back into estimate_data.
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     const { selectedTier } = req.body;
     const ALLOWED_TIERS = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -6725,6 +6776,9 @@ router.put('/:token/preferences', async (req, res, next) => {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    // Reconcile before this handler recomputes + persists, so a stale
+    // "existing customer" classification isn't written back into estimate_data.
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     // Only accept known pref keys; coerce to boolean.
     const patch = {};
@@ -9838,6 +9892,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
     // (filtered by shouldCountView). Defensive try/catch because schema
@@ -10050,6 +10105,12 @@ async function handleEstimateAsk(req, res, next) {
       return res.status(409).json({ error: 'estimate_expired' });
     }
 
+    // Self-heal a stale "existing customer" classification before the assistant
+    // reads estimate_data / pricing, so a misclassified No-Plan lead isn't told
+    // the setup is waived or annual prepay is unavailable while the page and
+    // accept flow self-correct.
+    await reconcileFrozenMembershipSnapshot(estimate);
+
     let estData = {};
     try {
       estData = typeof estimate.estimate_data === 'string'
@@ -10112,6 +10173,7 @@ module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmou
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
+module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;

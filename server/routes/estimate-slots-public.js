@@ -42,6 +42,7 @@ const {
   handleEstimateAsk,
   isEstimateAcceptActive,
   isStructuralOneTimeOnlyEstimate,
+  reconcileFrozenMembershipSnapshot,
   resolveAcceptOneTimeTotal,
   resolveEstimateQuoteRequirement,
   verifyEstimateAskToken,
@@ -320,6 +321,7 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     if (!estimate) return res.status(404).json({ error: 'Not found' });
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     const estData = parseEstimateData(estimate);
     const pricingBundle = await buildPricingBundle(estimate);
