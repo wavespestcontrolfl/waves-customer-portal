@@ -30,6 +30,7 @@ const GoogleAds = require('../services/ads/google-ads');
 const {
   buildMatches,
   leadMatchPlan,
+  leadTimeWindow,
   mainLine,
   normalizeGoogleCallRow,
   parseGoogleDateTime,
@@ -79,23 +80,32 @@ describe('Google Ads call reporting bridge', () => {
   });
 
   test('plans lead attribution by stable customer id or caller phone, not call SID', () => {
-    expect(leadMatchPlan({
+    const byCustomer = leadMatchPlan({
       customerId: 'customer-1',
       fromPhone: '+19415550100',
+      createdAt: '2026-06-12T14:31:00.000Z',
       twilioCallSid: 'mutable-follow-up-sid',
-    })).toEqual({
+    });
+
+    expect(byCustomer).toEqual(expect.objectContaining({
       strategy: 'customer_id',
       customerId: 'customer-1',
-    });
+    }));
+    expect(byCustomer.callAt.toISOString()).toBe('2026-06-12T14:31:00.000Z');
+    expect(byCustomer.startAt.toISOString()).toBe('2026-06-12T08:31:00.000Z');
+    expect(byCustomer.endAt.toISOString()).toBe('2026-06-12T20:31:00.000Z');
 
     expect(phoneLast10('(941) 555-0100')).toBe('9415550100');
     expect(leadMatchPlan({
       fromPhone: '(941) 555-0100',
+      createdAt: '2026-06-12T14:31:00.000Z',
       twilioCallSid: 'mutable-follow-up-sid',
-    })).toEqual({
+    })).toEqual(expect.objectContaining({
       strategy: 'phone_last10',
       phoneLast10: '9415550100',
-    });
+    }));
+    expect(leadTimeWindow({ createdAt: 'not-a-date' })).toBeNull();
+    expect(leadMatchPlan({ customerId: 'customer-1' })).toBeNull();
   });
 
   test('scores a strong Google Ads to Twilio call match', () => {

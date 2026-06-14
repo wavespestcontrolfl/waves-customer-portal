@@ -5,6 +5,7 @@ const { parseETDateTime, etDateString, addETDays, formatETTime } = require('../.
 
 const GOOGLE_ADS_BRIDGE_SOURCE_NAME = 'Google Ads - Call Reporting Bridge';
 const GOOGLE_ADS_BRIDGE_LOCATION_ID = 'bradenton';
+const LEAD_MATCH_WINDOW_HOURS = 6;
 const MIN_AUTO_BRIDGE_CONFIDENCE = 70;
 const MAX_MATCH_WINDOW_MINUTES = 20;
 
@@ -56,13 +57,26 @@ function phoneLast10(value) {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
+function leadTimeWindow(callLog) {
+  const callAt = callLog?.createdAt ? new Date(callLog.createdAt) : null;
+  if (!callAt || Number.isNaN(callAt.getTime())) return null;
+  const windowMs = LEAD_MATCH_WINDOW_HOURS * 60 * 60 * 1000;
+  return {
+    callAt,
+    startAt: new Date(callAt.getTime() - windowMs),
+    endAt: new Date(callAt.getTime() + windowMs),
+  };
+}
+
 function leadMatchPlan(callLog) {
+  const window = leadTimeWindow(callLog);
+  if (!window) return null;
   if (callLog?.customerId) {
-    return { strategy: 'customer_id', customerId: callLog.customerId };
+    return { strategy: 'customer_id', customerId: callLog.customerId, ...window };
   }
   const last10 = phoneLast10(callLog?.fromPhone);
   if (last10) {
-    return { strategy: 'phone_last10', phoneLast10: last10 };
+    return { strategy: 'phone_last10', phoneLast10: last10, ...window };
   }
   return null;
 }
@@ -338,7 +352,12 @@ async function findLeadForCall(callLog) {
     );
   }
 
-  const lead = await query.orderBy('created_at', 'desc').first();
+  const lead = await query
+    .where('first_contact_at', '>=', plan.startAt)
+    .where('first_contact_at', '<=', plan.endAt)
+    .orderByRaw('ABS(EXTRACT(EPOCH FROM (first_contact_at - ?::timestamptz))) ASC', [plan.callAt])
+    .orderBy('created_at', 'desc')
+    .first();
   return lead?.id ? { ...plan, leadId: lead.id } : null;
 }
 
@@ -458,6 +477,7 @@ module.exports = {
     buildMatches,
     findLeadForCall,
     leadMatchPlan,
+    leadTimeWindow,
     mainLine,
     normalizeGoogleCallRow,
     parseGoogleDateTime,
