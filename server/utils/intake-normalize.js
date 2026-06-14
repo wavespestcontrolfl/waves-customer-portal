@@ -15,6 +15,11 @@ function cleanNullableText(value) {
   return cleaned || null;
 }
 
+function normalizeNullableStreetLine(value) {
+  const cleaned = cleanNullableText(value);
+  return cleaned ? cleanNullableText(normalizeStreetLine(cleaned)) : null;
+}
+
 function cleanEmail(value) {
   if (typeof value !== 'string') return '';
   const email = normalizeEmail(value);
@@ -93,7 +98,7 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     last_name: cleanNullableText(source.last_name),
     email: cleanValidEmailOrNull(source.email),
     phone: normalizedPhone || null,
-    address_line1: cleanNullableText(normalizeStreetLine(source.address_line1)),
+    address_line1: normalizeNullableStreetLine(source.address_line1),
     city: cleanNullableText(source.city),
     state: normalizeCallState(source.state),
     zip: normalizeZip(source.zip),
