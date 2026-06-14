@@ -56,25 +56,34 @@ async function createTurfHeightReading(knex, {
   return reading;
 }
 
+// Fail-soft reads: wrapped in try/catch (not just .catch) so a synchronous
+// query-builder issue or a missing table can never crash report rendering.
+
 /** The reading for a single visit (report module + GET endpoint), or null. */
 async function getTurfHeightForVisit(serviceRecordId, knex = db) {
   if (!serviceRecordId) return null;
-  return knex('turf_height_readings')
-    .where({ service_record_id: serviceRecordId })
-    .first(READING_COLUMNS)
-    .catch(() => null);
+  try {
+    return await knex('turf_height_readings')
+      .where({ service_record_id: serviceRecordId })
+      .first(READING_COLUMNS);
+  } catch {
+    return null;
+  }
 }
 
 /** Ordered height history for a customer (trend sparkline). Newest first. */
 async function getTurfHeightTrend(customerId, limit = 12, knex = db) {
   if (!customerId) return [];
   const n = Math.min(Math.max(parseInt(limit, 10) || 12, 1), 60);
-  return knex('turf_height_readings')
-    .where({ customer_id: customerId })
-    .orderBy('measured_at', 'desc')
-    .limit(n)
-    .select('id', 'manual_height_in', 'range_status', 'target_min_in', 'target_max_in', 'measured_at')
-    .catch(() => []);
+  try {
+    return await knex('turf_height_readings')
+      .where({ customer_id: customerId })
+      .orderBy('measured_at', 'desc')
+      .limit(n)
+      .select('id', 'manual_height_in', 'range_status', 'target_min_in', 'target_max_in', 'measured_at');
+  } catch {
+    return [];
+  }
 }
 
 module.exports = {
