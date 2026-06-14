@@ -102,7 +102,7 @@ describe('intake contact normalization', () => {
     const extracted = normalizeCallExtraction({
       first_name: false,
       last_name: 0,
-      address_line1: true,
+      address_line1: { street: '123 Main Street' },
       city: 34239,
       state: false,
       zip: 34239,
@@ -118,6 +118,8 @@ describe('intake contact normalization', () => {
       zip: null,
       call_summary: null,
     });
+
+    expect(normalizeCallExtraction({ address_line1: true }).address_line1).toBeNull();
   });
 
   test('call extraction tolerates non-object JSON responses', () => {

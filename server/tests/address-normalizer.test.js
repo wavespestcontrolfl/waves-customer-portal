@@ -4,11 +4,11 @@ describe('address normalizer', () => {
   test('splits the malformed Bill Waterman Parrish address into street/city/state/zip', () => {
     expect(normalizeLeadAddress({ raw: '17394 whiskey creek trail PArrish FL 34219' })).toMatchObject({
       raw: '17394 whiskey creek trail PArrish FL 34219',
-      line1: '17394 Whiskey Creek Trail',
+      line1: '17394 Whiskey Creek Trl',
       city: 'Parrish',
       state: 'FL',
       zip: '34219',
-      fullAddress: '17394 Whiskey Creek Trail, Parrish, FL 34219',
+      fullAddress: '17394 Whiskey Creek Trl, Parrish, FL 34219',
     });
   });
 
@@ -19,6 +19,79 @@ describe('address normalizer', () => {
       state: 'FL',
       zip: '34219',
       fullAddress: '17394 Whiskey Crk Trl, Parrish, FL 34219',
+    });
+  });
+
+  test('stores Terrace suffix as Ter for call/customer address consistency', () => {
+    expect(normalizeLeadAddress({ raw: '6905 Cumberland Terrace, Sarasota, FL 34243' })).toMatchObject({
+      line1: '6905 Cumberland Ter',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34243',
+      fullAddress: '6905 Cumberland Ter, Sarasota, FL 34243',
+    });
+  });
+
+  test('normalizes common terminal street suffix aliases', () => {
+    expect(normalizeLeadAddress({ raw: '123 Palm Avenue, Sarasota, FL 34236' }).line1).toBe('123 Palm Ave');
+    expect(normalizeLeadAddress({ raw: '456 Harbor Road, Sarasota, FL 34236' }).line1).toBe('456 Harbor Rd');
+    expect(normalizeLeadAddress({ raw: '789 Ridge Parkway, Sarasota, FL 34236' }).line1).toBe('789 Ridge Pkwy');
+    expect(normalizeLeadAddress({ raw: '101 Shore Dr., Sarasota, FL 34236' }).line1).toBe('101 Shore Dr');
+    expect(normalizeLeadAddress({ raw: '202 Oak Grove, Sarasota, FL 34236' }).line1).toBe('202 Oak Grv');
+  });
+
+  test('splits comma-free addresses with suffix aliases introduced for normalization', () => {
+    expect(normalizeLeadAddress({ raw: '123 Harbor Point Sarasota FL 34236' })).toMatchObject({
+      line1: '123 Harbor Pt',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '123 Harbor Pt, Sarasota, FL 34236',
+    });
+    expect(normalizeLeadAddress({ raw: '456 Bay Causeway Sarasota FL 34236' })).toMatchObject({
+      line1: '456 Bay Cswy',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '456 Bay Cswy, Sarasota, FL 34236',
+    });
+  });
+
+  test('keeps city suffix words out of the street line for comma-free addresses', () => {
+    expect(normalizeLeadAddress({ raw: '123 Main Street Palm Harbor FL 34683' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Palm Harbor',
+      state: 'FL',
+      zip: '34683',
+      fullAddress: '123 Main St, Palm Harbor, FL 34683',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Key West FL 33040' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Key West',
+      state: 'FL',
+      zip: '33040',
+      fullAddress: '123 Main St, Key West, FL 33040',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Lake City FL 32025' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Lake City',
+      state: 'FL',
+      zip: '32025',
+      fullAddress: '123 Main St, Lake City, FL 32025',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Grove City FL 34224' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Grove City',
+      state: 'FL',
+      zip: '34224',
+      fullAddress: '123 Main St, Grove City, FL 34224',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Ridge Wood Heights FL 34231' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Ridge Wood Heights',
+      state: 'FL',
+      zip: '34231',
+      fullAddress: '123 Main St, Ridge Wood Heights, FL 34231',
     });
   });
 

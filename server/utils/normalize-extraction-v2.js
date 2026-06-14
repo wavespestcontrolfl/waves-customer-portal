@@ -1,5 +1,6 @@
 const { toE164 } = require('./phone');
 const { normalizeEmail, properCaseName, collapseWhitespace } = require('./contact-normalize');
+const { normalizeStreetLine } = require('./address-normalizer');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -53,7 +54,7 @@ function normalizeAddress(addr) {
   return {
     ...addr,
     raw_text: cleanText(addr.raw_text),
-    street_line_1: cleanText(addr.street_line_1),
+    street_line_1: cleanText(normalizeStreetLine(addr.street_line_1)),
     street_line_2: cleanText(addr.street_line_2),
     city: addr.city ? properCaseName(addr.city) : null,
     state: normalizeState(addr.state),

@@ -798,7 +798,7 @@ describe('call recording appointment guardrails', () => {
     })).toMatchObject({ ok: true, service: 'Rodent Control' });
   });
 
-  test('does not use service history when the call has no explicit history reference', () => {
+  test('uses a generic Waves Appointment for broad confirmed scheduling without service-history inference', () => {
     expect(resolveSchedulableCallService({
       matched_service: null,
       requested_service: null,
@@ -814,8 +814,29 @@ describe('call recording appointment guardrails', () => {
         scheduledServices: [],
       },
     })).toMatchObject({
+      ok: true,
+      service: 'Waves Appointment',
+    });
+  });
+
+  test('rejects unsupported transcript cues before generic Waves Appointment fallback', () => {
+    expect(resolveSchedulableCallService({
+      matched_service: null,
+      requested_service: null,
+      appointment_confirmed: true,
+      preferred_date_time: '2026-05-19T10:00',
+      call_summary: 'Caller asked to put them down Tuesday at 10.',
+    }, {
+      transcription: 'Caller: I want to schedule an SEO consultation for my construction company. Agent: I can put you down Tuesday at 10.',
+      customerServiceContext: {
+        estimates: [],
+        serviceRecords: [],
+        scheduledServices: [],
+      },
+    })).toMatchObject({
       ok: false,
       reason: 'unsupported_service',
+      service: null,
     });
   });
 

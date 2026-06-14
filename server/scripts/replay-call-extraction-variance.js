@@ -16,6 +16,8 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 
+const { normalizeStreetLine } = require('../utils/address-normalizer');
+
 const DEFAULT_LIMIT = 10;
 const DEFAULT_DAYS = 30;
 const DEFAULT_MIN_TRANSCRIPT_CHARS = 200;
@@ -199,6 +201,7 @@ function normalizeTime(value) {
 }
 
 function normalizeField(field, value) {
+  if (field === 'address_line1') return normalizeString(normalizeStreetLine(value));
   if (field === 'phone') return normalizePhone(value);
   if (field === 'email') return normalizeString(value);
   if (field === 'appointment_confirmed' || field === 'is_spam' || field === 'is_voicemail') return normalizeBool(value);
