@@ -780,7 +780,9 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
     weekendShift: 'forward',
     durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
   });
-  await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
+  if (opts.registerReminders !== false) {
+    await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
+  }
   return seedResult;
 }
 
@@ -805,6 +807,8 @@ const EstimateConverter = {
     // converter auto-pick the next feasible zone date. Self-accept paths
     // still auto-schedule when there's no reservation row.
     const skipAutoSchedule = opts.skipAutoSchedule === true;
+    const deferFollowUpReminderRegistration = opts.deferFollowUpReminderRegistration === true;
+    const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
     const estimate = await database('estimates').where({ id: estimateId }).first();
     if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
@@ -925,6 +929,7 @@ const EstimateConverter = {
     let scheduledCount = 0;
     let termStartDate = null;
     let firstScheduledServiceId = null;
+    const deferredFollowUpReminderRows = [];
     const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .whereNotNull('customer_id')
@@ -1021,7 +1026,11 @@ const EstimateConverter = {
           const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
           const seedResult = await seedRecurringFollowUpsForParent(database, reservedStart, seedSvc, {
             fallbackFrequency: inferredFrequencyKey,
+            registerReminders: !deferFollowUpReminderRegistration,
           });
+          if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
+            deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+          }
           scheduledCount += seedResult.insertedCount || 0;
         } catch (seedErr) {
           logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
@@ -1109,7 +1118,11 @@ const EstimateConverter = {
           try {
             const seedResult = await seedRecurringFollowUpsForParent(database, parentRow, svc, {
               fallbackFrequency: inferredFrequencyKey,
+              registerReminders: !deferFollowUpReminderRegistration,
             });
+            if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
+              deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+            }
             insertedFollowUps = seedResult.insertedCount || 0;
           } catch (seedErr) {
             logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
@@ -1172,6 +1185,7 @@ const EstimateConverter = {
             ? monthlyRate
             : Math.round((annualAmount / 12) * 100) / 100;
           const inv = await InvoiceService.create({
+            database,
             customerId,
             title: `WaveGuard ${tier || 'Bronze'} — Annual Prepay (12 months)`,
             lineItems: [{
@@ -1196,14 +1210,15 @@ const EstimateConverter = {
               monthlyRate: termMonthlyRate,
               prepayAmount: annualAmount,
               termStart: termStartDate || null,
+              conn: database,
             });
             if (!annualPrepayTerm?.id) {
-              throw new Error('annual prepay term was not created');
+              throw new Error('Annual prepay term was not created');
             }
             annualPrepayTermId = annualPrepayTerm.id;
           } catch (termErr) {
             logger.error(`[estimate-converter] Annual prepay term creation failed for estimate ${estimateId}: ${termErr.message}`);
-            if (draftInvoiceId) {
+            if (draftInvoiceId && !usingCallerDatabase) {
               try {
                 await InvoiceService.voidInvoice(draftInvoiceId);
               } catch (voidErr) {
@@ -1213,6 +1228,7 @@ const EstimateConverter = {
             draftInvoiceId = null;
             draftInvoiceAmount = null;
             draftInvoicePayUrl = null;
+            throw termErr;
           }
         } else {
           const firstApplicationAmount = standardFirstApplicationAmount;
@@ -1349,8 +1365,20 @@ const EstimateConverter = {
         }
       }
     } catch (err) {
-      // Don't let an invoice-creation failure block the conversion.
-      // The accept route will fall back to office follow-up if this misfires.
+      if (billingTerm === 'prepay_annual') {
+        logger.error(`[estimate-converter] Annual prepay invoice/term creation failed for estimate ${estimateId}: ${err.message}`);
+        if (draftInvoiceId && !usingCallerDatabase) {
+          try {
+            const InvoiceService = require('./invoice');
+            await InvoiceService.voidInvoice(draftInvoiceId);
+          } catch (voidErr) {
+            logger.error(`[estimate-converter] Failed to void incomplete annual prepay invoice ${draftInvoiceId}: ${voidErr.message}`);
+          }
+        }
+        throw err;
+      }
+      // Don't let standard setup invoice creation block the conversion.
+      // Virginia can manually draft the setup invoice if this misfires.
       logger.error(`[estimate-converter] Draft invoice creation failed for estimate ${estimateId}: ${err.message}`);
     }
 
@@ -1388,6 +1416,7 @@ const EstimateConverter = {
       draftInvoicePayUrl,
       invoiceDelivery,
       membershipEmail,
+      deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
     };

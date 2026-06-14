@@ -174,6 +174,18 @@ const sBadge = (bg, color) => ({
   fontWeight: 600,
   display: "inline-block",
 });
+
+function annualPrepayInvoiceLabel(inv = {}) {
+  const status = String(inv.annual_prepay_status || "").toLowerCase();
+  if (!status) return null;
+  if (status === "payment_pending") return "Annual prepay pending";
+  if (status === "active") return "Annual prepay active";
+  if (status === "renewal_pending") return "Annual prepay renewal";
+  if (status === "cancelled" || status === "canceled") return "Annual prepay cancelled";
+  if (status === "refunded") return "Annual prepay refunded";
+  return `Annual prepay ${status.replace(/_/g, " ")}`;
+}
+
 const sInput = (isMobile) => ({
   width: "100%",
   padding: isMobile ? "12px 14px" : "10px 12px",
@@ -1036,6 +1048,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                           {inv.waveguard_tier && (
                             <span style={sBadge(`${D.amber}22`, D.amber)}>
                               {inv.waveguard_tier}
+                            </span>
+                          )}
+                          {annualPrepayInvoiceLabel(inv) && (
+                            <span style={sBadge(
+                              inv.annual_prepay_status === "active" ? `${D.green}22` : `${D.amber}22`,
+                              inv.annual_prepay_status === "active" ? D.green : D.amber,
+                            )}>
+                              {annualPrepayInvoiceLabel(inv)}
+                              {inv.annual_prepay_term_end ? ` · through ${inv.annual_prepay_term_end}` : ""}
                             </span>
                           )}
                           {cardOnFile && canCollect && (

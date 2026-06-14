@@ -8,6 +8,8 @@ jest.mock('../services/account-membership-email', () => ({
 
 const AccountMembershipEmail = require('../services/account-membership-email');
 const {
+  hasManualAnnualPrepayRecurringRows,
+  isManualAnnualPrepayEligibleServiceMix,
   markEstimateManuallyAccepted,
 } = require('../services/estimate-manual-acceptance');
 
@@ -137,6 +139,208 @@ describe('estimate manual acceptance', () => {
     ]);
     expect(result.warnings).toEqual([]);
     expect(result.estimate.status).toBe('accepted');
+  });
+
+  test('manual annual prepay creates the annual draft invoice and pending term through the converter', async () => {
+    const estimate = {
+      id: 'estimate-annual-prepay',
+      status: 'viewed',
+      customer_id: 'customer-annual',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      declined_at: null,
+      decline_reason: null,
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '99.00',
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        recurring: {
+          services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }],
+        },
+      },
+    };
+    const { database, updates, inserts } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const membershipEmail = {
+      customerId: 'customer-annual',
+      sourceId: `estimate:${estimate.id}`,
+      membershipTier: 'Bronze',
+    };
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({
+        customerId: 'customer-annual',
+        billingTerm: 'prepay_annual',
+        draftInvoiceId: 'invoice-annual',
+        membershipEmail,
+      }),
+    };
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-annual',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService,
+      estimateConverter,
+    });
+
+    expect(updates[0].patch).toMatchObject({
+      status: 'accepted',
+      accepted_at: 'NOW',
+    });
+    expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, {
+      database,
+      skipAutoSchedule: true,
+      skipSetupInvoice: false,
+      skipMembershipEmail: true,
+      autoSendInvoice: false,
+      billingTerm: 'prepay_annual',
+      prepayInvoiceAmount: 660,
+    });
+    expect(inserts).toEqual([
+      expect.objectContaining({
+        table: 'activity_log',
+        row: expect.objectContaining({
+          admin_user_id: 'admin-annual',
+          action: 'estimate_manual_accept',
+          metadata: expect.stringContaining('"billingTerm":"prepay_annual"'),
+        }),
+      }),
+    ]);
+    expect(result.billingTerm).toBe('prepay_annual');
+    expect(result.conversion).toEqual(expect.objectContaining({
+      draftInvoiceId: 'invoice-annual',
+      billingTerm: 'prepay_annual',
+    }));
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
+  });
+
+  test('manual annual prepay rejects estimates without recurring value before marking accepted', async () => {
+    const estimate = {
+      id: 'estimate-no-recurring-prepay',
+      status: 'sent',
+      customer_id: 'customer-no-recurring',
+      monthly_total: '0.00',
+      annual_total: '0.00',
+      onetime_total: '250.00',
+      waveguard_tier: null,
+    };
+    const { database, updates, inserts } = makeDb(estimate);
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      estimateConverter: { convertEstimate: jest.fn() },
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Annual prepay requires a recurring estimate with a monthly or annual total.',
+    });
+
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
+  test('manual annual prepay rejects amount-only estimates without recurring rows', async () => {
+    const estimate = {
+      id: 'estimate-legacy-amount-only-prepay',
+      status: 'sent',
+      customer_id: 'customer-legacy',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '0.00',
+      estimate_data: { result: { onetime: { services: [{ service: 'pest_control' }] } } },
+    };
+    const { database, updates, inserts } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Annual prepay requires recurring service rows on the estimate.',
+    });
+
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
+  test('manual annual prepay rejects recurring mixes that public annual prepay would not allow', async () => {
+    const estimate = {
+      id: 'estimate-disallowed-prepay-mix',
+      status: 'sent',
+      customer_id: 'customer-disallowed',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      onetime_total: '0.00',
+      estimate_data: {
+        recurring: {
+          services: [{ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'monthly' }],
+        },
+      },
+    };
+    const { database, updates, inserts } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Annual prepay is not available for this estimate service mix.',
+    });
+
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
+
+  test('manual annual prepay rolls back when conversion does not create a draft invoice', async () => {
+    const estimate = {
+      id: 'estimate-annual-no-invoice',
+      status: 'viewed',
+      customer_id: 'customer-annual-no-invoice',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      monthly_total: '55.00',
+      annual_total: '660.00',
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }],
+          },
+        },
+      },
+    };
+    const { database } = makeDb(estimate);
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({ customerId: estimate.customer_id }),
+    };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 500,
+      message: 'Customer conversion did not complete; estimate was not marked accepted.',
+    });
+
+    expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, expect.objectContaining({
+      billingTerm: 'prepay_annual',
+      autoSendInvoice: false,
+    }));
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
   });
 
   test('repairs missing sent_at so manual wins have a funnel denominator', async () => {
@@ -395,5 +599,39 @@ describe('estimate manual acceptance', () => {
       estimateConverter: { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-10' }) },
     });
     expect(updates[0].patch.price_locked_at).toBe('2026-05-12T09:00:00.000Z');
+  });
+});
+
+describe('manual annual prepay recurring row detection', () => {
+  test('accepts current and nested recurring service shapes', () => {
+    expect(hasManualAnnualPrepayRecurringRows({
+      estimate_data: { recurring: { services: [{ service: 'pest_control' }] } },
+    })).toBe(true);
+    expect(hasManualAnnualPrepayRecurringRows({
+      estimate_data: { result: { recurring: { services: [{ service: 'lawn_care' }] } } },
+    })).toBe(true);
+    expect(hasManualAnnualPrepayRecurringRows({
+      estimate_data: { result: { results: { recurring: { services: [{ service: 'termite_bait' }] } } } },
+    })).toBe(true);
+    expect(hasManualAnnualPrepayRecurringRows({
+      estimate_data: { services: [{ service: 'pest_control', frequency: 'quarterly' }] },
+    })).toBe(true);
+  });
+
+  test('rejects amount-only one-time shapes', () => {
+    expect(hasManualAnnualPrepayRecurringRows({
+      estimate_data: { result: { onetime: { services: [{ service: 'pest_control' }] } } },
+    })).toBe(false);
+  });
+});
+
+describe('manual annual prepay public eligibility reuse', () => {
+  test('uses the same service-mix eligibility as public acceptance', () => {
+    expect(isManualAnnualPrepayEligibleServiceMix({
+      estimate_data: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] } },
+    })).toBe(true);
+    expect(isManualAnnualPrepayEligibleServiceMix({
+      estimate_data: { recurring: { services: [{ service: 'tree_shrub', name: 'Tree & Shrub Care' }] } },
+    })).toBe(false);
   });
 });

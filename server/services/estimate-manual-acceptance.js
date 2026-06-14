@@ -14,6 +14,53 @@ function asMoneyOrNull(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function normalizeManualBillingTerm(value) {
+  return value === 'prepay_annual' ? 'prepay_annual' : 'standard';
+}
+
+function resolveAnnualPrepayAmount(estimate = {}) {
+  const annual = asMoneyOrNull(estimate.annual_total);
+  if (annual) return Math.round(annual * 100) / 100;
+  const monthly = asMoneyOrNull(estimate.monthly_total);
+  return monthly ? Math.round(monthly * 12 * 100) / 100 : null;
+}
+
+function parseEstimateData(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
+  return value && typeof value === 'object' ? value : {};
+}
+
+function hasManualAnnualPrepayRecurringRows(estimate = {}) {
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  const explicitRecurringLists = [
+    data.recurring?.services,
+    data.result?.recurring?.services,
+    data.result?.results?.recurring?.services,
+  ];
+  if (explicitRecurringLists.some((list) => Array.isArray(list) && list.length > 0)) {
+    return true;
+  }
+  return Array.isArray(data.services)
+    && data.services.some((svc) => svc?.recurring || svc?.frequency);
+}
+
+function isManualAnnualPrepayEligibleServiceMix(estimate = {}) {
+  const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  const {
+    acceptanceServiceLists,
+    isAnnualPrepayEligibleServiceMix,
+  } = require('../routes/estimate-public');
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(data);
+  return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+}
+
 function httpError(message, statusCode = 400) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -25,6 +72,7 @@ async function logManualAcceptance(database, {
   updatedEstimate,
   adminUserId,
   source,
+  billingTerm,
 }) {
   try {
     await database('activity_log').insert({
@@ -35,6 +83,7 @@ async function logManualAcceptance(database, {
       description: `Estimate manually marked accepted (${source || 'verbal_yes'}).`,
       metadata: JSON.stringify({
         source: source || 'verbal_yes',
+        billingTerm: billingTerm || 'standard',
         previousStatus: estimate.status,
         previousAcceptedAt: estimate.accepted_at || null,
       }),
@@ -48,11 +97,14 @@ async function markEstimateManuallyAccepted({
   estimateId,
   adminUserId,
   source = 'verbal_yes',
+  billingTerm = 'standard',
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
 } = {}) {
   if (!estimateId) throw httpError('estimateId is required', 400);
+  const normalizedBillingTerm = normalizeManualBillingTerm(billingTerm);
+  const annualPrepaySelected = normalizedBillingTerm === 'prepay_annual';
 
   const claim = await database.transaction(async (trx) => {
     const estimate = await trx('estimates').where({ id: estimateId }).first();
@@ -98,6 +150,17 @@ async function markEstimateManuallyAccepted({
       );
     }
 
+    const annualPrepayAmount = annualPrepaySelected ? resolveAnnualPrepayAmount(estimate) : null;
+    if (annualPrepaySelected && !annualPrepayAmount) {
+      throw httpError('Annual prepay requires a recurring estimate with a monthly or annual total.', 400);
+    }
+    if (annualPrepaySelected && !hasManualAnnualPrepayRecurringRows(estimate)) {
+      throw httpError('Annual prepay requires recurring service rows on the estimate.', 400);
+    }
+    if (annualPrepaySelected && !isManualAnnualPrepayEligibleServiceMix(estimate)) {
+      throw httpError('Annual prepay is not available for this estimate service mix.', 400);
+    }
+
     const now = trx.fn.now();
     const updates = {
       status: 'accepted',
@@ -133,23 +196,31 @@ async function markEstimateManuallyAccepted({
       updatedEstimate,
       adminUserId,
       source,
+      billingTerm: normalizedBillingTerm,
     });
 
     let conversion = null;
-    if (asMoneyOrNull(updatedEstimate.monthly_total)) {
+    if (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected) {
       try {
-        // Mark Won skips both side effects the converter would normally do
-        // on a customer-facing accept: no auto-scheduled visit and no
-        // draft setup-fee invoice. Adam wants to control scheduling on
-        // the calendar and invoice manually when the verbal yes converts
-        // to a real start. Customer flips to active_customer + tier +
-        // monthly_rate still land — those are pure data updates.
-        conversion = await estimateConverter.convertEstimate(updatedEstimate.id, {
+        // Manual Mark Won keeps scheduling under operator control. Standard
+        // verbal wins also skip the setup invoice. Annual-prepay verbal wins
+        // intentionally create the annual draft invoice + pending term so
+        // billing/renewal state matches the customer's commitment.
+        const convertOptions = {
           database: trx,
           skipAutoSchedule: true,
-          skipSetupInvoice: true,
           skipMembershipEmail: true,
-        });
+          skipSetupInvoice: !annualPrepaySelected,
+        };
+        if (annualPrepaySelected) {
+          convertOptions.billingTerm = 'prepay_annual';
+          convertOptions.prepayInvoiceAmount = annualPrepayAmount;
+          convertOptions.autoSendInvoice = false;
+        }
+        conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
+        if (annualPrepaySelected && !conversion?.draftInvoiceId) {
+          throw new Error('Annual prepay invoice was not created');
+        }
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] EstimateConverter failed for estimate ${updatedEstimate.id}: ${err.message}`);
         throw httpError('Customer conversion did not complete; estimate was not marked accepted.', 500);
@@ -188,7 +259,7 @@ async function markEstimateManuallyAccepted({
       warnings.push('Linked lead was not marked won automatically.');
     }
 
-    if (conversion?.membershipEmail) {
+    if (normalizedBillingTerm !== 'prepay_annual' && conversion?.membershipEmail) {
       void AccountMembershipEmail.sendMembershipStarted(conversion.membershipEmail)
         .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${acceptedEstimate.id}: ${err.message}`));
     }
@@ -198,6 +269,7 @@ async function markEstimateManuallyAccepted({
     estimate: acceptedEstimate,
     alreadyAccepted,
     conversion,
+    billingTerm: normalizedBillingTerm,
     warnings,
   };
 }
@@ -205,4 +277,8 @@ async function markEstimateManuallyAccepted({
 module.exports = {
   MANUAL_ACCEPTABLE_STATUSES,
   markEstimateManuallyAccepted,
+  normalizeManualBillingTerm,
+  resolveAnnualPrepayAmount,
+  hasManualAnnualPrepayRecurringRows,
+  isManualAnnualPrepayEligibleServiceMix,
 };

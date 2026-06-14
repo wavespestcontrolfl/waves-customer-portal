@@ -6,10 +6,12 @@
 
 // Statuses that should NOT receive a prepayment stamp. A completed visit
 // already has its books closed; cancelled / no-show / skipped are dead rows
-// we don't want to charge against. `skipped` is treated as terminal because
+// we don't want to charge against. Rescheduled rows are replaced by another
+// appointment, so keeping prepaid coverage on them double-counts visits.
+// `skipped` is treated as terminal because
 // other dispatch flows already use it as the operator-driven "we did not
 // service this row" outcome.
-const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'no_show', 'skipped']);
+const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'no_show', 'rescheduled', 'skipped']);
 
 // Series rows of the same family share `recurring_parent_id`. The parent row
 // itself has `recurring_parent_id IS NULL` and is identified by its own id
@@ -55,6 +57,7 @@ async function stampSeriesPrepaid(db, {
   totalAmount,
   method,
   note,
+  useExistingTransaction = false,
 }) {
   const anchor = await db('scheduled_services')
     .where({ id: anchorServiceId })
@@ -75,7 +78,10 @@ async function stampSeriesPrepaid(db, {
   const slices = splitTotalAcrossVisits(Number(totalAmount), eligible.length);
   const now = new Date();
   const updatedRows = [];
-  await db.transaction(async (trx) => {
+  const run = useExistingTransaction
+    ? async (handler) => handler(db)
+    : async (handler) => db.transaction(handler);
+  await run(async (trx) => {
     for (let i = 0; i < eligible.length; i++) {
       const row = eligible[i];
       const amt = slices[i];

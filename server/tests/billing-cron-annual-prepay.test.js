@@ -116,4 +116,27 @@ describe('processMonthlyBilling — annual-prepay suppression', () => {
     expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-Z');
     expect(chargeMonthly).toHaveBeenCalledWith('cust-Z');
   });
+
+  test('skips payment-pending annual-prepay customers until the invoice is resolved', async () => {
+    mockCustomers = [{
+      id: 'cust-P', first_name: 'Test', last_name: 'PendingPrepay', phone: '+15550003333',
+      monthly_rate: 55.0, waveguard_tier: 'Bronze', autopay_enabled: true,
+      autopay_paused_until: null, autopay_payment_method_id: 'pm_3', billing_day: 1,
+    }];
+    mockTermRows = []; // no active paid coverage yet
+    const pendingSpy = jest
+      .spyOn(AnnualPrepayRenewals, 'getPaymentPendingCustomerIds')
+      .mockResolvedValue(new Set(['cust-P']));
+
+    try {
+      const result = await BillingCron.processMonthlyBilling();
+
+      expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+      expect(logAutopay).toHaveBeenCalledWith('cust-P', 'skipped_annual_prepay_pending');
+      expect(result.charged).toBe(0);
+      expect(result.skipped).toBe(1);
+    } finally {
+      pendingSpy.mockRestore();
+    }
+  });
 });
