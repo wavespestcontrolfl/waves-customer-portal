@@ -5463,6 +5463,10 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
 async function reconcileFrozenMembershipSnapshot(estimate) {
   try {
     if (!estimate || !estimate.customer_id) return;
+    // Never reconcile an accepted or price-locked estimate: that deal was
+    // committed at the send-time classification, so a later plan lapse must
+    // not retroactively change the terms the customer accepted.
+    if (estimate.status === 'accepted' || estimate.price_locked_at) return;
     const isString = typeof estimate.estimate_data === 'string';
     const estData = isString
       ? JSON.parse(estimate.estimate_data)
