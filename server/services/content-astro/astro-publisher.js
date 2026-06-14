@@ -117,6 +117,14 @@ function blogOriginForSpoke(spokeKey) {
   return spokeSiteOrigin(spokeKey) || HUB_ORIGIN;
 }
 
+// The first remark-substitution token (brandName/siteUrl/…) left un-interpolated
+// in a body, or null. These belong to the .md remark pipeline; in an autonomous
+// .mdx post they reach the build as undefined references and crash it.
+function mdxBreakingToken(body) {
+  const m = String(body || '').match(/\{\{\s*(brandName|brandShort|siteUrl|phone|tel|email|primaryCity|cityPhone)\s*\}\}/);
+  return m ? m[0] : null;
+}
+
 // Write the resolved publish target (canonical + domains) back onto the ORIGINAL
 // draft frontmatter so the persisted autonomous_runs.draft_payload reflects what
 // was actually published — the PR poller / post-merge reconciliation read
@@ -984,6 +992,17 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const branchSlug = slugify(slug.replace(/\//g, '-'));
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
+  // MDX guard: autonomous posts are written as .mdx, where `{{ }}` is parsed as a
+  // JS expression — NOT a token (remark-token-substitution only rewrites .md text
+  // nodes). An un-substituted {{brandName}}/{{siteUrl}}/… reaches the build as an
+  // undefined reference and CRASHES it (ReferenceError), parking the PR after a
+  // full generation spend. Fail fast to review instead of shipping a crasher.
+  const mdxToken = mdxBreakingToken(body);
+  if (mdxToken) {
+    const err = new Error(`autonomous blog body contains an MDX-breaking token "${mdxToken}" — .mdx posts must use literal text, not {{ }} tokens`);
+    err.code = 'BLOG_MDX_TOKEN_LEAK';
+    throw err;
+  }
   // Spoke routing: a curated spoke-seed brief publishes the post on its single
   // spoke domain with a SELF-canonical spoke URL (the publisher owns domain
   // routing, so it overrides the hub-defaulted canonical the writer emits).
@@ -2261,5 +2280,6 @@ module.exports = {
     stampBlogDomains,
     stampHubOnlyBlogDomains,
     syncDraftPublishTarget,
+    mdxBreakingToken,
   },
 };

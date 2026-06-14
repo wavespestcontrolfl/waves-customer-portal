@@ -94,6 +94,26 @@ describe('spoke-seed-seeder: manifest + rows', () => {
   });
 });
 
+describe('MDX {{token}} crash guard (proof-caught bug)', () => {
+  test('spoke binding instructions never tell the writer to emit {{brandName}} (crashes .mdx builds)', () => {
+    const m = seeder.loadManifest();
+    const row = seeder._internals.rowForBrief(m.briefs[1], m, { now: new Date('2026-06-14T12:00:00Z') });
+    const ov = seeder.buildSpokeOverlay({ opportunity: { signal_metadata: row.signal_metadata }, pageType: 'supporting-blog', requiredSections: [], schemaTypes: ['Article'] });
+    const bind = ov.operator_brief.binding_instructions.join('\n');
+    expect(bind).not.toMatch(/use the \{\{brandName\}\} token/i);
+    expect(bind).toMatch(/do NOT emit ANY \{\{\.\.\.\}\} token/);
+    expect(bind).toMatch(/first person/i);
+  });
+
+  test('publisher mdxBreakingToken flags un-interpolated remark tokens', () => {
+    const { _internals } = require('../services/content-astro/astro-publisher');
+    expect(_internals.mdxBreakingToken("browse {{brandName}}'s services")).toBe('{{brandName}}');
+    expect(_internals.mdxBreakingToken('see {{ siteUrl }}/x')).toBe('{{ siteUrl }}');
+    expect(_internals.mdxBreakingToken('clean Sarasota body, no tokens')).toBeNull();
+    expect(_internals.mdxBreakingToken('an object literal {{a:1}} is not a token')).toBeNull();
+  });
+});
+
 describe('astro-publisher: spoke domain + canonical routing', () => {
   const { _internals } = require('../services/content-astro/astro-publisher');
 

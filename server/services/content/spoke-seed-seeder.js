@@ -382,7 +382,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, city, target
     hubLink
       ? `REQUIRED HUB LINK (exactly one, contextual, in-body): link once to ${hubLink}${hubAnchor ? ` using a branded-local anchor like "${hubAnchor}"` : ' using a natural branded-local anchor'} — placed naturally inside a sentence near the end where you hand off to a professional, never as a button or a list item. The hub URL MUST be the absolute https://www.wavespestcontrol.com/... URL exactly as given — never a relative path and never a {{siteUrl}} token (that token rewrites to this spoke's own domain).`
       : null,
-    `BRAND TOKENS: this post publishes on a spoke domain. Use the {{brandName}} token for any reference to the site's own brand. The ONLY place the literal hub brand "Waves Pest Control" may appear is inside the single hub-link anchor above.`,
+    `BRAND: this is an .mdx post — do NOT emit ANY {{...}} token anywhere (MDX parses {{ }} as a JS expression and the spoke build CRASHES with "X is not defined"). Do not name the site's own brand in the body at all; refer to the team in the first person ("our team", "we", "our licensed techs", "a local pro"). The ONLY brand name allowed anywhere in the post is the hub brand inside the single hub-link anchor above.`,
     payload.internal_links?.length
       ? `ADDITIONAL HUB LINKS (optional, each a natural in-body anchor): ${payload.internal_links.join(', ')}.`
       : null,
