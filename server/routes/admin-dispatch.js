@@ -27,6 +27,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
+const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
@@ -2543,6 +2544,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
     let record;
+    let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
     if (resumingCommittedCompletion) {
       record = await db('service_records').where({ id: claim.serviceRecordId }).first();
@@ -2865,7 +2867,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               logger.warn(`[turf-height] optional gauge photo skipped for service=${req.params.serviceId}: ${photoErr.message}`);
             }
           }
-          await createTurfHeightReading(trx, {
+          const turfReading = await createTurfHeightReading(trx, {
             serviceRecordId: record.id,
             customerId: svc.customer_id,
             grassType: turfRow?.grass_type || 'unknown',
@@ -2873,6 +2875,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             gaugePhotoId,
             createdBy: req.technicianId,
           });
+          // Only cross-check when a gauge photo exists; OCR runs after commit.
+          if (gaugePhotoId && turfReading?.id) turfOcrReadingId = turfReading.id;
         }
 
         // Typed activity score — in the same trx as the record so retries
@@ -3305,6 +3309,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // execution we can now run best-effort follow-up alerts and tracking;
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
+
+    // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
+    // durably committed. Runs on BOTH first-run and durable-resume paths. On
+    // resume the reading was written in a prior pass (so turfOcrReadingId is
+    // null here); recover any reading that never got cross-checked — i.e. the
+    // process exited before this point — instead of leaving it stuck 'pending'
+    // and invisible to the review queue. QA only; never blocks completion.
+    if (!turfOcrReadingId && resumingCommittedCompletion && record?.id) {
+      try {
+        const pendingTurf = await db('turf_height_readings')
+          .where({ service_record_id: record.id, verification_status: 'pending' })
+          .whereNotNull('gauge_photo_id')
+          .first('id');
+        turfOcrReadingId = pendingTurf?.id || null;
+      } catch (turfErr) {
+        logger.warn(`[turf-height] resume OCR re-arm lookup failed for service_record=${record.id}: ${turfErr.message}`);
+      }
+    }
+    if (turfOcrReadingId) {
+      const ocrReadingId = turfOcrReadingId;
+      setImmediate(() => {
+        void TurfHeightOcr.processReadingOcr(ocrReadingId)
+          .catch((err) => logger.error(`[turf-height] OCR cross-check failed for reading=${ocrReadingId}: ${err.message}`));
+      });
+    }
 
     if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
       completionPhotoUploadResult = await uploadServicePhotoDataUrls({
