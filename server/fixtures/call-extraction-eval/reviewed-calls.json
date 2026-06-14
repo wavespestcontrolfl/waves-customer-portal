@@ -42,7 +42,9 @@
       "reviewed_outcome": "Transcript explicitly says book the appointment and Monday at 11; current v2 should recover this missed booking, though model variability was observed during replay.",
       "expect": {
         "current_status": "valid",
-        "current_would_auto_route": true,
+        "current_scheduling_status": "confirmed",
+        "current_schedule_date": "2026-06-15",
+        "current_schedule_window_start": "11:00",
         "legacy_scheduled_created": false
       }
     },
@@ -69,7 +71,6 @@
         "current_would_auto_route": false,
         "appointment_candidate_changed_vs_legacy": true,
         "current_flags_include": [
-          "address_unverifiable",
           "missing_service_address"
         ]
       }

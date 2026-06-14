@@ -20,6 +20,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
 const { normalizeStreetLine } = require('../utils/address-normalizer');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const DEFAULT_LIMIT = 10;
 const DEFAULT_DAYS = 30;
@@ -57,6 +58,9 @@ const FIELD_SEVERITY = Object.entries(FIELD_GROUPS).reduce((acc, [severity, fiel
 const COMPARED_FIELDS = Object.keys(FIELD_SEVERITY);
 const EXPECTATION_KEYS = new Set([
   'current_status',
+  'current_scheduling_status',
+  'current_schedule_date',
+  'current_schedule_window_start',
   'current_would_auto_route',
   'legacy_scheduled_created',
   'route_changed_vs_legacy_schedule',
@@ -297,8 +301,9 @@ function isStringArray(value) {
   return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.trim());
 }
 
-function evaluateFixtureExpectation(result, fixtureCase) {
+function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
   const expect = fixtureCase?.expect;
+  const currentSchedule = context.currentSchedule || {};
 
   const failures = [];
   const checks = [];
@@ -324,6 +329,42 @@ function evaluateFixtureExpectation(result, fixtureCase) {
       check('current_status', result.current.status === expect.current_status, result.current.status, expect.current_status);
     } else {
       fixtureError('invalid_current_status', expect.current_status, 'string');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_scheduling_status')) {
+    if (typeof expect.current_scheduling_status === 'string') {
+      check(
+        'current_scheduling_status',
+        result.current.schedulingStatus === expect.current_scheduling_status,
+        result.current.schedulingStatus,
+        expect.current_scheduling_status
+      );
+    } else {
+      fixtureError('invalid_current_scheduling_status', expect.current_scheduling_status, 'string');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_schedule_date')) {
+    if (typeof expect.current_schedule_date === 'string') {
+      check(
+        'current_schedule_date',
+        currentSchedule.scheduled_date === expect.current_schedule_date,
+        currentSchedule.scheduled_date || null,
+        expect.current_schedule_date
+      );
+    } else {
+      fixtureError('invalid_current_schedule_date', expect.current_schedule_date, 'string');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_schedule_window_start')) {
+    if (typeof expect.current_schedule_window_start === 'string') {
+      check(
+        'current_schedule_window_start',
+        normalizeTime(currentSchedule.window_start) === normalizeTime(expect.current_schedule_window_start),
+        currentSchedule.window_start || null,
+        expect.current_schedule_window_start
+      );
+    } else {
+      fixtureError('invalid_current_schedule_window_start', expect.current_schedule_window_start, 'string');
     }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'current_would_auto_route')) {
@@ -500,7 +541,7 @@ function appointmentCandidate(flat) {
 
 function etScheduleParts(value) {
   if (!value) return {};
-  const d = new Date(value);
+  const d = parseETDateTime(value);
   if (isNaN(d.getTime())) return {};
   return {
     scheduled_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(d),
@@ -860,6 +901,7 @@ async function replayCall(call, context) {
   const legacyScheduledServiceVariances = currentFlat
     ? compareScheduledService(scheduled, currentFlat, includeValues)
     : [];
+  const currentSchedule = currentFlat ? etScheduleParts(currentFlat.preferred_date_time) : {};
 
   const legacyAppointmentCandidate = appointmentCandidate(legacyFlat);
   const currentAppointmentCandidate = appointmentCandidate(currentFlat || {});
@@ -915,7 +957,7 @@ async function replayCall(call, context) {
     result.fixture = {
       caseId: fixtureCase.id,
       reviewedOutcome: fixtureCase.reviewed_outcome || null,
-      expectation: evaluateFixtureExpectation(result, fixtureCase),
+      expectation: evaluateFixtureExpectation(result, fixtureCase, { currentSchedule }),
     };
   }
   return result;
@@ -1115,4 +1157,5 @@ module.exports = {
   loadReplayFixture,
   validateExplicitFixtureIds,
   applyFixtureReplayOptions,
+  etScheduleParts,
 };

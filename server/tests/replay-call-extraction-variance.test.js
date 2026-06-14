@@ -2,6 +2,7 @@ const {
   applyFixtureReplayOptions,
   buildMissingFixtureResults,
   buildReplayErrorResult,
+  etScheduleParts,
   evaluateFixtureExpectation,
   loadReplayFixture,
   parseArgs,
@@ -16,6 +17,7 @@ function validResult(overrides = {}) {
       status: 'valid',
       wouldAutoRoute: true,
       flags: [],
+      schedulingStatus: 'confirmed',
     },
     legacy: {
       scheduledCreated: false,
@@ -36,25 +38,41 @@ function validResult(overrides = {}) {
 }
 
 describe('call extraction replay variance reporting', () => {
+  test('parses naive extracted schedule timestamps as ET wall-clock', () => {
+    expect(etScheduleParts('2026-06-15T11:00:00')).toEqual({
+      scheduled_date: '2026-06-15',
+      window_start: '11:00',
+    });
+  });
+
   test('evaluates fixture expectations against replay results', () => {
     const result = validResult({
       current: {
         status: 'valid',
         wouldAutoRoute: false,
         flags: ['name_email_mismatch'],
+        schedulingStatus: 'confirmed',
       },
     });
 
     expect(evaluateFixtureExpectation(result, {
       expect: {
         current_status: 'valid',
+        current_scheduling_status: 'confirmed',
+        current_schedule_date: '2026-06-15',
+        current_schedule_window_start: '11:00',
         current_would_auto_route: false,
         current_flags_include: ['name_email_mismatch'],
         current_flags_exclude: ['address_unverifiable'],
       },
+    }, {
+      currentSchedule: {
+        scheduled_date: '2026-06-15',
+        window_start: '11:00',
+      },
     })).toMatchObject({
       status: 'pass',
-      checked: 4,
+      checked: 7,
       failures: [],
     });
   });
@@ -98,12 +116,18 @@ describe('call extraction replay variance reporting', () => {
     expect(evaluateFixtureExpectation(validResult(), {
       expect: {
         current_status: 'valid',
+        current_scheduling_status: false,
+        current_schedule_window_start: false,
         current_flags_exclude: [],
       },
     })).toMatchObject({
       status: 'fail',
       checked: 1,
-      failures: [expect.objectContaining({ name: 'fixture_error:invalid_current_flags_exclude' })],
+      failures: expect.arrayContaining([
+        expect.objectContaining({ name: 'fixture_error:invalid_current_scheduling_status' }),
+        expect.objectContaining({ name: 'fixture_error:invalid_current_schedule_window_start' }),
+        expect.objectContaining({ name: 'fixture_error:invalid_current_flags_exclude' }),
+      ]),
     });
   });
 
