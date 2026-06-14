@@ -2850,6 +2850,7 @@ CallRecordingProcessor._test = {
   extractedNameMatchesCustomer,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
+  transcribeRecording,
   extractCallDataV2,
   normalizeOpenAISegments,
 };
