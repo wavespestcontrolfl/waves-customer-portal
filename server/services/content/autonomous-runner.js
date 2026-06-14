@@ -530,10 +530,21 @@ class AutonomousRunner {
       // opportunities can never set this.
       const operatorFaqException = opp.bucket === OPERATOR_INTERCEPT_BUCKET
         && brief?.voice_constraints?.operator_brief?.faq_required === true;
+      // For NEW spoke-targeted posts the publisher stamps frontmatter.domains to
+      // the spoke AFTER these gates run, so the draft's own frontmatter still
+      // reads hub-only here. Pass the brief's resolved spoke domains explicitly
+      // so the brand-token guard enforces against the domain the post will
+      // ACTUALLY publish to — the intentional hub-link anchor is exempt, any
+      // other literal-brand mention on the spoke still fails. Refresh keeps the
+      // live-page domains hydrated above.
+      const spokeDomains = Array.isArray(brief.target_sites) ? brief.target_sites.filter(Boolean) : [];
+      const guardDomains = liveDomains != null
+        ? liveDomains
+        : (spokeDomains.length ? spokeDomains : null);
       const guardResult = contentGuardrails.evaluate(draft, {
         service: opp.service || brief.service || null,
         primaryKeyword: brief.target_keyword || null,
-        domains: liveDomains,
+        domains: guardDomains,
         operatorFaqException,
       });
       run.content_guardrails_result = guardResult;

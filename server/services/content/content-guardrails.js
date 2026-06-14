@@ -77,13 +77,45 @@ function escapeRegExp(value) {
 // must therefore count as hub-only, not multi-domain.
 const HUB_DOMAINS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
 
+// Markdown links whose href is the hub origin → their anchor TEXT may carry the
+// literal hub brand. This is the one intentional brand surface on a spoke blog
+// post: the contextual spoke→hub link uses a branded-local anchor like "Waves
+// Pest Control in Sarasota" (per content-ops/anchor-and-content-playbook.md).
+// Mirrors the Phase-1 Astro brand-isolation blog exemption. Returns the
+// [start,end) character ranges of those anchor texts.
+function hubLinkAnchorRanges(text) {
+  const ranges = [];
+  const linkRe = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  let m;
+  while ((m = linkRe.exec(text)) !== null) {
+    let host;
+    try { host = new URL(m[2]).hostname.toLowerCase(); } catch { continue; }
+    if (!HUB_DOMAINS.has(host) && !HUB_DOMAINS.has(host.replace(/^www\./, ''))) continue;
+    const anchorStart = m.index + 1; // skip the opening '['
+    ranges.push([anchorStart, anchorStart + m[1].length]);
+  }
+  return ranges;
+}
+
 function brandTokenFinding(body, domains) {
   const list = (Array.isArray(domains) ? domains : [])
     .map((d) => String(d || '').trim().toLowerCase())
     .filter((d) => d && !HUB_DOMAINS.has(d)); // only spoke domains make it multi-domain
   if (list.length === 0) return null; // hub-only page — literal brand is fine
-  if (/\bWaves\s+Pest\s+Control\b/.test(String(body || ''))) {
-    return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" instead of the {{brandName}} token — brand leaks across spoke domains.');
+  const text = String(body || '');
+  // The literal hub brand is allowed ONLY when it is the anchor text of a link
+  // pointing at the hub (the intentional branded-local spoke→hub anchor). Any
+  // OTHER occurrence on a spoke page is a real brand leak.
+  const allowed = hubLinkAnchorRanges(text);
+  const brandRe = /\bWaves\s+Pest\s+Control\b/g;
+  let match;
+  while ((match = brandRe.exec(text)) !== null) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const insideHubAnchor = allowed.some(([a, b]) => a <= start && end <= b);
+    if (!insideHubAnchor) {
+      return finding('P0', 'BRAND_TOKEN_LEAK', 'Multi-domain page uses the literal "Waves Pest Control" outside a hub-link anchor instead of the {{brandName}} token — brand leaks across spoke domains.');
+    }
   }
   return null;
 }

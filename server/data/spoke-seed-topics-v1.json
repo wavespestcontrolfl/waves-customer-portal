@@ -1,0 +1,176 @@
+{
+  "version": "1.0",
+  "set": "spoke-seed",
+  "owner": "Adam Benetti",
+  "notes": "Curated unique per-spoke blog topics for the spoke blog network (Phase 2). Each brief is operator-pinned: it bypasses SERP profiling, is pinned by the decision-router, and renders ONLY on its target spoke domain (target_site -> frontmatter.domains) with a self-canonical spoke URL and exactly one contextual, branded-local in-body link back to the most-relevant hub city/service page. Topics are deduped against the live blog corpus (network-wide novelty gate) and against each other — each is a distinct pest family with a real Sarasota-local hook. Anchors follow content-ops/anchor-and-content-playbook.md (branded-local-heavy). Hub links MUST be absolute https://www.wavespestcontrol.com/... never {{siteUrl}}. Never hardcode Waves pricing — link to /pest-control-calculator/.",
+  "cta_codes": {
+    "QUOTE": "quote form https://www.wavespestcontrol.com/pest-control-quote/",
+    "CALC": "estimate calculator https://www.wavespestcontrol.com/pest-control-calculator/"
+  },
+  "briefs": [
+    {
+      "id": "SAR1",
+      "target_site": "sarasotaflpestcontrol.com",
+      "city": "Sarasota",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/bed-bugs-siesta-key-vacation-rentals-sarasota/",
+      "working_title": "Bed Bugs and Sarasota Vacation Rentals: Siesta Key & Lido Key Short-Term-Stay Risk",
+      "primary_kw": "bed bugs Sarasota vacation rental",
+      "secondary_kws": [
+        "bed bugs Siesta Key",
+        "Lido Key rental bed bugs",
+        "Airbnb bed bugs Sarasota",
+        "how to check a rental for bed bugs"
+      ],
+      "intent": "Sarasota short-term-rental host / traveler, problem-aware",
+      "byline": "adam",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article"],
+      "hub_link": "https://www.wavespestcontrol.com/pest-control-sarasota-fl/",
+      "hub_anchor": "Waves Pest Control in Sarasota",
+      "thesis": "Siesta Key and Lido Key run on heavy short-term-rental turnover, and bed bugs are a hitchhiker pest that rides in on luggage from the last guest. Explain why beach-rental density raises the risk, how a host or traveler inspects a unit, and why DIY sprays drive an infestation deeper instead of ending it.",
+      "outline": [
+        "Why Sarasota's barrier-island rentals (Siesta Key, Lido Key) see more bed-bug introductions: constant guest turnover + luggage from out of state",
+        "How bed bugs actually spread between rental units and laundry — not a cleanliness problem",
+        "A practical 5-minute inspection a host or guest can do (mattress seams, headboard, box-spring corners, luggage rack)",
+        "Why store-bought foggers and sprays scatter them and miss the harborage",
+        "What a professional bed-bug treatment looks like and why early detection in a rental matters for reviews and bookings"
+      ],
+      "verify_notes": [
+        "Keep all guidance non-alarmist and accurate to bed-bug biology; no pricing claims in the body."
+      ]
+    },
+    {
+      "id": "SAR2",
+      "target_site": "sarasotaflpestcontrol.com",
+      "city": "Sarasota",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/carpenter-ants-sarasota-coastal-live-oaks/",
+      "working_title": "Carpenter Ants in Sarasota's Coastal Live-Oak Neighborhoods (West of Trail, Laurel Park)",
+      "primary_kw": "carpenter ants Sarasota",
+      "secondary_kws": [
+        "carpenter ants live oak",
+        "large black ants Sarasota house",
+        "carpenter ant damage vs termites",
+        "West of Trail carpenter ants"
+      ],
+      "intent": "Sarasota homeowner in a mature-canopy neighborhood, problem-aware",
+      "byline": "adam",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article", "FAQPage"],
+      "hub_link": "https://www.wavespestcontrol.com/pest-control-sarasota-fl/",
+      "hub_anchor": "the Sarasota pest control team at Waves",
+      "thesis": "Sarasota's older West-of-Trail and Laurel Park neighborhoods have a mature live-oak canopy, and those oaks (plus moisture-damaged wood) are exactly what large black carpenter ants nest in before they move into a house. Make this post Sarasota-specific to the coastal-oak neighborhoods — do NOT write a generic carpenter-ant article — and clearly distinguish carpenter-ant galleries from termite damage.",
+      "outline": [
+        "Why Sarasota's coastal live-oak neighborhoods (West of Trail, Laurel Park) are carpenter-ant country: mature oaks, moisture, and old-growth landscaping",
+        "How to tell carpenter ants from other big ants — and from termites (frass vs mud tubes, smooth galleries vs soil-packed)",
+        "The moisture connection: roof leaks, irrigation overspray, and tree limbs touching the roofline",
+        "Why they keep coming back after spray-and-pray — you have to find the parent nest",
+        "What a Sarasota carpenter-ant inspection and treatment actually targets",
+        "FAQ: 5 common Sarasota carpenter-ant questions"
+      ],
+      "verify_notes": [
+        "Stay Sarasota-coastal-oak specific so this clears the novelty gate against the generic carpenter-ant post already live; carpenter ants do not eat wood (they excavate) — be accurate."
+      ]
+    },
+    {
+      "id": "SAR3",
+      "target_site": "sarasotaflpestcontrol.com",
+      "city": "Sarasota",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/drain-flies-sarasota-bathrooms-kitchens/",
+      "working_title": "Drain Flies in Sarasota Bathrooms and Kitchen Sinks: Why They Won't Go Away",
+      "primary_kw": "drain flies Sarasota",
+      "secondary_kws": [
+        "tiny flies bathroom sink Sarasota",
+        "how to get rid of drain flies",
+        "moth flies drain",
+        "sewer flies kitchen sink"
+      ],
+      "intent": "Sarasota homeowner, problem-aware, recurring nuisance",
+      "byline": "adam",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article", "FAQPage"],
+      "hub_link": "https://www.wavespestcontrol.com/pest-control-sarasota-fl/",
+      "hub_anchor": "Sarasota pest control",
+      "thesis": "Drain flies breed in the organic gunk lining slow or seldom-used drains, and Sarasota's humidity plus the older-home plumbing common across the city keeps that film wet year-round. Explain where they actually breed, why surface sprays never fix it, and how to break the breeding cycle.",
+      "outline": [
+        "What drain flies are and how to confirm them (the tape-over-the-drain test) — small fuzzy 'moth' flies, not fruit flies",
+        "Why Sarasota homes see them year-round: humidity plus older-home and guest-bath plumbing that sits unused",
+        "Where they really breed — the biofilm inside the drain, not the room — so room sprays do nothing",
+        "How to break the cycle: mechanical cleaning of the drain wall + enzyme treatment, and finding the right drain",
+        "When recurring drain flies signal a bigger plumbing or sewer issue worth a professional look",
+        "FAQ: 5 common Sarasota drain-fly questions"
+      ],
+      "verify_notes": [
+        "Drain flies (Psychodidae) breed in drain biofilm — keep the biology accurate; no pricing in the body."
+      ]
+    },
+    {
+      "id": "SAR4",
+      "target_site": "sarasotaflpestcontrol.com",
+      "city": "Sarasota",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/springtails-sarasota-lanai-pool-decks/",
+      "working_title": "Springtails Swarming Your Sarasota Lanai and Pool Deck After Summer Rain",
+      "primary_kw": "springtails Sarasota lanai",
+      "secondary_kws": [
+        "tiny jumping bugs pool deck",
+        "springtails after rain Florida",
+        "springtails screened lanai",
+        "what are the tiny bugs on my pool screen"
+      ],
+      "intent": "Sarasota homeowner with a screened lanai/pool, rainy-season problem-aware",
+      "byline": "adam",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article", "FAQPage"],
+      "hub_link": "https://www.wavespestcontrol.com/pest-control-sarasota-fl/",
+      "hub_anchor": "Waves Pest Control in Sarasota",
+      "thesis": "After Sarasota's summer afternoon storms, tiny jumping springtails erupt across screened lanais and pool decks because saturated soil and mulch push them toward dry surfaces. Explain the rain-and-moisture trigger specific to SWFL screened-lanai living and why they're harmless but fixable.",
+      "outline": [
+        "What springtails are and why they suddenly 'swarm' a Sarasota lanai after rain (they jump, they're not fleas, they're harmless)",
+        "The rainy-season moisture trigger: saturated mulch, overwatered beds, and afternoon storms driving them onto pool decks and screens",
+        "Why screened-lanai living in SWFL concentrates them at the door tracks and deck edges",
+        "Moisture corrections that actually reduce them: mulch depth, irrigation timing, drainage away from the lanai",
+        "Why a perimeter treatment plus moisture fixes beats hosing them off every afternoon",
+        "FAQ: 5 common Sarasota springtail questions"
+      ],
+      "verify_notes": [
+        "Springtails are harmless and moisture-driven — keep the framing reassuring and accurate; tie explicitly to Sarasota rainy season."
+      ]
+    },
+    {
+      "id": "SAR5",
+      "target_site": "sarasotaflpestcontrol.com",
+      "city": "Sarasota",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/year-round-fleas-ticks-sarasota/",
+      "working_title": "Why Fleas and Ticks Are a Year-Round Problem in Sarasota's Mild Coastal Climate",
+      "primary_kw": "year-round fleas Sarasota",
+      "secondary_kws": [
+        "ticks Sarasota Florida",
+        "fleas never go away Florida",
+        "flea season Sarasota",
+        "yard flea and tick treatment Sarasota"
+      ],
+      "intent": "Sarasota pet owner, problem-aware, recurring",
+      "byline": "adam",
+      "cta": ["QUOTE"],
+      "schema_types": ["Article", "FAQPage"],
+      "hub_link": "https://www.wavespestcontrol.com/pest-control-sarasota-fl/",
+      "hub_anchor": "Sarasota pest control",
+      "thesis": "Most of the country gets a winter freeze that resets the flea and tick population. Sarasota doesn't — the mild coastal climate plus barrier-island wildlife means fleas and ticks breed all twelve months, so pet owners who treat seasonally fall behind. Explain the no-freeze reality and the yard-plus-pet approach that actually keeps up.",
+      "outline": [
+        "Why there's no 'off season': Sarasota's lack of a hard winter freeze lets fleas and ticks breed year-round",
+        "The barrier-island wildlife factor — raccoons, opossums, and deer reseeding yards near the coast",
+        "Why treating only the pet (or only in summer) leaves the yard reservoir intact",
+        "The 90% you can't see: eggs, larvae, and pupae in the yard and home, and why timing matters",
+        "A year-round yard-and-perimeter plan for Sarasota pet owners — coordinate with your vet's on-pet product",
+        "FAQ: 5 common Sarasota flea-and-tick questions"
+      ],
+      "verify_notes": [
+        "Coordinate-with-your-vet framing for on-pet products; no medical or pricing claims in the body. Keep the no-winter-freeze point Sarasota-specific."
+      ]
+    }
+  ]
+}
