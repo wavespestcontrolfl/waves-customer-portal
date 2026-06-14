@@ -105,6 +105,17 @@ describe('completion recap', () => {
     expect(smsRecap(sanitizeRecap(longRecap))).toBe(smsRecap(longRecap));
   });
 
+  // Regression (Codex P3): a pasted recap that is already quoted AND signed must
+  // not leave a dangling quote once the signoff is stripped.
+  test('sanitizeRecap unwraps quotes around a signed recap without a dangling quote', () => {
+    expect(sanitizeRecap('"We checked the garage." - Waves')).toBe('We checked the garage. - Waves');
+    expect(sanitizeRecap("'We treated the lawn today.' - Waves")).toBe('We treated the lawn today. - Waves');
+    // Signoff wrapped INSIDE the quotes must not double-sign.
+    expect(sanitizeRecap('"We treated the lawn today. - Waves"')).toBe('We treated the lawn today. - Waves');
+    // A genuine inner quote (not a wrapper) is preserved.
+    expect(sanitizeRecap('We noted "minor" weed pressure. - Waves')).toBe('We noted "minor" weed pressure. - Waves');
+  });
+
   test('generated deterministic recap includes signoff without exposing technician notes', async () => {
     const result = await generateRecap({
       visitOutcome: 'customer_declined',

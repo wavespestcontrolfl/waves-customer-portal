@@ -49,12 +49,22 @@ function clampRecap(text, maxLength) {
 // SMS-sized copy. The 232-char cap was previously UNCONDITIONAL, which chopped
 // the stored recap mid-sentence and surfaced on the report ("...noticed some.").
 function sanitizeRecap(value, { maxLength = null } = {}) {
-  let text = cleanText(value)
+  // Normalize dashes first so an em-dash signoff ("text — Waves") is recognized.
+  let text = cleanText(value).replace(/[–—]/g, '-');
+  // Strip wrapping quotes BOTH before and after removing the "- Waves" signoff.
+  // A pasted, already-signed + quoted recap ("text." - Waves) hides its closing
+  // quote behind the signoff, so a single pre-strip would leave it dangling once
+  // the signoff is removed (Codex P3); a recap quoted AROUND the signoff
+  // ("text - Waves") needs the pre-strip so the signoff is then at the edge.
+  // Smart→straight runs last so a smart-quoted recap keeps its (converted) quotes
+  // rather than being unwrapped.
+  text = text.replace(/^["']+|["']+$/g, '');
+  text = text.replace(/\s*-\s*Waves\s*$/i, '').trim();
+  text = text
     .replace(/^["']+|["']+$/g, '')
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
-    .replace(/[–—]/g, '-');
-  text = text.replace(/\s*-\s*Waves\s*$/i, '').trim();
+    .trim();
   if (typeof maxLength === 'number' && maxLength > 0) text = clampRecap(text, maxLength);
   return text ? `${text} - Waves` : '';
 }
