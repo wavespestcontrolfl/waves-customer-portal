@@ -13,6 +13,7 @@
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
+ *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
@@ -71,6 +72,18 @@ const gates = {
   // and sends — never auto-sends. Escalation intents and scheduling-intent
   // messages stay shadow regardless. Prod opt-in per house pattern.
   smsSuggestMode: isProd ? process.env.GATE_SMS_SUGGEST_MODE === 'true' : true,
+
+  // SMS Auto-Send Executor (brand-voice loop, Phase E) — the top rung of the
+  // ladder shadow → suggest → auto_send. Intents flipped to 'auto_send' in
+  // sms_intent_modes have their VERIFIED house-voice draft sent to the
+  // customer automatically, no human in the loop. The single most sensitive
+  // gate in the loop: customer-facing autonomous send, so it is explicit
+  // opt-in in EVERY environment (off in dev too, unlike the silent
+  // shadow/judge gates). Even with the gate on, the executor re-checks
+  // graduation readiness server-side at send time and escalation/scheduling
+  // intents never auto-send — the gate only unlocks the path, the data still
+  // has to earn each intent.
+  smsAutoSend: process.env.GATE_SMS_AUTO_SEND === 'true',
 
   // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
   // replies for HISTORICAL inbound SMS that already have a human reply and

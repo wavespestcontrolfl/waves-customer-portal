@@ -53,11 +53,16 @@ describe('suggest mode — eligibility (hard rules)', () => {
 });
 
 describe('suggest mode — mode-change validation', () => {
-  test('shadow and suggest are the only valid modes', () => {
-    expect(VALID_MODES).toEqual(['shadow', 'suggest']);
+  test('the ladder is shadow → suggest → auto_send (Phase E adds the top rung)', () => {
+    expect(VALID_MODES).toEqual(['shadow', 'suggest', 'auto_send']);
     expect(validateModeChange('billing_question_needs_review', 'suggest').ok).toBe(true);
     expect(validateModeChange('billing_question_needs_review', 'shadow').ok).toBe(true);
-    expect(validateModeChange('billing_question_needs_review', 'auto_send').ok).toBe(false);
+    // auto_send is now a syntactically valid flip for a normal intent — the
+    // DATA-earned gate lives in graduation.evaluateAutoSendEligibility (the
+    // PUT /intent-modes route + the executor enforce it), not in this pure
+    // shape validator.
+    expect(validateModeChange('billing_question_needs_review', 'auto_send').ok).toBe(true);
+    expect(validateModeChange('billing_question_needs_review', 'unknown_mode').ok).toBe(false);
     expect(validateModeChange('billing_question_needs_review', '').ok).toBe(false);
   });
 

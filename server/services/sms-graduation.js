@@ -242,10 +242,63 @@ async function computeReadiness({ intents, dbi = db } = {}) {
   return out;
 }
 
+/**
+ * Per-intent suggest-mode outcome buckets for the suggest → auto_send rung:
+ * the accepted / corrected / ignored counts that ARE the human ground truth
+ * once an intent is suggesting. Mirrors the rollup in GET /intent-modes but
+ * scoped to one intent, so the executor's send-time gate doesn't aggregate
+ * every intent on every inbound.
+ */
+async function fetchSuggestOutcomes({ intent, dbi = db } = {}) {
+  const { SUGGEST_WORKFLOW } = require('./sms-suggest-mode');
+  const rows = await dbi('agent_decisions')
+    .where({ workflow: SUGGEST_WORKFLOW, detected_intent: intent })
+    .select('status')
+    .count('* as count')
+    .groupBy('status');
+  const out = { accepted: 0, corrected: 0, ignored: 0 };
+  for (const r of rows) {
+    if (Object.prototype.hasOwnProperty.call(out, r.status)) out[r.status] = Number(r.count) || 0;
+  }
+  return out;
+}
+
+/**
+ * Server-enforced auto_send eligibility for ONE intent — the gate the executor
+ * and the manual mode-flip BOTH consult. Re-runs the suggest → auto_send rung
+ * from LIVE data every call (independent of the stored mode), so a quality
+ * regression after the flip STOPS auto-send. Fail closed: escalation intents,
+ * and any signal-fetch error, return not-eligible.
+ */
+async function evaluateAutoSendEligibility({ intent, dbi = db } = {}) {
+  const { isEscalationIntent } = require('./sms-suggest-mode');
+  if (isEscalationIntent(intent)) {
+    return { eligible: false, blockers: ['Escalation intent — never auto-sends.'] };
+  }
+  let judge;
+  let suggest;
+  try {
+    const signals = await fetchLiveJudgeSignals(dbi);
+    judge = signals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0 };
+    suggest = await fetchSuggestOutcomes({ intent, dbi });
+  } catch (err) {
+    logger.warn(`[sms-graduation] auto-send eligibility fetch failed (${intent}): ${err.message}; blocking`);
+    return { eligible: false, blockers: ['Live readiness signal unavailable — auto-send blocked.'] };
+  }
+  // Evaluate the rung BELOW auto_send: "is suggest → auto_send earned?" — so
+  // this stays true while the intent sits at auto_send, and flips false the
+  // moment the data stops clearing the bar.
+  const verdict = evaluateRung({ mode: 'suggest', locked: false, judge, suggest, judgeAvailable: true });
+  const eligible = verdict.eligible && verdict.nextRung === 'auto_send';
+  return { eligible, blockers: verdict.blockers, judge, suggest };
+}
+
 module.exports = {
   LADDER,
   THRESHOLDS,
   evaluateRung,
   fetchLiveJudgeSignals,
+  fetchSuggestOutcomes,
+  evaluateAutoSendEligibility,
   computeReadiness,
 };

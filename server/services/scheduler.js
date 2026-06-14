@@ -666,9 +666,14 @@ function initScheduledJobs() {
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const { recoverSuggestionHoldingStates, expireStaleSuggestions } = require('./sms-suggest-mode');
+      const { reconcileAutoSendClaims } = require('./sms-auto-send');
       await runExclusive('sms-suggest-expiry', async () => {
         await recoverSuggestionHoldingStates();
         if (isEnabled('smsSuggestMode')) await expireStaleSuggestions();
+        // UNGATED like the suggestion recovery: an auto-send claim left in
+        // 'sending' by a crash must be reconciled even if the gate was since
+        // turned off (a turned-off gate just stops NEW claims).
+        await reconcileAutoSendClaims();
       });
     } catch (err) {
       logger.error(`SMS suggestion recovery/expiry sweep failed: ${err.message}`);

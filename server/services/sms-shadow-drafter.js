@@ -333,17 +333,19 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     }
 
     const intentName = intent?.intent || 'GENERAL';
-    // Phase D: intents flipped to 'suggest' surface the draft as a composer
-    // card instead of staying silent. Escalation intents, scheduling-intent
-    // messages, and anything without a customer + inbound link stay shadow.
+    // Phase D/E: intents flipped to 'suggest' surface the draft as a composer
+    // card; intents flipped to 'auto_send' (and that have earned the rung)
+    // have it SENT to the customer automatically. Escalation intents,
+    // scheduling-intent messages, and anything without a customer + inbound
+    // link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
-    const wantsSuggestion = (await suggestMode.resolveDraftStatus({
+    const deliveryMode = await suggestMode.resolveDeliveryMode({
       reply: parsed.reply,
       customerId: customer?.id || null,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
-    })) === suggestMode.SUGGESTED_STATUS;
+    });
 
     // ALWAYS insert as shadow: the flip to 'suggested' happens atomically
     // with the decision insert inside publishSuggestion's locked
@@ -374,28 +376,44 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       })
       .returning('id');
 
-    // Only verified-clean drafts may surface to a human as a suggestion: a
-    // draft the verify loop couldn't sign off (still asserting unsupported
-    // facts after the revision budget) stays a silent shadow row rather than
-    // putting a possibly-fabricated card in front of staff.
-    let published = false;
-    if (row?.id && wantsSuggestion && converged) {
-      const decisionId = await suggestMode.publishSuggestion({
-        draftId: row.id,
-        customerId: customer.id,
-        smsLogId,
-        inboundMessage,
-        reply: parsed.reply,
-        intent: intentName,
-        confidence: intent?.confidence ?? null,
-        model: MODELS.FLAGSHIP,
-        promptVersion: PROMPT_VERSION,
-      });
-      published = Boolean(decisionId);
+    // Only verified-clean drafts (verify loop converged) may leave the silent
+    // shadow lane — a draft still asserting unsupported facts after the
+    // revision budget is never shown to a human OR sent to a customer; it
+    // stays a shadow row the judge still covers.
+    let deliveredAs = SHADOW_STATUS;
+    if (row?.id && converged) {
+      if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+        const result = await require('./sms-auto-send').maybeAutoSend({
+          draftId: row.id,
+          customer,
+          smsLogId,
+          inboundMessage,
+          reply: parsed.reply,
+          intent: intentName,
+          confidence: intent?.confidence ?? null,
+          model: MODELS.FLAGSHIP,
+          promptVersion: PROMPT_VERSION,
+          schedulingIntent,
+        });
+        if (result?.sent) deliveredAs = 'auto_sent';
+      } else if (deliveryMode === 'suggest') {
+        const decisionId = await suggestMode.publishSuggestion({
+          draftId: row.id,
+          customerId: customer.id,
+          smsLogId,
+          inboundMessage,
+          reply: parsed.reply,
+          intent: intentName,
+          confidence: intent?.confidence ?? null,
+          model: MODELS.FLAGSHIP,
+          promptVersion: PROMPT_VERSION,
+        });
+        if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+      }
     }
 
     logger.info(
-      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${published ? suggestMode.SUGGESTED_STATUS : SHADOW_STATUS} passes=${passes} converged=${converged} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
+      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${deliveredAs} passes=${passes} converged=${converged} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
     );
     return row?.id || null;
   } catch (err) {
