@@ -390,12 +390,31 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           inboundMessage,
           reply: parsed.reply,
           intent: intentName,
+          intendedActions: parsed.intended_actions,
           confidence: intent?.confidence ?? null,
           model: MODELS.FLAGSHIP,
           promptVersion: PROMPT_VERSION,
           schedulingIntent,
         });
-        if (result?.sent) deliveredAs = 'auto_sent';
+        if (result?.sent) {
+          deliveredAs = 'auto_sent';
+        } else if (result?.reason === 'action_required') {
+          // A verified draft that still needs a human action (escalate / send
+          // a link / book) must reach a person — not auto-send, and not vanish
+          // into silent shadow. Downgrade it one rung to a suggestion card.
+          const decisionId = await suggestMode.publishSuggestion({
+            draftId: row.id,
+            customerId: customer.id,
+            smsLogId,
+            inboundMessage,
+            reply: parsed.reply,
+            intent: intentName,
+            confidence: intent?.confidence ?? null,
+            model: MODELS.FLAGSHIP,
+            promptVersion: PROMPT_VERSION,
+          });
+          if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+        }
       } else if (deliveryMode === 'suggest') {
         const decisionId = await suggestMode.publishSuggestion({
           draftId: row.id,

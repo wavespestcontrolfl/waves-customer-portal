@@ -54,6 +54,54 @@ const FAILED_STATUS = 'auto_send_failed';
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 
+// The ONLY intended_action type safe to send with no human. Every other type
+// the drafter can emit (escalate, book_appointment, send_*_link) names a
+// follow-up the executor does NOT perform — auto-sending the text alone would
+// promise an action that never happens, so those drafts are routed to a human.
+const SAFE_AUTO_SEND_ACTION = 'none';
+
+// sendCustomerMessage / TwilioService.sendSMS report sent:true for upstream
+// SUPPRESSION paths (feature gate off, template disabled, owner-SMS kill
+// switch) where no customer SMS actually leaves — surfaced as a sentinel
+// providerMessageId, not a real Twilio sid. Treating those as delivered would
+// silently drop the reply AND pull the draft out of the human path, so the
+// executor must read them as not-sent.
+const SUPPRESSION_SENTINELS = new Set([
+  'gate-blocked',
+  'template-disabled',
+  'owner-silence',
+  'owner-sms-disabled',
+  'internal-admin-notification',
+  'internal-admin-notification-undelivered',
+  'internal-admin-notification-error',
+]);
+
+/**
+ * Did a real customer SMS actually leave? sent:true is necessary but not
+ * sufficient — an upstream suppression returns sent:true with a sentinel id
+ * (or none). Require a truthy, non-sentinel provider message id.
+ */
+function isRealProviderSend(result) {
+  if (!result || result.sent !== true) return false;
+  const id = result.providerMessageId;
+  if (!id) return false;
+  return !SUPPRESSION_SENTINELS.has(id);
+}
+
+/**
+ * Pure: is this draft's action set safe to send with no human? True only when
+ * there are no intended actions, or every one is 'none' (a pure courtesy
+ * no-op). Any actionable type → false (fail closed). Tolerates an array of
+ * {type} objects or bare strings.
+ */
+function autoSendActionsSafe(intendedActions) {
+  if (!Array.isArray(intendedActions) || intendedActions.length === 0) return true;
+  return intendedActions.every((a) => {
+    const type = typeof a === 'string' ? a : a && a.type;
+    return type === SAFE_AUTO_SEND_ACTION;
+  });
+}
+
 /**
  * Pure precondition ordering for an auto-send attempt — the gate/eligibility
  * decision tree with no DB, for exhaustive unit coverage. Returns the reason
@@ -62,10 +110,11 @@ const DRAFT_SENT_STATUS = 'auto_sent';
  * runs when the gate is off or the draft is ineligible); this is the contract
  * they share.
  */
-function autoSendPreflight({ gateOn, baseEligible, mode, eligible }) {
+function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }) {
   if (!gateOn) return 'gate_off';
   if (!baseEligible) return 'ineligible_base';
   if (mode !== AUTOSEND_MODE) return 'mode_not_autosend';
+  if (!actionsSafe) return 'action_required';
   if (!eligible) return 'not_eligible';
   return null;
 }
@@ -188,6 +237,7 @@ async function failClaim(decisionId, reason) {
 async function maybeAutoSend(params = {}) {
   const {
     draftId, customer, smsLogId, inboundMessage, reply, intent,
+    intendedActions = null,
     confidence = null, model = null, promptVersion = null, schedulingIntent = false,
   } = params;
   const customerId = customer?.id || null;
@@ -204,6 +254,14 @@ async function maybeAutoSend(params = {}) {
     // (3) Intent must actually be flipped to auto_send.
     const mode = await suggest.getIntentMode(intent);
     if (mode !== AUTOSEND_MODE) return { sent: false, reason: 'mode_not_autosend' };
+
+    // (3.5) A draft whose safety contract records a follow-up action
+    //       (escalate / book / send a link) must reach a HUMAN — auto-sending
+    //       the text alone would promise something the executor never does.
+    //       Fail closed; the drafter downgrades it to a suggestion card.
+    if (!autoSendActionsSafe(intendedActions)) {
+      return { sent: false, reason: 'action_required' };
+    }
 
     // (4) Server-enforced graduation eligibility — re-checked live every send.
     const graduation = require('./sms-graduation');
@@ -254,17 +312,21 @@ async function maybeAutoSend(params = {}) {
       return { sent: false, reason: 'send_error' };
     }
 
-    if (result?.sent) {
+    // sent:true is not enough — an upstream suppression (gate off, template
+    // disabled, owner kill switch) reports sent with a sentinel id but nothing
+    // reached the customer. Only a real provider message finalizes the draft.
+    if (isRealProviderSend(result)) {
       await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId });
       if (parkedIds.length) await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
       logger.info(`[sms-auto-send] SENT customer=${customerId || 'unknown'} intent=${intent} decision=${claim.decisionId} sid=${result.providerMessageId || 'n/a'}`);
       return { sent: true, decisionId: claim.decisionId, providerMessageId: result.providerMessageId || null };
     }
 
-    await failClaim(claim.decisionId, result?.reason || result?.code || 'provider did not send');
+    const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');
+    await failClaim(claim.decisionId, result?.reason || notSentReason);
     await reopenParked('Auto-send did not go out — suggestion reopened.');
-    logger.info(`[sms-auto-send] NOT sent customer=${customerId || 'unknown'} intent=${intent} reason=${result?.code || 'not_sent'}`);
-    return { sent: false, reason: result?.code || 'not_sent' };
+    logger.info(`[sms-auto-send] NOT sent customer=${customerId || 'unknown'} intent=${intent} reason=${notSentReason}`);
+    return { sent: false, reason: notSentReason };
   } catch (err) {
     logger.error(`[sms-auto-send] unexpected failure (draft ${draftId}): ${err.message}`);
     return { sent: false, reason: 'error' };
@@ -331,6 +393,10 @@ module.exports = {
   SENT_STATUS,
   FAILED_STATUS,
   DRAFT_SENT_STATUS,
+  SAFE_AUTO_SEND_ACTION,
+  SUPPRESSION_SENTINELS,
+  isRealProviderSend,
+  autoSendActionsSafe,
   autoSendPreflight,
   claimAutoSend,
   resolveSent,

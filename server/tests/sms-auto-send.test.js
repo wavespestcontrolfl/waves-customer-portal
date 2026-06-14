@@ -17,9 +17,12 @@ const {
 } = require('../services/sms-suggest-mode');
 const graduation = require('../services/sms-graduation');
 
-const { autoSendPreflight, AUTOSEND_MODE, AUTOSEND_MESSAGE_TYPE, CLAIM_STATUS, SENT_STATUS, FAILED_STATUS } = autoSend;
+const {
+  autoSendPreflight, autoSendActionsSafe, isRealProviderSend,
+  AUTOSEND_MODE, AUTOSEND_MESSAGE_TYPE, CLAIM_STATUS, SENT_STATUS, FAILED_STATUS, SUPPRESSION_SENTINELS,
+} = autoSend;
 
-const CLEAR = { gateOn: true, baseEligible: true, mode: AUTOSEND_MODE, eligible: true };
+const CLEAR = { gateOn: true, baseEligible: true, mode: AUTOSEND_MODE, actionsSafe: true, eligible: true };
 
 describe('autoSendPreflight — precondition ordering (the gate to an autonomous send)', () => {
   test('all preconditions clear → no stop reason', () => {
@@ -29,17 +32,23 @@ describe('autoSendPreflight — precondition ordering (the gate to an autonomous
   test('gate off stops first, before anything else is even consulted', () => {
     expect(autoSendPreflight({ ...CLEAR, gateOn: false })).toBe('gate_off');
     // gate wins even when every other signal is also bad
-    expect(autoSendPreflight({ gateOn: false, baseEligible: false, mode: 'shadow', eligible: false })).toBe('gate_off');
+    expect(autoSendPreflight({ gateOn: false, baseEligible: false, mode: 'shadow', actionsSafe: false, eligible: false })).toBe('gate_off');
   });
 
   test('base ineligibility stops before mode + eligibility', () => {
     expect(autoSendPreflight({ ...CLEAR, baseEligible: false })).toBe('ineligible_base');
-    expect(autoSendPreflight({ gateOn: true, baseEligible: false, mode: 'shadow', eligible: false })).toBe('ineligible_base');
+    expect(autoSendPreflight({ gateOn: true, baseEligible: false, mode: 'shadow', actionsSafe: false, eligible: false })).toBe('ineligible_base');
   });
 
   test('mode must be auto_send', () => {
     expect(autoSendPreflight({ ...CLEAR, mode: 'shadow' })).toBe('mode_not_autosend');
     expect(autoSendPreflight({ ...CLEAR, mode: 'suggest' })).toBe('mode_not_autosend');
+  });
+
+  test('a draft needing a human action stops before the eligibility query', () => {
+    expect(autoSendPreflight({ ...CLEAR, actionsSafe: false })).toBe('action_required');
+    // action gate beats eligibility (cheaper + safety-critical)
+    expect(autoSendPreflight({ ...CLEAR, actionsSafe: false, eligible: false })).toBe('action_required');
   });
 
   test('graduation eligibility is the last gate', () => {
@@ -50,7 +59,56 @@ describe('autoSendPreflight — precondition ordering (the gate to an autonomous
     expect(autoSendPreflight({})).toBe('gate_off');
     expect(autoSendPreflight({ gateOn: true })).toBe('ineligible_base');
     expect(autoSendPreflight({ gateOn: true, baseEligible: true })).toBe('mode_not_autosend');
-    expect(autoSendPreflight({ gateOn: true, baseEligible: true, mode: AUTOSEND_MODE })).toBe('not_eligible');
+    expect(autoSendPreflight({ gateOn: true, baseEligible: true, mode: AUTOSEND_MODE })).toBe('action_required');
+    expect(autoSendPreflight({ gateOn: true, baseEligible: true, mode: AUTOSEND_MODE, actionsSafe: true })).toBe('not_eligible');
+  });
+});
+
+describe('autoSendActionsSafe — only a pure no-op draft auto-sends', () => {
+  test('no actions / empty / non-array → safe', () => {
+    expect(autoSendActionsSafe(undefined)).toBe(true);
+    expect(autoSendActionsSafe(null)).toBe(true);
+    expect(autoSendActionsSafe([])).toBe(true);
+  });
+
+  test("only 'none' actions → safe", () => {
+    expect(autoSendActionsSafe([{ type: 'none' }])).toBe(true);
+    expect(autoSendActionsSafe([{ type: 'none', note: 'no reply warranted' }, { type: 'none' }])).toBe(true);
+    expect(autoSendActionsSafe(['none'])).toBe(true); // tolerates bare strings
+  });
+
+  test('any actionable type → NOT safe (fail closed)', () => {
+    for (const t of ['escalate', 'book_appointment', 'send_payment_link', 'send_portal_link', 'send_estimate_link']) {
+      expect(autoSendActionsSafe([{ type: t }])).toBe(false);
+    }
+    // a single actionable entry poisons an otherwise-safe set
+    expect(autoSendActionsSafe([{ type: 'none' }, { type: 'escalate' }])).toBe(false);
+  });
+});
+
+describe('isRealProviderSend — suppression sentinels are NOT a delivered SMS', () => {
+  test('a real provider message id is a send', () => {
+    expect(isRealProviderSend({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' })).toBe(true);
+  });
+
+  test('sent:false is never a send', () => {
+    expect(isRealProviderSend({ sent: false, providerMessageId: 'SMxxxx' })).toBe(false);
+    expect(isRealProviderSend(null)).toBe(false);
+    expect(isRealProviderSend(undefined)).toBe(false);
+  });
+
+  test('sent:true with a suppression sentinel id is NOT a send', () => {
+    for (const sentinel of SUPPRESSION_SENTINELS) {
+      expect(isRealProviderSend({ sent: true, providerMessageId: sentinel })).toBe(false);
+    }
+    // gate-off, template-disabled, owner kill switch are the prod-reachable ones
+    expect(isRealProviderSend({ sent: true, providerMessageId: 'gate-blocked' })).toBe(false);
+    expect(isRealProviderSend({ sent: true, providerMessageId: 'owner-silence' })).toBe(false);
+  });
+
+  test('sent:true with no provider id is NOT a send', () => {
+    expect(isRealProviderSend({ sent: true, providerMessageId: null })).toBe(false);
+    expect(isRealProviderSend({ sent: true })).toBe(false);
   });
 });
 
