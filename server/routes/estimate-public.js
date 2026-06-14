@@ -5470,12 +5470,20 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const snapshot = estData && estData.membershipSnapshot;
     if (!snapshot || !snapshot.isExistingCustomer) return;
     if (await isActivePlanCustomer(db, estimate.customer_id)) return;
+    // Drop every frozen artifact derived from the stale "existing customer"
+    // classification, not just the snapshot: priorQualifyingServices is
+    // re-injected by extractEngineInputs() on every recompute (keeping the
+    // combined-tier discount), and sendSnapshot.pricingBundle is consulted by
+    // buildPricingBundle() before the runtime cache (returning the old bundle
+    // with no waivable setup fee). Leaving either behind lets the lead keep
+    // member pricing / undercharge even after the snapshot is gone.
     delete estData.membershipSnapshot;
+    delete estData.priorQualifyingServices;
+    invalidateSendSnapshotPricingBundle(estData);
     estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
-    // A bundle cached from the stale "existing customer" snapshot omits the
-    // waivable WaveGuard setup fee (firstVisitFees); the cache key ignores
-    // estimate_data content, so bust it here to force a fresh recompute with
-    // the new-customer setup fee + annual-prepay restored.
+    // The runtime pricing cache key ignores estimate_data content, so bust it
+    // here to force a fresh recompute with the new-customer setup fee + annual
+    // prepay restored.
     clearEstimatePricingCache(estimate.id);
   } catch (err) {
     logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);
@@ -10086,6 +10094,12 @@ async function handleEstimateAsk(req, res, next) {
     if (!isEstimateAskAnswerable(estimate)) {
       return res.status(409).json({ error: 'estimate_expired' });
     }
+
+    // Self-heal a stale "existing customer" classification before the assistant
+    // reads estimate_data / pricing, so a misclassified No-Plan lead isn't told
+    // the setup is waived or annual prepay is unavailable while the page and
+    // accept flow self-correct.
+    await reconcileFrozenMembershipSnapshot(estimate);
 
     let estData = {};
     try {
