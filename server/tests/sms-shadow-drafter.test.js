@@ -2,12 +2,70 @@ const {
   parseShadowResponse,
   buildSystemPrompt,
   buildUserPrompt,
+  formatExemplarBlock,
+  fetchVoiceExemplars,
   SHADOW_STATUS,
   DRAFTER,
   PROMPT_VERSION,
   INTENDED_ACTION_TYPES,
 } = require('../services/sms-shadow-drafter');
 const { CUSTOMER_SMS_HOUSE_VOICE, AGENT_CONFIG } = require('../services/ai-assistant/managed-agent-config');
+
+describe('few-shot voice grounding (v7)', () => {
+  test('prompt version bumped to v7', () => {
+    expect(PROMPT_VERSION).toBe('house_voice_v7');
+  });
+
+  describe('formatExemplarBlock — pure', () => {
+    test('no usable rows → empty string (v7 == v6)', () => {
+      expect(formatExemplarBlock([])).toBe('');
+      expect(formatExemplarBlock(null)).toBe('');
+      expect(formatExemplarBlock(undefined)).toBe('');
+      // rows missing either side of the pair are dropped
+      expect(formatExemplarBlock([{ inbound_text: 'hi' }, { reply_text: 'yo' }])).toBe('');
+    });
+
+    test('formats the pair with a voice-only, no-facts, no-placeholder framing', () => {
+      const block = formatExemplarBlock([
+        { inbound_text: 'When are you coming?', reply_text: 'Hello [name]! We have you down for Tuesday.' },
+        { inbound_text: 'Thanks', reply_text: 'Anytime! Reply here with any questions.' },
+      ]);
+      expect(block).toMatch(/HOUSE-VOICE EXAMPLES/);
+      expect(block).toMatch(/VOICE ONLY/);
+      expect(block).toMatch(/never reuse their specific facts/i);
+      expect(block).toMatch(/NEVER output a bracketed placeholder/i);
+      expect(block).toContain('Customer: When are you coming?');
+      expect(block).toContain('Waves: Hello [name]! We have you down for Tuesday.');
+      expect(block).toContain('Example 2:');
+    });
+  });
+
+  describe('fetchVoiceExemplars — fail-safe guards (no DB needed)', () => {
+    test('no intent → [] without touching the DB', async () => {
+      await expect(fetchVoiceExemplars({ intent: null })).resolves.toEqual([]);
+      await expect(fetchVoiceExemplars({})).resolves.toEqual([]);
+    });
+    test('limit 0 → []', async () => {
+      await expect(fetchVoiceExemplars({ intent: 'general_customer_sms_needs_review', limit: 0 })).resolves.toEqual([]);
+    });
+  });
+
+  describe('buildUserPrompt — exemplar block', () => {
+    const ctx = { summary: 'Test customer', smsHistory: [] };
+    test('omits the block when none provided (back-compat with v6 shape)', () => {
+      const p = buildUserPrompt(ctx, 'hello', { intent: 'GENERAL' }, false);
+      expect(p).toContain('NEW INBOUND MESSAGE: "hello"');
+      expect(p).not.toMatch(/HOUSE-VOICE EXAMPLES/);
+    });
+    test('includes the block before the inbound when provided', () => {
+      const p = buildUserPrompt(ctx, 'hello', { intent: 'GENERAL' }, false, formatExemplarBlock([
+        { inbound_text: 'a', reply_text: 'b' },
+      ]));
+      expect(p.indexOf('HOUSE-VOICE EXAMPLES')).toBeGreaterThan(-1);
+      expect(p.indexOf('HOUSE-VOICE EXAMPLES')).toBeLessThan(p.indexOf('NEW INBOUND MESSAGE'));
+    });
+  });
+});
 
 describe('sms shadow drafter — response parsing', () => {
   test('parses a bare JSON object', () => {
@@ -222,7 +280,7 @@ describe('sms shadow drafter — structural unsendability', () => {
 
   test('telemetry identity constants are stable for the judge pass', () => {
     expect(DRAFTER).toBe('house_voice');
-    expect(PROMPT_VERSION).toBe('house_voice_v6');
+    expect(PROMPT_VERSION).toBe('house_voice_v7');
     expect(INTENDED_ACTION_TYPES).toContain('escalate');
     expect(INTENDED_ACTION_TYPES).toContain('none');
   });

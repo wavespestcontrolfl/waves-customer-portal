@@ -27,16 +27,25 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 
 const DRAFTER = 'house_voice';
-// v6 (06-13): DATA GROUNDING. Verifier sharpening plateaued at ~13-16%
-// (v4≈v5) — the residual is the drafter inventing schedule facts (dates,
-// arrival windows, tech names) it was never given. v6 surfaces the REAL
-// upcoming schedule with arrival window + assigned tech in the facts block
-// (UPCOMING SERVICES), so the drafter can state them instead of inventing
-// and the verifier can validate them. LIVE-only effect: backfill context is
-// drifted (today's schedule on old inbounds), so this is not backfill-
-// measurable — it improves real drafts that feed suggest mode.
-const PROMPT_VERSION = 'house_voice_v6';
+// v7 (06-14): FEW-SHOT VOICE GROUNDING. v6 attacked fact fabrication via data
+// grounding; v7 attacks VOICE — seeds the prompt with a few real replies Waves
+// teammates actually sent to OTHER customers on the same intent (from
+// voice_corpus_examples, redacted), so the draft mirrors house tone/length/
+// structure instead of approximating it. Voice-only: the examples are framed
+// as NOT a fact source (the verifier still checks every asserted fact against
+// THIS customer's context, catching any leak). Fail-safe + LIVE-only-ish: when
+// the corpus has no rows for the intent the example block is empty and v7
+// behaves exactly like v6, so there is no regression where the corpus is thin.
+const PROMPT_VERSION = 'house_voice_v7';
 const SHADOW_STATUS = 'shadow';
+
+// Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
+// behaves like v6); count is bounded so the prompt can't balloon.
+const FEWSHOT_ENABLED = process.env.SHADOW_FEWSHOT !== 'false';
+const FEWSHOT_COUNT = (() => {
+  const n = Number(process.env.SHADOW_FEWSHOT_COUNT);
+  return Number.isInteger(n) && n >= 0 && n <= 5 ? n : 3;
+})();
 
 const INTENDED_ACTION_TYPES = [
   'none',
@@ -156,13 +165,57 @@ RECENT SMS THREAD:
 ${conversation || '(no recent thread)'}`;
 }
 
-function buildUserPrompt(context, inboundMessage, intent, schedulingIntent) {
+/**
+ * Pure: format mined human-reply exemplars into a few-shot block. Returns ''
+ * when there are no usable rows (then the prompt is identical to v6). The
+ * framing is deliberate: these are OTHER customers' threads, redacted, present
+ * for VOICE only — never a fact source. Bracketed redaction placeholders
+ * ([name], [phone], …) must be replaced with THIS customer's real details, not
+ * echoed.
+ */
+function formatExemplarBlock(exemplars) {
+  const rows = (exemplars || []).filter((e) => e && e.inbound_text && e.reply_text);
+  if (!rows.length) return '';
+  const lines = rows
+    .map((e, i) => `Example ${i + 1}:\n  Customer: ${e.inbound_text}\n  Waves: ${e.reply_text}`)
+    .join('\n\n');
+  return `HOUSE-VOICE EXAMPLES — real replies Waves teammates sent to OTHER customers on similar messages. Mirror their tone, warmth, length, and structure. These are for VOICE ONLY: never reuse their specific facts (names, dates, services, prices) — use ONLY this customer's facts above. Names/addresses are redacted as [bracketed] placeholders; replace them with THIS customer's real details, and NEVER output a bracketed placeholder.
+
+${lines}`;
+}
+
+/**
+ * Retrieve up to FEWSHOT_COUNT high-signal human-reply exemplars for an intent
+ * from voice_corpus_examples (SMS pairs only, redacted at mine time). Quality
+ * gate: drop rows whose outcome opted out or drew a complaint within 7 days.
+ * Fail-safe: any error (or the kill switch, or no intent) → [] so drafting is
+ * never blocked on the corpus.
+ */
+async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db } = {}) {
+  if (!FEWSHOT_ENABLED || !intent || limit <= 0) return [];
+  try {
+    return await dbi('voice_corpus_examples')
+      .where({ source: 'sms_human_reply', intent })
+      .whereNotNull('inbound_text')
+      .whereNotNull('reply_text')
+      .whereRaw("COALESCE(outcome->>'optedOut', 'false') <> 'true'")
+      .whereRaw("COALESCE(outcome->>'complaintWithin7d', 'false') <> 'true'")
+      .orderBy('occurred_at', 'desc')
+      .limit(limit)
+      .select('inbound_text', 'reply_text');
+  } catch (err) {
+    logger.warn(`[sms-shadow] voice exemplar fetch failed (${intent}): ${err.message}`);
+    return [];
+  }
+}
+
+function buildUserPrompt(context, inboundMessage, intent, schedulingIntent, exemplarBlock = '') {
   return `${buildFactsBlock(context)}
 
 CLASSIFIED INTENT: ${intent?.intent || 'GENERAL'}${schedulingIntent ? ' (scheduling-intent detected — be especially careful to only state schedule facts present above)' : ''}
 
 The facts above are the ONLY ones you have. If answering needs a detail that isn't shown — an exact time, a tech name, what was found, a billing event — do not invent it; say you'll confirm and follow up.
-
+${exemplarBlock ? `\n${exemplarBlock}\n` : ''}
 NEW INBOUND MESSAGE: "${inboundMessage}"
 
 Draft the reply JSON now.`;
@@ -202,7 +255,12 @@ async function generateDraftOnce(client, system, userContent) {
 async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent }) {
   const system = buildSystemPrompt();
   const factsBlock = buildFactsBlock(context);
-  const userContent = buildUserPrompt(context, inboundMessage, intent, schedulingIntent);
+  // Few-shot voice grounding: intent-matched real human replies (redacted),
+  // baked into the prompt once so they persist across the verify/revise loop.
+  // Empty when the corpus has no rows for this intent → identical to v6.
+  const exemplars = await fetchVoiceExemplars({ intent: intent?.intent });
+  const exemplarBlock = formatExemplarBlock(exemplars);
+  const userContent = buildUserPrompt(context, inboundMessage, intent, schedulingIntent, exemplarBlock);
 
   let parsed = await generateDraftOnce(client, system, userContent);
   if (!parsed) return { parsed: null, passes: 1, converged: false };
@@ -474,6 +532,8 @@ module.exports = {
   buildSystemPrompt,
   buildUserPrompt,
   buildFactsBlock,
+  formatExemplarBlock,
+  fetchVoiceExemplars,
   DRAFTER,
   PROMPT_VERSION,
   SHADOW_STATUS,
