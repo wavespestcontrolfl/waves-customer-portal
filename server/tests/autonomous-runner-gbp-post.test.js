@@ -119,6 +119,9 @@ describe('_handleGbpPostAction', () => {
     const run = { shadow_mode: false };
     const result = await runner._handleGbpPostAction(baseBrief(), run);
 
+    // Readiness is checked for the TARGET location, not just globally, so a
+    // partial GBP setup can't burn an image on an unconfigured profile.
+    expect(social.assertSocialPublishingReady).toHaveBeenCalledWith('gbp', 'sarasota');
     expect(social.postToGBP).toHaveBeenCalledTimes(1);
     expect(social.postToGBP).toHaveBeenCalledWith(
       'sarasota',

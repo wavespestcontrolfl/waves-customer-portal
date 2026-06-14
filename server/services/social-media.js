@@ -117,7 +117,7 @@ const PLATFORM_ENV_REQS = {
   gbp: [],
 };
 
-async function assertSocialPublishingReady(platform) {
+async function assertSocialPublishingReady(platform, locationId) {
   if (await isPausedByAdmin()) {
     return { ready: false, reason: 'Automation paused by admin' };
   }
@@ -150,8 +150,18 @@ async function assertSocialPublishingReady(platform) {
   // postToGBP fails in _getHeaders ("No GBP credentials for location") — and
   // callers that gate image generation on this readiness check would burn
   // image credits first. Bail here so the post is parked, not retried.
-  if (platform === 'gbp' && !gbpService.configured) {
-    return { ready: false, reason: 'GBP OAuth client credentials not configured for any location' };
+  if (platform === 'gbp') {
+    if (!gbpService.configured) {
+      return { ready: false, reason: 'GBP OAuth client credentials not configured for any location' };
+    }
+    // gbpService.configured only proves SOME location has client creds. When
+    // the caller knows the target location (e.g. the autonomous single-profile
+    // post), verify THAT location has usable creds + a refresh token — a
+    // partial setup would otherwise pass the global check and burn an image
+    // before postToGBP fails for the unconfigured target.
+    if (locationId && !(await gbpService.isLocationConfigured(locationId))) {
+      return { ready: false, reason: `GBP location "${locationId}" has no usable credentials (client ID/secret + refresh token)` };
+    }
   }
 
   return { ready: true };
@@ -741,6 +751,10 @@ const SocialMediaService = {
     // is generated — so a GBP-only deploy with the flag on but creds missing
     // would burn image credits with no profile able to consume the media.
     // gbpService.configured mirrors the Instagram credential check above.
+    // Coarse (any-location) is correct HERE: this path generates ONE image and
+    // reuses it across every WAVES_LOCATIONS GBP post below, so as long as one
+    // profile is configured the image is consumed. (The autonomous single-
+    // profile path uses a per-location check via assertSocialPublishingReady.)
     const gbpCanConsume = SOCIAL_FLAGS.gbpEnabled && gbpService.configured;
     const canConsumeGeneratedImage = hasImageHosting && (instagramCanConsume || gbpCanConsume);
     // Skip generation entirely on a dry run — nothing gets posted, so an

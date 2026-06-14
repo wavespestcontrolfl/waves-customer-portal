@@ -1860,7 +1860,7 @@ class AutonomousRunner {
       };
     }
 
-    const ready = await social.assertSocialPublishingReady('gbp');
+    const ready = await social.assertSocialPublishingReady('gbp', location.id);
     if (!ready.ready) {
       return {
         claim: 'pending',
