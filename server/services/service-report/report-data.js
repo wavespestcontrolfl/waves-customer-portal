@@ -7,6 +7,8 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
+const { buildMowingHeightContext } = require('./turf-height');
+const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
@@ -1874,6 +1876,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  // Mowing height-of-cut — surfaced at the top level (not inside lawnAssessment)
+  // so it shows on lawn reports even when there's no vision assessment. Null when
+  // not a lawn visit or no reading was captured. The trend is capped at THIS
+  // report's reading time so a long-lived report token can't expose later visits.
+  let mowingHeight = null;
+  if (serviceLine === 'lawn') {
+    const turfReading = await getTurfHeightForVisit(service.id, knex);
+    const turfTrend = turfReading
+      ? await getTurfHeightTrend(service.customer_id, 12, knex, turfReading.measured_at)
+      : [];
+    mowingHeight = buildMowingHeightContext(turfReading, turfTrend);
+  }
   const lawnProgramOverview = await loadLawnProgramOverviewContext(knex, service, serviceLine, scheduledService);
   const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
 
@@ -2094,17 +2108,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ...protocol.recommendations,
     ...findings.map((finding) => finding.recommendation).filter(Boolean),
   ]);
-  const photoPayload = await Promise.all(photos.map(async (photo) => ({
-    id: photo.id,
-    url: await photoUrl(photo),
-    caption: photo.caption || '',
-    stateBadge: photo.state_badge || null,
-    zoneId: photo.zone_id || null,
-    capturedAt: photo.captured_at || photo.created_at,
-    hashSha256: photo.hash_sha256 || null,
-    prevHashSha256: photo.prev_hash_sha256 || null,
-    aiTags: parseJsonArray(photo.ai_tags),
-  })));
+  // Drop the turf-height gauge image from the customer DISPLAY payload only — it's
+  // a measurement/QA artifact, not a field photo. It stays in `photos` so the
+  // tamper-evident hash chain (validated below) remains intact. Fail-soft.
+  let gaugePhotoId = null;
+  try {
+    const gaugeRow = await knex('turf_height_readings')
+      .where({ service_record_id: service.id })
+      .whereNotNull('gauge_photo_id')
+      .first('gauge_photo_id');
+    gaugePhotoId = gaugeRow?.gauge_photo_id || null;
+  } catch { gaugePhotoId = null; }
+  const photoPayload = await Promise.all(photos
+    .filter((photo) => !gaugePhotoId || String(photo.id) !== String(gaugePhotoId))
+    .map(async (photo) => ({
+      id: photo.id,
+      url: await photoUrl(photo),
+      caption: photo.caption || '',
+      stateBadge: photo.state_badge || null,
+      zoneId: photo.zone_id || null,
+      capturedAt: photo.captured_at || photo.created_at,
+      hashSha256: photo.hash_sha256 || null,
+      prevHashSha256: photo.prev_hash_sha256 || null,
+      aiTags: parseJsonArray(photo.ai_tags),
+    })));
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
@@ -2280,6 +2307,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     protocol,
     advisory,
     lawnAssessment,
+    mowingHeight,
     lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
     proofMoments: approvedVisualMoments,

@@ -10,6 +10,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-height-service');
+const { buildMowingHeightContext } = require('../services/service-report/turf-height');
 const logger = require('../services/logger');
 const { isCardCustomerSurfaceable } = require('../services/lawn-recommendation-visibility');
 
@@ -295,6 +297,13 @@ router.get('/:customerId', async (req, res, next) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
+    // Mowing height-of-cut (independent of a vision assessment) — latest reading
+    // + trend for the card. Fail-soft helpers → null when none / feature off.
+    const mowingHeight = buildMowingHeightContext(
+      await getLatestTurfHeight(customerId),
+      await getTurfHeightTrend(customerId, 12),
+    );
+
     // Get all confirmed assessments
     const assessments = await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
@@ -315,6 +324,7 @@ router.get('/:customerId', async (req, res, next) => {
         trend: [],
         latestSnapshot: null,
         recommendationCards: [],
+        mowingHeight,
       });
     }
 
@@ -450,6 +460,7 @@ router.get('/:customerId', async (req, res, next) => {
       neighborBenchmark: normalizeNeighborBenchmark(neighborBenchmark),
       latestSnapshot,
       recommendationCards,
+      mowingHeight,
       assessmentCount: assessments.length,
       nextMilestone: assessments.length < 3
         ? { message: `${3 - assessments.length} more visit${assessments.length < 2 ? 's' : ''} until full trend data`, type: 'visits' }

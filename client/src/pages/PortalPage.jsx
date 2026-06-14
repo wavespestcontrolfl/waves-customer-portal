@@ -301,6 +301,7 @@ function useLawnHealth(customerId) {
         neighborBenchmark: d.neighborBenchmark || null,
         latestSnapshot: d.latestSnapshot || null,
         recommendationCards: d.recommendationCards || [],
+        mowingHeight: d.mowingHeight || null,
       }))
       .catch(() => setData(prev => ({ ...prev, loading: false })));
   }, [customerId]);
@@ -717,7 +718,43 @@ function SnapshotDetail({ label, value }) {
   );
 }
 
-function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, latestSnapshot, recommendationCards, onRequest }) {
+// Customer card mowing-height section. Advisory voice — Waves doesn't mow, so the
+// copy speaks to how the lawn is being kept. `below` is the only red state.
+function PortalMowingHeight({ mowing }) {
+  if (!mowing || mowing.heightIn == null) return null;
+  const meta = {
+    in_range: { color: B.green, pill: 'In range', copy: `Right in the ideal ${mowing.bandLabel} range — keep it up.` },
+    above: { color: B.orange, pill: 'A bit long', copy: `A notch toward ${mowing.bandLabel} keeps it healthiest.` },
+    below: { color: B.red, pill: 'Cut low', copy: `Raising the mower toward ${mowing.bandLabel} avoids scalping and stress.` },
+  }[mowing.status] || { color: B.textCaption, pill: '', copy: '' };
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{
+        fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+        marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
+      }}>
+        Mowing height
+      </div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 30, lineHeight: 1, color: B.navy }}>{mowing.heightIn}&Prime;</span>
+        {meta.pill && (
+          <span style={{
+            fontSize: 11, fontWeight: 700, color: '#fff', background: meta.color, borderRadius: 999,
+            padding: '3px 10px', fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: '0.03em',
+          }}>{meta.pill}</span>
+        )}
+        <span style={{ fontSize: 13, color: B.textCaption, fontFamily: FONTS.body }}>Ideal {mowing.bandLabel}</span>
+      </div>
+      {meta.copy && (
+        <div style={{ marginTop: 6, fontSize: 13.5, color: B.textBody, fontFamily: FONTS.body, lineHeight: 1.5 }}>
+          {meta.copy}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, latestSnapshot, recommendationCards, mowingHeight, onRequest }) {
   const [animated, setAnimated] = useState(false);
   const [showTrend, setShowTrend] = useState(false);
 
@@ -794,6 +831,9 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           <PhotoGallery photos={photos} />
         </div>
       )}
+
+      {/* Mowing height-of-cut */}
+      <PortalMowingHeight mowing={mowingHeight} />
 
       {/* Progress Bars */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1566,11 +1606,14 @@ function DashboardTab({ customer, onSwitchTab }) {
           neighborBenchmark={lawnHealth.neighborBenchmark}
           latestSnapshot={lawnHealth.latestSnapshot}
           recommendationCards={lawnHealth.recommendationCards}
+          mowingHeight={lawnHealth.mowingHeight}
           onRequest={() => onSwitchTab?.('request')}
         />
       )}
       {!lawnHealth.loading && lawnHealth.hasLawnCare && (!lawnHealth.scores || !lawnHealth.initialScores) && (
         <section style={{ ...card, padding: 20 }}>
+          {/* Mowing height shows even before the first vision assessment. */}
+          <PortalMowingHeight mowing={lawnHealth.mowingHeight} />
           <PortalInlineState
             icon="sprout"
             title="Lawn health tracking will start soon"

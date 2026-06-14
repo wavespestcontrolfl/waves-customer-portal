@@ -25,6 +25,8 @@ const { detectServiceLine, getServiceLineConfig } = require('../services/service
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { isValidHeight } = require('../services/service-report/turf-height');
+const { createTurfHeightReading } = require('../services/turf-height-service');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
@@ -1650,6 +1652,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       lawnProtocolCompletion = null,
       treeShrubCompletion = null,
       completionPhotos = [],
+      manualHeightIn = null,        // turf height-of-cut gauge reading (lawn)
+      gaugePhoto = null,            // gauge-in-turf photo (data URL), required with the reading
+      turfHeightOverrideReason = null, // reason-coded bypass when no reading is possible
       clientPestRating = null,
       structuredFindings = null,
       companionFindings = null,
@@ -2046,6 +2051,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
+
+    // Turf height-of-cut capture gate (flag-gated; UAT → rollout). A LAWN visit
+    // cannot close without a maintained-height READING unless the tech logs a
+    // reason-coded override. The gauge photo is OPTIONAL (not gated).
+    // detectServiceLine keeps this strictly off pest / rodent / mosquito.
+    // The flag reads the SAME DB-backed source the tech UI checks
+    // (useFeatureFlag) — no env-only bypass, so the handler never requires a
+    // field the UI doesn't render (fail-closed rule). Validation itself runs in
+    // the claim.action === 'proceed' path below so a replay of an already-
+    // completed visit isn't 422'd if the flag flips on afterward.
+    const TURF_HEIGHT_OVERRIDE_REASONS = ['no_gauge_on_truck', 'gauge_unreadable', 'not_applicable'];
+    const turfHeightFlagOn = await isUserFeatureEnabled(req.technicianId, 'turf-height-capture', false).catch(() => false);
+    // Exempt typed-findings lawn jobs (e.g. one_time_lawn_treatment): the client
+    // hides TurfHeightCapture when isTypedFindings, so the server must not require
+    // a field the UI never renders (matches client isLawn = !isTypedFindings && lawn).
+    const turfHeightRequired = turfHeightFlagOn && reportServiceLine === 'lawn'
+      && !isIncompleteVisit && !typedFindingsType;
+    const turfHeightOverride = turfHeightRequired
+      && TURF_HEIGHT_OVERRIDE_REASONS.includes(turfHeightOverrideReason)
+      ? turfHeightOverrideReason : null;
+
     // Typed completions (e.g. palm_injection detects to the 'palm' line)
     // capture their structured findings instead of the Tree/Shrub closeout —
     // the client hides that UI in typed mode, so requiring the payload here
@@ -2151,6 +2177,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           new Error(companionValidationError.body.code),
         );
         return res.status(companionValidationError.status).json(companionValidationError.body);
+      }
+      // Turf height-of-cut: required reading for a flagged lawn visit (gauge
+      // photo optional). Validated here — after replay/conflict handling — so a
+      // retry of an already-completed visit replays instead of 422-ing.
+      if (turfHeightRequired && !turfHeightOverride
+        && (manualHeightIn == null || !isValidHeight(manualHeightIn))) {
+        const code = manualHeightIn == null ? 'turf_height_required' : 'turf_height_invalid';
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(code));
+        return res.status(422).json({
+          error: manualHeightIn == null
+            ? 'A turf height reading is required to close a lawn visit.'
+            : 'Turf height must be between 0.5 and 8 inches.',
+          code,
+          ...(manualHeightIn == null ? { overrideReasons: TURF_HEIGHT_OVERRIDE_REASONS } : {}),
+        });
+      }
+      if (turfHeightOverride) {
+        logger.warn(`[turf-height] completion override service=${req.params.serviceId} reason=${turfHeightOverride} by=${req.technicianId}`);
       }
     }
 
@@ -2792,6 +2836,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
 
+        // Turf height reading. The READING itself is REQUIRED, so it goes in the
+        // outer completion txn (atomic) — a persistence failure aborts completion
+        // (the existing catch cleans up + the tech retries) rather than silently
+        // completing without the required reading. The OPTIONAL gauge photo runs
+        // in its own SAVEPOINT so a photo/S3 failure can't block the reading; its
+        // uploaded row is registered for cleanup if the outer txn later aborts.
+        if (turfHeightRequired && !turfHeightOverride && manualHeightIn != null) {
+          const turfRow = await trx('customer_turf_profiles')
+            .where({ customer_id: svc.customer_id, active: true }).first();
+          let gaugePhotoId = null;
+          if (gaugePhoto) {
+            try {
+              await trx.transaction(async (sp) => {
+                const gaugeUpload = await uploadServicePhotoDataUrls({
+                  serviceRecordId: record.id,
+                  photos: [gaugePhoto],
+                  photoType: 'progress',
+                  knex: sp,
+                });
+                gaugePhotoId = gaugeUpload?.photos?.[0]?.id || null;
+                if (gaugeUpload?.photos?.length) {
+                  preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(gaugeUpload.photos);
+                }
+              });
+            } catch (photoErr) {
+              gaugePhotoId = null; // optional — never block the required reading
+              logger.warn(`[turf-height] optional gauge photo skipped for service=${req.params.serviceId}: ${photoErr.message}`);
+            }
+          }
+          await createTurfHeightReading(trx, {
+            serviceRecordId: record.id,
+            customerId: svc.customer_id,
+            grassType: turfRow?.grass_type || 'unknown',
+            manualHeightIn,
+            gaugePhotoId,
+            createdBy: req.technicianId,
+          });
+        }
+
         // Typed activity score — in the same trx as the record so retries
         // and durable-completion resumes can never double-insert (composite
         // unique on (service_record_id, indicator_key) backstops).
@@ -3082,7 +3165,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             photoType: 'after',
             knex: trx,
           });
-          preCommitCompletionPhotoRows = completionPhotoUploadResult.photos || [];
+          // Cumulative (concat, not assign) so an earlier-registered turf-height
+          // gauge photo row isn't dropped from the rollback-cleanup list on a
+          // lawn + Tree/Shrub completion (else the gauge image orphans in S3).
+          preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(completionPhotoUploadResult.photos || []);
           const uniqueCompletionPhotosUploaded = completionPhotoUploadResult.uniqueUploaded
             ?? completionPhotoUploadResult.uploaded;
           if (uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
