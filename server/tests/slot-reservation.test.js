@@ -33,6 +33,13 @@ describe('slot reservation helpers', () => {
     )).toBe('Rodent Trapping Service');
   });
 
+  test('one-time pest reservations keep the non-recurring service label', () => {
+    expect(slotReservation._internals.canonicalServiceTypeForProfile(
+      { serviceMode: 'one_time', services: [] },
+      'Pest Control',
+    )).toBe('Pest Control');
+  });
+
   test('reserveSlot writes service-profile duration and checks overlapping windows', async () => {
     const estimateBuilder = {
       where: jest.fn().mockReturnThis(),

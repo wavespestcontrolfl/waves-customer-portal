@@ -386,6 +386,63 @@ function estimateOneTimeItemsFromData(estimateData = {}) {
   });
 }
 
+function recurringServiceSignature(svc = {}) {
+  return [
+    svc.id,
+    svc.serviceId,
+    svc.service_id,
+    svc.service,
+    svc.serviceName,
+    svc.service_name,
+    svc.name,
+    svc.label,
+    svc.frequency,
+    svc.mo,
+    svc.monthly,
+    svc.monthlyTotal,
+    svc.monthly_total,
+    svc.ann,
+    svc.annual,
+    svc.annualTotal,
+    svc.annual_total,
+    svc.perTreatment,
+    svc.perVisit,
+    svc.perApp,
+    svc.pa,
+    svc.price,
+    svc.quoteRequired,
+    svc.requiresCustomQuote,
+    svc.quote_required,
+    svc.requires_custom_quote,
+  ].map((value) => String(value ?? '')).join('|');
+}
+
+function mergeRecurringServiceLists(...lists) {
+  const rows = [];
+  const seen = new Set();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const svc of list) {
+      if (!svc || typeof svc !== 'object') continue;
+      const signature = recurringServiceSignature(svc);
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      rows.push(svc);
+    }
+  }
+  return rows;
+}
+
+function recurringServicesFromEstimateData(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  return mergeRecurringServiceLists(
+    data.recurring?.services,
+    data.result?.recurring?.services,
+    data.result?.results?.recurring?.services,
+    Array.isArray(data.services) ? data.services.filter((svc) => svc.recurring || svc.frequency) : [],
+  );
+}
+
 function oneTimeRawText(item = {}) {
   return [item.service, item.name, item.displayName, item.label]
     .filter(Boolean)
@@ -482,6 +539,111 @@ function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurr
   if (!Array.isArray(recurringServices) || recurringServices.length === 0) return false;
   if (billingTerm === 'prepay_annual') return true;
   return true;
+}
+
+function recurringRowRequiresQuote(row = {}) {
+  return row.quoteRequired === true
+    || row.requiresCustomQuote === true
+    || row.quote_required === true
+    || row.requires_custom_quote === true;
+}
+
+function recurringRowHasDollarAmount(row = {}) {
+  return firstPositiveNumber(
+    row.mo,
+    row.monthly,
+    row.monthlyTotal,
+    row.monthly_total,
+    row.monthlyBase,
+    row.monthlyAfterDiscount,
+    row.monthlyAfterCredits,
+    row.ann,
+    row.annual,
+    row.annualTotal,
+    row.annual_total,
+    row.annualAfterDiscount,
+    row.annualAfterCredits,
+    row.perTreatment,
+    row.perVisit,
+    row.perApp,
+    row.pa,
+    row.price,
+  ) != null;
+}
+
+function recurringObjectsFromEstimateData(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const result = data.result && typeof data.result === 'object' ? data.result : data;
+  return [
+    result.recurring && typeof result.recurring === 'object' ? result.recurring : {},
+    result.results?.recurring && typeof result.results.recurring === 'object'
+      ? result.results.recurring
+      : {},
+  ];
+}
+
+function recurringObjectHasDollarTotal(obj = {}) {
+  return firstPositiveNumber(
+    obj.monthlyTotal,
+    obj.grandTotal,
+    obj.annualAfterDiscount,
+    obj.annualTotal,
+    obj.monthly,
+    obj.annual,
+  ) != null;
+}
+
+function oneTimeObjectFromEstimateData(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const result = data.result && typeof data.result === 'object' ? data.result : data;
+  return {
+    oneTime: result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {},
+    nestedOneTime: result.results?.oneTime && typeof result.results.oneTime === 'object'
+      ? result.results.oneTime
+      : {},
+  };
+}
+
+function oneTimeItemHasDollarAmount(item = {}) {
+  return firstPositiveNumber(
+    item.price,
+    item.amount,
+    item.total,
+    item.priceAfterDiscount,
+    item.totalAfterDiscount,
+  ) != null;
+}
+
+function hasOneTimeDollarEvidence({ oneTimeTotal = 0, estimateData = {} } = {}) {
+  const { oneTime, nestedOneTime } = oneTimeObjectFromEstimateData(estimateData);
+  return firstPositiveNumber(oneTimeTotal, oneTime.total, nestedOneTime.total) != null
+    || estimateOneTimeItemsFromData(estimateData).some(oneTimeItemHasDollarAmount);
+}
+
+function shouldSuppressRecurringConversion({
+  billingTerm = 'standard',
+  monthlyRate = 0,
+  annualTotal = 0,
+  oneTimeTotal = 0,
+  recurringServices = [],
+  estimateData = {},
+} = {}) {
+  const services = mergeRecurringServiceLists(
+    Array.isArray(recurringServices) ? recurringServices : [],
+    recurringServicesFromEstimateData(estimateData),
+  );
+  const monthly = Number(monthlyRate);
+  const annual = Number(annualTotal);
+  const hasTopLevelRecurringAmount = (Number.isFinite(monthly) && monthly > 0)
+    || (Number.isFinite(annual) && annual > 0);
+  const hasRecurringEvidence = hasTopLevelRecurringAmount
+    || services.some(recurringRowHasDollarAmount)
+    || recurringObjectsFromEstimateData(estimateData).some(recurringObjectHasDollarTotal);
+
+  return billingTerm !== 'prepay_annual'
+    && hasOneTimeDollarEvidence({ oneTimeTotal, estimateData })
+    && !hasRecurringEvidence
+    && !services.some(recurringRowRequiresQuote);
 }
 
 function firstPositiveNumber(...values) {
@@ -628,22 +790,27 @@ const EstimateConverter = {
     // while older shapes use estimate_data.recurring.services or a flat estimate_data.services.
     // Without the result.* fallback, V2 estimates resolved to 0 services → tier='none' →
     // CHECK constraint violation on customers.waveguard_tier and the whole accept rolled back.
-    const recurringServices =
-      estimateData.recurring?.services
-      || estimateData.result?.recurring?.services
-      || estimateData.services?.filter(s => s.recurring || s.frequency)
-      || [];
-    const serviceCount = countTierQualifyingRecurringServices(recurringServices);
+    const recurringServices = recurringServicesFromEstimateData(estimateData);
+    const monthlyRate = parseFloat(estimate.monthly_total || 0);
+    const suppressRecurringConversion = shouldSuppressRecurringConversion({
+      billingTerm,
+      monthlyRate,
+      annualTotal: estimate.annual_total,
+      oneTimeTotal: estimate.onetime_total,
+      recurringServices,
+      estimateData,
+    });
+    const recurringServicesForConversion = suppressRecurringConversion ? [] : recurringServices;
+    const serviceCount = countTierQualifyingRecurringServices(recurringServicesForConversion);
     const shouldCreateDraftInvoice = shouldCreateDraftInvoiceForRecurring({
       billingTerm,
-      recurringServices,
+      recurringServices: recurringServicesForConversion,
     });
 
     // Determine tier
-    const { tier, discount } = determineTier(serviceCount, recurringServices.length > 0);
-
-    // Calculate monthly rate from estimate
-    const monthlyRate = parseFloat(estimate.monthly_total || 0);
+    const { tier, discount } = suppressRecurringConversion
+      ? { tier: 'One-Time', discount: 0 }
+      : determineTier(serviceCount, recurringServicesForConversion.length > 0);
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
       || inferFrequencyKeyFromEstimateData(estimateData);
     // Combined routing only trusts the customer's REAL accepted selection —
@@ -665,14 +832,21 @@ const EstimateConverter = {
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
     //    admin screen can display.
-    await database('customers').where({ id: customerId }).update({
-      pipeline_stage: 'active_customer',
-      pipeline_stage_changed_at: new Date(),
-      waveguard_tier: tier,
-      monthly_rate: monthlyRate,
-      active: true,
-      deleted_at: null,
-    });
+    const customerUpdates = suppressRecurringConversion
+      ? {
+          waveguard_tier: 'One-Time',
+          monthly_rate: null,
+          deleted_at: null,
+        }
+      : {
+          pipeline_stage: 'active_customer',
+          pipeline_stage_changed_at: new Date(),
+          waveguard_tier: tier,
+          monthly_rate: monthlyRate,
+          active: true,
+          deleted_at: null,
+        };
+    await database('customers').where({ id: customerId }).update(customerUpdates);
 
     // 2. Create scheduled_services for recurring services — but ONLY if
     //    the accept path didn't already create one via slot reservation
@@ -697,7 +871,12 @@ const EstimateConverter = {
       .first();
     const reservationRowsExist = Number(existingFromReservation?.count || 0) > 0;
 
-    if (reservationRowsExist) {
+    if (suppressRecurringConversion) {
+      logger.info(
+        `[estimate-converter] Skipping recurring conversion for estimate ${estimateId} — ` +
+        `$${monthlyRate}/mo standard accept is treated as one-time fallback`
+      );
+    } else if (reservationRowsExist) {
       logger.info(
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
         `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
@@ -726,7 +905,7 @@ const EstimateConverter = {
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
       try {
-        const { combos } = combineRecurringServicesForScheduling(recurringServices, {
+        const { combos } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
           acceptFrequency: acceptedPlanFrequency,
           supplementalCompanions: supplementalCompanionLines(estimateData),
         });
@@ -777,7 +956,7 @@ const EstimateConverter = {
 
       if (reservedStart) {
         try {
-          const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServices, reservedStart);
+          const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
           const seedResult = await seedRecurringFollowUpsForParent(database, reservedStart, seedSvc, {
             fallbackFrequency: inferredFrequencyKey,
           });
@@ -797,7 +976,7 @@ const EstimateConverter = {
 
       // Combined-service routing: matching-cadence pairs schedule as ONE
       // combined service; everything else flows through unchanged.
-      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServices, {
+      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
         acceptFrequency: acceptedPlanFrequency,
         supplementalCompanions: supplementalCompanionLines(estimateData),
       });
@@ -834,7 +1013,7 @@ const EstimateConverter = {
           fallbackFrequency: inferredFrequencyKey,
         });
         const frequency = svc.frequency || pattern || 'monthly';
-        const estimatedPrice = billingCadence && recurringServices.length === 1
+        const estimatedPrice = billingCadence && recurringServicesForConversion.length === 1
           ? billingCadence.amount
           : null;
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);
@@ -918,7 +1097,7 @@ const EstimateConverter = {
         })
         : 0;
       const setupFeeApplies = billingTerm === 'standard'
-        ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices, estimateData })
+        ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
         : false;
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
@@ -1122,13 +1301,13 @@ const EstimateConverter = {
       membershipTier: tier,
       monthlyRate,
       billingCadence: billingCadence?.periodLabel || (billingTerm === 'prepay_annual' ? 'annual prepay' : 'monthly'),
-      includedServices: recurringServices
+      includedServices: recurringServicesForConversion
         .map((svc) => svc.name || svc.serviceName || svc.service_name || svc.label)
         .filter(Boolean)
         .join(', '),
     };
 
-    if (opts.skipMembershipEmail !== true) {
+    if (opts.skipMembershipEmail !== true && !suppressRecurringConversion) {
       void AccountMembershipEmail.sendMembershipStarted(membershipEmail)
         .catch((err) => logger.warn(`[estimate-converter] membership.started email failed for customer ${customerId}: ${err.message}`));
     }
@@ -1147,6 +1326,8 @@ const EstimateConverter = {
       draftInvoicePayUrl,
       invoiceDelivery,
       membershipEmail,
+      serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
+      recurringConversionSkipped: suppressRecurringConversion,
     };
   },
 };
@@ -1167,6 +1348,7 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
+module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConversion;
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;

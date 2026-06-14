@@ -113,6 +113,14 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
   const key = primary?.service || serviceKeyForLabel(fallback);
 
+  if (serviceProfile?.serviceMode === 'one_time' && services.length === 0) {
+    if (key === 'pest_control') return 'Pest Control';
+    if (key === 'rodent_trapping') return 'Rodent Trapping Service';
+    if (key === 'rodent_exclusion') return 'Rodent Exclusion Service';
+    if (key === 'rodent_sanitation') return 'Rodent Sanitation Service';
+    return cappedServiceType(fallback);
+  }
+
   if (key === 'pest_control') return pestServiceTypeFromVisits(primary?.visitsPerYear);
   if (key === 'lawn_care') return 'Lawn Care';
   if (key === 'mosquito') return 'Mosquito Treatment';

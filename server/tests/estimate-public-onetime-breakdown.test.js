@@ -1805,6 +1805,83 @@ describe('public estimate one-time breakdown', () => {
     })).toBe(false);
   });
 
+  test('treats zero-dollar placeholder recurring rows as one-time-only', () => {
+    const oneTimeWithPlaceholderRecurring = {
+      result: {
+        recurring: {
+          serviceCount: 1,
+          monthlyTotal: 0,
+          annualAfterDiscount: 0,
+          services: [{ service: 'pest_control', name: 'Pest Control', mo: 0 }],
+        },
+        oneTime: {
+          total: 249,
+          items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 249 }],
+        },
+      },
+    };
+
+    const estimate = {
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 249,
+      show_one_time_option: false,
+    };
+
+    expect(isStructuralOneTimeOnlyEstimate(oneTimeWithPlaceholderRecurring, estimate)).toBe(true);
+    expect(defaultServiceModeForEstimate(oneTimeWithPlaceholderRecurring, estimate)).toBe('one_time');
+  });
+
+  test('keeps quote-required zero-dollar recurring rows in recurring mode', () => {
+    const quoteRequiredRecurring = {
+      result: {
+        recurring: {
+          serviceCount: 1,
+          monthlyTotal: 0,
+          annualAfterDiscount: 0,
+          services: [{ service: 'pest_control', name: 'Pest Control', mo: 0, quoteRequired: true }],
+        },
+        oneTime: {
+          total: 249,
+          items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 249 }],
+        },
+      },
+    };
+
+    const estimate = {
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 249,
+      show_one_time_option: false,
+    };
+
+    expect(isStructuralOneTimeOnlyEstimate(quoteRequiredRecurring, estimate)).toBe(false);
+    expect(defaultServiceModeForEstimate(quoteRequiredRecurring, estimate)).toBe('recurring');
+  });
+
+  test('keeps row-priced recurring estimates in recurring mode even when totals are stale', () => {
+    const recurringWithRowAmount = {
+      result: {
+        recurring: {
+          serviceCount: 1,
+          monthlyTotal: 0,
+          annualAfterDiscount: 0,
+          services: [{ service: 'pest_control', name: 'Pest Control', mo: 89 }],
+        },
+        oneTime: {
+          total: 249,
+          items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 249 }],
+        },
+      },
+    };
+
+    expect(isStructuralOneTimeOnlyEstimate(recurringWithRowAmount, {
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 249,
+    })).toBe(false);
+  });
+
   test('detects top-level specialty-only estimates as one-time-only', () => {
     const specialtyOnly = {
       result: {
