@@ -291,6 +291,15 @@ function parseShadowResponse(text) {
   // Only a missing/non-string reply is unusable.
   if (!parsed || typeof parsed.reply !== 'string') return null;
 
+  // Auto-send safety MUST be read from the RAW model output: the sanitize step
+  // below DROPS unrecognized action types, so a model that requests an unknown
+  // action (e.g. {"type":"cancel_service"}) would otherwise sanitize to [] and
+  // read as action-free. autoSendActionsSafe fails closed on any entry whose
+  // type isn't exactly 'none' — unknown types included — so applying it here,
+  // pre-sanitize, is the honest signal. (Empty/absent = no action = safe.)
+  const { autoSendActionsSafe } = require('./sms-auto-send');
+  const autoSendSafe = autoSendActionsSafe(parsed.intended_actions);
+
   const intendedActions = Array.isArray(parsed.intended_actions)
     ? parsed.intended_actions
         .filter((a) => a && typeof a.type === 'string' && INTENDED_ACTION_TYPES.includes(a.type))
@@ -300,6 +309,7 @@ function parseShadowResponse(text) {
   return {
     reply: parsed.reply.trim(),
     intended_actions: intendedActions,
+    auto_send_safe: autoSendSafe,
     missing_info: typeof parsed.missing_info === 'string' ? parsed.missing_info.slice(0, 500) : null,
   };
 }
@@ -391,6 +401,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           reply: parsed.reply,
           intent: intentName,
           intendedActions: parsed.intended_actions,
+          actionsVerifiedSafe: parsed.auto_send_safe,
           confidence: intent?.confidence ?? null,
           model: MODELS.FLAGSHIP,
           promptVersion: PROMPT_VERSION,

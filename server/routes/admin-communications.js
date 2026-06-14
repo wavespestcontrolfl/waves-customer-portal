@@ -25,6 +25,7 @@ const {
   ignoreParkedSuggestions,
   lockSuggestThread,
 } = require('../services/sms-suggest-mode');
+const autoSendExecutor = require('../services/sms-auto-send');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -238,11 +239,21 @@ router.post('/sms', async (req, res, next) => {
     // send the same card. Success resolves them as ignored; blocked/failed/
     // exception reopens them; a crash mid-send is bounded by the 30-min
     // orphan recovery.
+    let autoSendInFlight = false;
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
       if (parkPhoneLast10) {
         parkedThreadIds = await db.transaction(async (trx) => {
           await lockSuggestThread(trx, parkPhoneLast10);
+          // An autonomous house-voice reply (Phase E) may be mid-send to this
+          // thread — it claimed under THIS same lock. Don't let a manual send
+          // race its provider window; both would reach the customer. Under the
+          // lock the check is atomic with the auto-send's claim: whoever takes
+          // the lock first wins, the other backs off.
+          if (await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: parkPhoneLast10, customerId: trustedCustomerId })) {
+            autoSendInFlight = true;
+            return [];
+          }
           return parkThreadSuggestions(
             { phoneLast10: parkPhoneLast10, excludeDecisionId: verifiedAgentDecision?.id }, trx
           );
@@ -261,6 +272,18 @@ router.post('/sms', async (req, res, next) => {
         });
       }
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
+    }
+
+    if (autoSendInFlight) {
+      // The reply never left — release the claimed card so it can be resent
+      // after the autonomous reply lands.
+      if (claimedDecisionId) {
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId],
+          reason: 'An automated reply is going out to this thread — suggestion reopened.',
+        });
+      }
+      return res.status(409).json({ error: 'An automated reply is going out to this conversation right now — refresh in a moment and resend if it is still needed.' });
     }
 
     const sendStartedAt = new Date();

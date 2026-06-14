@@ -49,6 +49,12 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 0),
   lockSuggestThread: jest.fn(async () => {}),
 }));
+// Inert auto-send executor: the /sms route checks for an in-flight autonomous
+// reply under the park lock. Default to "none in flight" so the send tests
+// proceed; the executor's own behavior is covered by sms-auto-send.test.js.
+jest.mock('../services/sms-auto-send', () => ({
+  hasActiveAutoSendClaim: jest.fn(async () => false),
+}));
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => (
   jest.fn().mockImplementation(() => ({
@@ -60,6 +66,7 @@ const express = require('express');
 const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { hasActiveAutoSendClaim } = require('../services/sms-auto-send');
 const smsMedia = require('../services/sms-media');
 
 function makeQueryBuilder(rows = []) {
@@ -285,6 +292,31 @@ describe('admin communications SMS route', () => {
           adminUserId: 'admin-1',
         }),
       }));
+    });
+  });
+
+  test('refuses a manual send while an autonomous reply is mid-send to the thread', async () => {
+    // An auto-send claim is in flight for this thread (it reserved under the
+    // shared lock). The manual send must back off, not race its provider
+    // window — both would reach the customer.
+    hasActiveAutoSendClaim.mockResolvedValueOnce(true);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Replying by hand',
+          messageType: 'manual',
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
 

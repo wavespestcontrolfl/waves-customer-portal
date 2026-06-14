@@ -17,7 +17,29 @@ describe('sms shadow drafter — response parsing', () => {
     expect(parsed).toEqual({
       reply: 'Hello Dale! You are on the schedule.',
       intended_actions: [],
+      auto_send_safe: true,
       missing_info: null,
+    });
+  });
+
+  describe('auto_send_safe — computed from RAW actions, before sanitize drops unknowns', () => {
+    test('no actions / empty / only none → safe', () => {
+      expect(parseShadowResponse('{"reply":"hi","intended_actions":[]}').auto_send_safe).toBe(true);
+      expect(parseShadowResponse('{"reply":"hi"}').auto_send_safe).toBe(true);
+      expect(parseShadowResponse('{"reply":"","intended_actions":[{"type":"none"}]}').auto_send_safe).toBe(true);
+    });
+
+    test('a recognized actionable type → NOT safe', () => {
+      expect(parseShadowResponse('{"reply":"hi","intended_actions":[{"type":"escalate"}]}').auto_send_safe).toBe(false);
+      expect(parseShadowResponse('{"reply":"hi","intended_actions":[{"type":"send_payment_link"}]}').auto_send_safe).toBe(false);
+    });
+
+    test('an UNKNOWN action type fails closed even though it is sanitized away', () => {
+      const parsed = parseShadowResponse('{"reply":"hi","intended_actions":[{"type":"cancel_service"}]}');
+      // sanitize drops the unrecognized type...
+      expect(parsed.intended_actions).toEqual([]);
+      // ...but the raw-derived safety flag still refuses auto-send.
+      expect(parsed.auto_send_safe).toBe(false);
     });
   });
 

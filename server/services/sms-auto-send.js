@@ -212,6 +212,38 @@ async function resolveSent({ decisionId, draftId, providerMessageId }) {
   });
 }
 
+// How long an auto-send claim counts as "in flight" for cross-path reservation
+// checks. A real provider call resolves in well under a minute; a longer-lived
+// 'sending' row is an orphan the nightly reconcile will fail, and must NOT
+// block human replies to the thread indefinitely.
+const ACTIVE_CLAIM_MINUTES = 5;
+
+/**
+ * Is an auto-send mid-flight to this thread right now? A claim sits in
+ * 'sending' only for the provider window (then resolves to auto_sent /
+ * auto_send_failed). The manual/scheduled send paths call this UNDER the shared
+ * thread lock before dispatching, so an autonomous reply and a human reply
+ * can't both reach the customer in the same window: whichever takes the lock
+ * first commits its claim/park, the other sees it and backs off. Scoped to
+ * RECENT claims so an orphaned 'sending' row never blocks the inbox for more
+ * than the reconcile window. Thread scope = customer phone (last 10), with a
+ * customer_id fallback.
+ */
+async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMinutes = ACTIVE_CLAIM_MINUTES } = {}) {
+  if (!threadLast10 && !customerId) return false;
+  const cutoff = new Date(Date.now() - recentMinutes * 60 * 1000);
+  const q = dbh('agent_decisions as ad')
+    .where({ 'ad.workflow': AUTOSEND_WORKFLOW, 'ad.status': CLAIM_STATUS })
+    .where('ad.updated_at', '>', cutoff);
+  if (threadLast10) {
+    q.leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+      .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
+  } else {
+    q.where('ad.customer_id', customerId);
+  }
+  return Boolean(await q.first('ad.id'));
+}
+
 /** Mark a claim whose send was blocked/failed/errored. The draft stays 'shadow'. */
 async function failClaim(decisionId, reason) {
   try {
@@ -237,7 +269,7 @@ async function failClaim(decisionId, reason) {
 async function maybeAutoSend(params = {}) {
   const {
     draftId, customer, smsLogId, inboundMessage, reply, intent,
-    intendedActions = null,
+    intendedActions = null, actionsVerifiedSafe = false,
     confidence = null, model = null, promptVersion = null, schedulingIntent = false,
   } = params;
   const customerId = customer?.id || null;
@@ -258,8 +290,11 @@ async function maybeAutoSend(params = {}) {
     // (3.5) A draft whose safety contract records a follow-up action
     //       (escalate / book / send a link) must reach a HUMAN — auto-sending
     //       the text alone would promise something the executor never does.
-    //       Fail closed; the drafter downgrades it to a suggestion card.
-    if (!autoSendActionsSafe(intendedActions)) {
+    //       Two layers: (a) actionsVerifiedSafe is the parser's RAW-output flag
+    //       (the only place unknown/dropped action types are visible — defaults
+    //       false, so a caller that omits it fails closed); (b) the executor
+    //       independently re-checks the sanitized list. Both must hold.
+    if (actionsVerifiedSafe !== true || !autoSendActionsSafe(intendedActions)) {
       return { sent: false, reason: 'action_required' };
     }
 
@@ -398,6 +433,7 @@ module.exports = {
   isRealProviderSend,
   autoSendActionsSafe,
   autoSendPreflight,
+  hasActiveAutoSendClaim,
   claimAutoSend,
   resolveSent,
   failClaim,
