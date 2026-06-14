@@ -1888,10 +1888,15 @@ class AutonomousRunner {
     // Best-effort image so the GBP post isn't a flat text card. The image
     // pipeline (generate -> S3 -> CDN) is the same one publishToAll uses for
     // Instagram; on any failure we fall through to a text-only post (the
-    // prior behavior) rather than blocking the publish.
+    // prior behavior) rather than blocking the publish. Gate on image hosting
+    // first — uploadImageToS3 returns null without S3 + a CDN domain, so
+    // generating without it would just burn credits.
+    const imageHostingReady =
+      !!process.env.S3_BUCKET && !!process.env.AWS_ACCESS_KEY_ID
+      && !!process.env.AWS_SECRET_ACCESS_KEY && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     let gbpImageUrl = null;
     try {
-      if (social.generateImage && social.uploadImageToS3) {
+      if (imageHostingReady && social.generateImage && social.uploadImageToS3) {
         const img = await social.generateImage(title);
         if (img?.base64) {
           gbpImageUrl = await social.uploadImageToS3(img.base64, `gbp-${location.id}-${Date.now()}.jpg`);

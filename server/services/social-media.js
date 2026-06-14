@@ -729,7 +729,9 @@ const SocialMediaService = {
       SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
     const gbpCanConsume = SOCIAL_FLAGS.gbpEnabled;
     const canConsumeGeneratedImage = hasImageHosting && (instagramCanConsume || gbpCanConsume);
-    if (!generatedImageUrl && canConsumeGeneratedImage) {
+    // Skip generation entirely on a dry run — nothing gets posted, so an
+    // image would just burn credits.
+    if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && canConsumeGeneratedImage) {
       try {
         const img = await generateImage(title);
         if (img && img.base64) {

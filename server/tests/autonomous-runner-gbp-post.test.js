@@ -62,6 +62,11 @@ beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
   delete process.env.AUTONOMOUS_GBP_POST_DAILY_CAP;
   delete process.env.AUTO_PUBLISH_GBP_POST;
+  // Image hosting ready by default so the image-path tests exercise generation.
+  process.env.S3_BUCKET = 'test-bucket';
+  process.env.AWS_ACCESS_KEY_ID = 'test-key';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test-secret';
+  process.env.SOCIAL_MEDIA_CDN_DOMAIN = 'cdn.example.com';
   social.SOCIAL_FLAGS.dryRun = false;
   social.generateContent.mockResolvedValue('Sarasota ghost ants are peaking. Schedule an inspection.');
   social.validateContent.mockReturnValue({ valid: true, issues: [] });
@@ -238,6 +243,17 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).toHaveBeenNthCalledWith(2, 'sarasota', expect.any(String), expect.any(String), null);
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
+  });
+
+  test('skips image generation when image hosting is not configured (no CDN)', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    delete process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    mockDb();
+    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+
+    expect(social.generateImage).not.toHaveBeenCalled();
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
   });
 
   test('non-media post failure does NOT retry text-only (auth/quota would just fail again)', async () => {
