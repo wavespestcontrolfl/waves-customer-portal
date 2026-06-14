@@ -1,4 +1,5 @@
 const {
+  applyFixtureReplayOptions,
   buildMissingFixtureResults,
   buildReplayErrorResult,
   evaluateFixtureExpectation,
@@ -229,6 +230,34 @@ describe('call extraction replay variance reporting', () => {
       explicitIds: true,
       ids: ['11111111-1111-4111-8111-111111111111'],
     });
+  });
+
+  test('fixture setup raises limit for explicit ids and rejects non-fixture ids', () => {
+    const ids = Array.from({ length: 11 }, (_, index) => `fixture-call-${index + 1}`);
+    const fixture = {
+      path: 'reviewed.json',
+      cases: ids.map((callId) => ({ call_log_id: callId })),
+      byCallId: new Map(ids.map((callId) => [callId, { call_log_id: callId }])),
+    };
+    const options = {
+      limit: 10,
+      ids,
+      explicitIds: true,
+    };
+
+    expect(applyFixtureReplayOptions(options, fixture)).toEqual(ids);
+    expect(options.limit).toBe(11);
+
+    expect(() => applyFixtureReplayOptions({
+      limit: 10,
+      ids: ['not-in-fixture'],
+      explicitIds: true,
+    }, fixture)).toThrow(/does not contain explicit --ids/);
+    expect(() => applyFixtureReplayOptions({
+      limit: 10,
+      ids: [],
+      explicitIds: true,
+    }, fixture)).toThrow(/must include at least one fixture call_log_id/);
   });
 
   test('fixture runs should fail after printing summary when errors or expectation failures exist', () => {

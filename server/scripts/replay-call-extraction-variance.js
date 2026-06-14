@@ -218,6 +218,33 @@ function loadReplayFixture(fixturePath) {
   };
 }
 
+function validateExplicitFixtureIds(fixture, ids) {
+  const fixtureLabel = fixture?.path || 'fixture';
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error(`Replay fixture ${fixtureLabel} explicit --ids must include at least one fixture call_log_id`);
+  }
+
+  const byCallId = fixture.byCallId || new Map((fixture.cases || []).map((item) => [item.call_log_id, item]));
+  const missingIds = ids.filter((id) => !byCallId.has(id));
+  if (missingIds.length) {
+    throw new Error(`Replay fixture ${fixtureLabel} does not contain explicit --ids: ${missingIds.join(', ')}`);
+  }
+}
+
+function applyFixtureReplayOptions(options, fixture) {
+  if (!fixture) return null;
+
+  if (options.explicitIds) {
+    validateExplicitFixtureIds(fixture, options.ids);
+    options.limit = Math.max(options.limit, options.ids.length);
+    return [...options.ids];
+  }
+
+  options.ids = fixture.cases.map((item) => item.call_log_id);
+  options.limit = Math.max(options.limit, options.ids.length);
+  return null;
+}
+
 function normalizeString(value) {
   if (value === null || value === undefined) return null;
   const s = String(value).trim().replace(/\s+/g, ' ');
@@ -1003,11 +1030,7 @@ async function main() {
   const extractionCompat = require('../utils/extraction-compat');
   const helpers = { ...triageFlags, ...extractionCompat };
   const fixture = loadReplayFixture(options.fixturePath);
-  const explicitFixtureIds = fixture && options.explicitIds ? [...options.ids] : null;
-  if (fixture && !options.explicitIds) {
-    options.ids = fixture.cases.map((item) => item.call_log_id);
-    options.limit = Math.max(options.limit, options.ids.length);
-  }
+  const explicitFixtureIds = applyFixtureReplayOptions(options, fixture);
   const fixtureCaseByCallId = fixture?.byCallId || new Map();
 
   try {
@@ -1090,4 +1113,6 @@ module.exports = {
   buildMissingFixtureResults,
   shouldFailRun,
   loadReplayFixture,
+  validateExplicitFixtureIds,
+  applyFixtureReplayOptions,
 };

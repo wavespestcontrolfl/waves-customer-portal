@@ -37,6 +37,7 @@ describe('call extraction eval fixtures', () => {
         expect(ALLOWED_EXPECTATION_KEYS.has(key)).toBe(true);
         if (key.endsWith('_include') || key.endsWith('_exclude') || key === 'legacy_schedule_variance_fields') {
           expect(Array.isArray(item.expect[key])).toBe(true);
+          expect(item.expect[key].length).toBeGreaterThan(0);
           expect(item.expect[key].every((entry) => typeof entry === 'string' && entry.trim())).toBe(true);
         }
       }
