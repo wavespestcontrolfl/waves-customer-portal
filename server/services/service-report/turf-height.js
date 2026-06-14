@@ -92,11 +92,16 @@ function buildReadingFields(grassType, manualHeightIn) {
     err.code = 'invalid_height';
     throw err;
   }
+  // Round to the stored precision (numeric(4,2)) BEFORE computing status, so the
+  // persisted height and range_status can never disagree (e.g. 3.499 → 3.50,
+  // which must read in_range against a 3.5–4.0 band, not below).
+  const heightIn = Math.round(Number(manualHeightIn) * 100) / 100;
   const band = resolveHeightBand(grassType);
   return {
+    manual_height_in: heightIn, // the value to persist (rounded to column precision)
     target_min_in: band.min,
     target_max_in: band.max,
-    range_status: computeRangeStatus(Number(manualHeightIn), band),
+    range_status: computeRangeStatus(heightIn, band),
     grass_defaulted: band.defaulted, // surface flags the assumption; not a column
   };
 }
@@ -118,7 +123,9 @@ function buildMowingHeightContext(reading, trend = []) {
     mowTriggerIn: mowTriggerInches(band),
     grassType: reading.grass_type || null,
     measuredAt: reading.measured_at || null,
-    verificationStatus: reading.verification_status || 'pending', // internal QA marker only
+    // verification_status is intentionally NOT exposed here — this context is
+    // returned on customer-facing report + lawn-health JSON. The internal QA
+    // state lives in the admin review queue (PR2), never in a customer payload.
     trend: (Array.isArray(trend) ? trend : [])
       .filter((r) => r && r.manual_height_in != null && r.manual_height_in !== ''
         && Number.isFinite(Number(r.manual_height_in)))

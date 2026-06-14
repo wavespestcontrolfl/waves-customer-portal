@@ -62,20 +62,25 @@ describe('turf-height: range status (below is the only red state)', () => {
 describe('turf-height: buildReadingFields (snapshot assembly)', () => {
   test('snapshots the band + computes status for a valid reading', () => {
     expect(buildReadingFields('st_augustine', 3.0)).toEqual({
-      target_min_in: 3.5, target_max_in: 4.0, range_status: 'below', grass_defaulted: false,
+      manual_height_in: 3.0, target_min_in: 3.5, target_max_in: 4.0, range_status: 'below', grass_defaulted: false,
     });
     expect(buildReadingFields('zoysia', 2.0)).toEqual({
-      target_min_in: 1.5, target_max_in: 2.0, range_status: 'in_range', grass_defaulted: false,
+      manual_height_in: 2.0, target_min_in: 1.5, target_max_in: 2.0, range_status: 'in_range', grass_defaulted: false,
     });
   });
   test('mixed/unknown grass → defaulted band, flagged', () => {
     expect(buildReadingFields('mixed', 4.5)).toEqual({
-      target_min_in: 3.5, target_max_in: 4.0, range_status: 'above', grass_defaulted: true,
+      manual_height_in: 4.5, target_min_in: 3.5, target_max_in: 4.0, range_status: 'above', grass_defaulted: true,
     });
   });
   test('accepts a free off-stop value (e.g. 3.7")', () => {
     expect(buildReadingFields('st_augustine', 3.7)).toEqual({
-      target_min_in: 3.5, target_max_in: 4.0, range_status: 'in_range', grass_defaulted: false,
+      manual_height_in: 3.7, target_min_in: 3.5, target_max_in: 4.0, range_status: 'in_range', grass_defaulted: false,
+    });
+  });
+  test('rounds to column precision before computing status (3.499 → 3.5, in_range not below)', () => {
+    expect(buildReadingFields('st_augustine', 3.499)).toEqual({
+      manual_height_in: 3.5, target_min_in: 3.5, target_max_in: 4.0, range_status: 'in_range', grass_defaulted: false,
     });
   });
   test('throws invalid_height on an out-of-range value (service-layer guard)', () => {
@@ -94,8 +99,10 @@ describe('turf-height: buildMowingHeightContext (report/card payload)', () => {
     const ctx = buildMowingHeightContext(reading, []);
     expect(ctx).toMatchObject({
       heightIn: 5.0, unit: 'in', band: { min: 3.5, max: 4.0 }, bandLabel: '3.5–4″',
-      status: 'above', mowTriggerIn: 6.0, grassType: 'st_augustine', verificationStatus: 'pending',
+      status: 'above', mowTriggerIn: 6.0, grassType: 'st_augustine',
     });
+    // verification_status is internal-only — never in the customer payload.
+    expect(ctx.verificationStatus).toBeUndefined();
   });
   test('maps + filters the trend rows', () => {
     const ctx = buildMowingHeightContext(reading, [

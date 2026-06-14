@@ -38,13 +38,13 @@ async function createTurfHeightReading(knex, {
   createdBy,
   measuredAt = null,
 }) {
-  const fields = buildReadingFields(grassType, manualHeightIn); // throws on bad increment
+  const fields = buildReadingFields(grassType, manualHeightIn); // throws on bad value
   const [reading] = await knex('turf_height_readings')
     .insert({
       service_record_id: serviceRecordId,
       customer_id: customerId,
       grass_type: grassType,
-      manual_height_in: manualHeightIn,
+      manual_height_in: fields.manual_height_in, // rounded to column precision (matches range_status)
       target_min_in: fields.target_min_in,
       target_max_in: fields.target_max_in,
       range_status: fields.range_status,
