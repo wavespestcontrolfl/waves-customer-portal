@@ -105,7 +105,8 @@ async function syncCampaigns() {
         campaign_name: row.campaign.name,
         status: mapStatus(row.campaign.status),
         campaign_type: row.campaign.advertising_channel_type || null,
-        daily_budget: dailyBudget,
+        daily_budget_base: dailyBudget,
+        daily_budget_current: dailyBudget,
         updated_at: new Date(),
       };
 
