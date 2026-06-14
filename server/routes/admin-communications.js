@@ -275,11 +275,12 @@ router.post('/sms', async (req, res, next) => {
             // auto-send claiming AFTER we release the lock won't fire during our
             // provider window. Deleted once the send resolves (below / in catch).
             // sms_log.from_phone is NOT NULL, but the route lets callers omit
-            // fromNumber (TwilioService picks the location default later).
-            // Resolve the same default here so a gate-on send doesn't throw on
-            // the reservation insert.
-            const reservationFrom = fromNumber
-              || TWILIO_NUMBERS.getOutboundNumber(resolveLocation(customer?.city || '')?.id);
+            // fromNumber (TwilioService picks the location default at send).
+            // The reservation is a transient marker (deleted after send, never
+            // customer-visible), so its from only needs to be non-null — use
+            // the main-line default. getOutboundNumber() with no location falls
+            // back to the main line.
+            const reservationFrom = fromNumber || TWILIO_NUMBERS.getOutboundNumber();
             const [resv] = await trx('sms_log')
               .insert({
                 customer_id: trustedCustomerId || null,

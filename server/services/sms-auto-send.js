@@ -183,7 +183,12 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
         model: model || null,
         prompt_version: promptVersion || null,
-        idempotency_key: `${AUTOSEND_WORKFLOW}:draft:${draftId}`,
+        // Scope idempotency to the INBOUND, not the draft: message_drafts are
+        // not unique per sms_log_id, so the same inbound can be drafted twice
+        // (webhook retry, backfill overlap). Keying on draftId would let the
+        // second draft auto-send a duplicate after the first resolved. One
+        // autonomous reply per inbound, period.
+        idempotency_key: `${AUTOSEND_WORKFLOW}:inbound:${smsLogId}`,
       })
       .onConflict('idempotency_key')
       .ignore()
@@ -366,8 +371,17 @@ async function maybeAutoSend(params = {}) {
     // disabled, owner kill switch) reports sent with a sentinel id but nothing
     // reached the customer. Only a real provider message finalizes the draft.
     if (isRealProviderSend(result)) {
-      await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId });
-      if (parkedIds.length) await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
+      // The customer HAS been texted. Post-send bookkeeping must never flip
+      // this back to sent:false — that would let the drafter republish the
+      // already-delivered draft as a suggestion (a duplicate reply). If the
+      // bookkeeping update throws, the claim stays 'sending' with a sent
+      // sms_log row and reconcileAutoSendClaims settles it (resolve + flip).
+      try {
+        await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId });
+        if (parkedIds.length) await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
+      } catch (bookErr) {
+        logger.warn(`[sms-auto-send] post-send bookkeeping failed (decision ${claim.decisionId}); reconcile sweep will settle: ${bookErr.message}`);
+      }
       logger.info(`[sms-auto-send] SENT customer=${customerId || 'unknown'} intent=${intent} decision=${claim.decisionId} sid=${result.providerMessageId || 'n/a'}`);
       return { sent: true, decisionId: claim.decisionId, providerMessageId: result.providerMessageId || null };
     }

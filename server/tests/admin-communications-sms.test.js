@@ -117,6 +117,23 @@ function makeFirstQueryBuilder(row = null) {
   return builder;
 }
 
+// Permissive chainable builder for paths that issue arbitrary queries (e.g. the
+// gate-on reservation insert + delete and the post-send sweep). insert→returning
+// yields a row id; everything else resolves empty/null.
+function makeUniversalBuilder() {
+  const b = {};
+  const chain = () => b;
+  for (const m of ['where', 'whereNull', 'whereNot', 'whereIn', 'whereRaw', 'leftJoin', 'join', 'joinRaw', 'select', 'orderBy', 'groupBy', 'distinct', 'limit', 'offset', 'insert', 'update', 'onConflict', 'ignore', 'merge', 'count']) {
+    b[m] = jest.fn(chain);
+  }
+  b.returning = jest.fn(() => Promise.resolve([{ id: 'resv-1' }]));
+  b.first = jest.fn(() => Promise.resolve(null));
+  b.del = jest.fn(() => Promise.resolve(1));
+  b.pluck = jest.fn(() => Promise.resolve([]));
+  b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+  return b;
+}
+
 function smsMessageRow(overrides = {}) {
   return {
     id: 'message-1',
@@ -329,6 +346,26 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(409);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a gate-on manual send without fromNumber reserves and still sends (no 503)', async () => {
+    // Regression: the reservation insert must resolve a non-null from_phone
+    // without referencing an out-of-scope customer. With the gate on and no
+    // fromNumber, it must NOT throw → 503; it should reserve and send.
+    mockGates.smsAutoSend = true; // hasActiveAutoSendClaim default mock → false
+    db.mockImplementation(() => makeUniversalBuilder());
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM777' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Hi there' }), // no fromNumber
+      });
+
+      expect(res.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalled();
     });
   });
 
