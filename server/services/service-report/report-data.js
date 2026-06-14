@@ -1836,21 +1836,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
-    knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at')
-      .then(async (rows) => {
-        // Drop the turf-height gauge image — a measurement/QA artifact (uploaded
-        // as a 'progress' photo), never a customer-facing field photo. Fail-soft.
-        try {
-          const gauge = await knex('turf_height_readings')
-            .where({ service_record_id: service.id })
-            .whereNotNull('gauge_photo_id')
-            .first('gauge_photo_id');
-          return gauge?.gauge_photo_id
-            ? rows.filter((p) => String(p.id) !== String(gauge.gauge_photo_id))
-            : rows;
-        } catch { return rows; }
-      })
-      .catch(() => []),
+    knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
   ]);
@@ -2122,17 +2108,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ...protocol.recommendations,
     ...findings.map((finding) => finding.recommendation).filter(Boolean),
   ]);
-  const photoPayload = await Promise.all(photos.map(async (photo) => ({
-    id: photo.id,
-    url: await photoUrl(photo),
-    caption: photo.caption || '',
-    stateBadge: photo.state_badge || null,
-    zoneId: photo.zone_id || null,
-    capturedAt: photo.captured_at || photo.created_at,
-    hashSha256: photo.hash_sha256 || null,
-    prevHashSha256: photo.prev_hash_sha256 || null,
-    aiTags: parseJsonArray(photo.ai_tags),
-  })));
+  // Drop the turf-height gauge image from the customer DISPLAY payload only — it's
+  // a measurement/QA artifact, not a field photo. It stays in `photos` so the
+  // tamper-evident hash chain (validated below) remains intact. Fail-soft.
+  let gaugePhotoId = null;
+  try {
+    const gaugeRow = await knex('turf_height_readings')
+      .where({ service_record_id: service.id })
+      .whereNotNull('gauge_photo_id')
+      .first('gauge_photo_id');
+    gaugePhotoId = gaugeRow?.gauge_photo_id || null;
+  } catch { gaugePhotoId = null; }
+  const photoPayload = await Promise.all(photos
+    .filter((photo) => !gaugePhotoId || String(photo.id) !== String(gaugePhotoId))
+    .map(async (photo) => ({
+      id: photo.id,
+      url: await photoUrl(photo),
+      caption: photo.caption || '',
+      stateBadge: photo.state_badge || null,
+      zoneId: photo.zone_id || null,
+      capturedAt: photo.captured_at || photo.created_at,
+      hashSha256: photo.hash_sha256 || null,
+      prevHashSha256: photo.prev_hash_sha256 || null,
+      aiTags: parseJsonArray(photo.ai_tags),
+    })));
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
