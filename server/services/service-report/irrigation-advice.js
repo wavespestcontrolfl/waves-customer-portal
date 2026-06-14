@@ -29,14 +29,22 @@ const PEAK_INCHES_BY_GRASS = {
 // vision model assumes it too), and grass type is rarely captured per customer.
 const DEFAULT_PEAK_INCHES = PEAK_INCHES_BY_GRASS.st_augustine; // 1.25"
 
-// Season multiplier by ET demand. SWFL months are grouped into peak demand
-// (Jun–Sep), shoulder (Apr–May, Oct–Nov), and cool/dormant (Dec–Mar).
-function seasonMultiplier(month) {
+// SWFL months grouped by ET demand / turf activity: peak (Jun–Sep), shoulder
+// (Apr–May, Oct–Nov), cool/dormant (Dec–Mar). Invalid input → peak (no seasonal
+// reduction), preserving prior behavior.
+function classifySeason(month) {
   const m = Number(month);
-  if (!Number.isInteger(m) || m < 1 || m > 12) return 1.0;
-  if (m >= 6 && m <= 9) return 1.0;       // peak
-  if (m === 4 || m === 5 || m === 10 || m === 11) return 0.75; // shoulder
-  return 0.5;                              // Dec–Mar cool/dormant
+  if (!Number.isInteger(m) || m < 1 || m > 12) return 'peak';
+  if (m >= 6 && m <= 9) return 'peak';
+  if (m === 4 || m === 5 || m === 10 || m === 11) return 'shoulder';
+  return 'cool'; // Dec–Mar
+}
+
+// Seasonal multiplier for the no-weather fallback path (scales absolute peak
+// inches). Unchanged from the original 1.0 / 0.75 / 0.5 curve.
+const SEASON_MULTIPLIER = { peak: 1.0, shoulder: 0.75, cool: 0.5 };
+function seasonMultiplier(month) {
+  return SEASON_MULTIPLIER[classifySeason(month)];
 }
 
 function normalizeGrassKey(grassType) {
@@ -60,11 +68,10 @@ function recommendedInchesPerWeek(grassType, month) {
   return roundQuarter(peak * seasonMultiplier(month));
 }
 
-// Turf crop coefficients (Kc) for the FAO-56 water balance: weekly water need =
-// reference ET₀ × Kc. UF/IFAS warm-season range ~0.45–0.8; calibrated so a
-// typical SWFL summer week (ET₀ ≈ 1.6") lands near the approved seasonal targets
-// (St. Augustine 1.6 × 0.8 ≈ 1.25"). PENDING agronomic sign-off, like the
-// seasonal lookup.
+// Peak-season turf crop coefficients (Kc) for the FAO-56 water balance: weekly
+// water need = reference ET₀ × Kc. UF/IFAS warm-season range ~0.45–0.8;
+// calibrated so a typical SWFL summer week (ET₀ ≈ 1.6") lands on the approved
+// seasonal targets (St. Augustine 1.6 × 0.8 ≈ 1.25"). Agronomy sign-off: Adam 2026-06.
 const CROP_COEFFICIENT_BY_GRASS = {
   st_augustine: 0.8,
   zoysia: 0.6,
@@ -76,13 +83,24 @@ const CROP_COEFFICIENT_BY_GRASS = {
 // Unknown grass → St. Augustine Kc (see DEFAULT_PEAK_INCHES rationale).
 const DEFAULT_CROP_COEFFICIENT = CROP_COEFFICIENT_BY_GRASS.st_augustine; // 0.8
 
-// ET₀-based weekly target (inches) = reference ET₀ for the week × turf Kc. Null
-// when ET₀ is unavailable so the caller falls back to the seasonal lookup.
-function recommendedFromEt0(et0InchesPerWeek, grassType) {
+// Seasonal Kc factor applied to every grass's peak Kc. Gentler than the fallback
+// SEASON_MULTIPLIER (0.5 cool) because ET₀ already carries the weather swing;
+// this layer adds the warm-season-turf dormancy effect — the plant uses less
+// relative to a reference grass in cool months. One curve for all warm-season
+// grasses; the base-Kc spread carries per-grass thirstiness. Sign-off: Adam 2026-06.
+const SEASONAL_KC_FACTOR = { peak: 1.0, shoulder: 0.9, cool: 0.75 };
+function seasonalKcFactor(month) {
+  return SEASONAL_KC_FACTOR[classifySeason(month)];
+}
+
+// ET₀-based weekly target (inches) = reference ET₀ × seasonally-adjusted turf Kc.
+// Null when ET₀ is unavailable so the caller falls back to the seasonal lookup.
+// `month` is optional; without it the peak (unreduced) Kc is used.
+function recommendedFromEt0(et0InchesPerWeek, grassType, month = null) {
   const et0 = Number(et0InchesPerWeek);
   if (!Number.isFinite(et0) || et0 <= 0) return null;
-  const kc = CROP_COEFFICIENT_BY_GRASS[normalizeGrassKey(grassType)] ?? DEFAULT_CROP_COEFFICIENT;
-  return roundQuarter(et0 * kc);
+  const baseKc = CROP_COEFFICIENT_BY_GRASS[normalizeGrassKey(grassType)] ?? DEFAULT_CROP_COEFFICIENT;
+  return roundQuarter(et0 * baseKc * seasonalKcFactor(month));
 }
 
 function numberOrNull(value) {
@@ -119,7 +137,7 @@ function buildIrrigationAdvice({
   referenceEt0InchesWeek = null,
 } = {}) {
   // Prefer the weather-driven ET₀ target; fall back to the grass×season lookup.
-  const et0Target = recommendedFromEt0(referenceEt0InchesWeek, grassType);
+  const et0Target = recommendedFromEt0(referenceEt0InchesWeek, grassType, month);
   const recommendedInchesPerWeek0 = et0Target != null ? et0Target : recommendedInchesPerWeek(grassType, month);
   const targetBasis = et0Target != null ? 'evapotranspiration' : 'seasonal';
   const irrigation = numberOrNull(irrigationInchesPerWeek);
@@ -178,5 +196,5 @@ module.exports = {
   recommendedInchesPerWeek,
   recommendedFromEt0,
   buildIrrigationAdvice,
-  _private: { seasonMultiplier, normalizeGrassKey, PEAK_INCHES_BY_GRASS, CROP_COEFFICIENT_BY_GRASS },
+  _private: { seasonMultiplier, classifySeason, seasonalKcFactor, normalizeGrassKey, PEAK_INCHES_BY_GRASS, CROP_COEFFICIENT_BY_GRASS, SEASONAL_KC_FACTOR },
 };

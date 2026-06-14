@@ -2,7 +2,46 @@ const {
   recommendedInchesPerWeek,
   recommendedFromEt0,
   buildIrrigationAdvice,
+  _private,
 } = require('../services/service-report/irrigation-advice');
+
+const ALL_GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'seashore_paspalum', 'bahia', 'centipede'];
+
+describe('seasonal Kc factor (ET₀ path)', () => {
+  test('classifies SWFL months into peak / shoulder / cool', () => {
+    expect([6, 7, 8, 9].map(_private.classifySeason)).toEqual(['peak', 'peak', 'peak', 'peak']);
+    expect([4, 5, 10, 11].map(_private.classifySeason)).toEqual(['shoulder', 'shoulder', 'shoulder', 'shoulder']);
+    expect([12, 1, 2, 3].map(_private.classifySeason)).toEqual(['cool', 'cool', 'cool', 'cool']);
+    expect(_private.classifySeason(null)).toBe('peak'); // unknown → no reduction
+  });
+
+  test('factor curve is 1.0 peak / 0.9 shoulder / 0.75 cool', () => {
+    expect(_private.seasonalKcFactor(7)).toBe(1.0);
+    expect(_private.seasonalKcFactor(5)).toBe(0.9);
+    expect(_private.seasonalKcFactor(1)).toBe(0.75);
+  });
+
+  test('no month → peak (unreduced) Kc, preserving prior behavior', () => {
+    expect(recommendedFromEt0(1.6, 'st_augustine')).toBe(1.25);       // 1.6 × 0.8 × 1.0
+    expect(recommendedFromEt0(1.6, 'st_augustine', 7)).toBe(1.25);    // explicit peak, same
+  });
+
+  test('steps the target down through the seasons for the same ET₀', () => {
+    // St. Augustine at a constant ET₀ of 2.5": 2.5 × 0.8 × {1.0, 0.9, 0.75}
+    // = {2.0, 1.8→1.75, 1.5}, rounded to the nearest 0.25".
+    expect(recommendedFromEt0(2.5, 'st_augustine', 7)).toBe(2.0);   // peak
+    expect(recommendedFromEt0(2.5, 'st_augustine', 5)).toBe(1.75);  // shoulder
+    expect(recommendedFromEt0(2.5, 'st_augustine', 1)).toBe(1.5);   // cool
+  });
+
+  test('applies to EVERY grass type (cool target < peak target)', () => {
+    for (const grass of ALL_GRASSES) {
+      const peak = recommendedFromEt0(2.5, grass, 7);
+      const cool = recommendedFromEt0(2.5, grass, 1);
+      expect(cool).toBeLessThan(peak);
+    }
+  });
+});
 
 describe('recommendedFromEt0 (ET₀ × turf Kc)', () => {
   test('calibrates to the approved seasonal targets in a typical summer week', () => {
@@ -26,6 +65,13 @@ describe('buildIrrigationAdvice target basis', () => {
     const a = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 6, irrigationInchesPerWeek: 1, rainfallInches7d: 0.3 });
     expect(a.targetBasis).toBe('seasonal');
     expect(a.recommendedInchesPerWeek).toBe(1.25);
+  });
+  test('seasonal Kc lowers the winter ET₀ target vs summer for the same ET₀', () => {
+    const summer = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 7, irrigationInchesPerWeek: 1, rainfallInches7d: 0.3, referenceEt0InchesWeek: 2.0 });
+    const winter = buildIrrigationAdvice({ grassType: 'St. Augustine', month: 1, irrigationInchesPerWeek: 1, rainfallInches7d: 0.3, referenceEt0InchesWeek: 2.0 });
+    expect(summer.targetBasis).toBe('evapotranspiration');
+    expect(winter.targetBasis).toBe('evapotranspiration');
+    expect(winter.recommendedInchesPerWeek).toBeLessThan(summer.recommendedInchesPerWeek);
   });
 });
 
