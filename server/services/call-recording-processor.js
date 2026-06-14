@@ -696,6 +696,9 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   const service = shouldUsePreSlabDetail
     ? detailService
     : (shouldUseHistoryService ? historyService : (matchedService || requestedService || detailService));
+  if (!service && hasUnsupportedCallContext(fullContextText)) {
+    return { ok: false, reason: 'unsupported_service', service: null };
+  }
   if (!service && hasConfirmedGenericAppointment(extracted, fullContextText)) {
     return { ok: true, reason: null, service: GENERIC_CALL_APPOINTMENT_SERVICE };
   }

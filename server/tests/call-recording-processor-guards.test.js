@@ -819,6 +819,27 @@ describe('call recording appointment guardrails', () => {
     });
   });
 
+  test('rejects unsupported transcript cues before generic Waves Appointment fallback', () => {
+    expect(resolveSchedulableCallService({
+      matched_service: null,
+      requested_service: null,
+      appointment_confirmed: true,
+      preferred_date_time: '2026-05-19T10:00',
+      call_summary: 'Caller asked to put them down Tuesday at 10.',
+    }, {
+      transcription: 'Caller: I want to schedule an SEO consultation for my construction company. Agent: I can put you down Tuesday at 10.',
+      customerServiceContext: {
+        estimates: [],
+        serviceRecords: [],
+        scheduledServices: [],
+      },
+    })).toMatchObject({
+      ok: false,
+      reason: 'unsupported_service',
+      service: null,
+    });
+  });
+
   test('validates configured default technician id and returns the assigned name', async () => {
     const previousConfiguredId = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID;
     const fakeTechnicianConn = (rows, queries) => (table) => {
