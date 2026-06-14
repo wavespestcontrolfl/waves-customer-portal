@@ -219,6 +219,7 @@ function scoreCallMatch(googleCall, callLog, targetNumber = mainLine().number) {
 
 function shapeCallLog(row) {
   if (!row) return null;
+  const bridgeMetadata = googleAdsBridgeMetadata(row.metadata);
   return {
     id: row.id,
     twilioCallSid: row.twilio_call_sid,
@@ -234,7 +235,46 @@ function shapeCallLog(row) {
     leadSourceName: row.lead_source_name || null,
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
+    googleAdsLeadMatched: !!bridgeMetadata?.leadMatch?.leadId,
+    googleAdsLeadMatchedAt: bridgeMetadata?.leadAttributedAt || null,
   };
+}
+
+function googleAdsBridgeMetadata(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === 'string') {
+    try {
+      return JSON.parse(metadata)?.google_ads_call_bridge || {};
+    } catch {
+      return {};
+    }
+  }
+  return metadata.google_ads_call_bridge || {};
+}
+
+function shouldRetryLeadAttribution(match) {
+  return match?.status === 'already_bridged'
+    && !!match.callLog?.id
+    && !match.callLog.googleAdsLeadMatched;
+}
+
+function redactedLeadMatch(leadMatch) {
+  if (!leadMatch?.leadId) return null;
+  return {
+    leadId: leadMatch.leadId,
+    strategy: leadMatch.strategy,
+    customerId: leadMatch.customerId || null,
+  };
+}
+
+function bridgeMetadataPatch(bridgePayload) {
+  return db.raw(`
+    COALESCE(metadata, '{}'::jsonb)
+    || jsonb_build_object(
+      'google_ads_call_bridge',
+      COALESCE(metadata->'google_ads_call_bridge', '{}'::jsonb) || ?::jsonb
+    )
+  `, [JSON.stringify(bridgePayload)]);
 }
 
 function shapeGoogleCall(row) {
@@ -361,6 +401,17 @@ async function findLeadForCall(callLog) {
   return lead?.id ? { ...plan, leadId: lead.id } : null;
 }
 
+async function updateLeadAttribution(leadMatch, bridgeSource, now) {
+  if (!leadMatch?.leadId) return false;
+  await db('leads')
+    .where({ id: leadMatch.leadId })
+    .update({
+      lead_source_id: bridgeSource.id,
+      updated_at: now,
+    });
+  return true;
+}
+
 function summarize(matches, crmCalls) {
   return {
     googleCalls: matches.length,
@@ -397,14 +448,43 @@ async function previewBridge(options = {}) {
 async function applyBridge(options = {}) {
   const preview = await previewBridge(options);
   const now = new Date();
-  const readyMatches = preview.matches.filter((match) => match.status === 'ready' && match.callLog?.id);
-  const bridgeSource = readyMatches.length > 0 ? await ensureBridgeLeadSource() : null;
+  const sourceNeeded = preview.matches.some((match) => (
+    (match.status === 'ready' || shouldRetryLeadAttribution(match)) && match.callLog?.id
+  ));
+  const bridgeSource = sourceNeeded ? await ensureBridgeLeadSource() : null;
   const applied = [];
   const skipped = [];
 
   for (const match of preview.matches) {
     if (match.status === 'already_bridged') {
-      skipped.push({ ...match, skipReason: 'already_bridged' });
+      if (!shouldRetryLeadAttribution(match)) {
+        skipped.push({ ...match, skipReason: 'already_bridged' });
+        continue;
+      }
+
+      try {
+        const leadMatch = await findLeadForCall(match.callLog);
+        if (!leadMatch?.leadId) {
+          skipped.push({ ...match, skipReason: 'lead_not_found' });
+          continue;
+        }
+
+        await updateLeadAttribution(leadMatch, bridgeSource, now);
+        await db('call_log')
+          .where({ id: match.callLog.id })
+          .update({
+            metadata: bridgeMetadataPatch({
+              leadMatch: redactedLeadMatch(leadMatch),
+              leadAttributedAt: now.toISOString(),
+            }),
+            updated_at: now,
+          });
+
+        applied.push({ ...match, status: 'lead_attribution_retried' });
+      } catch (err) {
+        logger.error(`[google-call-bridge] Failed to retry lead attribution ${match.googleCall.resourceName}: ${err.message}`);
+        skipped.push({ ...match, skipReason: 'lead_retry_failed', error: err.message });
+      }
       continue;
     }
     if (match.status !== 'ready' || !match.callLog?.id) {
@@ -425,7 +505,9 @@ async function applyBridge(options = {}) {
       };
       const leadMatch = await findLeadForCall(match.callLog);
       if (leadMatch) {
-        bridgePayload.leadMatch = leadMatch;
+        await updateLeadAttribution(leadMatch, bridgeSource, now);
+        bridgePayload.leadMatch = redactedLeadMatch(leadMatch);
+        bridgePayload.leadAttributedAt = now.toISOString();
       }
 
       await db('call_log')
@@ -438,20 +520,9 @@ async function applyBridge(options = {}) {
           google_ads_call_status: match.googleCall.callStatus,
           google_ads_bridge_confidence: match.confidence,
           google_ads_bridged_at: now,
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
-            JSON.stringify({ google_ads_call_bridge: bridgePayload }),
-          ]),
+          metadata: bridgeMetadataPatch(bridgePayload),
           updated_at: now,
         });
-
-      if (leadMatch?.leadId) {
-        await db('leads')
-          .where({ id: leadMatch.leadId })
-          .update({
-            lead_source_id: bridgeSource?.id,
-            updated_at: now,
-          });
-      }
 
       applied.push(match);
     } catch (err) {
@@ -476,6 +547,7 @@ module.exports = {
     areaCode,
     buildMatches,
     findLeadForCall,
+    googleAdsBridgeMetadata,
     leadMatchPlan,
     leadTimeWindow,
     mainLine,
@@ -483,9 +555,11 @@ module.exports = {
     parseGoogleDateTime,
     phoneLast10,
     phoneVariants,
+    redactedLeadMatch,
     scoreCallMatch,
     shapeCallLog,
     shapeGoogleCall,
+    shouldRetryLeadAttribution,
     summarize,
   },
 };

@@ -36,7 +36,10 @@ const {
   parseGoogleDateTime,
   phoneLast10,
   phoneVariants,
+  redactedLeadMatch,
   scoreCallMatch,
+  shapeCallLog,
+  shouldRetryLeadAttribution,
 } = GoogleCallBridge._private;
 
 describe('Google Ads call reporting bridge', () => {
@@ -106,6 +109,43 @@ describe('Google Ads call reporting bridge', () => {
     }));
     expect(leadTimeWindow({ createdAt: 'not-a-date' })).toBeNull();
     expect(leadMatchPlan({ customerId: 'customer-1' })).toBeNull();
+  });
+
+  test('retries already-bridged calls until successful lead attribution is recorded', () => {
+    const pendingCallLog = shapeCallLog({
+      id: 'call-1',
+      created_at: '2026-06-12T14:31:00.000Z',
+      metadata: {
+        google_ads_call_bridge: {
+          resourceName: 'customers/123/callViews/match',
+        },
+      },
+    });
+    const attributedCallLog = shapeCallLog({
+      id: 'call-2',
+      created_at: '2026-06-12T14:31:00.000Z',
+      metadata: JSON.stringify({
+        google_ads_call_bridge: {
+          leadMatch: { leadId: 'lead-1', strategy: 'customer_id' },
+          leadAttributedAt: '2026-06-12T14:40:00.000Z',
+        },
+      }),
+    });
+
+    expect(pendingCallLog.googleAdsLeadMatched).toBe(false);
+    expect(shouldRetryLeadAttribution({ status: 'already_bridged', callLog: pendingCallLog })).toBe(true);
+    expect(attributedCallLog.googleAdsLeadMatched).toBe(true);
+    expect(attributedCallLog.googleAdsLeadMatchedAt).toBe('2026-06-12T14:40:00.000Z');
+    expect(shouldRetryLeadAttribution({ status: 'already_bridged', callLog: attributedCallLog })).toBe(false);
+    expect(redactedLeadMatch({
+      leadId: 'lead-1',
+      strategy: 'phone_last10',
+      phoneLast10: '9415550100',
+    })).toEqual({
+      leadId: 'lead-1',
+      strategy: 'phone_last10',
+      customerId: null,
+    });
   });
 
   test('scores a strong Google Ads to Twilio call match', () => {
