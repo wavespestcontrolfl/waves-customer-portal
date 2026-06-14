@@ -171,6 +171,77 @@ describe('content-guardrails: narrow brand-token exemption on spoke pages', () =
   });
 });
 
+describe('Codex PR #1772 review fixes', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const NOW = new Date('2026-06-14T12:00:00Z');
+  const tmpManifest = (briefs, extra = {}) => {
+    const p = path.join(os.tmpdir(), `spoke-fix-${briefs[0].id}-${briefs.length}.json`);
+    fs.writeFileSync(p, JSON.stringify({ version: '1.0', set: 'spoke-seed', cta_codes: {}, briefs, ...extra }));
+    return p;
+  };
+
+  test('P1: checkHubLinkPresent accepts the brief curated hub_link (city page, not in SERVICE_HUB_LINKS)', () => {
+    const { _internals: qg } = require('../services/content/content-quality-gate');
+    const brief = { voice_constraints: { operator_brief: { hub_link: 'https://www.wavespestcontrol.com/pest-control-sarasota-fl/' } } };
+    const body = 'the team at [Waves Pest Control in Sarasota](https://www.wavespestcontrol.com/pest-control-sarasota-fl/) can help';
+    expect(qg.checkHubLinkPresent({ body }, brief).ok).toBe(true);
+    expect(qg.checkHubLinkPresent({ body: 'no hub link here at all' }, brief).ok).toBe(false);
+    // existing SERVICE_HUB_LINKS behavior unchanged
+    expect(qg.checkHubLinkPresent({ body: 'see /pest-control-services/ for details' }, {}).ok).toBe(true);
+  });
+
+  test('P2: loadManifest rejects a FAQ-policy-blocked topic that requests an FAQ; allows it without FAQ', () => {
+    const base = { action: 'new_supporting_blog', target_site: 'sarasotaflpestcontrol.com', city: 'Sarasota' };
+    expect(() => seeder.loadManifest(tmpManifest([{ ...base, id: 'BB', slug: '/pest-control/bed-bugs-x-sarasota/', schema_types: ['Article', 'FAQPage'] }])))
+      .toThrow(/FAQ-policy-blocked but requests an FAQ/);
+    expect(() => seeder.loadManifest(tmpManifest([{ ...base, id: 'BB2', slug: '/pest-control/bed-bugs-y-sarasota/', schema_types: ['Article'] }])))
+      .not.toThrow();
+    // the shipped SAR1 bed-bug brief is FAQ-free → loads clean
+    expect(() => seeder.loadManifest()).not.toThrow();
+  });
+
+  test('P2: buildSpokeOverlay drops the default FAQ section for a no-FAQ topic; keeps an outline FAQ', () => {
+    const m = seeder.loadManifest();
+    const sar1 = seeder._internals.rowForBrief(m.briefs[0], m, { now: NOW }); // bed bugs — Article only
+    const ov1 = seeder.buildSpokeOverlay({
+      opportunity: { signal_metadata: sar1.signal_metadata },
+      pageType: 'supporting-blog',
+      requiredSections: ['FAQ section (2–3 questions)', 'final CTA to relevant city/service page'],
+      schemaTypes: ['Article', 'BreadcrumbList'],
+    });
+    expect(ov1.required_sections.some((s) => /faq|frequently asked|common questions/i.test(s))).toBe(false);
+    expect(ov1.schema_types).not.toContain('FAQPage');
+
+    const sar2 = seeder._internals.rowForBrief(m.briefs[1], m, { now: NOW }); // carpenter ants — FAQ in outline + schema
+    const ov2 = seeder.buildSpokeOverlay({
+      opportunity: { signal_metadata: sar2.signal_metadata },
+      pageType: 'supporting-blog',
+      requiredSections: ['FAQ section (2–3 questions)'],
+      schemaTypes: ['Article', 'BreadcrumbList'],
+    });
+    expect(ov2.required_sections.some((s) => /faq/i.test(s))).toBe(true); // from the manifest outline
+    expect(ov2.schema_types).toContain('FAQPage');
+  });
+
+  test('P2: shipped manifest CTA codes are relative on-site paths (conversion-CTA gate)', () => {
+    const m = seeder.loadManifest();
+    for (const v of Object.values(m.cta_codes)) {
+      expect(String(v)).not.toMatch(/https?:\/\//); // no absolute hub URL
+    }
+    expect(m.cta_codes.QUOTE).toMatch(/\/pest-control-quote\//);
+  });
+
+  test('P2: IndexNow submit skips a spoke-host URL (host mismatch)', async () => {
+    const indexNow = require('../services/seo/indexnow-submit');
+    const r = await indexNow.submit('https://www.sarasotaflpestcontrol.com/pest-control/german-roaches-sarasota-condos/');
+    expect(r.status).toBe('skipped');
+    expect(r.reason).toBe('host_mismatch');
+    expect(r.ok).toBe(true); // fail-soft, not an error
+  });
+});
+
 describe('content-brief-builder: spoke overlay precedence + target_sites threading', () => {
   const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
 

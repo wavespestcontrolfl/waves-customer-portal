@@ -562,10 +562,15 @@ function checkHubLinkPresent(draft, brief) {
   // load-order coupling with content-brief-builder.
   const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
   const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
-  if (!hubs.some((h) => body.includes(h))) {
-    return { ok: false, reason: 'no_hub_link_found' };
-  }
-  return { ok: true };
+  if (hubs.some((h) => body.includes(h))) return { ok: true };
+  // Spoke-seed / operator briefs carry a CURATED hub link (the most-relevant
+  // hub city/service page, e.g. /pest-control-sarasota-fl/) that is NOT in the
+  // fixed SERVICE_HUB_LINKS set. That curated link is the authoritative hub
+  // target for the post, so a draft that links exactly where the brief told it
+  // to must satisfy this gate too.
+  const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link;
+  if (curatedHubLink && body.includes(String(curatedHubLink))) return { ok: true };
+  return { ok: false, reason: 'no_hub_link_found' };
 }
 
 function checkTwoPlusCityMentions(draft) {

@@ -4,8 +4,8 @@
   "owner": "Adam Benetti",
   "notes": "Curated unique per-spoke blog topics for the spoke blog network (Phase 2). Each brief is operator-pinned: it bypasses SERP profiling, is pinned by the decision-router, and renders ONLY on its target spoke domain (target_site -> frontmatter.domains) with a self-canonical spoke URL and exactly one contextual, branded-local in-body link back to the most-relevant hub city/service page. Topics are deduped against the live blog corpus (network-wide novelty gate) and against each other — each is a distinct pest family with a real Sarasota-local hook. Anchors follow content-ops/anchor-and-content-playbook.md (branded-local-heavy). Hub links MUST be absolute https://www.wavespestcontrol.com/... never {{siteUrl}}. Never hardcode Waves pricing — link to /pest-control-calculator/.",
   "cta_codes": {
-    "QUOTE": "quote form https://www.wavespestcontrol.com/pest-control-quote/",
-    "CALC": "estimate calculator https://www.wavespestcontrol.com/pest-control-calculator/"
+    "QUOTE": "quote form — link the CTA with the RELATIVE on-site path /pest-control-quote/ (not an absolute URL; the conversion-CTA gate only recognizes relative hrefs)",
+    "CALC": "estimate calculator — link with the RELATIVE path /pest-control-calculator/"
   },
   "briefs": [
     {

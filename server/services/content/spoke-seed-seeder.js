@@ -115,8 +115,33 @@ function loadManifest(file = DEFAULT_MANIFEST_PATH) {
     if (brief.hub_link && !/^https?:\/\//i.test(brief.hub_link)) {
       throw new Error(`spoke seed ${brief.id}: hub_link must be an absolute https URL`);
     }
+    // FAQ policy: a spoke seed carries the coarse 'pest' service, so the
+    // downstream FAQ-blocked-service guards can't see a blocked pest topic
+    // (bed bug, cockroach, rodent, …). Enforce the no-FAQ-for-blocked-topics
+    // rule at seed time instead — reject a blocked-topic brief that requests an
+    // FAQ (FAQPage schema or an outline FAQ section).
+    if (FAQ_BLOCKED_TOPIC_RE.test(briefTopicText(brief)) && briefRequestsFaq(brief)) {
+      throw new Error(`spoke seed ${brief.id}: topic is FAQ-policy-blocked but requests an FAQ (FAQPage schema / outline FAQ) — remove the FAQ for this topic`);
+    }
   }
   return manifest;
+}
+
+// Pest topics whose FAQ sections are policy-blocked (mirrors the ids in
+// content-guardrails.FAQ_BLOCKED_SERVICES, matched as free-text phrases so a
+// slug/keyword/title like "bed-bugs-…" is caught even though the row's coarse
+// service is 'pest').
+const FAQ_BLOCKED_TOPIC_RE = /\b(bed[\s-]?bugs?|cockroach(?:es)?|roach(?:es)?|rodents?|rats?|mice|mouse|spiders?|wasps?|hornets?|termites?|drywood)\b/i;
+const FAQ_OUTLINE_RE = /\bfaq\b|frequently asked|common questions/i;
+
+function briefTopicText(brief) {
+  return `${brief.slug || ''} ${brief.primary_kw || ''} ${brief.working_title || ''}`;
+}
+
+function briefRequestsFaq(brief) {
+  const schema = Array.isArray(brief.schema_types) ? brief.schema_types : [];
+  const outline = Array.isArray(brief.outline) ? brief.outline : [];
+  return schema.includes('FAQPage') || outline.some((s) => FAQ_OUTLINE_RE.test(String(s || '')));
 }
 
 function rowForBrief(brief, manifest, { now = new Date() } = {}) {
@@ -242,7 +267,11 @@ function buildSpokeOverlay({ opportunity, pageType, requiredSections = [], schem
   const outline = Array.isArray(payload.outline) ? [...payload.outline] : [];
   const outlineHasFaq = outline.some((s) => FAQ_SECTION_RE.test(String(s || '')));
   const structural = requiredSections.filter((s) => {
-    if (outlineHasFaq && FAQ_SECTION_RE.test(String(s || ''))) return false; // operator FAQ spec wins
+    // FAQ on a spoke post is governed SOLELY by the manifest outline — drop the
+    // default supporting-blog FAQ section so a topic that doesn't request an FAQ
+    // (e.g. the bed-bug seed, whose coarse 'pest' service hides it from the
+    // FAQ-blocked guard) never silently gains one.
+    if (FAQ_SECTION_RE.test(String(s || ''))) return false;
     return !outline.includes(s);
   });
 
@@ -325,7 +354,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, city, target
     ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified, OMIT it.`) : []),
     `AUTHOR (exact frontmatter author block): ${JSON.stringify(byline.frontmatter)}.`,
     byline.emphasis || null,
-    ctaDirectives.length ? `CTAs: ${ctaDirectives.join(' || ')}` : null,
+    ctaDirectives.length ? `CTAs (link each with its RELATIVE on-site path, e.g. [request a quote](/pest-control-quote/) — never an absolute URL; the conversion-CTA gate only recognizes relative hrefs): ${ctaDirectives.join(' || ')}` : null,
     Array.isArray(payload.schema_types) && payload.schema_types.includes('FAQPage')
       ? 'SCHEMA: emit FAQPage structured data with a matching VISIBLE FAQ section (questions as ### headings).'
       : null,
