@@ -62,7 +62,10 @@ const STATUS_MAP = {
 };
 
 function mapStatus(googleStatus) {
-  return STATUS_MAP[googleStatus] || 'unknown';
+  const status = typeof googleStatus === 'number'
+    ? enums.CampaignStatus[googleStatus]
+    : googleStatus;
+  return STATUS_MAP[status] || 'unknown';
 }
 
 // ---------------------------------------------------------------------------
