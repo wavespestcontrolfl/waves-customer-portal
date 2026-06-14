@@ -4,6 +4,7 @@ import {
   CalendarRange,
   Layers,
   Megaphone,
+  PhoneCall,
   Sparkles,
 } from "lucide-react";
 import {
@@ -92,6 +93,7 @@ function pct(n) {
 const TABS = [
   { key: "ppc-dashboard", label: "PPC Dashboard", Icon: Megaphone },
   { key: "overview", label: "Overview", Icon: BarChart3 },
+  { key: "call-bridge", label: "Call Bridge", Icon: PhoneCall },
   { key: "service-lines", label: "Service Lines", Icon: Layers },
   { key: "advisor", label: "AI Advisor", Icon: Sparkles },
   { key: "capacity", label: "Capacity", Icon: CalendarRange },
@@ -194,6 +196,34 @@ function roasColor(roas) {
   if (roas >= 4) return D.green;
   if (roas >= 2) return D.amber;
   return D.red;
+}
+
+function fmtInt(n) {
+  return Number(n || 0).toLocaleString();
+}
+
+function secondsLabel(value) {
+  const seconds = Number(value || 0);
+  if (!seconds) return "—";
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
+}
+
+function bridgeStatusTone(status) {
+  if (status === "ready" || status === "already_bridged") return D.green;
+  if (status === "ambiguous") return D.amber;
+  return D.muted;
+}
+
+function bridgeStatusLabel(status) {
+  const labels = {
+    ready: "Ready",
+    already_bridged: "Bridged",
+    ambiguous: "Review",
+    unmatched: "Unmatched",
+  };
+  return labels[status] || "Unknown";
 }
 
 // =========================================================================
@@ -360,6 +390,291 @@ function EmptyState() {
         service-line attribution, and get daily AI-powered recommendations.
       </div>{" "}
     </Card>
+  );
+}
+
+// =========================================================================
+// CALL BRIDGE TAB
+// =========================================================================
+function CallBridgeTab() {
+  const [data, setData] = useState(null);
+  const [period, setPeriod] = useState("30d");
+  const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  const load = () => {
+    setLoading(true);
+    setMessage(null);
+    adminFetch(`/admin/ads/call-bridge?period=${period}`)
+      .then((d) => {
+        setData(d);
+        setLoading(false);
+      })
+      .catch((e) => {
+        setMessage({ tone: D.red, text: e.message || "Bridge preview failed" });
+        setLoading(false);
+      });
+  };
+
+  useEffect(() => {
+    load();
+  }, [period]);
+
+  const applyBridge = async () => {
+    setApplying(true);
+    setMessage(null);
+    try {
+      const result = await adminPost("/admin/ads/call-bridge/apply", {
+        period,
+        limit: 200,
+      });
+      setData(result);
+      setMessage({
+        tone: result.appliedCount > 0 ? D.green : D.amber,
+        text: `${fmtInt(result.appliedCount || 0)} call${Number(result.appliedCount || 0) === 1 ? "" : "s"} bridged`,
+      });
+    } catch (e) {
+      setMessage({ tone: D.red, text: e.message || "Bridge apply failed" });
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+        Loading call bridge...
+      </div>
+    );
+  }
+
+  const summary = data?.summary || {};
+  const matches = data?.matches || [];
+  const readyCount = Number(summary.ready || 0);
+  const configured = data?.configured !== false;
+  const targetNumber = data?.targetNumber?.formatted || "(941) 318-7612";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 14, color: D.muted }}>
+            Google Ads call reporting bridge
+          </div>
+          <div style={{ fontSize: 12, color: D.text, marginTop: 4 }}>
+            Main call asset: <span style={{ fontFamily: MONO }}>{targetNumber}</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 4,
+              background: D.bg,
+              borderRadius: 8,
+              padding: 3,
+            }}
+          >
+            {["7d", "30d", "90d"].map((p) => (
+              <button
+                key={p}
+                onClick={() => setPeriod(p)}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 6,
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: period === p ? D.heading : "transparent",
+                  color: period === p ? D.white : D.muted,
+                }}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={load}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: `1px solid ${D.border}`,
+              background: D.card,
+              color: D.heading,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            Preview
+          </button>
+          <button
+            onClick={applyBridge}
+            disabled={!configured || readyCount === 0 || applying}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: `1px solid ${configured && readyCount > 0 ? D.green : D.border}`,
+              background: configured && readyCount > 0 ? D.green : D.bg,
+              color: configured && readyCount > 0 ? D.white : D.muted,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: configured && readyCount > 0 && !applying ? "pointer" : "not-allowed",
+            }}
+          >
+            {applying ? "Applying..." : "Apply ready matches"}
+          </button>
+        </div>
+      </div>
+
+      {!configured && (
+        <Card style={{ padding: 16, borderColor: D.amber }}>
+          <div style={{ color: D.amber, fontSize: 13, fontWeight: 700 }}>
+            Google Ads API is not configured in this environment.
+          </div>
+        </Card>
+      )}
+
+      {message && (
+        <Card style={{ padding: 16 }}>
+          <div style={{ color: message.tone, fontSize: 13, fontWeight: 700 }}>
+            {message.text}
+          </div>
+        </Card>
+      )}
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+        gap: 14,
+      }}>
+        <KpiCard label="Google Calls" value={fmtInt(summary.googleCalls)} />
+        <KpiCard label="Ready Matches" value={fmtInt(summary.ready)} color={D.green} />
+        <KpiCard label="Already Bridged" value={fmtInt(summary.alreadyBridged)} />
+        <KpiCard label="Main-Line CRM Calls" value={fmtInt(summary.crmMainLineCalls)} />
+      </div>
+
+      <Card>
+        <div
+          style={{
+            fontSize: 15,
+            fontWeight: 600,
+            color: D.heading,
+            marginBottom: 16,
+          }}
+        >
+          Bridge Queue
+        </div>
+        {matches.length === 0 ? (
+          <div style={{ color: D.muted, fontSize: 13 }}>
+            No Google Ads call rows returned for this period.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={thStyle}>Google Call</th>
+                  <th style={thStyle}>Campaign</th>
+                  <th style={thStyle}>CRM Call</th>
+                  <th style={thR}>Confidence</th>
+                  <th style={thR}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {matches.slice(0, 50).map((match, i) => (
+                  <tr key={match.googleCall?.resourceName || i}>
+                    <td style={tdText}>
+                      <div>{match.googleCall?.startLabel || "Unknown"}</div>
+                      <div style={{ color: D.muted, fontSize: 11 }}>
+                        {secondsLabel(match.googleCall?.durationSeconds)} · area {match.googleCall?.callerAreaCode || "—"}
+                      </div>
+                    </td>
+                    <td style={tdText}>
+                      <div>{match.googleCall?.campaignName || "—"}</div>
+                      <div style={{ color: D.muted, fontSize: 11 }}>
+                        {match.googleCall?.adGroupName || "—"}
+                      </div>
+                    </td>
+                    <td style={tdText}>
+                      {match.callLog ? (
+                        <>
+                          <div>{match.callLog.fromPhone || "Unknown caller"}</div>
+                          <div style={{ color: D.muted, fontSize: 11 }}>
+                            {match.callLog.customerName || match.callLog.leadSourceName || match.callLog.status || "CRM call"}
+                          </div>
+                        </>
+                      ) : (
+                        <span style={{ color: D.muted }}>No CRM match</span>
+                      )}
+                    </td>
+                    <td style={{ ...tdR, color: bridgeStatusTone(match.status), fontWeight: 700 }}>
+                      {fmtInt(match.confidence)}%
+                    </td>
+                    <td style={{ ...tdR, color: bridgeStatusTone(match.status), fontWeight: 700 }}>
+                      {bridgeStatusLabel(match.status)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div
+          style={{
+            fontSize: 15,
+            fontWeight: 600,
+            color: D.heading,
+            marginBottom: 16,
+          }}
+        >
+          Recent {targetNumber} Calls
+        </div>
+        {(data?.recentMainLineCalls || []).length === 0 ? (
+          <div style={{ color: D.muted, fontSize: 13 }}>
+            No recent main-line calls in this period.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={thStyle}>Caller</th>
+                  <th style={thStyle}>Customer</th>
+                  <th style={thR}>Duration</th>
+                  <th style={thR}>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.recentMainLineCalls || []).slice(0, 20).map((call) => (
+                  <tr key={call.id}>
+                    <td style={tdText}>{call.fromPhone || "Unknown"}</td>
+                    <td style={tdText}>{call.customerName || "—"}</td>
+                    <td style={tdR}>{secondsLabel(call.durationSeconds)}</td>
+                    <td style={{ ...tdR, color: call.source === "google_ads" ? D.green : D.muted }}>
+                      {call.source || "unattributed"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
   );
 }
 
@@ -4105,7 +4420,7 @@ export default function AdsPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="PPC section"
-        navGridClassName="grid-cols-2 md:grid-cols-5"
+        navGridClassName="grid-cols-2 md:grid-cols-6"
       />
       {tab === "ppc-dashboard" && (
         <Suspense
@@ -4119,6 +4434,7 @@ export default function AdsPage() {
         </Suspense>
       )}
       {tab === "overview" && <OverviewTab />}
+      {tab === "call-bridge" && <CallBridgeTab />}
       {tab === "service-lines" && <ServiceLinesTab />}
       {tab === "advisor" && <AdvisorTab />}
       {tab === "capacity" && <CapacityTab />}

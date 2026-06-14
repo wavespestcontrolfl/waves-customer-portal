@@ -296,6 +296,50 @@ async function syncSearchTerms(days = 30) {
 }
 
 // ---------------------------------------------------------------------------
+// fetchCallViews - read Google Ads call reporting rows for attribution bridge
+// ---------------------------------------------------------------------------
+function buildCallViewQuery(days = 30, limit = 200) {
+  const safeDays = Math.min(Math.max(parseInt(days, 10) || 30, 1), 90);
+  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 500);
+  const since = new Date(Date.now() - safeDays * 86400000);
+  const sinceStr = since.toISOString().split('T')[0];
+
+  return `
+    SELECT
+      call_view.resource_name,
+      call_view.caller_area_code,
+      call_view.caller_country_code,
+      call_view.call_duration_seconds,
+      call_view.call_status,
+      call_view.call_tracking_display_location,
+      call_view.end_call_date_time,
+      call_view.start_call_date_time,
+      call_view.type,
+      campaign.id,
+      campaign.name,
+      ad_group.id,
+      ad_group.name
+    FROM call_view
+    WHERE call_view.start_call_date_time >= '${sinceStr}'
+    ORDER BY call_view.start_call_date_time DESC
+    LIMIT ${safeLimit}
+  `;
+}
+
+async function fetchCallViews(days = 30, limit = 200) {
+  const customer = getCustomer();
+  if (!customer) return [];
+
+  try {
+    logger.info(`[google-ads] Fetching call view rows (last ${days} days)`);
+    return await customer.query(buildCallViewQuery(days, limit));
+  } catch (err) {
+    logger.error(`[google-ads] fetchCallViews failed: ${err.message}`);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // pauseCampaign — set campaign status to PAUSED via Google Ads API
 // ---------------------------------------------------------------------------
 async function pauseCampaign(platformCampaignId) {
@@ -396,7 +440,11 @@ module.exports = {
   syncCampaigns,
   syncDailyPerformance,
   syncSearchTerms,
+  fetchCallViews,
   pauseCampaign,
   enableCampaign,
   updateBudget,
+  _private: {
+    buildCallViewQuery,
+  },
 };

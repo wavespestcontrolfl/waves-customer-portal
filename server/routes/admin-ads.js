@@ -10,6 +10,10 @@ let _BudgetManager, _CampaignAdvisor, _googleAds;
 function getBudgetManager() { return _BudgetManager || (_BudgetManager = require('../services/ads/budget-manager')); }
 function getCampaignAdvisor() { return _CampaignAdvisor || (_CampaignAdvisor = require('../services/ads/campaign-advisor')); }
 function getGoogleAds() { return _googleAds || (_googleAds = require('../services/ads/google-ads')); }
+let _GoogleCallBridge;
+function getGoogleCallBridge() {
+  return _GoogleCallBridge || (_GoogleCallBridge = require('../services/ads/google-call-bridge'));
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -149,6 +153,30 @@ router.post('/sync', async (req, res, next) => {
         searchTerms: searchTerms.length,
       },
     });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// GOOGLE ADS CALL REPORTING BRIDGE
+// =========================================================================
+
+// GET /api/admin/ads/call-bridge?period=30d
+router.get('/call-bridge', async (req, res, next) => {
+  try {
+    const periodDays = parseInt(String(req.query.period || '30d').replace('d', ''), 10) || 30;
+    const limit = parseInt(req.query.limit, 10) || 200;
+    const result = await getGoogleCallBridge().previewBridge({ days: periodDays, limit });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/ads/call-bridge/apply
+router.post('/call-bridge/apply', async (req, res, next) => {
+  try {
+    const periodDays = parseInt(String(req.body.period || '30d').replace('d', ''), 10) || 30;
+    const limit = parseInt(req.body.limit, 10) || 200;
+    const result = await getGoogleCallBridge().applyBridge({ days: periodDays, limit });
+    res.json(result);
   } catch (err) { next(err); }
 });
 
