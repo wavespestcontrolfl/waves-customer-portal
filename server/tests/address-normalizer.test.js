@@ -39,6 +39,47 @@ describe('address normalizer', () => {
     expect(normalizeLeadAddress({ raw: '101 Shore Dr., Sarasota, FL 34236' }).line1).toBe('101 Shore Dr');
   });
 
+  test('splits comma-free addresses with suffix aliases introduced for normalization', () => {
+    expect(normalizeLeadAddress({ raw: '123 Harbor Point Sarasota FL 34236' })).toMatchObject({
+      line1: '123 Harbor Pt',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '123 Harbor Pt, Sarasota, FL 34236',
+    });
+    expect(normalizeLeadAddress({ raw: '456 Bay Causeway Sarasota FL 34236' })).toMatchObject({
+      line1: '456 Bay Cswy',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+      fullAddress: '456 Bay Cswy, Sarasota, FL 34236',
+    });
+  });
+
+  test('keeps city suffix words out of the street line for comma-free addresses', () => {
+    expect(normalizeLeadAddress({ raw: '123 Main Street Palm Harbor FL 34683' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Palm Harbor',
+      state: 'FL',
+      zip: '34683',
+      fullAddress: '123 Main St, Palm Harbor, FL 34683',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Key West FL 33040' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Key West',
+      state: 'FL',
+      zip: '33040',
+      fullAddress: '123 Main St, Key West, FL 33040',
+    });
+    expect(normalizeLeadAddress({ raw: '123 Main Street Lake City FL 32025' })).toMatchObject({
+      line1: '123 Main St',
+      city: 'Lake City',
+      state: 'FL',
+      zip: '32025',
+      fullAddress: '123 Main St, Lake City, FL 32025',
+    });
+  });
+
   test('prefers structured Google address components over raw typed text', () => {
     expect(normalizeLeadAddress({
       raw: '17394 whiskey creek trail PArrish FL 34219',

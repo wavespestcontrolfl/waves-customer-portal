@@ -1,13 +1,5 @@
-const STREET_SUFFIXES = new Set([
-  'aly', 'alley', 'ave', 'avenue', 'blvd', 'boulevard', 'cir', 'circle',
-  'ct', 'court', 'cv', 'cove', 'dr', 'drive', 'gln', 'glen', 'hwy',
-  'highway', 'ln', 'lane', 'loop', 'pkwy', 'parkway', 'pl', 'place',
-  'rd', 'road', 'run', 'st', 'street', 'ter', 'terrace', 'trl', 'trail',
-  'way',
-]);
-
 const DIRECTIONALS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
-const CITY_PREFIX_TOKENS = new Set(['st']);
+const CITY_PREFIX_TOKENS = new Set(['st', 'lake', 'key']);
 const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
   'space', 'ste', 'suite', 'unit',
@@ -85,6 +77,12 @@ const STREET_SUFFIX_ALIASES = {
   vista: 'VIS',
   vis: 'VIS',
 };
+const LEGACY_STREET_SPLIT_SUFFIXES = ['aly', 'alley'];
+const STREET_SUFFIXES = new Set([
+  ...Object.keys(STREET_SUFFIX_ALIASES),
+  ...Object.values(STREET_SUFFIX_ALIASES).map((suffix) => suffix.toLowerCase()),
+  ...LEGACY_STREET_SPLIT_SUFFIXES,
+]);
 const US_STATE_ABBREVIATIONS = {
   alabama: 'AL',
   alaska: 'AK',
@@ -250,11 +248,14 @@ function splitStreetAndCity(value) {
       suffixIndices.push(i);
     }
   }
-  let suffixIndex = suffixIndices[suffixIndices.length - 1] ?? -1;
-  const selectedSuffix = tokens[suffixIndex]?.replace(/[.,]/g, '').toLowerCase();
-  if (CITY_PREFIX_TOKENS.has(selectedSuffix) && suffixIndices.length > 1) {
-    suffixIndex = suffixIndices[suffixIndices.length - 2];
+  const eligibleSuffixIndices = suffixIndices.filter((index) => index < tokens.length - 1);
+  let suffixPosition = eligibleSuffixIndices.length - 1;
+  while (suffixPosition > 0) {
+    const selectedSuffix = tokens[eligibleSuffixIndices[suffixPosition]]?.replace(/[.,]/g, '').toLowerCase();
+    if (!CITY_PREFIX_TOKENS.has(selectedSuffix)) break;
+    suffixPosition -= 1;
   }
+  const suffixIndex = eligibleSuffixIndices[suffixPosition] ?? -1;
 
   if (suffixIndex >= 0 && suffixIndex < tokens.length - 1) {
     const tail = tokens.slice(suffixIndex + 1);
