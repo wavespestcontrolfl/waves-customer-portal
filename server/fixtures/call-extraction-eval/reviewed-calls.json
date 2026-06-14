@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "call-extraction-reviewed-calls.v1",
+  "description": "Reviewed call-recording replay cases from the June 2026 v2 extraction hardening pass. Cases reference call_log ids only; no transcript text or customer PII is stored here.",
+  "cases": [
+    {
+      "id": "ronni-name-email-address-ground-truth",
+      "call_log_id": "86b33b84-d66f-4274-84b2-513299d47211",
+      "reviewed_at": "2026-06-14",
+      "reviewed_outcome": "Ronni/Ronnie email corroboration and Cumberland Terrace/Ter normalization should allow routing in shadow replay.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": true,
+        "current_flags_exclude": [
+          "name_email_mismatch",
+          "address_unverifiable",
+          "missing_service_address"
+        ]
+      }
+    },
+    {
+      "id": "historical-schedule-date-time-was-wrong",
+      "call_log_id": "2a775bc2-abf7-494b-b931-7aa466111663",
+      "reviewed_at": "2026-06-14",
+      "reviewed_outcome": "Transcript says tomorrow at 3 from a June 10 call; historical scheduled service was June 12 at 11, so current v2 schedule variance is expected and useful.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": true,
+        "legacy_schedule_variance_fields": [
+          "scheduled_date",
+          "window_start"
+        ],
+        "current_flags_exclude": [
+          "name_email_mismatch",
+          "address_unverifiable"
+        ]
+      }
+    },
+    {
+      "id": "missed-booking-recovery-monday-11",
+      "call_log_id": "a100d830-5287-4716-9da5-429e1a83a79c",
+      "reviewed_at": "2026-06-14",
+      "reviewed_outcome": "Transcript explicitly says book the appointment and Monday at 11; current v2 should recover this missed booking, though model variability was observed during replay.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": true,
+        "legacy_scheduled_created": false
+      }
+    },
+    {
+      "id": "name-email-mismatch-guard-useful",
+      "call_log_id": "59823aeb-42fa-4ed4-bb44-75846e5d5606",
+      "reviewed_at": "2026-06-14",
+      "reviewed_outcome": "Transcript supports a name/email spelling conflict; this should triage instead of unattended booking.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_flags_include": [
+          "name_email_mismatch"
+        ]
+      }
+    },
+    {
+      "id": "short-call-missing-address-correct-triage",
+      "call_log_id": "0b83d2cf-9a81-4eb2-bc77-e27342f98238",
+      "reviewed_at": "2026-06-14",
+      "reviewed_outcome": "Legacy looked appointment-like, but current v2 correctly triages a short call with missing/unverifiable service address and authorization risk.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "appointment_candidate_changed_vs_legacy": true,
+        "current_flags_include": [
+          "address_unverifiable",
+          "missing_service_address"
+        ]
+      }
+    }
+  ]
+}
