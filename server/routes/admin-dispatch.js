@@ -2055,32 +2055,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Turf height-of-cut capture gate (flag-gated; UAT → rollout). A LAWN visit
     // cannot close without a maintained-height READING unless the tech logs a
     // reason-coded override. The gauge photo is OPTIONAL (not gated).
-    // detectServiceLine keeps this strictly off pest / rodent / mosquito
-    // completions. Flag OFF by default → no change to existing completions.
+    // detectServiceLine keeps this strictly off pest / rodent / mosquito.
+    // The flag reads the SAME DB-backed source the tech UI checks
+    // (useFeatureFlag) — no env-only bypass, so the handler never requires a
+    // field the UI doesn't render (fail-closed rule). Validation itself runs in
+    // the claim.action === 'proceed' path below so a replay of an already-
+    // completed visit isn't 422'd if the flag flips on afterward.
     const TURF_HEIGHT_OVERRIDE_REASONS = ['no_gauge_on_truck', 'gauge_unreadable', 'not_applicable'];
-    const turfHeightFlagOn = await runtimeServiceReportFlag(req, 'turf-height-capture', 'TURF_HEIGHT_CAPTURE', false);
+    const turfHeightFlagOn = await isUserFeatureEnabled(req.technicianId, 'turf-height-capture', false).catch(() => false);
     const turfHeightRequired = turfHeightFlagOn && reportServiceLine === 'lawn' && !isIncompleteVisit;
     const turfHeightOverride = turfHeightRequired
       && TURF_HEIGHT_OVERRIDE_REASONS.includes(turfHeightOverrideReason)
       ? turfHeightOverrideReason : null;
-    if (turfHeightRequired && !turfHeightOverride) {
-      if (manualHeightIn == null) {
-        return res.status(422).json({
-          error: 'A turf height reading is required to close a lawn visit.',
-          code: 'turf_height_required',
-          overrideReasons: TURF_HEIGHT_OVERRIDE_REASONS,
-        });
-      }
-      if (!isValidHeight(manualHeightIn)) {
-        return res.status(422).json({
-          error: 'Turf height must be between 0.5 and 8 inches.',
-          code: 'turf_height_invalid',
-        });
-      }
-    }
-    if (turfHeightOverride) {
-      logger.warn(`[turf-height] completion override service=${req.params.serviceId} reason=${turfHeightOverride} by=${req.technicianId}`);
-    }
 
     // Typed completions (e.g. palm_injection detects to the 'palm' line)
     // capture their structured findings instead of the Tree/Shrub closeout —
@@ -2187,6 +2173,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           new Error(companionValidationError.body.code),
         );
         return res.status(companionValidationError.status).json(companionValidationError.body);
+      }
+      // Turf height-of-cut: required reading for a flagged lawn visit (gauge
+      // photo optional). Validated here — after replay/conflict handling — so a
+      // retry of an already-completed visit replays instead of 422-ing.
+      if (turfHeightRequired && !turfHeightOverride
+        && (manualHeightIn == null || !isValidHeight(manualHeightIn))) {
+        const code = manualHeightIn == null ? 'turf_height_required' : 'turf_height_invalid';
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(code));
+        return res.status(422).json({
+          error: manualHeightIn == null
+            ? 'A turf height reading is required to close a lawn visit.'
+            : 'Turf height must be between 0.5 and 8 inches.',
+          code,
+          ...(manualHeightIn == null ? { overrideReasons: TURF_HEIGHT_OVERRIDE_REASONS } : {}),
+        });
+      }
+      if (turfHeightOverride) {
+        logger.warn(`[turf-height] completion override service=${req.params.serviceId} reason=${turfHeightOverride} by=${req.technicianId}`);
       }
     }
 

@@ -1612,6 +1612,8 @@ function DashboardTab({ customer, onSwitchTab }) {
       )}
       {!lawnHealth.loading && lawnHealth.hasLawnCare && (!lawnHealth.scores || !lawnHealth.initialScores) && (
         <section style={{ ...card, padding: 20 }}>
+          {/* Mowing height shows even before the first vision assessment. */}
+          <PortalMowingHeight mowing={lawnHealth.mowingHeight} />
           <PortalInlineState
             icon="sprout"
             title="Lawn health tracking will start soon"

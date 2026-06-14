@@ -1014,8 +1014,14 @@ function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live', over
 // speaks to how the lawn is being kept — never "we'll fix it". `below` is the
 // only alert state (scalping/stress). The QA marker is internal-only (never on
 // the customer 'live' surface).
-function LawnMowingHeight({ mowing, grassLabel = 'lawn', mode = 'live' }) {
+// Standalone — renders from top-level data.mowingHeight so it shows on lawn
+// reports even without a vision assessment. Derives its own grass label. No QA
+// marker: the report is customer-facing across all modes (incl. ?mode=pdf), so
+// internal verification status never appears here (it lives in the admin queue).
+function LawnMowingHeight({ mowing }) {
   if (!mowing || mowing.heightIn == null) return null;
+  const g = mowing.grassType;
+  const grassLabel = g && g !== 'unknown' && g !== 'mixed' ? formatEnumLabel(g) : 'lawn';
   const h = <strong>{mowing.heightIn}&Prime;</strong>;
   const band = mowing.bandLabel;
   let message;
@@ -1026,11 +1032,9 @@ function LawnMowingHeight({ mowing, grassLabel = 'lawn', mode = 'live' }) {
   } else {
     message = <>Your {grassLabel} is being kept at {h} — right in the ideal {band} range.</>;
   }
-  const showQa = mode !== 'live' && mowing.verificationStatus && mowing.verificationStatus !== 'verified';
   return (
     <div className="lawn-water-line lawn-mowing-height" data-mowing-status={mowing.status}>
       <span className="lawn-mowing-label">Mowing height</span> {message}
-      {showQa && <span className="lawn-mowing-qa"> · QA: {mowing.verificationStatus}</span>}
     </div>
   );
 }
@@ -1333,7 +1337,7 @@ function LawnTrendChart({ trend = [], summary }) {
   );
 }
 
-function LawnAssessmentCard({ assessment, mode, token, embedded = false, mowingHeight = null }) {
+function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   useEffect(() => {
     if (mode !== 'live' || !assessment) return;
     trackReportEvent(token, 'lawn_assessment_viewed');
@@ -1383,7 +1387,6 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false, mowingH
         <LawnTrendChart trend={assessment.trend || []} summary={assessment.customerSummary} />
       </div>
       <LawnWaterBalance water={assessment.waterContext} grassLabel={grassLabel} mode={mode} overwateringObserved={overwateringObserved} />
-      <LawnMowingHeight mowing={mowingHeight} grassLabel={grassLabel} mode={mode} />
       <div className="lawn-score-grid">
         {metricRows.map(([label, value]) => (
           <div className="lawn-score-cell" key={label}>
@@ -6924,10 +6927,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-color: var(--red);
           color: var(--red);
         }
-        .lawn-mowing-height .lawn-mowing-qa {
-          color: var(--muted);
-          font-weight: 500;
-        }
         .lawn-trend-chart {
           width: 100%;
           max-width: 420px;
@@ -7445,8 +7444,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mode={mode}
               token={token}
               embedded
-              mowingHeight={data.mowingHeight}
             />
+          )}
+          {data.serviceLine === 'lawn' && data.mowingHeight && (
+            <LawnMowingHeight mowing={data.mowingHeight} />
           )}
         </section>
 
