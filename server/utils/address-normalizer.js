@@ -77,6 +77,12 @@ const STREET_SUFFIX_ALIASES = {
   vista: 'VIS',
   vis: 'VIS',
 };
+const COMPOUND_SUFFIX_PAIRS = new Set([
+  'street:circle',
+  'street:cir',
+  'st:circle',
+  'st:cir',
+]);
 const LEGACY_STREET_SPLIT_SUFFIXES = ['aly', 'alley'];
 // Comma-free raw address splitting needs stronger boundary markers than display
 // normalization; city-prone suffixes like harbor/beach/grove stay normalize-only.
@@ -192,7 +198,8 @@ function titleToken(token) {
   if (!token) return token;
   const bare = token.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
   if (DIRECTIONALS.has(bare)) return token.toUpperCase();
-  if (/^\d+(st|nd|rd|th)$/i.test(token)) return token.toUpperCase();
+  const ordinal = token.match(/^(\d+)(st|nd|rd|th)$/i);
+  if (ordinal) return `${ordinal[1]}${ordinal[2].toLowerCase()}`;
   return token
     .toLowerCase()
     .replace(/(^|[-'])([a-z])/g, (_, prefix, c) => `${prefix}${c.toUpperCase()}`);
@@ -223,6 +230,13 @@ function normalizeStreetLine(value) {
     if (!suffixIsTerminal && !suffixBeforeDirection && !suffixBeforeUnit) continue;
 
     tokens[i] = titleToken(alias);
+    for (let j = i - 1; j >= 0; j -= 1) {
+      const compoundKey = tokens[j].replace(/[.,]/g, '').toLowerCase();
+      const nextKey = tokens[j + 1]?.replace(/[.,]/g, '').toLowerCase();
+      const compoundAlias = STREET_SUFFIX_ALIASES[compoundKey];
+      if (!compoundAlias || !COMPOUND_SUFFIX_PAIRS.has(`${compoundKey}:${nextKey}`)) break;
+      tokens[j] = titleToken(compoundAlias);
+    }
     break;
   }
 

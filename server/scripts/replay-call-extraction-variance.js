@@ -14,7 +14,10 @@
  *   node server/scripts/replay-call-extraction-variance.js --limit=25 --jsonl
  */
 
-require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
+const fs = require('fs');
+const path = require('path');
+
+require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
 const { normalizeStreetLine } = require('../utils/address-normalizer');
 
@@ -52,6 +55,17 @@ const FIELD_SEVERITY = Object.entries(FIELD_GROUPS).reduce((acc, [severity, fiel
 }, {});
 
 const COMPARED_FIELDS = Object.keys(FIELD_SEVERITY);
+const EXPECTATION_KEYS = new Set([
+  'current_status',
+  'current_would_auto_route',
+  'legacy_scheduled_created',
+  'route_changed_vs_legacy_schedule',
+  'appointment_candidate_changed_vs_legacy',
+  'prior_v2_route_changed',
+  'current_flags_include',
+  'current_flags_exclude',
+  'legacy_schedule_variance_fields',
+]);
 
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
@@ -60,6 +74,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     minTranscriptChars: DEFAULT_MIN_TRANSCRIPT_CHARS,
     statuses: ['processed'],
     ids: [],
+    explicitIds: false,
+    fixturePath: null,
     retranscribe: false,
     onlyAppointmentCandidates: false,
     includeValues: false,
@@ -93,6 +109,10 @@ function parseArgs(argv = process.argv.slice(2)) {
         break;
       case 'ids':
         opts.ids = splitCsv(value);
+        opts.explicitIds = true;
+        break;
+      case 'fixture':
+        opts.fixturePath = value;
         break;
       case 'retranscribe':
         opts.retranscribe = parseBool(value);
@@ -123,6 +143,7 @@ function usage() {
     '  --days=N                          Lookback window when --ids is omitted. Default: 30.',
     '  --status=a,b                      call_log.processing_status filter. Default: processed. Use all to disable.',
     '  --ids=id1,id2                     Replay exact call_log ids; bypasses days/status filters.',
+    '  --fixture=path                    Load reviewed call ids and expectations from a JSON fixture.',
     '  --min-transcript-chars=N          Minimum transcript length. Default: 200.',
     '  --retranscribe                    Download recording and re-run current transcription before extraction.',
     '  --only-appointment-candidates     Only replay calls whose stored legacy extraction looked appointment-like.',
@@ -132,6 +153,7 @@ function usage() {
     'Examples:',
     '  node server/scripts/replay-call-extraction-variance.js --limit=10 --days=30',
     '  node server/scripts/replay-call-extraction-variance.js --limit=3 --days=30 --retranscribe',
+    '  node server/scripts/replay-call-extraction-variance.js --fixture=server/fixtures/call-extraction-eval/reviewed-calls.json --jsonl',
     '  node server/scripts/replay-call-extraction-variance.js --limit=25 --status=processed,customer_creation_failed --jsonl',
     '  node server/scripts/replay-call-extraction-variance.js --ids=<call_id>,<call_id> --include-values',
   ].join('\n');
@@ -163,6 +185,64 @@ function parseJson(value, fallback = null) {
   } catch (_err) {
     return fallback;
   }
+}
+
+function loadReplayFixture(fixturePath) {
+  if (!fixturePath) return null;
+  const resolvedPath = path.isAbsolute(fixturePath)
+    ? fixturePath
+    : path.resolve(process.cwd(), fixturePath);
+  const document = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
+  if (!Array.isArray(document.cases)) {
+    throw new Error(`Replay fixture ${fixturePath} must contain a cases array`);
+  }
+  if (document.cases.length === 0) {
+    throw new Error(`Replay fixture ${fixturePath} must contain at least one reviewed case`);
+  }
+
+  const seenCallIds = new Set();
+  const cases = document.cases.map((item, index) => {
+    const callId = item.call_log_id || item.callId;
+    if (!callId) throw new Error(`Replay fixture ${fixturePath} case ${index + 1} is missing call_log_id`);
+    if (seenCallIds.has(callId)) {
+      throw new Error(`Replay fixture ${fixturePath} contains duplicate call_log_id ${callId}`);
+    }
+    seenCallIds.add(callId);
+    return { ...item, call_log_id: callId };
+  });
+  return {
+    path: resolvedPath,
+    document,
+    cases,
+    byCallId: new Map(cases.map((item) => [item.call_log_id, item])),
+  };
+}
+
+function validateExplicitFixtureIds(fixture, ids) {
+  const fixtureLabel = fixture?.path || 'fixture';
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error(`Replay fixture ${fixtureLabel} explicit --ids must include at least one fixture call_log_id`);
+  }
+
+  const byCallId = fixture.byCallId || new Map((fixture.cases || []).map((item) => [item.call_log_id, item]));
+  const missingIds = ids.filter((id) => !byCallId.has(id));
+  if (missingIds.length) {
+    throw new Error(`Replay fixture ${fixtureLabel} does not contain explicit --ids: ${missingIds.join(', ')}`);
+  }
+}
+
+function applyFixtureReplayOptions(options, fixture) {
+  if (!fixture) return null;
+
+  if (options.explicitIds) {
+    validateExplicitFixtureIds(fixture, options.ids);
+    options.limit = Math.max(options.limit, options.ids.length);
+    return [...options.ids];
+  }
+
+  options.ids = fixture.cases.map((item) => item.call_log_id);
+  options.limit = Math.max(options.limit, options.ids.length);
+  return null;
 }
 
 function normalizeString(value) {
@@ -207,6 +287,146 @@ function normalizeField(field, value) {
   if (field === 'appointment_confirmed' || field === 'is_spam' || field === 'is_voicemail') return normalizeBool(value);
   if (field === 'preferred_date_time') return normalizeDateTime(value);
   return normalizeString(value);
+}
+
+function normalizeExpectedArray(value) {
+  return Array.isArray(value) ? value.filter(Boolean) : [];
+}
+
+function isStringArray(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.trim());
+}
+
+function evaluateFixtureExpectation(result, fixtureCase) {
+  const expect = fixtureCase?.expect;
+
+  const failures = [];
+  const checks = [];
+  const check = (name, passed, actual, expected) => {
+    checks.push(name);
+    if (!passed) failures.push({ name, actual, expected });
+  };
+  const fixtureError = (name, actual, expected) => {
+    failures.push({ name: `fixture_error:${name}`, actual, expected });
+  };
+
+  if (!expect || typeof expect !== 'object' || Array.isArray(expect)) {
+    fixtureError('invalid_expect', expect, 'object with at least one supported expectation key');
+    return { status: 'fail', checked: 0, failures };
+  }
+
+  for (const key of Object.keys(expect)) {
+    if (!EXPECTATION_KEYS.has(key)) fixtureError(`unknown_key:${key}`, key, [...EXPECTATION_KEYS].sort());
+  }
+
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_status')) {
+    if (typeof expect.current_status === 'string') {
+      check('current_status', result.current.status === expect.current_status, result.current.status, expect.current_status);
+    } else {
+      fixtureError('invalid_current_status', expect.current_status, 'string');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_would_auto_route')) {
+    if (typeof expect.current_would_auto_route === 'boolean') {
+      check(
+        'current_would_auto_route',
+        result.current.wouldAutoRoute === expect.current_would_auto_route,
+        result.current.wouldAutoRoute,
+        expect.current_would_auto_route
+      );
+    } else {
+      fixtureError('invalid_current_would_auto_route', expect.current_would_auto_route, 'boolean');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'legacy_scheduled_created')) {
+    if (typeof expect.legacy_scheduled_created === 'boolean') {
+      check(
+        'legacy_scheduled_created',
+        result.legacy.scheduledCreated === expect.legacy_scheduled_created,
+        result.legacy.scheduledCreated,
+        expect.legacy_scheduled_created
+      );
+    } else {
+      fixtureError('invalid_legacy_scheduled_created', expect.legacy_scheduled_created, 'boolean');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'route_changed_vs_legacy_schedule')) {
+    if (typeof expect.route_changed_vs_legacy_schedule === 'boolean') {
+      check(
+        'route_changed_vs_legacy_schedule',
+        result.variance.routeChangedVsLegacySchedule === expect.route_changed_vs_legacy_schedule,
+        result.variance.routeChangedVsLegacySchedule,
+        expect.route_changed_vs_legacy_schedule
+      );
+    } else {
+      fixtureError('invalid_route_changed_vs_legacy_schedule', expect.route_changed_vs_legacy_schedule, 'boolean');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'appointment_candidate_changed_vs_legacy')) {
+    if (typeof expect.appointment_candidate_changed_vs_legacy === 'boolean') {
+      check(
+        'appointment_candidate_changed_vs_legacy',
+        result.variance.appointmentCandidateChangedVsLegacy === expect.appointment_candidate_changed_vs_legacy,
+        result.variance.appointmentCandidateChangedVsLegacy,
+        expect.appointment_candidate_changed_vs_legacy
+      );
+    } else {
+      fixtureError('invalid_appointment_candidate_changed_vs_legacy', expect.appointment_candidate_changed_vs_legacy, 'boolean');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'prior_v2_route_changed')) {
+    if (typeof expect.prior_v2_route_changed === 'boolean') {
+      check(
+        'prior_v2_route_changed',
+        result.variance.priorV2RouteChanged === expect.prior_v2_route_changed,
+        result.variance.priorV2RouteChanged,
+        expect.prior_v2_route_changed
+      );
+    } else {
+      fixtureError('invalid_prior_v2_route_changed', expect.prior_v2_route_changed, 'boolean');
+    }
+  }
+
+  const flags = new Set(result.current.flags || []);
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_flags_include')) {
+    if (isStringArray(expect.current_flags_include)) {
+      for (const flag of normalizeExpectedArray(expect.current_flags_include)) {
+        check(`current_flags_include:${flag}`, flags.has(flag), [...flags], flag);
+      }
+    } else {
+      fixtureError('invalid_current_flags_include', expect.current_flags_include, 'array');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_flags_exclude')) {
+    if (isStringArray(expect.current_flags_exclude)) {
+      for (const flag of normalizeExpectedArray(expect.current_flags_exclude)) {
+        check(`current_flags_exclude:${flag}`, !flags.has(flag), [...flags], flag);
+      }
+    } else {
+      fixtureError('invalid_current_flags_exclude', expect.current_flags_exclude, 'array');
+    }
+  }
+
+  const legacyScheduleFields = new Set((result.variance.legacyScheduledServiceVariances || []).map((item) => item.field));
+  if (Object.prototype.hasOwnProperty.call(expect, 'legacy_schedule_variance_fields')) {
+    if (isStringArray(expect.legacy_schedule_variance_fields)) {
+      for (const field of normalizeExpectedArray(expect.legacy_schedule_variance_fields)) {
+        check(`legacy_schedule_variance_fields:${field}`, legacyScheduleFields.has(field), [...legacyScheduleFields], field);
+      }
+    } else {
+      fixtureError('invalid_legacy_schedule_variance_fields', expect.legacy_schedule_variance_fields, 'array');
+    }
+  }
+
+  if (checks.length === 0) {
+    fixtureError('no_recognized_checks', Object.keys(expect), [...EXPECTATION_KEYS].sort());
+  }
+
+  return {
+    status: failures.length ? 'fail' : 'pass',
+    checked: checks.length,
+    failures,
+  };
 }
 
 function valuePresence(value) {
@@ -347,6 +567,9 @@ function summarizeResults(results, options) {
   const allLegacyFieldVariances = results.flatMap((r) => r.variance.legacyFieldVariances || []);
   const allPriorV2FieldVariances = results.flatMap((r) => r.variance.priorV2FieldVariances || []);
   const triageFlags = results.flatMap((r) => r.current.flags || []);
+  const fixtureExpectations = results
+    .map((r) => r.fixture?.expectation)
+    .filter(Boolean);
   return {
     checked: results.length,
     options: {
@@ -354,6 +577,7 @@ function summarizeResults(results, options) {
       days: options.ids.length ? null : options.days,
       statuses: options.ids.length ? null : options.statuses,
       ids: options.ids.length,
+      fixturePath: options.fixturePath || null,
       retranscribe: options.retranscribe,
       onlyAppointmentCandidates: options.onlyAppointmentCandidates,
       includeValues: options.includeValues,
@@ -361,6 +585,8 @@ function summarizeResults(results, options) {
     currentStatusCounts: countBy(results, (r) => r.current.status),
     currentValid: results.filter((r) => r.current.status === 'valid').length,
     currentInvalid: results.filter((r) => r.current.status !== 'valid').length,
+    replayErrors: results.filter((r) => r.current.status === 'error').length,
+    replayErrorCallIds: results.filter((r) => r.current.status === 'error').map((r) => r.callId),
     legacyScheduledCreated: results.filter((r) => r.legacy.scheduledCreated).length,
     currentWouldAutoRoute: results.filter((r) => r.current.wouldAutoRoute).length,
     routeChangedVsLegacySchedule: results.filter((r) => r.variance.routeChangedVsLegacySchedule).length,
@@ -388,6 +614,14 @@ function summarizeResults(results, options) {
     topLegacyFieldsChanged: countBy(allLegacyFieldVariances, (v) => v.field),
     topPriorV2FieldsChanged: countBy(allPriorV2FieldVariances, (v) => v.field),
     currentTriageFlagCounts: countBy(triageFlags, (f) => f),
+    fixtureExpectations: {
+      checked: fixtureExpectations.length,
+      passed: fixtureExpectations.filter((r) => r.status === 'pass').length,
+      failed: fixtureExpectations.filter((r) => r.status === 'fail').length,
+      failedCallIds: results
+        .filter((r) => r.fixture?.expectation?.status === 'fail')
+        .map((r) => r.callId),
+    },
   };
 }
 
@@ -447,6 +681,15 @@ function printHumanResult(result, index) {
       legacySchedule: result.variance.legacyScheduledServiceVariances,
       priorV2: result.variance.priorV2FieldVariances,
     })}`);
+  }
+  if (result.fixture?.expectation) {
+    console.log(`     fixture=${result.fixture.caseId}:${result.fixture.expectation.status}`);
+    for (const failure of result.fixture.expectation.failures || []) {
+      console.log(`       fixture_failure=${failure.name} actual=${JSON.stringify(failure.actual)} expected=${JSON.stringify(failure.expected)}`);
+    }
+  }
+  if (result.error) {
+    console.log(`     error=${result.error.name}: ${result.error.message}`);
   }
   console.log('');
 }
@@ -543,7 +786,7 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
 }
 
 async function replayCall(call, context) {
-  const { helpers, CRP, db, scheduledColumns, includeValues, retranscribe } = context;
+  const { helpers, CRP, db, scheduledColumns, includeValues, retranscribe, fixtureCaseByCallId } = context;
   const contactPhone = contactPhoneForCall(call);
   const legacyFlat = parseJson(call.ai_extraction, {}) || {};
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
@@ -621,7 +864,7 @@ async function replayCall(call, context) {
   const legacyAppointmentCandidate = appointmentCandidate(legacyFlat);
   const currentAppointmentCandidate = appointmentCandidate(currentFlat || {});
 
-  return {
+  const result = {
     callId: call.id,
     createdAt: call.created_at || null,
     processingStatus: call.processing_status || null,
@@ -667,6 +910,107 @@ async function replayCall(call, context) {
     },
     includeValues,
   };
+  const fixtureCase = fixtureCaseByCallId?.get(call.id) || null;
+  if (fixtureCase) {
+    result.fixture = {
+      caseId: fixtureCase.id,
+      reviewedOutcome: fixtureCase.reviewed_outcome || null,
+      expectation: evaluateFixtureExpectation(result, fixtureCase),
+    };
+  }
+  return result;
+}
+
+function buildReplayErrorResult(call, err, context = {}) {
+  const { includeValues = false, retranscribe = false, fixtureCaseByCallId = null } = context;
+  const legacyFlat = parseJson(call?.ai_extraction, {}) || {};
+  const result = {
+    callId: call?.id || null,
+    createdAt: call?.created_at || null,
+    processingStatus: call?.processing_status || null,
+    transcription: {
+      provider: call?.transcription_provider || null,
+      model: call?.transcription_model || null,
+      chars: String(call?.transcription || '').length,
+      source: retranscribe ? 'fresh_recording' : 'stored_transcript',
+      replay: {
+        attempted: !!retranscribe,
+        status: 'error',
+        provider: null,
+        model: null,
+        delta: null,
+      },
+    },
+    legacy: {
+      hasExtraction: !!Object.keys(legacyFlat).length,
+      appointmentCandidate: appointmentCandidate(legacyFlat),
+      scheduledCreated: false,
+      scheduledServiceId: null,
+    },
+    priorV2: {
+      status: call?.v2_extraction_status || null,
+      hasStoredExtraction: !!parseJson(call?.ai_extraction_enriched, null),
+      schemaValidShape: false,
+      wouldAutoRoute: null,
+      routeReason: null,
+    },
+    current: {
+      status: 'error',
+      durationMs: null,
+      schemaErrors: [],
+      wouldAutoRoute: false,
+      routeReason: 'replay_error',
+      flags: [],
+      appointmentBlockingFlags: [],
+      confidence: null,
+      schedulingStatus: null,
+      serviceCategory: null,
+    },
+    variance: {
+      routeChangedVsLegacySchedule: false,
+      appointmentCandidateChangedVsLegacy: false,
+      priorV2RouteChanged: false,
+      legacyFieldVariances: [],
+      legacyScheduledServiceVariances: [],
+      priorV2FieldVariances: [],
+    },
+    includeValues,
+    error: {
+      name: err?.name || 'Error',
+      message: err?.message || String(err || 'unknown error'),
+    },
+  };
+  const fixtureCase = call?.id ? fixtureCaseByCallId?.get(call.id) : null;
+  if (fixtureCase) {
+    result.fixture = {
+      caseId: fixtureCase.id,
+      reviewedOutcome: fixtureCase.reviewed_outcome || null,
+      expectation: evaluateFixtureExpectation(result, fixtureCase),
+    };
+  }
+  return result;
+}
+
+function buildMissingFixtureResults(fixture, loadedRows, context = {}) {
+  if (!fixture) return [];
+  const loadedCallIds = new Set((loadedRows || []).map((row) => row.id));
+  const requiredCallIds = context.requiredCallIds ? new Set(context.requiredCallIds) : null;
+  return fixture.cases
+    .filter((item) => !requiredCallIds || requiredCallIds.has(item.call_log_id))
+    .filter((item) => !loadedCallIds.has(item.call_log_id))
+    .map((item) => buildReplayErrorResult(
+      { id: item.call_log_id, processing_status: null },
+      new Error('fixture call was not loaded by call_log query'),
+      context
+    ));
+}
+
+function shouldFailRun(summary, options) {
+  return !!options.fixturePath
+    && (
+      summary.replayErrors > 0
+      || summary.fixtureExpectations.failed > 0
+    );
 }
 
 async function main() {
@@ -685,6 +1029,9 @@ async function main() {
   const triageFlags = require('../services/call-triage-flags');
   const extractionCompat = require('../utils/extraction-compat');
   const helpers = { ...triageFlags, ...extractionCompat };
+  const fixture = loadReplayFixture(options.fixturePath);
+  const explicitFixtureIds = applyFixtureReplayOptions(options, fixture);
+  const fixtureCaseByCallId = fixture?.byCallId || new Map();
 
   try {
     const scheduledColumns = (await tableExists(db, 'scheduled_services'))
@@ -695,14 +1042,39 @@ async function main() {
 
     const results = [];
     for (const call of rows) {
-      const result = await replayCall(call, {
-        helpers,
-        CRP,
-        db,
-        scheduledColumns,
-        includeValues: options.includeValues,
-        retranscribe: options.retranscribe,
-      });
+      let result;
+      try {
+        result = await replayCall(call, {
+          helpers,
+          CRP,
+          db,
+          scheduledColumns,
+          includeValues: options.includeValues,
+          retranscribe: options.retranscribe,
+          fixtureCaseByCallId,
+        });
+      } catch (err) {
+        result = buildReplayErrorResult(call, err, {
+          includeValues: options.includeValues,
+          retranscribe: options.retranscribe,
+          fixtureCaseByCallId,
+        });
+      }
+      results.push(result);
+      if (options.jsonl) {
+        console.log(JSON.stringify({ type: 'call', ...result }));
+      } else {
+        printHumanResult(result, results.length - 1);
+      }
+    }
+
+    const missingFixtureResults = buildMissingFixtureResults(fixture, rows, {
+      includeValues: options.includeValues,
+      retranscribe: options.retranscribe,
+      fixtureCaseByCallId,
+      requiredCallIds: explicitFixtureIds,
+    });
+    for (const result of missingFixtureResults) {
       results.push(result);
       if (options.jsonl) {
         console.log(JSON.stringify({ type: 'call', ...result }));
@@ -717,12 +1089,30 @@ async function main() {
     } else {
       printHumanSummary(summary);
     }
+    if (shouldFailRun(summary, options)) {
+      process.exitCode = 1;
+    }
   } finally {
     await db.destroy().catch(() => {});
   }
 }
 
-main().catch((err) => {
-  console.error(`Replay failed: ${err.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`Replay failed: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  parseArgs,
+  normalizeField,
+  summarizeResults,
+  evaluateFixtureExpectation,
+  buildReplayErrorResult,
+  buildMissingFixtureResults,
+  shouldFailRun,
+  loadReplayFixture,
+  validateExplicitFixtureIds,
+  applyFixtureReplayOptions,
+};

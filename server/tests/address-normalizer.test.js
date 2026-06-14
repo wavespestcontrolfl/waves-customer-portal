@@ -40,6 +40,22 @@ describe('address normalizer', () => {
     expect(normalizeLeadAddress({ raw: '202 Oak Grove, Sarasota, FL 34236' }).line1).toBe('202 Oak Grv');
   });
 
+  test('normalizes ordinal street names without shouting the suffix', () => {
+    expect(normalizeLeadAddress({ raw: '8920 39TH Street Circle E, Parrish, FL 34219' })).toMatchObject({
+      line1: '8920 39th St Cir E',
+      city: 'Parrish',
+      state: 'FL',
+      zip: '34219',
+      fullAddress: '8920 39th St Cir E, Parrish, FL 34219',
+    });
+  });
+
+  test('does not abbreviate street-name tokens before terminal suffixes', () => {
+    expect(normalizeLeadAddress({ raw: '123 Court Street, Sarasota, FL 34236' }).line1).toBe('123 Court St');
+    expect(normalizeLeadAddress({ raw: '456 Lane Road, Sarasota, FL 34236' }).line1).toBe('456 Lane Rd');
+    expect(normalizeLeadAddress({ raw: '789 Street Road, Sarasota, FL 34236' }).line1).toBe('789 Street Rd');
+  });
+
   test('splits comma-free addresses with suffix aliases introduced for normalization', () => {
     expect(normalizeLeadAddress({ raw: '123 Harbor Point Sarasota FL 34236' })).toMatchObject({
       line1: '123 Harbor Pt',
