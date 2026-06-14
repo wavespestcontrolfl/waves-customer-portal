@@ -20,6 +20,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
 
 const { normalizeStreetLine } = require('../utils/address-normalizer');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const DEFAULT_LIMIT = 10;
 const DEFAULT_DAYS = 30;
@@ -540,7 +541,7 @@ function appointmentCandidate(flat) {
 
 function etScheduleParts(value) {
   if (!value) return {};
-  const d = new Date(value);
+  const d = parseETDateTime(value);
   if (isNaN(d.getTime())) return {};
   return {
     scheduled_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(d),
@@ -1156,4 +1157,5 @@ module.exports = {
   loadReplayFixture,
   validateExplicitFixtureIds,
   applyFixtureReplayOptions,
+  etScheduleParts,
 };

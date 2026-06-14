@@ -2,6 +2,7 @@ const {
   applyFixtureReplayOptions,
   buildMissingFixtureResults,
   buildReplayErrorResult,
+  etScheduleParts,
   evaluateFixtureExpectation,
   loadReplayFixture,
   parseArgs,
@@ -37,6 +38,13 @@ function validResult(overrides = {}) {
 }
 
 describe('call extraction replay variance reporting', () => {
+  test('parses naive extracted schedule timestamps as ET wall-clock', () => {
+    expect(etScheduleParts('2026-06-15T11:00:00')).toEqual({
+      scheduled_date: '2026-06-15',
+      window_start: '11:00',
+    });
+  });
+
   test('evaluates fixture expectations against replay results', () => {
     const result = validResult({
       current: {
