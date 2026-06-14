@@ -82,6 +82,25 @@ function computeRangeStatus(manualHeightIn, band) {
   return 'in_range';
 }
 
+// Assemble the persisted/snapshotted fields for a reading from the manual gauge
+// value + the property's grass type: guards the increment, snapshots the target
+// band, and computes range status. The picker should prevent a bad increment,
+// but the service guards too — throws `invalid_increment` if it slips through.
+function buildReadingFields(grassType, manualHeightIn) {
+  if (!isAllowedHeight(manualHeightIn)) {
+    const err = new Error(`manual_height_in must be one of: ${ALLOWED_HEIGHTS_IN.join(', ')}`);
+    err.code = 'invalid_increment';
+    throw err;
+  }
+  const band = resolveHeightBand(grassType);
+  return {
+    target_min_in: band.min,
+    target_max_in: band.max,
+    range_status: computeRangeStatus(Number(manualHeightIn), band),
+    grass_defaulted: band.defaulted, // surface flags the assumption; not a column
+  };
+}
+
 module.exports = {
   ALLOWED_HEIGHTS_IN,
   HEIGHT_BAND_BY_GRASS,
@@ -91,4 +110,5 @@ module.exports = {
   resolveHeightBand,
   mowTriggerInches,
   computeRangeStatus,
+  buildReadingFields,
 };

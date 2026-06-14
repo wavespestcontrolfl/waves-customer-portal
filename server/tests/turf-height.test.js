@@ -4,6 +4,7 @@ const {
   resolveHeightBand,
   mowTriggerInches,
   computeRangeStatus,
+  buildReadingFields,
 } = require('../services/service-report/turf-height');
 
 describe('turf-height: allowed gauge increments', () => {
@@ -54,6 +55,26 @@ describe('turf-height: range status (below is the only red state)', () => {
   test('null-safe', () => {
     expect(computeRangeStatus(null, stAug)).toBeNull();
     expect(computeRangeStatus(4, null)).toBeNull();
+  });
+});
+
+describe('turf-height: buildReadingFields (snapshot assembly)', () => {
+  test('snapshots the band + computes status for a valid reading', () => {
+    expect(buildReadingFields('st_augustine', 3.0)).toEqual({
+      target_min_in: 3.5, target_max_in: 4.0, range_status: 'below', grass_defaulted: false,
+    });
+    expect(buildReadingFields('zoysia', 2.0)).toEqual({
+      target_min_in: 1.5, target_max_in: 2.0, range_status: 'in_range', grass_defaulted: false,
+    });
+  });
+  test('mixed/unknown grass → defaulted band, flagged', () => {
+    expect(buildReadingFields('mixed', 4.5)).toEqual({
+      target_min_in: 3.5, target_max_in: 4.0, range_status: 'above', grass_defaulted: true,
+    });
+  });
+  test('throws invalid_increment on an off-gauge value (service-layer guard)', () => {
+    expect(() => buildReadingFields('st_augustine', 3.75)).toThrow(/must be one of/);
+    try { buildReadingFields('st_augustine', 3.75); } catch (e) { expect(e.code).toBe('invalid_increment'); }
   });
 });
 
