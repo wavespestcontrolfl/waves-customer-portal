@@ -112,6 +112,12 @@ describe('MDX {{token}} crash guard (proof-caught bug)', () => {
     expect(_internals.mdxBreakingToken('clean Sarasota body, no tokens')).toBeNull();
     expect(_internals.mdxBreakingToken('an object literal {{a:1}} is not a token')).toBeNull();
   });
+
+  test('runner treats BLOG_MDX_TOKEN_LEAK as deterministic → parks for review (no retry loop)', () => {
+    const { isDeterministicPublishError } = require('../services/content/autonomous-runner')._internals;
+    expect(isDeterministicPublishError({ code: 'BLOG_MDX_TOKEN_LEAK' })).toBe(true);
+    expect(isDeterministicPublishError({ code: 'SOME_TRANSIENT_ERROR' })).toBe(false);
+  });
 });
 
 describe('astro-publisher: spoke domain + canonical routing', () => {
