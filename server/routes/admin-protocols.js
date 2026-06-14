@@ -2440,6 +2440,7 @@ router.get('/programs', async (req, res, next) => {
     }));
 
     res.json({
+      operations: protocols.operations || {},
       lawn: { tracks: summary },
       programs: PROGRAM_KEYS.map((key) => programSummary(key, protocols[key])).filter(Boolean),
       tree_shrub: programSummary('tree_shrub', protocols.tree_shrub),

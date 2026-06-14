@@ -58,6 +58,13 @@ function actionConfig(kind, opportunity) {
         confirmLabel: "Mark Accepted",
         tone: "primary",
       };
+    case "mark_annual_prepay":
+      return {
+        title: "Mark annual prepay",
+        description: `Mark ${name} as accepted for annual prepay. This creates a pending annual prepay invoice and renewal term, but does not text, email, or auto-schedule the customer.`,
+        confirmLabel: "Mark Annual Prepay",
+        tone: "primary",
+      };
     case "decline_estimate":
       return {
         title: "Mark estimate declined",
@@ -145,6 +152,7 @@ function menuActions(opportunity) {
     }
     if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)) {
       actions.push({ label: "Mark Accepted", kind: "mark_accepted" });
+      actions.push({ label: "Mark Annual Prepay", kind: "mark_annual_prepay" });
       actions.push({ label: "Mark Declined", kind: "decline_estimate" });
     }
     if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.LOST].includes(opportunity.stage)) {
@@ -260,6 +268,16 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
         body: JSON.stringify({ source: "pipeline_verbal_yes" }),
       });
       return "Estimate marked accepted.";
+    }
+    if (item.kind === "mark_annual_prepay") {
+      await adminFetch(`/admin/estimates/${opportunity.estimateId}/mark-accepted`, {
+        method: "POST",
+        body: JSON.stringify({
+          source: "pipeline_verbal_annual_prepay",
+          billingTerm: "prepay_annual",
+        }),
+      });
+      return "Annual prepay marked accepted.";
     }
     if (item.kind === "decline_estimate") {
       await adminFetch(`/admin/estimates/${opportunity.estimateId}`, {

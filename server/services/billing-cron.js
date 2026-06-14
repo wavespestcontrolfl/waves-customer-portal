@@ -107,6 +107,8 @@ const BillingCron = {
     }
     const annualPrepayCoveredIds =
       await AnnualPrepayRenewals.getActivelyCoveredCustomerIds(etDateString());
+    const annualPrepayPendingIds =
+      await AnnualPrepayRenewals.getPaymentPendingCustomerIds();
 
     const todayDay = etParts(now).day;
     let charged = 0;
@@ -145,6 +147,15 @@ const BillingCron = {
         // on; charging here would double-bill on top of the prepayment.
         if (annualPrepayCoveredIds.has(String(customer.id))) {
           await logAutopay(customer.id, 'skipped_annual_prepay');
+          skipped++;
+          continue;
+        }
+
+        // GUARD 5: pending annual-prepay commitment — office/customer still
+        // needs to complete or cancel the annual invoice. Do not monthly-charge
+        // in the meantime, even though active coverage has not started.
+        if (annualPrepayPendingIds.has(String(customer.id))) {
+          await logAutopay(customer.id, 'skipped_annual_prepay_pending');
           skipped++;
           continue;
         }

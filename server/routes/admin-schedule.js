@@ -1859,28 +1859,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
           createdAppointments.push({ id: boosterRow.id, date: boosterDate, confirmation: false });
         }
       }
-    });
 
-    // Prepaid stamping records financial state (the recorded prepayment), not a
-    // best-effort notification, so it MUST be durable before we tell the client
-    // the save succeeded — otherwise the schedule can reload with no
-    // prepaid_amount, and a crash/deploy in the deferred window would silently
-    // drop a prepayment the admin saw succeed. It's a fast local DB write (no
-    // network), so keeping it on the save path does not reintroduce the delay
-    // this PR removes (that delay was Twilio-bound: SMS + landline lookups).
-    if (req.body.prepaid && isRecurring) {
-      try {
+      // Prepaid stamping records financial state, so it belongs in the same
+      // transaction as the appointment series. If it fails, no appointment rows
+      // commit and the admin cannot retry into a duplicate unprepaid series.
+      if (req.body.prepaid && isRecurring) {
         const { totalAmount, method, note } = req.body.prepaid;
         if (totalAmount > 0) {
-          await stampSeriesPrepaid(db, {
+          await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
             totalAmount: Number(totalAmount),
             method: method || 'cash',
             note: note || null,
+            useExistingTransaction: true,
           });
         }
-      } catch (e) { logger.error(`[schedule] prepaid stamp failed (non-blocking): ${e.message}`); }
-    }
+      }
+    });
 
     // Register appointment-reminder rows synchronously, BEFORE the response, with
     // deferConfirmation so the slow Twilio confirmation SMS does NOT run here.
@@ -1917,7 +1912,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // recurring welcome SMS, tech notification, tagging, prepay-terms refresh, and
     // dispatch broadcast — none of which affect the response payload, financial
     // state, or reminder-row durability.
-    res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
+    res.status(201).json({
+      id: svc.id,
+      recurringCreated: isRecurring ? (recurringCount || 4) : 1,
+      appointments: createdAppointments,
+      warnings: [],
+    });
 
     // ── Post-commit side-effects (fire-and-forget; never fail the request) ──
     setImmediate(async () => {
