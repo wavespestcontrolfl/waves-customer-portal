@@ -33,7 +33,11 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 
-const VALID_MODES = ['shadow', 'suggest'];
+// The graduation ladder. 'auto_send' is the top rung — its delivery path
+// lives in sms-auto-send.js and only fires behind GATE_SMS_AUTO_SEND with a
+// server-enforced eligibility re-check. Escalation intents never leave shadow.
+const VALID_MODES = ['shadow', 'suggest', 'auto_send'];
+const AUTO_SEND_MODE = 'auto_send';
 const ESCALATION_INTENTS = new Set(['customer_issue_needs_review']);
 
 const SUGGESTED_STATUS = 'suggested';
@@ -63,6 +67,61 @@ async function lockSuggestThread(trx, key) {
     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [THREAD_LOCK_NS, String(key)]
   );
+}
+
+/**
+ * Shared thread guard-gauntlet for any path that would put a fresh house-voice
+ * reply on a thread — the suggest publish AND the auto-send executor. Returns
+ * a blocker reason, or null when the thread is clear. Reads committed state
+ * only: call it INSIDE the locked transaction so a concurrent staff reply or
+ * newer inbound can't slip past between the check and the write.
+ *   human_answered  — a human-authored outbound already answered this inbound
+ *   reply_in_flight — a human reply for this thread is queued/sending
+ *   newer_inbound   — a newer inbound exists; this reply's context is stale
+ * Thread scope is the customer phone (last 10); customer_id is the fallback
+ * when the inbound carried no phone. (Auto-sent outbounds use their own
+ * message_type, deliberately NOT in HUMAN_REPLY_TYPES — "did a HUMAN answer?"
+ * is the question, and a newer auto-send always implies a newer inbound, which
+ * the newer_inbound guard already catches.)
+ */
+async function threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt }) {
+  const byThread = (phoneColumn) => function matchThread() {
+    if (threadLast10) {
+      this.whereRaw(
+        `RIGHT(REGEXP_REPLACE(COALESCE(${phoneColumn}, ''), '[^0-9]', '', 'g'), 10) = ?`,
+        [threadLast10]
+      );
+    } else {
+      this.where({ customer_id: customerId });
+    }
+  };
+
+  const answered = await trx('sms_log')
+    .where({ direction: 'outbound' })
+    .where(byThread('to_phone'))
+    .whereIn('message_type', HUMAN_REPLY_TYPES)
+    .whereIn('status', SENT_STATUSES)
+    .where('created_at', '>', inboundCreatedAt)
+    .first('id');
+  if (answered) return 'human_answered';
+
+  const replyInFlight = await trx('sms_log')
+    .where({ direction: 'outbound' })
+    .where(byThread('to_phone'))
+    .whereIn('message_type', HUMAN_REPLY_TYPES)
+    .whereIn('status', ['scheduled', 'sending'])
+    .where('created_at', '>', inboundCreatedAt)
+    .first('id');
+  if (replyInFlight) return 'reply_in_flight';
+
+  const newerInbound = await trx('sms_log')
+    .where({ direction: 'inbound' })
+    .where(byThread('from_phone'))
+    .where('created_at', '>', inboundCreatedAt)
+    .first('id');
+  if (newerInbound) return 'newer_inbound';
+
+  return null;
 }
 
 function isEscalationIntent(intent) {
@@ -111,14 +170,39 @@ async function getIntentMode(intent) {
 }
 
 /**
- * Resolve the message_drafts status for a freshly parsed draft. One call
- * site in the shadow drafter; returns 'shadow' unless every gate passes.
+ * Resolve the delivery target for a freshly parsed draft — the single source
+ * of truth the drafter branches on. Returns the ladder rung the draft should
+ * take: 'shadow' (silent), 'suggest' (composer card), or 'auto_send'
+ * (executor sends it). Fail closed at every step:
+ *   - ineligible (no reply / no customer+inbound / scheduling / escalation) → shadow
+ *   - intent mode 'auto_send' → auto_send only if GATE_SMS_AUTO_SEND is on;
+ *     otherwise gracefully DEGRADE to a human-reviewed suggestion (never a
+ *     silent drop) when suggest is available, else shadow
+ *   - intent mode 'suggest' → suggest only if GATE_SMS_SUGGEST_MODE is on
+ *   - anything else → shadow
+ * The executor independently re-verifies all of this before sending; this is
+ * the drafter-side resolution, not the security boundary.
  */
-async function resolveDraftStatus({ reply, customerId, smsLogId, intent, schedulingIntent }) {
-  if (!isEnabled('smsSuggestMode')) return 'shadow';
+async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent }) {
   if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) return 'shadow';
-  const mode = await getIntentMode(intent);
-  return mode === 'suggest' ? SUGGESTED_STATUS : 'shadow';
+  const mode = await getIntentMode(intent); // 'shadow' | 'suggest' | 'auto_send'; escalation forced shadow
+  if (mode === AUTO_SEND_MODE) {
+    if (isEnabled('smsAutoSend')) return AUTO_SEND_MODE;
+    return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
+  }
+  if (mode === 'suggest') return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
+  return 'shadow';
+}
+
+/**
+ * Back-compat: the message_drafts STATUS for a freshly parsed draft. The draft
+ * row is always inserted as 'shadow'; only a published suggestion flips it to
+ * 'suggested'. Auto-send drafts also insert as 'shadow' (the executor flips
+ * them to 'auto_sent' after the send confirms), so this maps every non-suggest
+ * rung to 'shadow'.
+ */
+async function resolveDraftStatus(args) {
+  return (await resolveDeliveryMode(args)) === 'suggest' ? SUGGESTED_STATUS : 'shadow';
 }
 
 async function listIntentModes() {
@@ -210,59 +294,16 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // every guard below reads committed state, and anything we insert is
       // visible to the next locked path.
       await lockSuggestThread(trx, threadLast10 || customerId);
-      const byThread = (phoneColumn) => function matchThread() {
-        if (threadLast10) {
-          this.whereRaw(
-            `RIGHT(REGEXP_REPLACE(COALESCE(${phoneColumn}, ''), '[^0-9]', '', 'g'), 10) = ?`,
-            [threadLast10]
-          );
-        } else {
-          this.where({ customer_id: customerId });
-        }
-      };
 
-      // A fast human reply can land while the draft is still generating, and
-      // the post-send ignore sweep can't resolve a decision row that doesn't
-      // exist yet. If a human-authored outbound already answered this
-      // inbound, don't publish: the draft stays shadow and the judge scores
-      // it against that very reply.
-      const answered = await trx('sms_log')
-        .where({ direction: 'outbound' })
-        .where(byThread('to_phone'))
-        .whereIn('message_type', HUMAN_REPLY_TYPES)
-        .whereIn('status', SENT_STATUSES)
-        .where('created_at', '>', inbound.created_at)
-        .first('id');
-      if (answered) return null;
-
-      // Same race, queued flavor: staff can have a reply for this thread
-      // sitting in the scheduled-send queue. /schedule-sms couldn't park a
-      // decision that didn't exist yet (the drafter was mid-generation), so
-      // publishing now would put an actionable card on top of the queued
-      // reply. Only replies QUEUED AFTER this inbound count — a reply
-      // composed before the customer's newest message can't be answering
-      // it, and that newer message still deserves its card.
-      const replyInFlight = await trx('sms_log')
-        .where({ direction: 'outbound' })
-        .where(byThread('to_phone'))
-        .whereIn('message_type', HUMAN_REPLY_TYPES)
-        .whereIn('status', ['scheduled', 'sending'])
-        .where('created_at', '>', inbound.created_at)
-        .first('id');
-      if (replyInFlight) return null;
-
-      // A newer inbound may exist whose own draft hasn't published yet —
-      // invisible to the pending-suggestion ordering check below. This
-      // draft's context is stale; the newer inbound's draft will publish
-      // its own card. Conservative on purpose (any newer inbound row,
-      // reactions included): the cost of suppressing is one fewer card,
-      // the draft reverts to shadow for the judge.
-      const newerInbound = await trx('sms_log')
-        .where({ direction: 'inbound' })
-        .where(byThread('from_phone'))
-        .where('created_at', '>', inbound.created_at)
-        .first('id');
-      if (newerInbound) return null;
+      // Shared guard-gauntlet (mirrored by the auto-send executor): a human
+      // reply already out, a staff reply queued/in-flight, or a newer inbound
+      // whose own draft is still generating all mean this draft's context is
+      // stale. Any hit → leave the draft shadow for the judge. The pending-
+      // suggestion ordering check below catches the published-card case the
+      // newer-inbound scan can't yet see.
+      if (await threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt: inbound.created_at })) {
+        return null;
+      }
 
       // Same thread scope as the guards: supersede/ordering must only see
       // cards for THIS conversation — a multi-phone customer's other thread
@@ -601,6 +642,7 @@ async function expireStaleSuggestions({ maxAgeHours = EXPIRY_HOURS } = {}) {
 
 module.exports = {
   VALID_MODES,
+  AUTO_SEND_MODE,
   ESCALATION_INTENTS,
   SUGGESTED_STATUS,
   SUGGEST_WORKFLOW,
@@ -608,12 +650,15 @@ module.exports = {
   SUGGEST_DECISION_VERSION,
   EXPIRY_HOURS,
   HUMAN_REPLY_TYPES,
+  SENT_STATUSES,
   isEscalationIntent,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
   classifySendVerdict,
   getIntentMode,
+  threadHasLiveAnswer,
+  resolveDeliveryMode,
   resolveDraftStatus,
   listIntentModes,
   setIntentMode,

@@ -48,7 +48,7 @@ const INTENDED_ACTION_TYPES = [
 ];
 
 function buildSystemPrompt() {
-  return `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This draft is for INTERNAL EVALUATION ONLY — it will never be sent. Draft exactly what you would send if you were live.
+  return `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
@@ -291,6 +291,15 @@ function parseShadowResponse(text) {
   // Only a missing/non-string reply is unusable.
   if (!parsed || typeof parsed.reply !== 'string') return null;
 
+  // Auto-send safety MUST be read from the RAW model output: the sanitize step
+  // below DROPS unrecognized action types, so a model that requests an unknown
+  // action (e.g. {"type":"cancel_service"}) would otherwise sanitize to [] and
+  // read as action-free. autoSendActionsSafe fails closed on any entry whose
+  // type isn't exactly 'none' — unknown types included — so applying it here,
+  // pre-sanitize, is the honest signal. (Empty/absent = no action = safe.)
+  const { autoSendActionsSafe } = require('./sms-auto-send');
+  const autoSendSafe = autoSendActionsSafe(parsed.intended_actions);
+
   const intendedActions = Array.isArray(parsed.intended_actions)
     ? parsed.intended_actions
         .filter((a) => a && typeof a.type === 'string' && INTENDED_ACTION_TYPES.includes(a.type))
@@ -300,6 +309,7 @@ function parseShadowResponse(text) {
   return {
     reply: parsed.reply.trim(),
     intended_actions: intendedActions,
+    auto_send_safe: autoSendSafe,
     missing_info: typeof parsed.missing_info === 'string' ? parsed.missing_info.slice(0, 500) : null,
   };
 }
@@ -333,17 +343,19 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     }
 
     const intentName = intent?.intent || 'GENERAL';
-    // Phase D: intents flipped to 'suggest' surface the draft as a composer
-    // card instead of staying silent. Escalation intents, scheduling-intent
-    // messages, and anything without a customer + inbound link stay shadow.
+    // Phase D/E: intents flipped to 'suggest' surface the draft as a composer
+    // card; intents flipped to 'auto_send' (and that have earned the rung)
+    // have it SENT to the customer automatically. Escalation intents,
+    // scheduling-intent messages, and anything without a customer + inbound
+    // link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
-    const wantsSuggestion = (await suggestMode.resolveDraftStatus({
+    const deliveryMode = await suggestMode.resolveDeliveryMode({
       reply: parsed.reply,
       customerId: customer?.id || null,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
-    })) === suggestMode.SUGGESTED_STATUS;
+    });
 
     // ALWAYS insert as shadow: the flip to 'suggested' happens atomically
     // with the decision insert inside publishSuggestion's locked
@@ -374,28 +386,79 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       })
       .returning('id');
 
-    // Only verified-clean drafts may surface to a human as a suggestion: a
-    // draft the verify loop couldn't sign off (still asserting unsupported
-    // facts after the revision budget) stays a silent shadow row rather than
-    // putting a possibly-fabricated card in front of staff.
-    let published = false;
-    if (row?.id && wantsSuggestion && converged) {
-      const decisionId = await suggestMode.publishSuggestion({
-        draftId: row.id,
-        customerId: customer.id,
-        smsLogId,
-        inboundMessage,
-        reply: parsed.reply,
-        intent: intentName,
-        confidence: intent?.confidence ?? null,
-        model: MODELS.FLAGSHIP,
-        promptVersion: PROMPT_VERSION,
-      });
-      published = Boolean(decisionId);
+    // Only verified-clean drafts (verify loop converged) may leave the silent
+    // shadow lane — a draft still asserting unsupported facts after the
+    // revision budget is never shown to a human OR sent to a customer; it
+    // stays a shadow row the judge still covers.
+    let deliveredAs = SHADOW_STATUS;
+    if (row?.id && converged) {
+      if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
+        const result = await require('./sms-auto-send').maybeAutoSend({
+          draftId: row.id,
+          customer,
+          smsLogId,
+          inboundMessage,
+          reply: parsed.reply,
+          intent: intentName,
+          intendedActions: parsed.intended_actions,
+          actionsVerifiedSafe: parsed.auto_send_safe,
+          confidence: intent?.confidence ?? null,
+          model: MODELS.FLAGSHIP,
+          promptVersion: PROMPT_VERSION,
+          schedulingIntent,
+        });
+        if (result?.sent) {
+          deliveredAs = 'auto_sent';
+        } else if (result?.reason !== 'guarded_or_claimed' && result?.reason !== 'ineligible_base') {
+          // Fail closed to a HUMAN: a verified draft that couldn't auto-send —
+          // needs a follow-up action, the intent is no longer eligible, the
+          // readiness signal was unavailable, or the send was blocked/failed —
+          // should reach a person, not vanish into silent shadow. But re-resolve
+          // the mode first: an admin may have demoted the intent (to shadow or
+          // suggest) while this draft generated, or the mode lookup failed
+          // closed (mode_not_autosend). Only surface a card if the intent STILL
+          // wants human/auto handling — a now-shadow intent must stay silent.
+          // (Guard/duplicate misses already stayed shadow above.)
+          const fallbackMode = await suggestMode.resolveDeliveryMode({
+            reply: parsed.reply,
+            customerId: customer?.id || null,
+            smsLogId: smsLogId || null,
+            intent: intentName,
+            schedulingIntent,
+          });
+          if (fallbackMode === 'suggest' || fallbackMode === suggestMode.AUTO_SEND_MODE) {
+            const decisionId = await suggestMode.publishSuggestion({
+              draftId: row.id,
+              customerId: customer.id,
+              smsLogId,
+              inboundMessage,
+              reply: parsed.reply,
+              intent: intentName,
+              confidence: intent?.confidence ?? null,
+              model: MODELS.FLAGSHIP,
+              promptVersion: PROMPT_VERSION,
+            });
+            if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+          }
+        }
+      } else if (deliveryMode === 'suggest') {
+        const decisionId = await suggestMode.publishSuggestion({
+          draftId: row.id,
+          customerId: customer.id,
+          smsLogId,
+          inboundMessage,
+          reply: parsed.reply,
+          intent: intentName,
+          confidence: intent?.confidence ?? null,
+          model: MODELS.FLAGSHIP,
+          promptVersion: PROMPT_VERSION,
+        });
+        if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
+      }
     }
 
     logger.info(
-      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${published ? suggestMode.SUGGESTED_STATUS : SHADOW_STATUS} passes=${passes} converged=${converged} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
+      `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${deliveredAs} passes=${passes} converged=${converged} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
     );
     return row?.id || null;
   } catch (err) {

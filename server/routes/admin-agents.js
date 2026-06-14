@@ -1505,6 +1505,21 @@ router.put('/intent-modes/:intent', async (req, res, next) => {
     const mode = String(req.body?.mode || '').trim();
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : null;
 
+    // Server-enforced eligibility for the top rung: an intent can only be
+    // flipped to 'auto_send' once it has EARNED it on live data. Defense in
+    // depth — the executor re-checks this at send time too, but blocking the
+    // flip keeps the UI honest and never stages an unearned autonomous send.
+    if (mode === suggestMode.AUTO_SEND_MODE) {
+      const graduation = require('../services/sms-graduation');
+      const elig = await graduation.evaluateAutoSendEligibility({ intent });
+      if (!elig.eligible) {
+        return res.status(409).json({
+          error: 'This intent has not earned auto-send yet — flip blocked.',
+          blockers: elig.blockers || [],
+        });
+      }
+    }
+
     const prior = await db('sms_intent_modes').where({ intent }).first();
     let row;
     try {

@@ -17,7 +17,34 @@ describe('sms shadow drafter — response parsing', () => {
     expect(parsed).toEqual({
       reply: 'Hello Dale! You are on the schedule.',
       intended_actions: [],
+      auto_send_safe: true,
       missing_info: null,
+    });
+  });
+
+  describe('auto_send_safe — computed from RAW actions, before sanitize drops unknowns', () => {
+    test('a well-formed empty / only-none action list → safe', () => {
+      expect(parseShadowResponse('{"reply":"hi","intended_actions":[]}').auto_send_safe).toBe(true);
+      expect(parseShadowResponse('{"reply":"","intended_actions":[{"type":"none"}]}').auto_send_safe).toBe(true);
+    });
+
+    test('an OMITTED intended_actions field is a broken contract → NOT safe', () => {
+      // The prompt requires the field; a response that drops it must not
+      // auto-send (it is the only signal that no follow-up action is needed).
+      expect(parseShadowResponse('{"reply":"hi"}').auto_send_safe).toBe(false);
+    });
+
+    test('a recognized actionable type → NOT safe', () => {
+      expect(parseShadowResponse('{"reply":"hi","intended_actions":[{"type":"escalate"}]}').auto_send_safe).toBe(false);
+      expect(parseShadowResponse('{"reply":"hi","intended_actions":[{"type":"send_payment_link"}]}').auto_send_safe).toBe(false);
+    });
+
+    test('an UNKNOWN action type fails closed even though it is sanitized away', () => {
+      const parsed = parseShadowResponse('{"reply":"hi","intended_actions":[{"type":"cancel_service"}]}');
+      // sanitize drops the unrecognized type...
+      expect(parsed.intended_actions).toEqual([]);
+      // ...but the raw-derived safety flag still refuses auto-send.
+      expect(parsed.auto_send_safe).toBe(false);
     });
   });
 
@@ -81,8 +108,11 @@ describe('sms shadow drafter — prompt contract', () => {
     const prompt = buildSystemPrompt();
     expect(prompt).toContain(CUSTOMER_SMS_HOUSE_VOICE);
     expect(AGENT_CONFIG.system).toContain(CUSTOMER_SMS_HOUSE_VOICE);
-    expect(prompt).toContain('INTERNAL EVALUATION ONLY');
-    expect(prompt).toContain('never be sent');
+    // The draft is treated as customer-facing (it may be auto-sent once an
+    // intent graduates), so the prompt must instruct send-safe output — NOT
+    // the old "internal evaluation only, never sent" framing.
+    expect(prompt).toContain('safe and correct to send AS-IS');
+    expect(prompt).not.toContain('never be sent');
     expect(prompt).toContain('no reply warranted'); // courtesy acks may draft an empty reply
   });
 

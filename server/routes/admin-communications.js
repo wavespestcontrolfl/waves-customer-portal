@@ -25,6 +25,7 @@ const {
   ignoreParkedSuggestions,
   lockSuggestThread,
 } = require('../services/sms-suggest-mode');
+const autoSendExecutor = require('../services/sms-auto-send');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -154,7 +155,18 @@ async function resolveSmsLogCustomerFallbacks(rows) {
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
+  let manualReservationId = null;
   let parkedThreadIds = [];
+  const clearManualReservation = async () => {
+    if (!manualReservationId) return;
+    const id = manualReservationId;
+    manualReservationId = null;
+    await db('sms_log').where({ id }).del().catch((delErr) => {
+      // A leftover reservation is bounded — reconcileAutoSendClaims sweeps
+      // stale 'sending' reservation rows — so a failed delete is non-fatal.
+      logger.warn(`[sms-auto-send] manual reservation cleanup failed (${id}): ${delErr.message}`);
+    });
+  };
   try {
     const {
       to,
@@ -238,11 +250,52 @@ router.post('/sms', async (req, res, next) => {
     // send the same card. Success resolves them as ignored; blocked/failed/
     // exception reopens them; a crash mid-send is bounded by the 30-min
     // orphan recovery.
+    let autoSendInFlight = false;
+    // The auto-send interlock only matters when Phase E auto-send is enabled.
+    // Gated so the manual send path carries ZERO extra work while the feature
+    // is dormant (the usual state): no claim lookup, no reservation row.
+    const autoSendInterlock = isEnabled('smsAutoSend');
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
       if (parkPhoneLast10) {
         parkedThreadIds = await db.transaction(async (trx) => {
           await lockSuggestThread(trx, parkPhoneLast10);
+          if (autoSendInterlock) {
+            // An autonomous house-voice reply (Phase E) may be mid-send to this
+            // thread — it claimed under THIS same lock. Don't let a manual send
+            // race its provider window; both would reach the customer. Under
+            // the lock the check is atomic with the auto-send's claim: whoever
+            // takes the lock first wins, the other backs off.
+            if (await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: parkPhoneLast10, customerId: trustedCustomerId })) {
+              autoSendInFlight = true;
+              return [];
+            }
+            // ...and the symmetric direction: persist a human-typed 'sending'
+            // marker the auto-send's own guard (threadHasLiveAnswer) sees, so an
+            // auto-send claiming AFTER we release the lock won't fire during our
+            // provider window. Deleted once the send resolves (below / in catch).
+            // sms_log.from_phone is NOT NULL, but the route lets callers omit
+            // fromNumber (TwilioService picks the location default at send).
+            // The reservation is a transient marker (deleted after send, never
+            // customer-visible), so its from only needs to be non-null — use
+            // the main-line default. getOutboundNumber() with no location falls
+            // back to the main line.
+            const reservationFrom = fromNumber || TWILIO_NUMBERS.getOutboundNumber();
+            const [resv] = await trx('sms_log')
+              .insert({
+                customer_id: trustedCustomerId || null,
+                direction: 'outbound',
+                from_phone: reservationFrom,
+                to_phone: to,
+                message_body: cleanBody,
+                status: 'sending',
+                message_type: 'manual',
+                admin_user_id: req.technicianId || null,
+                metadata: JSON.stringify({ manual_send_reservation: true }),
+              })
+              .returning('id');
+            manualReservationId = resv?.id || null;
+          }
           return parkThreadSuggestions(
             { phoneLast10: parkPhoneLast10, excludeDecisionId: verifiedAgentDecision?.id }, trx
           );
@@ -261,6 +314,18 @@ router.post('/sms', async (req, res, next) => {
         });
       }
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
+    }
+
+    if (autoSendInFlight) {
+      // The reply never left — release the claimed card so it can be resent
+      // after the autonomous reply lands.
+      if (claimedDecisionId) {
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId],
+          reason: 'An automated reply is going out to this thread — suggestion reopened.',
+        });
+      }
+      return res.status(409).json({ error: 'An automated reply is going out to this conversation right now — refresh in a moment and resend if it is still needed.' });
     }
 
     const sendStartedAt = new Date();
@@ -289,6 +354,10 @@ router.post('/sms', async (req, res, next) => {
         media,
       },
     });
+    // The reservation has done its job — the real provider row now exists (on
+    // success) or no send happened (on failure). Clear it so it can't linger as
+    // a stuck 'sending' row blocking auto-sends to the thread.
+    await clearManualReservation();
     if (result.blocked || result.sent === false) {
       // The reply never left — release the claim and the parked cards.
       await reopenScheduledSuggestions({
@@ -393,6 +462,9 @@ router.post('/sms', async (req, res, next) => {
 
     res.json(result);
   } catch (err) {
+    // Release the in-flight reservation so a throw mid-send can't strand a
+    // 'sending' row that blocks auto-sends to the thread.
+    await clearManualReservation();
     // Guarded reopen: anything the send actually resolved before the throw
     // is no longer 'scheduled' and no-ops here.
     if (claimedDecisionId || parkedThreadIds.length) {
@@ -1172,6 +1244,19 @@ router.post('/schedule-sms', async (req, res, next) => {
         // Same thread lock as the drafter's publish and the post-send
         // sweep — park + queue commit atomically with respect to both.
         await lockSuggestThread(trx, normalizePhoneLast10(to) || to);
+
+        // Don't queue a reply while an autonomous house-voice reply (Phase E)
+        // is mid-send to this thread — it could land as a duplicate when this
+        // one dispatches. The 'scheduled' sms_log row inserted below is itself
+        // the marker the auto-send's guard sees, so this check only needs to
+        // cover the reverse race (auto claimed first). Gated → no-op while
+        // auto-send is dormant.
+        if (isEnabled('smsAutoSend')
+          && await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: normalizePhoneLast10(to), customerId: trustedCustomerId })) {
+          const conflict = new Error('An automated reply is going out to this conversation right now — refresh in a moment before scheduling.');
+          conflict.statusCode = 409;
+          throw conflict;
+        }
 
         let usedDecisionId = null;
         if (scheduledAgentDecision) {
