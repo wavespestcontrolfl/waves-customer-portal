@@ -3,10 +3,10 @@
   "description": "Reviewed call-recording replay cases from the June 2026 v2 extraction hardening pass. Cases reference call_log ids only; no transcript text or customer PII is stored here.",
   "cases": [
     {
-      "id": "ronni-name-email-address-ground-truth",
+      "id": "name-email-address-ground-truth",
       "call_log_id": "86b33b84-d66f-4274-84b2-513299d47211",
       "reviewed_at": "2026-06-14",
-      "reviewed_outcome": "Ronni/Ronnie email corroboration and Cumberland Terrace/Ter normalization should allow routing in shadow replay.",
+      "reviewed_outcome": "Reviewed customer-name/email corroboration plus street-suffix normalization should allow routing in shadow replay.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": true,

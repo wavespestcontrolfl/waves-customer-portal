@@ -55,6 +55,17 @@ const FIELD_SEVERITY = Object.entries(FIELD_GROUPS).reduce((acc, [severity, fiel
 }, {});
 
 const COMPARED_FIELDS = Object.keys(FIELD_SEVERITY);
+const EXPECTATION_KEYS = new Set([
+  'current_status',
+  'current_would_auto_route',
+  'legacy_scheduled_created',
+  'route_changed_vs_legacy_schedule',
+  'appointment_candidate_changed_vs_legacy',
+  'prior_v2_route_changed',
+  'current_flags_include',
+  'current_flags_exclude',
+  'legacy_schedule_variance_fields',
+]);
 
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
@@ -245,9 +256,12 @@ function normalizeExpectedArray(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.trim());
+}
+
 function evaluateFixtureExpectation(result, fixtureCase) {
   const expect = fixtureCase?.expect;
-  if (!expect) return null;
 
   const failures = [];
   const checks = [];
@@ -255,62 +269,120 @@ function evaluateFixtureExpectation(result, fixtureCase) {
     checks.push(name);
     if (!passed) failures.push({ name, actual, expected });
   };
+  const fixtureError = (name, actual, expected) => {
+    failures.push({ name: `fixture_error:${name}`, actual, expected });
+  };
+
+  if (!expect || typeof expect !== 'object' || Array.isArray(expect)) {
+    fixtureError('invalid_expect', expect, 'object with at least one supported expectation key');
+    return { status: 'fail', checked: 0, failures };
+  }
+
+  for (const key of Object.keys(expect)) {
+    if (!EXPECTATION_KEYS.has(key)) fixtureError(`unknown_key:${key}`, key, [...EXPECTATION_KEYS].sort());
+  }
 
   if (Object.prototype.hasOwnProperty.call(expect, 'current_status')) {
-    check('current_status', result.current.status === expect.current_status, result.current.status, expect.current_status);
+    if (typeof expect.current_status === 'string') {
+      check('current_status', result.current.status === expect.current_status, result.current.status, expect.current_status);
+    } else {
+      fixtureError('invalid_current_status', expect.current_status, 'string');
+    }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'current_would_auto_route')) {
-    check(
-      'current_would_auto_route',
-      result.current.wouldAutoRoute === expect.current_would_auto_route,
-      result.current.wouldAutoRoute,
-      expect.current_would_auto_route
-    );
+    if (typeof expect.current_would_auto_route === 'boolean') {
+      check(
+        'current_would_auto_route',
+        result.current.wouldAutoRoute === expect.current_would_auto_route,
+        result.current.wouldAutoRoute,
+        expect.current_would_auto_route
+      );
+    } else {
+      fixtureError('invalid_current_would_auto_route', expect.current_would_auto_route, 'boolean');
+    }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'legacy_scheduled_created')) {
-    check(
-      'legacy_scheduled_created',
-      result.legacy.scheduledCreated === expect.legacy_scheduled_created,
-      result.legacy.scheduledCreated,
-      expect.legacy_scheduled_created
-    );
+    if (typeof expect.legacy_scheduled_created === 'boolean') {
+      check(
+        'legacy_scheduled_created',
+        result.legacy.scheduledCreated === expect.legacy_scheduled_created,
+        result.legacy.scheduledCreated,
+        expect.legacy_scheduled_created
+      );
+    } else {
+      fixtureError('invalid_legacy_scheduled_created', expect.legacy_scheduled_created, 'boolean');
+    }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'route_changed_vs_legacy_schedule')) {
-    check(
-      'route_changed_vs_legacy_schedule',
-      result.variance.routeChangedVsLegacySchedule === expect.route_changed_vs_legacy_schedule,
-      result.variance.routeChangedVsLegacySchedule,
-      expect.route_changed_vs_legacy_schedule
-    );
+    if (typeof expect.route_changed_vs_legacy_schedule === 'boolean') {
+      check(
+        'route_changed_vs_legacy_schedule',
+        result.variance.routeChangedVsLegacySchedule === expect.route_changed_vs_legacy_schedule,
+        result.variance.routeChangedVsLegacySchedule,
+        expect.route_changed_vs_legacy_schedule
+      );
+    } else {
+      fixtureError('invalid_route_changed_vs_legacy_schedule', expect.route_changed_vs_legacy_schedule, 'boolean');
+    }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'appointment_candidate_changed_vs_legacy')) {
-    check(
-      'appointment_candidate_changed_vs_legacy',
-      result.variance.appointmentCandidateChangedVsLegacy === expect.appointment_candidate_changed_vs_legacy,
-      result.variance.appointmentCandidateChangedVsLegacy,
-      expect.appointment_candidate_changed_vs_legacy
-    );
+    if (typeof expect.appointment_candidate_changed_vs_legacy === 'boolean') {
+      check(
+        'appointment_candidate_changed_vs_legacy',
+        result.variance.appointmentCandidateChangedVsLegacy === expect.appointment_candidate_changed_vs_legacy,
+        result.variance.appointmentCandidateChangedVsLegacy,
+        expect.appointment_candidate_changed_vs_legacy
+      );
+    } else {
+      fixtureError('invalid_appointment_candidate_changed_vs_legacy', expect.appointment_candidate_changed_vs_legacy, 'boolean');
+    }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'prior_v2_route_changed')) {
-    check(
-      'prior_v2_route_changed',
-      result.variance.priorV2RouteChanged === expect.prior_v2_route_changed,
-      result.variance.priorV2RouteChanged,
-      expect.prior_v2_route_changed
-    );
+    if (typeof expect.prior_v2_route_changed === 'boolean') {
+      check(
+        'prior_v2_route_changed',
+        result.variance.priorV2RouteChanged === expect.prior_v2_route_changed,
+        result.variance.priorV2RouteChanged,
+        expect.prior_v2_route_changed
+      );
+    } else {
+      fixtureError('invalid_prior_v2_route_changed', expect.prior_v2_route_changed, 'boolean');
+    }
   }
 
   const flags = new Set(result.current.flags || []);
-  for (const flag of normalizeExpectedArray(expect.current_flags_include)) {
-    check(`current_flags_include:${flag}`, flags.has(flag), [...flags], flag);
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_flags_include')) {
+    if (isStringArray(expect.current_flags_include)) {
+      for (const flag of normalizeExpectedArray(expect.current_flags_include)) {
+        check(`current_flags_include:${flag}`, flags.has(flag), [...flags], flag);
+      }
+    } else {
+      fixtureError('invalid_current_flags_include', expect.current_flags_include, 'array');
+    }
   }
-  for (const flag of normalizeExpectedArray(expect.current_flags_exclude)) {
-    check(`current_flags_exclude:${flag}`, !flags.has(flag), [...flags], flag);
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_flags_exclude')) {
+    if (isStringArray(expect.current_flags_exclude)) {
+      for (const flag of normalizeExpectedArray(expect.current_flags_exclude)) {
+        check(`current_flags_exclude:${flag}`, !flags.has(flag), [...flags], flag);
+      }
+    } else {
+      fixtureError('invalid_current_flags_exclude', expect.current_flags_exclude, 'array');
+    }
   }
 
   const legacyScheduleFields = new Set((result.variance.legacyScheduledServiceVariances || []).map((item) => item.field));
-  for (const field of normalizeExpectedArray(expect.legacy_schedule_variance_fields)) {
-    check(`legacy_schedule_variance_fields:${field}`, legacyScheduleFields.has(field), [...legacyScheduleFields], field);
+  if (Object.prototype.hasOwnProperty.call(expect, 'legacy_schedule_variance_fields')) {
+    if (isStringArray(expect.legacy_schedule_variance_fields)) {
+      for (const field of normalizeExpectedArray(expect.legacy_schedule_variance_fields)) {
+        check(`legacy_schedule_variance_fields:${field}`, legacyScheduleFields.has(field), [...legacyScheduleFields], field);
+      }
+    } else {
+      fixtureError('invalid_legacy_schedule_variance_fields', expect.legacy_schedule_variance_fields, 'array');
+    }
+  }
+
+  if (checks.length === 0) {
+    fixtureError('no_recognized_checks', Object.keys(expect), [...EXPECTATION_KEYS].sort());
   }
 
   return {
@@ -882,6 +954,26 @@ function buildReplayErrorResult(call, err, context = {}) {
   return result;
 }
 
+function buildMissingFixtureResults(fixture, loadedRows, context = {}) {
+  if (!fixture) return [];
+  const loadedCallIds = new Set((loadedRows || []).map((row) => row.id));
+  return fixture.cases
+    .filter((item) => !loadedCallIds.has(item.call_log_id))
+    .map((item) => buildReplayErrorResult(
+      { id: item.call_log_id, processing_status: null },
+      new Error('fixture call was not loaded by call_log query'),
+      context
+    ));
+}
+
+function shouldFailRun(summary, options) {
+  return !!options.fixturePath
+    && (
+      summary.replayErrors > 0
+      || summary.fixtureExpectations.failed > 0
+    );
+}
+
 async function main() {
   const options = parseArgs();
   if (options.help) {
@@ -940,11 +1032,28 @@ async function main() {
       }
     }
 
+    const missingFixtureResults = buildMissingFixtureResults(fixture, rows, {
+      includeValues: options.includeValues,
+      retranscribe: options.retranscribe,
+      fixtureCaseByCallId,
+    });
+    for (const result of missingFixtureResults) {
+      results.push(result);
+      if (options.jsonl) {
+        console.log(JSON.stringify({ type: 'call', ...result }));
+      } else {
+        printHumanResult(result, results.length - 1);
+      }
+    }
+
     const summary = summarizeResults(results, options);
     if (options.jsonl) {
       console.log(JSON.stringify({ type: 'summary', ...summary }));
     } else {
       printHumanSummary(summary);
+    }
+    if (shouldFailRun(summary, options)) {
+      process.exitCode = 1;
     }
   } finally {
     await db.destroy().catch(() => {});
@@ -964,5 +1073,7 @@ module.exports = {
   summarizeResults,
   evaluateFixtureExpectation,
   buildReplayErrorResult,
+  buildMissingFixtureResults,
+  shouldFailRun,
   loadReplayFixture,
 };

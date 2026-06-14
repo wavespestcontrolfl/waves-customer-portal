@@ -2,6 +2,17 @@ const fs = require('fs');
 const path = require('path');
 
 const fixturePath = path.join(__dirname, '../fixtures/call-extraction-eval/reviewed-calls.json');
+const ALLOWED_EXPECTATION_KEYS = new Set([
+  'current_status',
+  'current_would_auto_route',
+  'legacy_scheduled_created',
+  'route_changed_vs_legacy_schedule',
+  'appointment_candidate_changed_vs_legacy',
+  'prior_v2_route_changed',
+  'current_flags_include',
+  'current_flags_exclude',
+  'legacy_schedule_variance_fields',
+]);
 
 describe('call extraction eval fixtures', () => {
   const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
@@ -21,16 +32,31 @@ describe('call extraction eval fixtures', () => {
       expect(item).not.toHaveProperty('customer_name');
       expect(item).not.toHaveProperty('phone');
       expect(item).not.toHaveProperty('address');
+      expect(Object.keys(item.expect).length).toBeGreaterThan(0);
+      for (const key of Object.keys(item.expect)) {
+        expect(ALLOWED_EXPECTATION_KEYS.has(key)).toBe(true);
+        if (key.endsWith('_include') || key.endsWith('_exclude') || key === 'legacy_schedule_variance_fields') {
+          expect(Array.isArray(item.expect[key])).toBe(true);
+          expect(item.expect[key].every((entry) => typeof entry === 'string' && entry.trim())).toBe(true);
+        }
+      }
       ids.add(item.id);
     }
 
     expect(ids.size).toBe(fixture.cases.length);
   });
 
+  test('reviewed call metadata keeps production PII out of the committed fixture', () => {
+    const blob = JSON.stringify(fixture).toLowerCase();
+    for (const forbidden of ['ronni', 'ronnie', 'cumberland']) {
+      expect(blob).not.toContain(forbidden);
+    }
+  });
+
   test('locks reviewed June 2026 call ids into the replay set', () => {
     const byId = Object.fromEntries(fixture.cases.map((item) => [item.id, item]));
 
-    expect(byId['ronni-name-email-address-ground-truth'].expect.current_flags_exclude)
+    expect(byId['name-email-address-ground-truth'].expect.current_flags_exclude)
       .toContain('name_email_mismatch');
     expect(byId['historical-schedule-date-time-was-wrong'].expect.legacy_schedule_variance_fields)
       .toEqual(['scheduled_date', 'window_start']);
