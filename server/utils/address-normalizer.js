@@ -77,13 +77,11 @@ const STREET_SUFFIX_ALIASES = {
   vista: 'VIS',
   vis: 'VIS',
 };
-const COMPOUND_SUFFIX_PREFIXES = new Set([
-  'street', 'st',
-  'avenue', 'ave',
-  'road', 'rd',
-  'drive', 'dr',
-  'lane', 'ln',
-  'court', 'ct',
+const COMPOUND_SUFFIX_PAIRS = new Set([
+  'street:circle',
+  'street:cir',
+  'st:circle',
+  'st:cir',
 ]);
 const LEGACY_STREET_SPLIT_SUFFIXES = ['aly', 'alley'];
 // Comma-free raw address splitting needs stronger boundary markers than display
@@ -236,7 +234,7 @@ function normalizeStreetLine(value) {
       const compoundKey = tokens[j].replace(/[.,]/g, '').toLowerCase();
       const nextKey = tokens[j + 1]?.replace(/[.,]/g, '').toLowerCase();
       const compoundAlias = STREET_SUFFIX_ALIASES[compoundKey];
-      if (!compoundAlias || !COMPOUND_SUFFIX_PREFIXES.has(compoundKey) || !STREET_SUFFIX_ALIASES[nextKey]) break;
+      if (!compoundAlias || !COMPOUND_SUFFIX_PAIRS.has(`${compoundKey}:${nextKey}`)) break;
       tokens[j] = titleToken(compoundAlias);
     }
     break;

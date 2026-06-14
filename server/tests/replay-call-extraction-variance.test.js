@@ -2,6 +2,8 @@ const {
   buildMissingFixtureResults,
   buildReplayErrorResult,
   evaluateFixtureExpectation,
+  loadReplayFixture,
+  parseArgs,
   shouldFailRun,
   summarizeResults,
 } = require('../scripts/replay-call-extraction-variance');
@@ -91,6 +93,17 @@ describe('call extraction replay variance reporting', () => {
         expect.objectContaining({ name: 'fixture_error:no_recognized_checks' }),
       ]),
     });
+
+    expect(evaluateFixtureExpectation(validResult(), {
+      expect: {
+        current_status: 'valid',
+        current_flags_exclude: [],
+      },
+    })).toMatchObject({
+      status: 'fail',
+      checked: 1,
+      failures: [expect.objectContaining({ name: 'fixture_error:invalid_current_flags_exclude' })],
+    });
   });
 
   test('builds an error result that summary counts instead of aborting the batch', () => {
@@ -158,6 +171,63 @@ describe('call extraction replay variance reporting', () => {
           status: 'fail',
         },
       },
+    });
+  });
+
+  test('honors explicit fixture ids when reporting missing cases', () => {
+    const fixture = {
+      cases: [
+        {
+          id: 'requested-missing-case',
+          call_log_id: '33333333-3333-4333-8333-333333333333',
+          expect: { current_status: 'valid' },
+        },
+        {
+          id: 'unrequested-case',
+          call_log_id: '44444444-4444-4444-8444-444444444444',
+          expect: { current_status: 'valid' },
+        },
+      ],
+    };
+    const fixtureCaseByCallId = new Map(fixture.cases.map((item) => [item.call_log_id, item]));
+
+    const missing = buildMissingFixtureResults(fixture, [], {
+      fixtureCaseByCallId,
+      requiredCallIds: ['33333333-3333-4333-8333-333333333333'],
+    });
+
+    expect(missing.map((item) => item.callId)).toEqual(['33333333-3333-4333-8333-333333333333']);
+  });
+
+  test('fixture loader rejects empty and duplicate fixture case sets', () => {
+    const originalCwd = process.cwd();
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'call-fixture-'));
+    try {
+      process.chdir(dir);
+      fs.writeFileSync('empty.json', JSON.stringify({ cases: [] }));
+      fs.writeFileSync('dupe.json', JSON.stringify({
+        cases: [
+          { id: 'a', call_log_id: '11111111-1111-4111-8111-111111111111', expect: { current_status: 'valid' } },
+          { id: 'b', call_log_id: '11111111-1111-4111-8111-111111111111', expect: { current_status: 'valid' } },
+        ],
+      }));
+
+      expect(() => loadReplayFixture('empty.json')).toThrow(/at least one reviewed case/);
+      expect(() => loadReplayFixture('dupe.json')).toThrow(/duplicate call_log_id/);
+    } finally {
+      process.chdir(originalCwd);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('parseArgs records explicit ids separately from fixture-expanded ids', () => {
+    expect(parseArgs(['--fixture=reviewed.json']).explicitIds).toBe(false);
+    expect(parseArgs(['--fixture=reviewed.json', '--ids=11111111-1111-4111-8111-111111111111'])).toMatchObject({
+      explicitIds: true,
+      ids: ['11111111-1111-4111-8111-111111111111'],
     });
   });
 

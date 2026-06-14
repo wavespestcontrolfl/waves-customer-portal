@@ -74,6 +74,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     minTranscriptChars: DEFAULT_MIN_TRANSCRIPT_CHARS,
     statuses: ['processed'],
     ids: [],
+    explicitIds: false,
     fixturePath: null,
     retranscribe: false,
     onlyAppointmentCandidates: false,
@@ -108,6 +109,7 @@ function parseArgs(argv = process.argv.slice(2)) {
         break;
       case 'ids':
         opts.ids = splitCsv(value);
+        opts.explicitIds = true;
         break;
       case 'fixture':
         opts.fixturePath = value;
@@ -194,10 +196,18 @@ function loadReplayFixture(fixturePath) {
   if (!Array.isArray(document.cases)) {
     throw new Error(`Replay fixture ${fixturePath} must contain a cases array`);
   }
+  if (document.cases.length === 0) {
+    throw new Error(`Replay fixture ${fixturePath} must contain at least one reviewed case`);
+  }
 
+  const seenCallIds = new Set();
   const cases = document.cases.map((item, index) => {
     const callId = item.call_log_id || item.callId;
     if (!callId) throw new Error(`Replay fixture ${fixturePath} case ${index + 1} is missing call_log_id`);
+    if (seenCallIds.has(callId)) {
+      throw new Error(`Replay fixture ${fixturePath} contains duplicate call_log_id ${callId}`);
+    }
+    seenCallIds.add(callId);
     return { ...item, call_log_id: callId };
   });
   return {
@@ -257,7 +267,7 @@ function normalizeExpectedArray(value) {
 }
 
 function isStringArray(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.trim());
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.trim());
 }
 
 function evaluateFixtureExpectation(result, fixtureCase) {
@@ -957,7 +967,9 @@ function buildReplayErrorResult(call, err, context = {}) {
 function buildMissingFixtureResults(fixture, loadedRows, context = {}) {
   if (!fixture) return [];
   const loadedCallIds = new Set((loadedRows || []).map((row) => row.id));
+  const requiredCallIds = context.requiredCallIds ? new Set(context.requiredCallIds) : null;
   return fixture.cases
+    .filter((item) => !requiredCallIds || requiredCallIds.has(item.call_log_id))
     .filter((item) => !loadedCallIds.has(item.call_log_id))
     .map((item) => buildReplayErrorResult(
       { id: item.call_log_id, processing_status: null },
@@ -991,7 +1003,8 @@ async function main() {
   const extractionCompat = require('../utils/extraction-compat');
   const helpers = { ...triageFlags, ...extractionCompat };
   const fixture = loadReplayFixture(options.fixturePath);
-  if (fixture && !options.ids.length) {
+  const explicitFixtureIds = fixture && options.explicitIds ? [...options.ids] : null;
+  if (fixture && !options.explicitIds) {
     options.ids = fixture.cases.map((item) => item.call_log_id);
     options.limit = Math.max(options.limit, options.ids.length);
   }
@@ -1036,6 +1049,7 @@ async function main() {
       includeValues: options.includeValues,
       retranscribe: options.retranscribe,
       fixtureCaseByCallId,
+      requiredCallIds: explicitFixtureIds,
     });
     for (const result of missingFixtureResults) {
       results.push(result);

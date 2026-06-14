@@ -50,6 +50,12 @@ describe('address normalizer', () => {
     });
   });
 
+  test('does not abbreviate street-name tokens before terminal suffixes', () => {
+    expect(normalizeLeadAddress({ raw: '123 Court Street, Sarasota, FL 34236' }).line1).toBe('123 Court St');
+    expect(normalizeLeadAddress({ raw: '456 Lane Road, Sarasota, FL 34236' }).line1).toBe('456 Lane Rd');
+    expect(normalizeLeadAddress({ raw: '789 Street Road, Sarasota, FL 34236' }).line1).toBe('789 Street Rd');
+  });
+
   test('splits comma-free addresses with suffix aliases introduced for normalization', () => {
     expect(normalizeLeadAddress({ raw: '123 Harbor Point Sarasota FL 34236' })).toMatchObject({
       line1: '123 Harbor Pt',
