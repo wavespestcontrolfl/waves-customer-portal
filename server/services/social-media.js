@@ -62,43 +62,109 @@ async function isPausedByAdmin() {
   } catch { return false; }
 }
 
-// ── Consecutive Failure Alerting ──
+// ── Per-platform consecutive-failure alerting ──
+// A post's `status` is 'published' when ANY platform succeeds, so a single
+// broken platform (e.g. Instagram failing auth while Facebook + GBP post fine)
+// is invisible at the post level — that's how Instagram sat dead ~2 weeks
+// unnoticed. Instead, derive each platform's recent outcome from
+// platforms_posted and alert when any one platform's last ALERT_THRESHOLD
+// *attempts* all failed.
 const ALERT_THRESHOLD = 3;
+const ALERT_WINDOW = 20; // recent posts to scan — enough to find THRESHOLD attempts per platform
+const ALERTED_PLATFORMS = ['facebook', 'instagram', 'gbp'];
+const PLATFORM_LABELS = { facebook: 'Facebook', instagram: 'Instagram', gbp: 'Google Business' };
+const SOCIAL_ALERT_KEY = 'social_consecutive_failures_alert';
+
+function parsePlatformResults(value) {
+  if (!value) return [];
+  let v = value;
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return []; } }
+  return Array.isArray(v) ? v : [];
+}
+
+// One platform's outcome within a single post: 'success' | 'fail' | null.
+// null = not a real attempt (disabled / skipped / dry-run) — ignored for the
+// streak. GBP posts to multiple locations, so treat the post as a success if
+// ANY location succeeded (mirrors the post-level "any success" rule) and a
+// fail only if every attempted location failed.
+function platformOutcomeForPost(entries, platform) {
+  const attempts = entries.filter(e => e && e.platform === platform && !e.skipped && !e.dryRun);
+  if (!attempts.length) return null;
+  if (attempts.some(e => e.success === true)) return 'success';
+  if (attempts.some(e => e.success === false)) return 'fail';
+  return null;
+}
+
+function firstPlatformError(parsedPosts, platform) {
+  for (const entries of parsedPosts) {
+    const e = entries.find(x => x && x.platform === platform && x.success === false && x.error);
+    if (e) return String(e.error).slice(0, 120);
+  }
+  return null;
+}
+
+// Pure: given recent post rows (newest first), return which platforms have
+// ALERT_THRESHOLD+ consecutive failed attempts. Exported for testing.
+function buildSocialFailureAlert(recentRowsNewestFirst, threshold = ALERT_THRESHOLD) {
+  const parsed = (recentRowsNewestFirst || []).map(r => parsePlatformResults(r.platforms_posted));
+  const broken = [];
+  for (const platform of ALERTED_PLATFORMS) {
+    const outcomes = parsed
+      .map(entries => platformOutcomeForPost(entries, platform))
+      .filter(o => o !== null);
+    if (outcomes.length < threshold) continue; // not enough attempts to judge
+    const firstSuccess = outcomes.indexOf('success');
+    const consecutiveFailures = firstSuccess === -1 ? outcomes.length : firstSuccess;
+    if (consecutiveFailures >= threshold) {
+      broken.push({
+        platform,
+        label: PLATFORM_LABELS[platform] || platform,
+        consecutive_failures: consecutiveFailures,
+        latest_error: firstPlatformError(parsed, platform),
+      });
+    }
+  }
+  if (!broken.length) return { active: false, platforms: [] };
+  const names = broken.map(b => b.label).join(', ');
+  const errSuffix = broken.length === 1 && broken[0].latest_error
+    ? ` (latest: ${broken[0].latest_error})` : '';
+  const message =
+    `${names} ${broken.length === 1 ? 'has' : 'have'} ${threshold}+ consecutive failed posts — check platform credentials${errSuffix}`;
+  return { active: true, message, platforms: broken };
+}
 
 async function checkAndRaiseAlert() {
   try {
     const recentPosts = await db('social_media_posts')
       .orderBy('created_at', 'desc')
-      .limit(ALERT_THRESHOLD)
-      .select('status');
+      .limit(ALERT_WINDOW)
+      .select('platforms_posted');
 
-    const allFailed = recentPosts.length >= ALERT_THRESHOLD
-      && recentPosts.every(p => p.status === 'failed');
+    const result = buildSocialFailureAlert(recentPosts);
 
-    const alertKey = 'social_consecutive_failures_alert';
-    if (allFailed) {
-      const existing = await db('system_settings').where('key', alertKey).first();
-      if (!existing) {
-        await db('system_settings').insert({
-          key: alertKey,
-          value: JSON.stringify({
-            raised_at: new Date().toISOString(),
-            message: `Last ${ALERT_THRESHOLD} social posts all failed — check platform credentials`,
-          }),
-          updated_at: new Date(),
-        });
-      } else {
-        await db('system_settings').where('key', alertKey).update({
-          value: JSON.stringify({
-            raised_at: new Date().toISOString(),
-            message: `Last ${ALERT_THRESHOLD} social posts all failed — check platform credentials`,
-          }),
-          updated_at: new Date(),
-        });
+    if (result.active) {
+      const existing = await db('system_settings').where('key', SOCIAL_ALERT_KEY).first();
+      let priorRaisedAt = null;
+      if (existing) {
+        try {
+          const prior = typeof existing.value === 'string' ? JSON.parse(existing.value) : existing.value;
+          priorRaisedAt = prior && prior.raised_at;
+        } catch { /* ignore malformed prior value */ }
       }
-      logger.warn(`[social] ALERT: ${ALERT_THRESHOLD} consecutive failed posts`);
+      const value = JSON.stringify({
+        // Keep the original "since" timestamp while the alert stays active.
+        raised_at: priorRaisedAt || new Date().toISOString(),
+        message: result.message,
+        platforms: result.platforms,
+      });
+      if (existing) {
+        await db('system_settings').where('key', SOCIAL_ALERT_KEY).update({ value, updated_at: new Date() });
+      } else {
+        await db('system_settings').insert({ key: SOCIAL_ALERT_KEY, value, updated_at: new Date() });
+      }
+      logger.warn(`[social] ALERT: consecutive failures — ${result.platforms.map(p => p.label).join(', ')}`);
     } else {
-      await db('system_settings').where('key', alertKey).del();
+      await db('system_settings').where('key', SOCIAL_ALERT_KEY).del();
     }
   } catch (err) {
     logger.error(`[social] Alert check failed: ${err.message}`);
@@ -1033,3 +1099,5 @@ module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.postToGBP = postToGBP;
 module.exports.isGbpMediaError = isGbpMediaError;
+module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
+module.exports.buildSocialFailureAlert = buildSocialFailureAlert;
