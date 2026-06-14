@@ -3165,7 +3165,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             photoType: 'after',
             knex: trx,
           });
-          preCommitCompletionPhotoRows = completionPhotoUploadResult.photos || [];
+          // Cumulative (concat, not assign) so an earlier-registered turf-height
+          // gauge photo row isn't dropped from the rollback-cleanup list on a
+          // lawn + Tree/Shrub completion (else the gauge image orphans in S3).
+          preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(completionPhotoUploadResult.photos || []);
           const uniqueCompletionPhotosUploaded = completionPhotoUploadResult.uniqueUploaded
             ?? completionPhotoUploadResult.uploaded;
           if (uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
