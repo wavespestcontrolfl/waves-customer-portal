@@ -453,26 +453,39 @@ router.post('/analyze', async (req, res, next) => {
 });
 
 // POST /api/tech/lawn-diagnostic — persist an analyzed diagnostic as a draft.
+// The contract is rebuilt SERVER-SIDE from the analyze inputs (findings + re-enriched
+// products + compliance), never accepted verbatim from the client — so the stored,
+// later-published copy has authoritative watering/label gating and a server-computed,
+// reconciliation-aware summary, not client free-text.
 router.post('/', async (req, res, next) => {
   try {
     const body = req.body || {};
-    const reportContract = body.reportContract && typeof body.reportContract === 'object' && !Array.isArray(body.reportContract)
-      ? body.reportContract
-      : null;
-    if (!reportContract) return res.status(400).json({ error: 'reportContract is required' });
+    const findings = asArray(body.findings || body.diagnosis?.findings || body.reportContract?.diagnosis?.findings);
+    if (!findings.length) return res.status(400).json({ error: 'diagnostic findings are required' });
 
     const mode = DIAGNOSTIC_MODES.includes(body.mode) ? body.mode : 'internal';
     const contact = normalizeContact(body.contact);
     const address = normalizeAddress(body.address);
+    const compliance = body.compliance && typeof body.compliance === 'object' ? body.compliance : {};
     const aiAnalysis = body.aiAnalysis && typeof body.aiAnalysis === 'object' ? body.aiAnalysis : {};
     const overallScore = Number.isFinite(Number(body.overallScore)) ? Math.round(Number(body.overallScore)) : null;
     const aiConfidence = Number.isFinite(Number(body.aiConfidence)) ? Number(body.aiConfidence) : null;
+    const inputPhotos = asArray(body.photos).map((photo, index) => ({
+      photo_id: photo.photo_id || photo.photoId || `photo-${index + 1}`,
+      quality: photo.quality || photo.photo_quality || 'limited',
+      limitations: asArray(photo.limitations || photo.photo_limitations || photo.missing_views),
+    }));
 
-    // Never trust a client-supplied contract verbatim — re-run the server-side
-    // guardrail (classify + repair) so the stored, later-published copy is always
-    // sanitized regardless of what the client computed.
-    const releaseMode = classifyReleaseMode(reportContract);
-    const sanitizedContract = applyAutoReleaseRepair(reportContract, releaseMode);
+    const products = await enrichAppliedProducts(asArray(body.appliedProducts || body.applied_products || body.products));
+    const contract = buildDiagnosticReportContract({
+      photos: inputPhotos,
+      findings,
+      products,
+      compliance,
+      seasonal_context: body.seasonalContext || body.seasonal_context || '',
+    });
+    const releaseMode = classifyReleaseMode(contract);
+    const sanitizedContract = applyAutoReleaseRepair(contract, releaseMode);
     const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(sanitizedContract.customer_summary, 2000);
 
     const [row] = await db('lawn_diagnostics').insert({

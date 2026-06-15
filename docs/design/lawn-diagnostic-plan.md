@@ -506,8 +506,12 @@ deferred; the public page's satellite hero is address-based so it does not need 
 
 Routes (all never-block, all on the existing `tech-lawn-diagnostic.js` router unless noted):
 - `POST /api/tech/lawn-diagnostic` — persist an analyzed diagnostic as a draft
-  (`status='analyzed'`); stores `report_contract`, `ai_analysis`, contact/address snapshots,
-  overall_score, ai_summary, ai_confidence. Requires a `reportContract` body.
+  (`status='analyzed'`). **Rebuilds the contract server-side** from the analyze inputs
+  (`findings` + re-enriched `products` + `compliance` → `buildDiagnosticReportContract` →
+  classify → repair); never trusts a client-built `reportContract`, so the stored,
+  later-published copy has authoritative watering/label gating and a server-computed,
+  reconciliation-aware summary. Stores `report_contract`, `ai_analysis` (+ `release_mode`),
+  contact/address snapshots, overall_score, ai_summary, ai_confidence.
 - `POST /api/tech/lawn-diagnostic/:id/send` — **hard gate**: `hasSendableContact` (name +
   email or address) → 422 otherwise. Mints a 32-hex `report_token`
   (`crypto.randomBytes(16)`), sets `report_expires_at` (30d), flips `mode='prospect'`,

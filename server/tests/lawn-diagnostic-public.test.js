@@ -124,7 +124,7 @@ describe('buildPublicLawnReport whitelisting', () => {
           findings: [{ name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', customer_wording: 'We confirmed active chinch; we applied Talstar P.' }],
         },
         watering: {},
-        customer_summary: 'We confirmed chinch and treated with Talstar P at the labeled rate.',
+        customer_summary: 'We confirmed chinch at 123 Palm Street and treated with Talstar P at the labeled rate.',
         watch_items: ['Reapply Talstar if it spreads.'],
       }),
     });
@@ -132,6 +132,7 @@ describe('buildPublicLawnReport whitelisting', () => {
     const serialized = JSON.stringify(report);
     expect(serialized).not.toMatch(/talstar/i);
     expect(serialized).not.toMatch(/\bconfirmed\b/i);
+    expect(serialized).not.toContain('123 Palm Street');
     expect(report.findings[0].customer_note.toLowerCase()).toContain('suspected');
   });
 

@@ -564,13 +564,19 @@ function stripConfirmedLanguage(text) {
 // Product/active-ingredient names that must never reach customer-facing copy.
 const CUSTOMER_TEXT_BRANDS = /\b(?:talstar|arena|celsius|sedgehammer|prodiamine|dimension|barricade|bifenthrin|fipronil|imidacloprid|acelepryn|chlorantraniliprole|tenacity|mesotrione)\b/gi;
 
+// Street-address pattern (leading house number + street + suffix). Customer copy
+// should reference "the property", never a street line that could leak elsewhere.
+const STREET_ADDRESS = /\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,3}\s+(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|cir|circle|ter|terrace|pl|place|hwy|highway|pkwy|parkway|trl|trail)\b\.?/gi;
+
 // Final egress sanitizer for any free-text published to a prospect. Defense in
 // depth at the public boundary: even if a stale/buggy client stored unsanitized
-// copy, no confirmed-pest claim or brand/active-ingredient name leaves the server.
+// copy, no confirmed-pest claim, brand/active-ingredient name, or street address
+// leaves the server.
 function scrubCustomerText(text) {
   if (text == null) return text;
   return stripConfirmedLanguage(String(text))
     .replace(CUSTOMER_TEXT_BRANDS, 'the treatment product')
+    .replace(STREET_ADDRESS, 'the property')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
