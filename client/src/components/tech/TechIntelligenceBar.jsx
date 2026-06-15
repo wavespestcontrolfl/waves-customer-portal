@@ -6,8 +6,9 @@
  * Read-only tools, short responses, one-tap quick actions.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { getAdminAuthToken, getAdminDisplayName } from '../../lib/adminAuth';
+import { filesToImageParts, MAX_ATTACHMENTS } from '../../utils/ibImages';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
@@ -44,8 +45,44 @@ export default function TechIntelligenceBar() {
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const fileInputRef = useRef(null);
+  const attachmentConversionRef = useRef(0);
+  const attachmentsLoadingRef = useRef(false);
 
   const techName = getAdminDisplayName('Tech');
+
+  const setAttachmentBusy = useCallback((busy) => {
+    attachmentsLoadingRef.current = busy;
+    setAttachmentsLoading(busy);
+  }, []);
+
+  const resetAttachments = useCallback(() => {
+    attachmentConversionRef.current += 1;
+    setAttachments([]);
+    setAttachmentBusy(false);
+  }, [setAttachmentBusy]);
+
+  const addAttachments = useCallback(async (files) => {
+    const conversionId = attachmentConversionRef.current + 1;
+    attachmentConversionRef.current = conversionId;
+    setAttachmentBusy(true);
+    try {
+      const parts = await filesToImageParts(files, attachments.length);
+      if (attachmentConversionRef.current === conversionId && parts.length) {
+        setAttachments(prev => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+      }
+    } finally {
+      if (attachmentConversionRef.current === conversionId) {
+        setAttachmentBusy(false);
+      }
+    }
+  }, [attachments.length, setAttachmentBusy]);
+
+  const removeAttachment = useCallback((index) => {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
+  }, []);
 
   useEffect(() => {
     techFetch('/admin/intelligence-bar/quick-actions?context=tech')
@@ -62,7 +99,7 @@ export default function TechIntelligenceBar() {
 
   const submit = useCallback(async (text) => {
     const q = (text || prompt).trim();
-    if (!q || loading) return;
+    if (!q || loading || attachmentsLoadingRef.current) return;
     setLoading(true); setExpanded(true); setResponse(null);
 
     try {
@@ -72,6 +109,9 @@ export default function TechIntelligenceBar() {
           prompt: q, conversationHistory,
           context: 'tech',
           pageData: { tech_name: techName },
+          ...(attachments.length
+            ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
+            : {}),
         }),
       });
       setResponse(data.response);
@@ -79,14 +119,14 @@ export default function TechIntelligenceBar() {
     } catch (err) {
       setResponse(`Error: ${err.message}`);
     }
-    setLoading(false); setPrompt('');
-  }, [prompt, loading, conversationHistory, techName]);
+    setLoading(false); setPrompt(''); resetAttachments();
+  }, [prompt, loading, conversationHistory, techName, attachments, resetAttachments]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
   };
 
-  const clear = () => { setConversationHistory([]); setResponse(null); setExpanded(false); };
+  const clear = () => { setConversationHistory([]); setResponse(null); setExpanded(false); resetAttachments(); };
 
   return (
     <div style={{
@@ -113,7 +153,23 @@ export default function TechIntelligenceBar() {
             outline: 'none', boxSizing: 'border-box',
           }}
         />
-        {loading ? (
+        {!loading && (
+          <button onClick={() => fileInputRef.current?.click()} title="Attach a photo" aria-label="Attach a photo" style={{
+            width: 32, height: 32, borderRadius: 8, background: 'transparent',
+            border: `1px solid ${D.border}`, color: D.muted, cursor: attachmentsLoading ? 'not-allowed' : 'pointer',
+            opacity: attachmentsLoading ? 0.45 : 1,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, padding: 0,
+          }} disabled={attachmentsLoading}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+          </button>
+        )}
+        <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
+          onChange={(e) => { addAttachments(e.target.files); e.target.value = ''; }} />
+        {loading || attachmentsLoading ? (
           <div style={{ padding: '6px 10px', borderRadius: 6, background: `${D.teal}22`, color: D.teal, fontSize: 11, fontWeight: 600, animation: 'pulse 1.5s ease infinite' }}>...</div>
         ) : prompt.trim() ? (
           <button onClick={() => submit()} style={{
@@ -128,6 +184,22 @@ export default function TechIntelligenceBar() {
           }}>✕</button>
         )}
       </div>
+
+      {/* Attached photos */}
+      {attachments.length > 0 && (
+        <div style={{ padding: '0 12px 10px', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {attachments.map((a, i) => (
+            <div key={i} style={{ position: 'relative', width: 48, height: 48, borderRadius: 8, overflow: 'hidden', border: `1px solid ${D.border}` }}>
+              <img src={a.previewUrl} alt={a.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <button onClick={() => removeAttachment(i)} title="Remove" aria-label={`Remove ${a.name}`} style={{
+                position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: '50%',
+                border: 'none', background: 'rgba(15,25,35,0.85)', color: D.white, fontSize: 11, lineHeight: 1,
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+              }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Quick Actions — 2-column grid for mobile */}
       {expanded && !response && !loading && (
@@ -166,8 +238,9 @@ export default function TechIntelligenceBar() {
             <input value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up..."
               style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, fontFamily: "'Nunito Sans', sans-serif", outline: 'none' }} />
-            <button onClick={() => submit()} disabled={!prompt.trim()} style={{
-              padding: '7px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: prompt.trim() ? 1 : 0.4,
+            <button onClick={() => submit()} disabled={!prompt.trim() || attachmentsLoading} style={{
+              padding: '7px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700,
+              cursor: prompt.trim() && !attachmentsLoading ? 'pointer' : 'not-allowed', opacity: prompt.trim() && !attachmentsLoading ? 1 : 0.4,
             }}>Go</button>
           </div>
         </div>

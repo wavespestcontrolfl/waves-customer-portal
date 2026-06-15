@@ -103,6 +103,85 @@ function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
 }
 
+// Photo attachments (vision). The operator/tech can attach images to a query —
+// a screenshot of a portal page, a pest/insect to ID, a property condition.
+// Images apply to the turn they're sent on; they are NOT persisted into the
+// returned conversationHistory (a text marker stands in for them) so multi-turn
+// payloads don't balloon and image bytes never land in query telemetry.
+const MAX_QUERY_IMAGES = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // Anthropic per-image decoded-size cap
+const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
+const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
+
+function isValidBase64(data) {
+  return typeof data === 'string'
+    && data.length > 0
+    && data.length % 4 === 0
+    && BASE64_RE.test(data);
+}
+
+// Validate attachments server-side — never trust the client downscaler. Drop
+// anything with an unsupported media type, non-base64 data, or a decoded size
+// over the provider's per-image cap, so a stale/malformed/direct-API payload
+// can't burn an AI request on a guaranteed provider error. Unsupported types
+// are dropped, never relabeled.
+function sanitizeQueryImages(images) {
+  if (!Array.isArray(images)) return [];
+  const out = [];
+  for (const img of images) {
+    if (out.length >= MAX_QUERY_IMAGES) break;
+    if (!img || !ALLOWED_IMAGE_MEDIA_TYPES.has(img.mediaType)) continue;
+    if (!isValidBase64(img.data)) continue;
+    if (Math.floor((img.data.length * 3) / 4) > MAX_IMAGE_BYTES) continue;
+    out.push({ mediaType: img.mediaType, data: img.data });
+  }
+  return out;
+}
+
+function hasImageTaintedHistory(conversationHistory) {
+  if (!Array.isArray(conversationHistory)) return false;
+  return conversationHistory.some((message) => {
+    if (!message || typeof message.content !== 'string') return false;
+    return message.content.includes(IMAGE_TAINT_MARKER)
+      || IMAGE_ATTACHMENT_HISTORY_RE.test(message.content);
+  });
+}
+
+function stripInternalHistoryMarkers(message) {
+  if (!message || typeof message.content !== 'string') return message;
+  return {
+    ...message,
+    content: message.content
+      .split('\n')
+      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER)
+      .join('\n')
+      .trim(),
+  };
+}
+
+function markImageTaintedContent(content, imageTainted) {
+  if (!imageTainted || typeof content !== 'string' || content.includes(IMAGE_TAINT_MARKER)) {
+    return content;
+  }
+  return `${content}\n${IMAGE_TAINT_MARKER}`;
+}
+
+// Build the current-turn user message. Plain string when no images so the
+// common path is unchanged; an [image, …, text] block array when images are
+// attached (Anthropic vision format).
+function buildUserMessageContent(prompt, images) {
+  if (!images.length) return prompt;
+  return [
+    ...images.map((img) => ({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.data },
+    })),
+    { type: 'text', text: prompt },
+  ];
+}
+
 // UI-backed write confirmation (issue #1568). Dark until the Railway env
 // flips it on; read per-request so it can be toggled without a restart.
 function uiConfirmEnabled() {
@@ -736,6 +815,10 @@ RULES:
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
+IMAGE ATTACHMENTS:
+- The operator can attach photos to a question (a screenshot of a portal page, an insect/pest to identify, a property or lawn condition, a paper invoice or note). When images are present, read them and ground your answer in what they show.
+- Combine the image with your tools when useful — e.g. an attached photo of a customer's lawn alongside their service history.
+
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
 - You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
@@ -757,6 +840,8 @@ The current date is ${etDateString()}.`;
 router.post('/query', async (req, res, next) => {
   try {
     const { prompt, conversationHistory = [], context, pageData } = req.body;
+    const images = sanitizeQueryImages(req.body.images);
+    const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -812,10 +897,11 @@ For create_customer and the route-optimization writes: the first call returns a 
     // For tech context, use a simpler model to reduce latency in the field
     const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
 
-    // Build messages array (support multi-turn conversation)
+    // Build messages array (support multi-turn conversation). Attached photos
+    // ride on the current user turn as vision blocks.
     const messages = [
-      ...conversationHistory.slice(-10),
-      { role: 'user', content: prompt },
+      ...conversationHistory.slice(-10).map(stripInternalHistoryMarkers),
+      { role: 'user', content: buildUserMessageContent(prompt, images) },
     ];
 
     let currentMessages = messages;
@@ -944,14 +1030,22 @@ For create_customer and the route-optimization writes: the first call returns a 
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;
-    // prompt/response are additionally redacted when a PII-bearing tool ran —
-    // those prompts carry typed customer contact details and the responses
-    // echo SMS bodies.
+    // prompt/response are additionally redacted when a PII-bearing tool ran
+    // (prompts carry typed customer contact details, responses echo SMS
+    // bodies) OR when the conversation is image-tainted — the current turn has
+    // attachments, or an earlier image turn is still in the window and its
+    // OCR-derived answer can be echoed by a follow-up that carries no images
+    // itself. Either way Claude can surface a customer's name/address/phone
+    // with no tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
+    const redactPii = usedPiiTool || imageTainted;
+    const redactNote = usedPiiTool
+      ? '[redacted — PII-bearing tools used]'
+      : '[redacted — image attachment may contain PII]';
     try {
       await db('intelligence_bar_queries').insert({
-        prompt: usedPiiTool ? '[redacted — PII-bearing tools used]' : prompt,
-        response: usedPiiTool ? '[redacted — PII-bearing tools used]' : finalResponse.substring(0, 5000),
+        prompt: redactPii ? redactNote : prompt,
+        response: redactPii ? redactNote : finalResponse.substring(0, 5000),
         tool_calls: JSON.stringify(persistedToolCalls),
         created_at: new Date(),
       });
@@ -968,11 +1062,21 @@ For create_customer and the route-optimization writes: the first call returns a 
       // ONLY channel the confirmation ids travel on — the client must keep
       // them in component state, never in conversationHistory.
       ...(uiConfirmEnabled() ? { pendingActions: pendingProposals } : {}),
-      // Return conversation history for multi-turn
+      // Return conversation history for multi-turn. Attached images are not
+      // round-tripped (a text marker stands in) — keeps follow-up payloads
+      // small and image bytes out of the stored history.
       conversationHistory: [
         ...conversationHistory.slice(-8),
-        { role: 'user', content: prompt },
-        { role: 'assistant', content: finalResponse },
+        {
+          role: 'user',
+          content: markImageTaintedContent(
+            images.length
+              ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+              : prompt,
+            imageTainted,
+          ),
+        },
+        { role: 'assistant', content: markImageTaintedContent(finalResponse, imageTainted) },
       ],
     });
 
