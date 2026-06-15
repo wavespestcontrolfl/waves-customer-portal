@@ -298,8 +298,15 @@ function titleCase(value) {
 }
 
 function normalizeChannels(channels) {
-  const selected = Array.isArray(channels) && channels.length ? channels : CHANNELS;
-  return selected.filter((p) => CHANNELS.includes(p));
+  // Only omitted (null/undefined) defaults to all channels. An explicit value
+  // fails closed: a non-array, or an empty/all-invalid/whitespace list, yields
+  // NO channels — so a typo or a blank SOCIAL_AUTONOMOUS_CHANNELS can't blast
+  // every platform. Mirrors normalizePublishChannels in social-media.js.
+  if (channels == null) return [...CHANNELS];
+  if (!Array.isArray(channels)) return [];
+  return channels
+    .map((p) => String(p || '').trim().toLowerCase())
+    .filter((p) => CHANNELS.includes(p));
 }
 
 async function hasTable(table) {
@@ -1528,6 +1535,7 @@ module.exports = {
   createReviewGraphic,
   engagementScore,
   httpUrlOrNull,
+  normalizeChannels,
   getCampaignContext,
   listCompetitorSwipeFile,
   listAutonomousRuns,

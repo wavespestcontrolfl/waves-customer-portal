@@ -192,6 +192,16 @@ describe('social content studio', () => {
     expect(Studio.serviceIntentKeywords({ service: 'mosquito' })).not.toContain('shrub');
   });
 
+  test('normalizeChannels fails closed: omitted → all, explicit-empty/invalid → none', () => {
+    expect(Studio.normalizeChannels(undefined).sort()).toEqual([...Studio.CHANNELS].sort());
+    expect(Studio.normalizeChannels(null).sort()).toEqual([...Studio.CHANNELS].sort());
+    expect(Studio.normalizeChannels(['gbp', 'facebook'])).toEqual(['gbp', 'facebook']);
+    expect(Studio.normalizeChannels(['GBP ', 'Instagram'])).toEqual(['gbp', 'instagram']);
+    expect(Studio.normalizeChannels([])).toEqual([]);                 // explicit empty → none, not all
+    expect(Studio.normalizeChannels(['myspace'])).toEqual([]);        // all-invalid → none
+    expect(Studio.normalizeChannels('facebook')).toEqual([]);         // non-array → none
+  });
+
   test('httpUrlOrNull accepts only http(s) absolute URLs', () => {
     expect(Studio.httpUrlOrNull('https://example.com/post/123')).toBe('https://example.com/post/123');
     expect(Studio.httpUrlOrNull('http://example.com')).toBe('http://example.com');

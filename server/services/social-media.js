@@ -994,7 +994,21 @@ const SocialMediaService = {
         }
 
         if (p.key === 'facebook') {
-          const r = await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
+          // The image is OPTIONAL for Facebook (text+link /feed posts fine). If
+          // the /photos path fails — Meta rejected or couldn't fetch the image —
+          // fall back to a text/link /feed post instead of dropping a post that
+          // would otherwise publish. Mirrors the GBP media-fallback below.
+          let r;
+          try {
+            r = await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
+          } catch (fbErr) {
+            if (generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
+              logger.warn(`[social] Facebook photo post failed (${fbErr.message}); retrying text-only`);
+              r = await withRetry(() => postToFacebook(content, link, null), { label: 'facebook' });
+            } else {
+              throw fbErr;
+            }
+          }
           platformResults.push({ ...r, content });
         } else if (p.key === 'instagram') {
           const imgUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
