@@ -907,7 +907,11 @@ async function saveCampaignDraft(input) {
     .insert({
       title,
       description: cleanText(input.description || preview.inputs.service || preview.inputs.topic, 1000),
-      source_url: normalizeUrl(input.link || preview.suggestedLink) || null,
+      // normalizeUrl canonicalizes (forces https, strips UTM) but its catch
+      // fallback passes non-URL junk through and doesn't reject javascript:/
+      // data: schemes — and source_url is later rendered as an admin link. Gate
+      // the normalized value through httpUrlOrNull so only http(s) is stored.
+      source_url: httpUrlOrNull(normalizeUrl(input.link || preview.suggestedLink)),
       source_guid: `campaign_builder_${Date.now()}`,
       source_type: 'campaign_builder',
       platforms_posted: JSON.stringify(preview.inputs.channels || Object.keys(preview.drafts || {})),

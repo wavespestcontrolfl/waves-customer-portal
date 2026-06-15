@@ -937,8 +937,8 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                         Open image
                       </a>
                     )}
-                    {run.post?.sourceUrl && (
-                      <a href={run.post.sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                    {safeHttpHref(run.post?.sourceUrl) && (
+                      <a href={safeHttpHref(run.post.sourceUrl)} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
                         Open source
                       </a>
                     )}
@@ -1170,9 +1170,13 @@ function CampaignBuilderTab({ showToast, onSaved }) {
             {preview.suggestedLink && (
               <div style={{ ...sCard, marginBottom: 0, fontSize: 12, color: D.muted }}>
                 Suggested link:{" "}
-                <a href={preview.suggestedLink} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
-                  {preview.suggestedLink}
-                </a>
+                {safeHttpHref(preview.suggestedLink) ? (
+                  <a href={safeHttpHref(preview.suggestedLink)} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                    {preview.suggestedLink}
+                  </a>
+                ) : (
+                  <span>{preview.suggestedLink}</span>
+                )}
               </div>
             )}
             {safeHttpHref(preview.visual?.imageUrl) && (
