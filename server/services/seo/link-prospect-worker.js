@@ -16,6 +16,18 @@ const SIGNUP_TYPES = ['directory', 'citation', 'social'];
 const OUTREACH_TYPES = ['editorial', 'resource', 'guest_post', 'haro'];
 const MAX_ATTEMPTS = 4;
 
+// Recipient sanity check, shared by the outreach send valve (link-prospect-outreach
+// re-exports this) so a worker-drafted address is held to the same bar a send needs —
+// otherwise an invalid draft parks unsendable in the approval queue. Gmail is the
+// real validator; this just rejects obvious garbage. Lives here (the base module) to
+// keep the outreach→worker dependency one-directional.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isValidEmail(s) {
+  if (typeof s !== 'string') return false;
+  const t = s.trim();
+  return t.length > 0 && t.length <= 254 && EMAIL_RE.test(t);
+}
+
 // quality_signals may arrive as an object (pg jsonb) or a JSON string.
 function parseQuality(q) {
   if (!q) return {};
@@ -36,6 +48,11 @@ async function claim({ n = 10, type = 'signup' } = {}) {
       .where({ status: 'prospect' })
       .whereIn('link_type', types)
       .whereNull('claimed_at')
+      // Don't re-serve a prospect that already has a pending/sent/quarantined outreach
+      // draft — a drafted prospect stays status='prospect' until the operator approves
+      // the send (M3b); send_error rows await human reconciliation. Without this they'd
+      // be re-claimed and re-drafted, reopening a possibly-sent message.
+      .whereRaw("COALESCE(outreach_status, 'none') NOT IN ('drafted', 'sending', 'sent', 'send_error')")
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('domain_rating', 'desc')
       .limit(limit)
@@ -94,6 +111,21 @@ function mapReportToPatch(outcome, body = {}, existingQuality = null) {
     }
     return patch;
   }
+  if (outcome === 'drafted') {
+    // Hermes (hybrid lane) researched the target and drafted a one-to-one outreach
+    // email. Park the draft for human approval — status stays 'prospect' (NOTHING
+    // is sent until an operator approves the send in M3b). claim() skips drafted
+    // rows so this isn't re-served. The send valve is link-prospect-outreach.js.
+    const to = typeof body.outreach_to_email === 'string' ? body.outreach_to_email.trim() : '';
+    return {
+      ...release,
+      outreach_to_email: to || null,
+      outreach_subject: body.outreach_subject || null,
+      outreach_body: body.outreach_body || null,
+      outreach_status: 'drafted',
+      notes: body.notes || null,
+    };
+  }
   if (outcome === 'skipped') {
     return { ...release, status: 'rejected', notes: body.notes || 'worker skipped' };
   }
@@ -109,6 +141,13 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   if (outcome === 'placed' && !body.live_url && !body.pending) {
     return { ok: false, code: 'live_url_required', error: 'a placed report requires live_url (or pending:true)' };
   }
+  // A drafted report MUST carry the full draft, else the approval queue surfaces an
+  // unsendable row that fails checkSendPreconditions at send time.
+  if (outcome === 'drafted') {
+    if (!isValidEmail(body.outreach_to_email) || !body.outreach_subject || !body.outreach_body) {
+      return { ok: false, code: 'draft_incomplete', error: 'a drafted report requires a valid outreach_to_email, outreach_subject, and outreach_body' };
+    }
+  }
   const leaseDate = lease_token ? new Date(lease_token) : null;
   if (!leaseDate || Number.isNaN(leaseDate.getTime())) {
     return { ok: false, code: 'lease_required', error: 'valid lease_token required (the claimed_at returned by /claim)' };
@@ -116,6 +155,19 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
 
   const prospect = await db('seo_link_prospects').where({ id: prospect_id }).first();
   if (!prospect) return { ok: false, code: 'not_found', error: 'prospect not found' };
+  // Guard the lane: a 'drafted' report on a signup-lane prospect would set
+  // outreach_status='drafted' on a row that claim() then skips and the send valve
+  // rejects as not_outreach — stranding it. Only outreach prospects can be drafted.
+  if (outcome === 'drafted' && !OUTREACH_TYPES.includes(prospect.link_type)) {
+    return { ok: false, code: 'not_outreach', error: 'drafted is only valid for outreach-lane prospects' };
+  }
+  // Don't let a late 'drafted' report reopen an outreach that's already in flight,
+  // sent, or quarantined after an ambiguous send — that would resurrect a sendable
+  // draft and risk a duplicate. send_error rows need deliberate human reconciliation,
+  // not a worker reopen. (The send path also clears the lease — defense in depth.)
+  if (outcome === 'drafted' && (prospect.outreach_sent_at || ['sending', 'sent', 'send_error'].includes(prospect.outreach_status))) {
+    return { ok: false, code: 'outreach_locked', error: 'outreach already sent, in flight, or awaiting reconciliation' };
+  }
 
   const attempts = (prospect.attempts || 0) + 1;
   const patch = mapReportToPatch(outcome, body, prospect.quality_signals);
@@ -176,6 +228,6 @@ async function sweepExpiredClaims(maxHours = 6) {
 }
 
 module.exports = {
-  claim, report, sweepExpiredClaims, mapReportToPatch, businessProfile,
+  claim, report, sweepExpiredClaims, mapReportToPatch, businessProfile, isValidEmail,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS,
 };
