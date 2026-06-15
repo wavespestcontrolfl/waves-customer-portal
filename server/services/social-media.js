@@ -914,9 +914,12 @@ async function fetchRSSFeed(feedUrl) {
       return m ? m[1].trim() : '';
     };
     items.push({
-      title: decodeEntities(get('title')),
+      // Decode entities FIRST, then strip tags: a description with encoded HTML
+      // (&lt;p&gt;…&lt;/p&gt;) would otherwise decode into literal <p> tag text
+      // after the strip already ran. Then collapse whitespace and truncate.
+      title: decodeEntities(get('title')).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim(),
       link: get('link'),
-      description: decodeEntities(get('description').replace(/<[^>]+>/g, '')).substring(0, 500),
+      description: decodeEntities(get('description')).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().substring(0, 500),
       pubDate: get('pubDate'),
       guid: get('guid') || get('link'),
     });
@@ -992,7 +995,7 @@ const SocialMediaService = {
         try {
           // Share the blog post with the on-brand card (title + excerpt + read-
           // more CTA), matching the studio's branding instead of a generic AI
-          // image. Square for FB/IG, 4:3 for GBP. Only when the run will publish
+          // image. 1:1 for FB/IG, 4:3 for GBP. Only when the run will publish
           // and the image can be hosted (cardsEligible) — otherwise skip and let
           // publishToAll fall back to its normal image path with no orphan
           // uploads.
