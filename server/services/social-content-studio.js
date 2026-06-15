@@ -354,7 +354,11 @@ const AUTONOMOUS_FLAGS = {
   // use never silently starts autonomous posting.
   get cronEnabled() { return boolEnv('SOCIAL_AUTONOMOUS_CRON_ENABLED', false); },
   get includeReviews() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_REVIEWS', true); },
-  get intervalHours() { return numberEnv('SOCIAL_AUTONOMOUS_INTERVAL_HOURS', 24); },
+  // Default < 24h so a fixed once-daily cron (6:30 AM ET) always clears the
+  // cadence guard — a 24h interval vs a 24h-apart tick can be skipped by
+  // sub-minute drift. Still blocks same-day double-posts (duplicate fire /
+  // recent manual force).
+  get intervalHours() { return numberEnv('SOCIAL_AUTONOMOUS_INTERVAL_HOURS', 20); },
   get mode() {
     return normalizePublishMode(process.env.SOCIAL_AUTONOMOUS_MODE, 'publish');
   },
