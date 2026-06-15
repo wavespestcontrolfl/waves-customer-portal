@@ -90,7 +90,7 @@ async function checkFacebook() {
   }
 
   try {
-    const { res, data } = await fetchGraph(`/${pageId}?fields=id,name,tasks,instagram_business_account{id,username}`, token);
+    const { res, data } = await fetchGraph(`/${pageId}?fields=id,name,instagram_business_account{id,username}`, token);
 
     if (res.ok && !data.error && data.id === pageId) {
       const linkedIgId = data.instagram_business_account?.id || null;
@@ -117,19 +117,47 @@ async function checkFacebook() {
         await upsertResult({ ...result, tokenType: 'oauth', envVarName });
         return result;
       }
-      // A token can READ the Page yet lack content-creation rights, in which
-      // case every postToFacebook (/photos, /feed) fails while the strip shows
-      // green. The Page node's `tasks` includes 'CREATE_CONTENT' when the token
-      // can publish. Only treat an EXPLICIT absence as an error — if `tasks`
-      // isn't returned (some token types omit it), leave the capability unknown
-      // rather than false-flagging a working token.
-      const tasks = Array.isArray(data.tasks) ? data.tasks : null;
-      const canCreateContent = tasks ? tasks.includes('CREATE_CONTENT') : null;
+      // A token can READ the Page yet lack publish rights, in which case every
+      // postToFacebook (/photos, /feed) fails while the strip shows green.
+      //
+      // We previously probed this via the Page node's `tasks` field, but `tasks`
+      // is NOT a valid field on a Page node — it only exists on the
+      // `/me/accounts` edge. Requesting it made the ENTIRE Page call fail with
+      // `(#100) Tried accessing nonexisting field (tasks) on node type (Page)`,
+      // which tripped the error branch below and false-flagged a working token.
+      //
+      // Instead introspect the token's granted scopes via debug_token (the same
+      // token-introspects-itself pattern used in knowledge-base.js) and require
+      // `pages_manage_posts`. Only treat an EXPLICIT absence as an error — if
+      // the scopes can't be read, leave the capability unknown rather than
+      // re-introducing a false alarm.
+      let canCreateContent = null;
+      try {
+        const { data: dbg } = await fetchGraph(`/debug_token?input_token=${encodeURIComponent(token)}`, token);
+        const scopes = Array.isArray(dbg?.data?.scopes) ? dbg.data.scopes : [];
+        const granular = Array.isArray(dbg?.data?.granular_scopes) ? dbg.data.granular_scopes : [];
+        // FB expresses a granted permission in `scopes` (flat) and/or
+        // `granular_scopes` (per-resource). When a granular entry exists for
+        // pages_manage_posts its `target_ids` are authoritative: the permission
+        // applies only to those Pages (no target_ids = all Pages). A flat-only
+        // grant with no granular entry is a broad grant. Only render a verdict
+        // when introspection actually returned scope data — otherwise leave the
+        // capability unknown rather than false-flagging.
+        const granularPublish = granular.find((g) => g && g.scope === 'pages_manage_posts');
+        if (granularPublish) {
+          const targets = Array.isArray(granularPublish.target_ids) ? granularPublish.target_ids.map(String) : null;
+          canCreateContent = !targets || targets.includes(String(pageId));
+        } else if (scopes.length || granular.length) {
+          canCreateContent = scopes.includes('pages_manage_posts');
+        }
+      } catch {
+        // network/parse failure — leave capability unknown, never false-flag
+      }
       if (canCreateContent === false) {
         const result = {
           platform,
           status: 'error',
-          lastError: 'Facebook token can read the Page but lacks content-creation rights (no CREATE_CONTENT task / pages_manage_posts) — Page posts will fail',
+          lastError: 'Facebook token can read the Page but lacks publish rights (no pages_manage_posts scope) — Page posts will fail',
           expiresAt: null,
           details: {
             pageId: data.id,
