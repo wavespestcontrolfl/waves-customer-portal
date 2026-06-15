@@ -253,15 +253,15 @@ describe('social content studio', () => {
     }
   });
 
-  test('AUTONOMOUS_FLAGS.intervalHours clamps under 24h so the daily cron never skips', () => {
+  test('AUTONOMOUS_FLAGS.intervalHours clamps to 22h (below the spring-forward ET tick gap)', () => {
     const orig = process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS;
     try {
       delete process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS;
       expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(20); // default
       process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = '24';
-      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(23); // stale 24 -> capped
-      process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = '48';
-      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(23);
+      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(22); // stale 24 -> capped (DST-safe)
+      process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = '23';
+      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(22); // 23 would skip the spring-forward day
       process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = '12';
       expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(12); // under cap preserved
     } finally {
