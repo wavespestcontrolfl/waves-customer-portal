@@ -1031,7 +1031,10 @@ const SocialMediaService = {
             source: 'rss',
             imageUrl,
             gbpImageUrl,
-            noAiImage: true, // use the brand card or text-only — never a literal AI image
+            // Autonomous (cron) shares use the brand card or go text-only — never
+            // the AI image generator (irrelevant literal images). A manual admin
+            // /check-rss keeps the existing AI fallback (admin is supervising).
+            noAiImage: !manual,
           });
           results.push({ item: item.title, ...result });
         } catch (err) {
