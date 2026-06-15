@@ -52,12 +52,12 @@ export function useIntelligenceBar({
   const [favorites, setFavorites] = useState(() => getFavorites(context));
   // Attached photos for the next query (vision). Each: {mediaType,data,name,previewUrl}.
   const [attachments, setAttachments] = useState([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const attachmentConversionRef = useRef(0);
+  const attachmentsLoadingRef = useRef(false);
 
   const buildPageDataRef = useRef(buildPageData);
   const onAfterSubmitRef = useRef(onAfterSubmit);
-  // Bumped on submit/clear so an in-flight image conversion can tell its batch
-  // was invalidated and not reattach a stale photo.
-  const attachGenRef = useRef(0);
   useEffect(() => { buildPageDataRef.current = buildPageData; }, [buildPageData]);
   useEffect(() => { onAfterSubmitRef.current = onAfterSubmit; }, [onAfterSubmit]);
 
@@ -79,15 +79,32 @@ export function useIntelligenceBar({
     setFavorites(next);
   }, [context]);
 
+  const setAttachmentBusy = useCallback((busy) => {
+    attachmentsLoadingRef.current = busy;
+    setAttachmentsLoading(busy);
+  }, []);
+
+  const resetAttachments = useCallback(() => {
+    attachmentConversionRef.current += 1;
+    setAttachments([]);
+    setAttachmentBusy(false);
+  }, [setAttachmentBusy]);
+
   const addAttachments = useCallback(async (files) => {
-    const gen = attachGenRef.current;
-    const parts = await filesToImageParts(files, attachments.length);
-    // A submit/clear during conversion invalidates this batch — otherwise a
-    // photo that finished decoding after submit would reattach and ride the
-    // next, unrelated prompt.
-    if (!parts.length || attachGenRef.current !== gen) return;
-    setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
-  }, [attachments.length]);
+    const conversionId = attachmentConversionRef.current + 1;
+    attachmentConversionRef.current = conversionId;
+    setAttachmentBusy(true);
+    try {
+      const parts = await filesToImageParts(files, attachments.length);
+      if (attachmentConversionRef.current === conversionId && parts.length) {
+        setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+      }
+    } finally {
+      if (attachmentConversionRef.current === conversionId) {
+        setAttachmentBusy(false);
+      }
+    }
+  }, [attachments.length, setAttachmentBusy]);
 
   const removeAttachment = useCallback((index) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
@@ -95,9 +112,8 @@ export function useIntelligenceBar({
 
   const submit = useCallback(async (text) => {
     const q = (text ?? prompt).trim();
-    if (!q || loading) return;
+    if (!q || loading || attachmentsLoadingRef.current) return;
 
-    attachGenRef.current += 1;
     setLoading(true);
     setExpanded(true);
     setResponse(null);
@@ -134,18 +150,17 @@ export function useIntelligenceBar({
 
     setLoading(false);
     setPrompt('');
-    setAttachments([]);
-  }, [prompt, loading, conversationHistory, context, attachments]);
+    resetAttachments();
+  }, [prompt, loading, conversationHistory, context, attachments, resetAttachments]);
 
   const clear = useCallback(() => {
-    attachGenRef.current += 1;
     setConversationHistory([]);
     setResponse(null);
     setStructuredData(null);
     setPendingActions([]);
-    setAttachments([]);
+    resetAttachments();
     setExpanded(false);
-  }, []);
+  }, [resetAttachments]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
@@ -165,6 +180,7 @@ export function useIntelligenceBar({
     favorites,
     toggleFavorite,
     attachments,
+    attachmentsLoading,
     addAttachments,
     removeAttachment,
     submit,

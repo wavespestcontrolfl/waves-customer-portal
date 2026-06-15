@@ -112,10 +112,8 @@ const MAX_QUERY_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // Anthropic per-image decoded-size cap
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
-// Marker left on a user turn's stored history text when images were attached.
-// It both informs the model an image was shown earlier AND lets later turns
-// detect image-derived (potentially PII) context still in the window.
-const IMAGE_HISTORY_MARKER = '[Operator attached ';
+const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
+const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 function isValidBase64(data) {
   return typeof data === 'string'
@@ -142,15 +140,32 @@ function sanitizeQueryImages(images) {
   return out;
 }
 
-// An image-backed turn still in the conversation window taints follow-ups:
-// the assistant's prior OCR/image-derived answer is replayed to the model, so
-// "repeat the name from that invoice" can surface PII on a turn that itself
-// carries no images. Detected via the history marker so it ages out exactly
-// when the image-derived context falls out of the window.
-function historyHasImageTurn(history) {
-  return Array.isArray(history) && history.some(
-    (m) => m && m.role === 'user' && typeof m.content === 'string' && m.content.includes(IMAGE_HISTORY_MARKER),
-  );
+function hasImageTaintedHistory(conversationHistory) {
+  if (!Array.isArray(conversationHistory)) return false;
+  return conversationHistory.some((message) => {
+    if (!message || typeof message.content !== 'string') return false;
+    return message.content.includes(IMAGE_TAINT_MARKER)
+      || IMAGE_ATTACHMENT_HISTORY_RE.test(message.content);
+  });
+}
+
+function stripInternalHistoryMarkers(message) {
+  if (!message || typeof message.content !== 'string') return message;
+  return {
+    ...message,
+    content: message.content
+      .split('\n')
+      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER)
+      .join('\n')
+      .trim(),
+  };
+}
+
+function markImageTaintedContent(content, imageTainted) {
+  if (!imageTainted || typeof content !== 'string' || content.includes(IMAGE_TAINT_MARKER)) {
+    return content;
+  }
+  return `${content}\n${IMAGE_TAINT_MARKER}`;
 }
 
 // Build the current-turn user message. Plain string when no images so the
@@ -826,6 +841,7 @@ router.post('/query', async (req, res, next) => {
   try {
     const { prompt, conversationHistory = [], context, pageData } = req.body;
     const images = sanitizeQueryImages(req.body.images);
+    const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -884,7 +900,7 @@ For create_customer and the route-optimization writes: the first call returns a 
     // Build messages array (support multi-turn conversation). Attached photos
     // ride on the current user turn as vision blocks.
     const messages = [
-      ...conversationHistory.slice(-10),
+      ...conversationHistory.slice(-10).map(stripInternalHistoryMarkers),
       { role: 'user', content: buildUserMessageContent(prompt, images) },
     ];
 
@@ -1022,7 +1038,6 @@ For create_customer and the route-optimization writes: the first call returns a 
     // itself. Either way Claude can surface a customer's name/address/phone
     // with no tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
-    const imageTainted = images.length > 0 || historyHasImageTurn(conversationHistory);
     const redactPii = usedPiiTool || imageTainted;
     const redactNote = usedPiiTool
       ? '[redacted — PII-bearing tools used]'
@@ -1054,11 +1069,14 @@ For create_customer and the route-optimization writes: the first call returns a 
         ...conversationHistory.slice(-8),
         {
           role: 'user',
-          content: images.length
-            ? `${prompt}\n${IMAGE_HISTORY_MARKER}${images.length} image${images.length > 1 ? 's' : ''}]`
-            : prompt,
+          content: markImageTaintedContent(
+            images.length
+              ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+              : prompt,
+            imageTainted,
+          ),
         },
-        { role: 'assistant', content: finalResponse },
+        { role: 'assistant', content: markImageTaintedContent(finalResponse, imageTainted) },
       ],
     });
 

@@ -282,8 +282,44 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
         { type: 'text', text: prompt },
       ]);
 
-      expect(body.conversationHistory[0].content).toBe(`${prompt}\n[Operator attached 1 image]`);
+      expect(body.conversationHistory[0].content).toBe(
+        `${prompt}\n[Operator attached 1 image]\n[Image attachment context may contain PII]`,
+      );
+      expect(body.conversationHistory[1].content).toBe(
+        'The invoice shows a balance.\n[Image attachment context may contain PII]',
+      );
       expect(JSON.stringify(body.conversationHistory)).not.toContain(validImageData);
+    });
+
+    expect(mockDbInsert).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: '[redacted — image attachment may contain PII]',
+      response: '[redacted — image attachment may contain PII]',
+    }));
+  });
+
+  test('image-tainted follow-ups stay redacted even when the current turn has no images', async () => {
+    const taintedHistory = [
+      { role: 'user', content: 'read this invoice\n[Operator attached 1 image]\n[Image attachment context may contain PII]' },
+      { role: 'assistant', content: 'The invoice is for Jane Customer at 123 Main St.\n[Image attachment context may contain PII]' },
+    ];
+    scriptModelTurns([[{ type: 'text', text: 'Jane Customer, 123 Main St.' }]]);
+
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, {
+        prompt: 'repeat the name and address from that invoice',
+        context: 'customers',
+        conversationHistory: taintedHistory,
+      });
+
+      expect(status).toBe(200);
+      const firstCallMessages = mockMessagesCreate.mock.calls[0][0].messages;
+      expect(JSON.stringify(firstCallMessages)).not.toContain('[Image attachment context may contain PII]');
+      expect(body.conversationHistory.at(-2).content).toBe(
+        'repeat the name and address from that invoice\n[Image attachment context may contain PII]',
+      );
+      expect(body.conversationHistory.at(-1).content).toBe(
+        'Jane Customer, 123 Main St.\n[Image attachment context may contain PII]',
+      );
     });
 
     expect(mockDbInsert).toHaveBeenCalledWith(expect.objectContaining({

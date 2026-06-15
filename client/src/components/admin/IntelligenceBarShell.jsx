@@ -208,6 +208,7 @@ export default function IntelligenceBarShell({
     favorites,
     toggleFavorite,
     attachments,
+    attachmentsLoading,
     addAttachments,
     removeAttachment,
     submit,
@@ -257,14 +258,14 @@ export default function IntelligenceBarShell({
             ) : (
               <button
                 onClick={() => submit()}
-                disabled={!prompt.trim()}
+                disabled={!prompt.trim() || attachmentsLoading}
                 className={cn(
                   "h-8 sm:h-6 px-3 text-11 uppercase tracking-label font-medium rounded-xs u-focus-ring transition-colors",
                   "bg-zinc-900 text-white hover:bg-zinc-800",
-                  !prompt.trim() && "cursor-not-allowed",
+                  (!prompt.trim() || attachmentsLoading) && "cursor-not-allowed opacity-60",
                 )}
               >
-                {askLabel}
+                {attachmentsLoading ? "Attaching..." : askLabel}
               </button>
             )}
           </div>{" "}
@@ -272,12 +273,12 @@ export default function IntelligenceBarShell({
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={loading}
+          disabled={loading || attachmentsLoading}
           title="Attach a photo"
           aria-label="Attach a photo"
           className={cn(
             "h-9 w-9 flex items-center justify-center text-ink-secondary border-hairline border-zinc-200 rounded-sm u-focus-ring",
-            loading
+            loading || attachmentsLoading
               ? "opacity-40 cursor-not-allowed"
               : "hover:bg-zinc-50 hover:text-ink-primary",
           )}

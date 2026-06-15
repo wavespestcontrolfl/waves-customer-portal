@@ -261,13 +261,13 @@ function GlobalCommandPalette(_props, ref) {
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
   const [attachments, setAttachments] = useState([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
-  // Bumped on submit/clear/context-change so a late image conversion can tell
-  // its batch was invalidated and not reattach a stale photo.
-  const attachGenRef = useRef(0);
+  const attachmentConversionRef = useRef(0);
+  const attachmentsLoadingRef = useRef(false);
   const location = useLocation();
   const isMobile = useIsMobile(768);
 
@@ -317,20 +317,29 @@ function GlobalCommandPalette(_props, ref) {
       .catch(() => setQuickActions([]));
   }, [context, open]);
 
+  const setAttachmentBusy = useCallback((busy) => {
+    attachmentsLoadingRef.current = busy;
+    setAttachmentsLoading(busy);
+  }, []);
+
+  const resetAttachments = useCallback(() => {
+    attachmentConversionRef.current += 1;
+    setAttachments([]);
+    setAttachmentBusy(false);
+  }, [setAttachmentBusy]);
+
   // Clear conversation when context changes
   useEffect(() => {
-    attachGenRef.current += 1;
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
-    setAttachments([]);
-  }, [context]);
+    resetAttachments();
+  }, [context, resetAttachments]);
 
   const submit = useCallback(
     async (text) => {
       const q = (text || prompt).trim();
-      if (!q || loading) return;
-      attachGenRef.current += 1;
+      if (!q || loading || attachmentsLoadingRef.current) return;
       setLoading(true);
       setResponse(null);
       setPendingActions([]);
@@ -358,20 +367,27 @@ function GlobalCommandPalette(_props, ref) {
       }
       setLoading(false);
       setPrompt("");
-      setAttachments([]);
+      resetAttachments();
     },
-    [prompt, loading, conversationHistory, context, location.pathname, attachments],
+    [prompt, loading, conversationHistory, context, location.pathname, attachments, resetAttachments],
   );
 
   const addAttachments = useCallback(
     async (files) => {
-      const gen = attachGenRef.current;
-      const parts = await filesToImageParts(files, attachments.length);
-      // A submit/clear/context-change during conversion invalidates this batch.
-      if (!parts.length || attachGenRef.current !== gen) return;
-      setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+      const conversionId = attachmentConversionRef.current + 1;
+      attachmentConversionRef.current = conversionId;
+      setAttachmentBusy(true);
+      try {
+        const parts = await filesToImageParts(files, attachments.length);
+        if (attachmentConversionRef.current === conversionId && parts.length)
+          setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+      } finally {
+        if (attachmentConversionRef.current === conversionId) {
+          setAttachmentBusy(false);
+        }
+      }
     },
-    [attachments.length],
+    [attachments.length, setAttachmentBusy],
   );
 
   const removeAttachment = useCallback((index) => {
@@ -389,12 +405,11 @@ function GlobalCommandPalette(_props, ref) {
   };
 
   const clear = () => {
-    attachGenRef.current += 1;
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
     setPrompt("");
-    setAttachments([]);
+    resetAttachments();
   };
 
   // Merge each dictation transcript chunk into the input, space-separated.
@@ -450,6 +465,7 @@ function GlobalCommandPalette(_props, ref) {
         accentColor={accentColor}
         appendTranscript={appendTranscript}
         attachments={attachments}
+        attachmentsLoading={attachmentsLoading}
         addAttachments={addAttachments}
         removeAttachment={removeAttachment}
       />
@@ -544,6 +560,7 @@ function GlobalCommandPalette(_props, ref) {
                   onClick={() => fileInputRef.current?.click()}
                   color={D.muted}
                   size={30}
+                  disabled={attachmentsLoading}
                 />
               )}
               {!loading && (
@@ -554,7 +571,7 @@ function GlobalCommandPalette(_props, ref) {
                   palette={{ accent: accentColor, muted: D.muted, red: D.red, card: "#fff" }}
                 />
               )}
-              {loading ? (
+              {loading || attachmentsLoading ? (
                 <div
                   style={{
                     padding: "5px 10px",
@@ -567,7 +584,7 @@ function GlobalCommandPalette(_props, ref) {
                     animation: "pulse 1.5s ease infinite",
                   }}
                 >
-                  thinking...
+                  {loading ? "thinking..." : "attaching..."}
                 </div>
               ) : prompt.trim() ? (
                 <button
@@ -833,6 +850,7 @@ function MobileSheet({
   accentColor,
   appendTranscript,
   attachments,
+  attachmentsLoading,
   addAttachments,
   removeAttachment,
 }) {
@@ -982,6 +1000,7 @@ function MobileSheet({
                   onClick={() => fileInputRef.current?.click()}
                   color="#A1A1AA"
                   size={38}
+                  disabled={attachmentsLoading}
                 />{" "}
                 <DictationButton
                   onAppend={appendTranscript}
@@ -1015,23 +1034,23 @@ function MobileSheet({
             {" "}
             <button
               onClick={() => submit()}
-              disabled={!prompt.trim() || loading}
+              disabled={!prompt.trim() || loading || attachmentsLoading}
               style={{
                 flex: 1,
                 padding: "12px 16px",
                 borderRadius: 10,
                 border: "none",
-                background: prompt.trim() && !loading ? "#18181B" : "#E4E4E7",
-                color: prompt.trim() && !loading ? "#FFFFFF" : "#A1A1AA",
+                background: prompt.trim() && !loading && !attachmentsLoading ? "#18181B" : "#E4E4E7",
+                color: prompt.trim() && !loading && !attachmentsLoading ? "#FFFFFF" : "#A1A1AA",
                 fontSize: 14,
                 fontWeight: 500,
-                cursor: prompt.trim() && !loading ? "pointer" : "not-allowed",
+                cursor: prompt.trim() && !loading && !attachmentsLoading ? "pointer" : "not-allowed",
                 fontFamily: "Roboto, Arial, sans-serif",
                 letterSpacing: "0.06em",
                 textTransform: "uppercase",
               }}
             >
-              {loading ? "Thinking…" : "Ask"}
+              {loading ? "Thinking…" : attachmentsLoading ? "Attaching…" : "Ask"}
             </button>
             {(response || prompt) && (
               <button
@@ -1161,11 +1180,12 @@ function MobileSheet({
 }
 
 // Attach (photo) control — square icon button sized to match DictationButton.
-function AttachButton({ onClick, color, size = 30 }) {
+function AttachButton({ onClick, color, size = 30, disabled = false }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       title="Attach a photo"
       aria-label="Attach a photo"
       style={{
@@ -1175,7 +1195,8 @@ function AttachButton({ onClick, color, size = 30 }) {
         border: "none",
         background: "transparent",
         color,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.45 : 1,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
