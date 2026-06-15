@@ -613,10 +613,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForInstagramContainer(containerId, token) {
+// Poll Meta until the IG media container finishes ingesting, bounded by a wall-
+// clock budget that stays UNDER a typical proxy/request timeout (~60s). An
+// unbounded wait blocks the publish request for minutes, and a proxy 504 +
+// admin retry then produces duplicate posts. If the media isn't ready within
+// the budget we give up (IG is recorded as a partial failure; FB/GBP already
+// posted) rather than hang.
+async function waitForInstagramContainer(containerId, token, { maxWaitMs = 45000 } = {}) {
   let lastStatus = null;
-  for (let attempt = 0; attempt < 15; attempt += 1) {
+  const deadline = Date.now() + maxWaitMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
     await sleep(attempt === 0 ? 3000 : 5000);
+    attempt += 1;
     const statusRes = await fetch(
       `https://graph.facebook.com/v25.0/${containerId}?fields=status_code,status&access_token=${encodeURIComponent(token)}`
     );
@@ -630,7 +639,7 @@ async function waitForInstagramContainer(containerId, token) {
       throw new Error(`Instagram media error: ${JSON.stringify(status)}`);
     }
   }
-  throw new Error(`Instagram media not ready: ${JSON.stringify(lastStatus)}`);
+  throw new Error(`Instagram media not ready after ${Math.round(maxWaitMs / 1000)}s: ${JSON.stringify(lastStatus)}`);
 }
 
 async function postToInstagram(caption, imageUrl) {
@@ -980,7 +989,13 @@ const SocialMediaService = {
         } else if (p.key === 'instagram') {
           const imgUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
           if (imgUrl) {
-            const r = await withRetry(() => postToInstagram(content, imgUrl), { label: 'instagram' });
+            // NOT wrapped in withRetry: postToInstagram already polls Meta for
+            // media ingestion (bounded ~45s). Retrying the whole call would
+            // redo that wait (blocking the request for minutes) and create a
+            // fresh, duplicate media container each attempt. A transient
+            // failure here surfaces as an IG partial failure; FB/GBP are
+            // unaffected and IG can be retried on its own.
+            const r = await postToInstagram(content, imgUrl);
             platformResults.push({ ...r, content });
           } else {
             platformResults.push({ platform: 'instagram', skipped: 'No public image URL' });

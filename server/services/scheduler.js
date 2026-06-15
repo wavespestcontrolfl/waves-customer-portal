@@ -1808,6 +1808,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY — Autonomous Social Content Studio
+  // Fires every hour but self-throttles to SOCIAL_AUTONOMOUS_INTERVAL_HOURS:
+  // runAutonomous enforces the kill switch (SOCIAL_AUTONOMOUS_STUDIO_ENABLED),
+  // the DB-backed cadence guard, and a Postgres advisory lock internally, so an
+  // hourly tick honors the configured cadence shortly after each interval
+  // elapses without double-posting across restarts/pods.
+  // =========================================================================
+  cron.schedule('20 * * * *', async () => {
+    const SocialContentStudio = require('./social-content-studio');
+    if (!SocialContentStudio.AUTONOMOUS_FLAGS.enabled) {
+      return; // silently skip — SOCIAL_AUTONOMOUS_STUDIO_ENABLED not set
+    }
+    try {
+      const result = await SocialContentStudio.runAutonomous({ force: false });
+      if (result?.skipped) {
+        logger.info(`[social-studio] autonomous run skipped: ${result.reason}`);
+      } else {
+        logger.info(`[social-studio] autonomous run complete: status=${result?.run?.status || result?.status || 'done'}`);
+      }
+    } catch (err) {
+      logger.error(`[social-studio] autonomous run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 HOURS — Adjust ad budgets based on capacity
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {
