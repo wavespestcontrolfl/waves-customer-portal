@@ -19,15 +19,17 @@
  *   - Facebook  : Graph API /{page-id}/posts          (FACEBOOK_ACCESS_TOKEN)
  *   - Google    : GBP localPosts for each configured location
  *   - YouTube   : channel RSS (no key) — optional, YOUTUBE_CHANNEL_ID
+ *   - TikTok    : Display API /v2/video/list/         (TIKTOK_CLIENT_KEY /
+ *                 TIKTOK_CLIENT_SECRET / TIKTOK_REFRESH_TOKEN) — optional
  *
  * Every source is wrapped so one failing/unconfigured channel never breaks
  * the others; the response always resolves to an object (never throws). The
  * whole payload is cached in-memory (TTL) and served stale on upstream
- * errors. TikTok is intentionally absent — no read API; the site links to
- * the profile instead.
+ * errors.
  */
 
 const logger = require('./logger');
+const db = require('../models/db');
 const gbpService = require('./google-business');
 const { WAVES_LOCATIONS } = require('../config/locations');
 
@@ -41,6 +43,12 @@ const IG_LIMIT = 8;
 const FB_LIMIT = 8;
 const GBP_PER_LOCATION = 5;
 const YT_LIMIT = 5;
+const TIKTOK_LIMIT = 6;
+
+const TIKTOK_TOKENS_KEY = 'tiktok_oauth_tokens';
+const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
+const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
+const TIKTOK_VIDEO_FIELDS = 'id,title,video_description,cover_image_url,share_url,embed_link,create_time,duration';
 
 let CACHE = { payload: null, expires: 0 };
 let INFLIGHT = null;
@@ -195,6 +203,107 @@ async function fetchYouTube() {
   return { status: 'ok', posts: parseYouTubeRss(xml) };
 }
 
+// ------------------------------------------------------------------- TikTok
+// TikTok refresh tokens rotate on every refresh and access tokens last ~24h,
+// so the latest token pair is persisted in system_settings (same KV store
+// the GBP integration uses). TIKTOK_REFRESH_TOKEN env seeds the very first
+// run after OAuth; thereafter the rotated token in the DB wins.
+async function tiktokStoredTokens() {
+  try {
+    const row = await db('system_settings').where({ key: TIKTOK_TOKENS_KEY }).first();
+    if (!row?.value) return {};
+    return typeof row.value === 'object' ? row.value : JSON.parse(row.value);
+  } catch {
+    return {};
+  }
+}
+
+async function tiktokStoreTokens(record) {
+  const now = new Date();
+  await db('system_settings')
+    .insert({
+      key: TIKTOK_TOKENS_KEY,
+      value: JSON.stringify(record),
+      category: 'integrations',
+      description: 'TikTok OAuth tokens (access + rotating refresh)',
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflict('key')
+    .merge({ value: JSON.stringify(record), category: 'integrations', updated_at: now });
+}
+
+async function tiktokAccessToken() {
+  const stored = await tiktokStoredTokens();
+  const now = Date.now();
+  // Reuse the cached access token until ~1 min before it expires.
+  if (stored.access_token && stored.access_expires_at && Date.parse(stored.access_expires_at) - 60_000 > now) {
+    return stored.access_token;
+  }
+  const refreshToken = stored.refresh_token || process.env.TIKTOK_REFRESH_TOKEN;
+  if (!refreshToken) return null;
+
+  const body = new URLSearchParams({
+    client_key: TIKTOK_CLIENT_KEY,
+    client_secret: TIKTOK_CLIENT_SECRET,
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+  });
+  const res = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cache-Control': 'no-cache' },
+    body: body.toString(),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error || !data.access_token) {
+    throw new Error(data.error_description || data.error || `token HTTP ${res.status}`);
+  }
+
+  const nowMs = Date.now();
+  await tiktokStoreTokens({
+    access_token: data.access_token,
+    access_expires_at: new Date(nowMs + (Number(data.expires_in) || 86400) * 1000).toISOString(),
+    refresh_token: data.refresh_token || refreshToken,
+    refresh_expires_at: new Date(nowMs + (Number(data.refresh_expires_in) || 31536000) * 1000).toISOString(),
+    open_id: data.open_id || stored.open_id || null,
+    scope: data.scope || stored.scope || null,
+    updated_at: new Date(nowMs).toISOString(),
+  });
+  return data.access_token;
+}
+
+async function fetchTikTok() {
+  if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) return { status: 'skipped', posts: [] };
+  const accessToken = await tiktokAccessToken();
+  if (!accessToken) return { status: 'skipped', posts: [] };
+
+  const res = await fetch(`https://open.tiktokapis.com/v2/video/list/?fields=${encodeURIComponent(TIKTOK_VIDEO_FIELDS)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ max_count: TIKTOK_LIMIT }),
+  });
+  const data = await res.json().catch(() => ({}));
+  // TikTok wraps the status in data.error; code 'ok' means success.
+  const errCode = data?.error?.code;
+  if (!res.ok || (errCode && errCode !== 'ok')) {
+    throw new Error(data?.error?.message || errCode || `video list HTTP ${res.status}`);
+  }
+
+  const videos = data?.data?.videos || [];
+  const posts = videos
+    .map((v) => ({
+      platform: 'tiktok',
+      caption: clip(v.title || v.video_description || ''),
+      postedAt: v.create_time ? new Date(v.create_time * 1000).toISOString() : null,
+      postUrl: v.share_url || (v.id ? `https://www.tiktok.com/video/${v.id}` : ''),
+      image: v.cover_image_url || null,
+      video: true,
+      location: null,
+    }))
+    .filter((p) => p.postUrl);
+  return { status: 'ok', posts };
+}
+
 // --------------------------------------------------------------- aggregate
 async function build() {
   const sources = {};
@@ -204,6 +313,7 @@ async function build() {
     ['facebook', fetchFacebook],
     ['google', fetchGoogle],
     ['youtube', fetchYouTube],
+    ['tiktok', fetchTikTok],
   ];
 
   const results = await Promise.allSettled(runners.map(([, fn]) => fn()));
