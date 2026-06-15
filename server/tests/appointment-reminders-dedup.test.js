@@ -277,6 +277,46 @@ describe('appointment reminder reschedule windows', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('reschedule that notifies (coverDueWindows) covers the due 24h window so cron cannot race the notice', async () => {
+    const { updateReminder } = mockRescheduleRecord();
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+      { sendNotification: false, coverDueWindows: true },
+    );
+
+    // The dispatch route sends its own reschedule SMS after this sync and only
+    // then marks the windows covered. coverDueWindows keeps the due 24h flag
+    // covered now so the 15-min cron can't fire a duplicate reminder in the gap.
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: expect.any(Date),
+      reminder_24h_sent: true,
+      reminder_24h_sent_at: expect.any(Date),
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('resize that keeps the same start time preserves already-sent reminder flags', async () => {
+    const { updateReminder } = mockRescheduleRecord();
+
+    // Same start (2026-05-12T14:00Z = 10:00 AM ET) as the existing record —
+    // a duration-only resize. The already-sent flags must be preserved so the
+    // cron does not re-send a duplicate reminder.
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-12T10:00',
+      { sendNotification: false },
+    );
+
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_24h_sent: true,
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('silent reschedule about 48h out covers only the due 72h window', async () => {
     const { updateReminder } = mockRescheduleRecord();
 

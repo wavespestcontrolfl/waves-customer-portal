@@ -5132,13 +5132,19 @@ function rescheduleReminderTime(date, window) {
   return `${String(date).split('T')[0]}T${normalizeHHMM(win.start) || '08:00'}`;
 }
 
-async function syncRescheduleReminder(serviceId, date, window) {
+async function syncRescheduleReminder(serviceId, date, window, { willNotify = false } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
     await AppointmentReminders.handleReschedule(
       serviceId,
       rescheduleReminderTime(date, window),
-      { sendNotification: false },
+      // This route sends its own reschedule SMS (below) rather than letting
+      // handleReschedule send one, so always sendNotification:false. When we
+      // ARE about to notify, coverDueWindows keeps the day-before flag covered
+      // until our SMS settles + markRescheduleNoticeSent runs, so the 15-min
+      // cron can't fire a duplicate reminder in the gap. A non-notifying move
+      // leaves the 24h reminder pending so the cron still reminds the customer.
+      { sendNotification: false, coverDueWindows: willNotify },
     );
   } catch (err) {
     logger.warn(`[dispatch] Reschedule committed for ${serviceId}, but reminder sync failed: ${err.message}`);
@@ -5181,6 +5187,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           occurrence.id,
           occurrence.date,
           { start: occurrence.windowStart, end: occurrence.windowEnd },
+          { willNotify: notifyCustomer !== false },
         );
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId: req.technicianId });
@@ -5268,7 +5275,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       rescheduleOptions.technicianId = newTechId;
     }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
-    await syncRescheduleReminder(req.params.serviceId, newDate, newWindow);
+    await syncRescheduleReminder(req.params.serviceId, newDate, newWindow, { willNotify: notifyCustomer !== false });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {

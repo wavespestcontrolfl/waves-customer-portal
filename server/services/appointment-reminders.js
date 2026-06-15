@@ -731,6 +731,11 @@ const AppointmentReminders = {
   async handleReschedule(scheduledServiceId, newTime, options = {}) {
     try {
       const sendNotification = options.sendNotification !== false;
+      // Callers that send their own reschedule notice off this path (the
+      // dispatch route renders + sends, then calls markRescheduleNoticeSent)
+      // pass coverDueWindows:true so we cover any already-due window now —
+      // see the covered-flags comment below.
+      const coverDueWindows = options.coverDueWindows === true;
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();
@@ -750,24 +755,45 @@ const AppointmentReminders = {
       // below, we mark any already-due reminder windows as sent so cron does
       // not immediately repeat the same appointment details.
       //
-      // When the notice is suppressed (e.g. a dispatch-board move, which
-      // always passes sendNotification:false), we still let the day-before
-      // (24h) reminder fire — silent route reshuffles must not strand the
-      // customer with no message at all. Only the 72h window is marked
-      // covered here: if it is already due for the NEW time, firing it the
-      // instant after a silent move would just echo details the customer
-      // hasn't been told changed. The 24h reminder is left pending so the
-      // next cron tick still delivers the normal day-before reminder. Future
-      // windows stay unsent either way, so reminders follow the new time.
+      // When this path won't send a notice itself (sendNotification:false),
+      // the caller owns the customer message — two sub-cases:
+      //   • coverDueWindows:true — the caller WILL send its own reschedule
+      //     notice (the dispatch route renders + sends, then calls
+      //     markRescheduleNoticeSent). Cover any window already due for the
+      //     new time now, so the 15-min reminder cron can't fire a day-before
+      //     reminder in the gap before the caller's notice lands and
+      //     double-text the customer.
+      //   • otherwise — a truly silent move (e.g. an admin "don't notify"
+      //     reschedule). Leave the 24h window pending so the cron still
+      //     delivers the normal day-before reminder; a silent reshuffle must
+      //     not strand the customer with no message at all. The 72h window
+      //     stays covered when due — firing it the instant after a move would
+      //     just echo details the customer hasn't been told changed.
+      // Future windows stay unsent in every case, so reminders follow the
+      // new appointment time.
       const covered = sendNotification
         ? { alreadyInside72hWindow: false, alreadyInside24hWindow: false }
-        : { ...reminderFlagsCoveredByNotice(newApptTime), alreadyInside24hWindow: false };
+        : coverDueWindows
+          ? reminderFlagsCoveredByNotice(newApptTime)
+          : { ...reminderFlagsCoveredByNotice(newApptTime), alreadyInside24hWindow: false };
+
+      // Only re-arm reminder flags when the start time actually moves. A
+      // duration-only resize (dispatch sends the same start with a new window
+      // end, notifyCustomer:false) keeps the start unchanged — re-arming an
+      // already-fired 24h reminder there would make the next cron tick send a
+      // duplicate. When the start is unchanged we preserve the existing sent
+      // flags; only a real move applies the covered/pending values above.
+      const startMoved = newApptTime.getTime() !== new Date(record.appointment_time).getTime();
       const rescheduleUpdate = {
         appointment_time: newApptTime,
-        reminder_72h_sent: covered.alreadyInside72hWindow,
-        reminder_72h_sent_at: covered.alreadyInside72hWindow ? new Date() : null,
-        reminder_24h_sent: covered.alreadyInside24hWindow,
-        reminder_24h_sent_at: covered.alreadyInside24hWindow ? new Date() : null,
+        reminder_72h_sent: startMoved ? covered.alreadyInside72hWindow : record.reminder_72h_sent,
+        reminder_72h_sent_at: startMoved
+          ? (covered.alreadyInside72hWindow ? new Date() : null)
+          : record.reminder_72h_sent_at,
+        reminder_24h_sent: startMoved ? covered.alreadyInside24hWindow : record.reminder_24h_sent,
+        reminder_24h_sent_at: startMoved
+          ? (covered.alreadyInside24hWindow ? new Date() : null)
+          : record.reminder_24h_sent_at,
         updated_at: new Date(),
       };
       // A reschedule supersedes a still-pending creation confirmation — admin
