@@ -597,10 +597,16 @@ function spreadWindowsAcrossDay(
   };
   const idxByDate = new Map();
   return slots.map((s) => {
-    // Preserve the route-optimized time for slots placed near another
-    // customer — moving them to a different hour would destroy the
-    // routing benefit that earned them the "Nearby" tag.
-    if (s.routeOptimal) return s;
+    // Only re-window synthetic open-capacity slots. They are not tied to a
+    // specific route gap (buildAsapCapacitySlots emits them at preferred
+    // windows purely from tech availability), so any bookable preferred window
+    // is equally valid. Route-derived slots from find-time — both route-optimal
+    // and not — keep their proven-feasible start: find-time only validated the
+    // original gap, and reserveSlot trusts the slotId time while checking only
+    // window overlap, so retiming them could surface a time no feasibility
+    // check ever validated. Inside-lead route slots are instead left for
+    // filterPastSlotsForToday to drop.
+    if (s.capacityType !== 'asap_open') return s;
     const windows = windowsForDate(s.date);
     if (!windows.length) return s; // no bookable window left today — past-filter drops it
     const idx = idxByDate.get(s.date) || 0;
