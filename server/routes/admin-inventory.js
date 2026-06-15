@@ -18,6 +18,7 @@ const {
   costLineFromUsage,
   normalizeQuantityToOz,
 } = require('../services/product-costing');
+const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -1337,6 +1338,25 @@ router.post('/price-sync/hermes-login-discovery', async (req, res, next) => {
         ? `Queued ${queued} vendor login discovery job${queued === 1 ? '' : 's'} for Hermes.`
         : 'No new vendor login discovery jobs needed.',
     });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// POST /price-sync/run — recalculate active tank-mix costs from current
+// products_catalog best_price (syncPricesToEstimator). Preview-first: defaults
+// to a dry run that returns the would-be cost deltas and writes nothing. Pass
+// { apply: true } (or ?apply=true) to commit the recalculated tank-mix costs.
+// =========================================================================
+router.post('/price-sync/run', async (req, res, next) => {
+  try {
+    const apply = req.body?.apply === true || req.query?.apply === 'true';
+    const dryRun = !apply;
+    const result = await syncPricesToEstimator({ dryRun });
+    if (apply) {
+      const appliedBy = req.technicianId || 'unknown';
+      logger.info(`[inventory] Price sync applied by technician ${appliedBy} — ${result.mixes_updated} tank mix(es) updated`);
+    }
+    res.json(result);
   } catch (err) { next(err); }
 });
 
