@@ -136,6 +136,22 @@ describe('estimate slot weekend and expander behavior', () => {
     expect(kept).toEqual(['today-14', 'tomorrow-9']);
   });
 
+  test('spreading re-packs today\'s slots onto bookable windows instead of past ones', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET → earliest bookable 13:01 → 14:00 first
+    const todayStr = '2026-05-26';
+    const slots = Array.from({ length: 3 }, (_, i) => ({
+      slotId: `today-${i}`, date: todayStr, windowStart: '14:00', windowEnd: '15:00',
+      routeOptimal: false, techId: `tech-${i}`,
+    }));
+
+    const spread = slotAvailabilityInternals.spreadWindowsAcrossDay(slots, 60, { now, minimumLeadMinutes: 120 });
+
+    // No same-day window is stamped before the lead-time cutoff…
+    spread.forEach((s) => expect(['14:00', '15:00', '16:00']).toContain(s.windowStart));
+    // …so all genuine same-day capacity survives the past-slot filter.
+    expect(slotAvailabilityInternals.filterPastSlotsForToday(spread, { now, minimumLeadMinutes: 120 })).toHaveLength(3);
+  });
+
   test('past-slot filter also trims a route-optimal window that has already passed today', () => {
     const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET
     const slots = [

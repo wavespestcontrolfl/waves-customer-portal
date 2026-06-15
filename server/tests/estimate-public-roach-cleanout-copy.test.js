@@ -54,19 +54,23 @@ describe('German Roach Cleanout customer-facing estimate copy', () => {
     const prompts = buildEstimateAskPrompts([], [germanRoachItem], null, false);
     expect(prompts).toEqual([
       'How do you get rid of German roaches?',
-      'How many visits will I need?',
+      'How long until the roaches are gone?',
       'Are pets and kids safe?',
       'When am I charged?',
     ]);
     // German-roach prompts replace the generic ant chip.
     expect(prompts).not.toContain('How do you handle ants?');
+    // Both specialty prompts carry the "roach" keyword so the Ask Waves
+    // fallback routes them to the pest/roach answer branch.
+    expect(prompts[0].toLowerCase()).toContain('roach');
+    expect(prompts[1].toLowerCase()).toContain('roach');
   });
 
   test('German Roach detected by name (no service key) still gets specialty prompts', () => {
     const prompts = buildEstimateAskPrompts([], [{ name: 'German Roach Cleanout — 3 Visit Program', price: 450 }], null, false);
     expect(prompts.slice(0, 2)).toEqual([
       'How do you get rid of German roaches?',
-      'How many visits will I need?',
+      'How long until the roaches are gone?',
     ]);
   });
 

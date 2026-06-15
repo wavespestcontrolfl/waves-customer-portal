@@ -1054,8 +1054,11 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
     || recurringList.some((s) => /german\s*roach/i.test(s?.name || s?.label || s?.service || ''));
   const hasPestAny = !!pestRecurring || hasPestOneTime || hasGermanRoach;
   if (hasGermanRoach) {
+    // Both carry the "roach" keyword so the Ask Waves fallback routes them to
+    // the pest/roach answer branch (the multi-visit cleanout copy), not the
+    // generic scheduling or catch-all response.
     servicePrompts.push('How do you get rid of German roaches?');
-    servicePrompts.push('How many visits will I need?');
+    servicePrompts.push('How long until the roaches are gone?');
   } else if (hasPestAny) {
     servicePrompts.push('How do you handle ants?');
   }

@@ -651,6 +651,9 @@ function summarizeSupportContext(context = {}, question = '') {
 
 function treatmentApproachForQuestion(question = '') {
   const q = cleanText(question).toLowerCase();
+  if (/\b(roach|roaches|cockroach|cockroaches)\b/.test(q)) {
+    return 'For German roaches, the cleanout runs as a multi-visit program — each visit targets the live population and the next generation to break the breeding cycle, with prep guidance so the treatment holds. The number of visits is shown on this estimate.';
+  }
   if (/\bant|ants\b/.test(q)) {
     return 'For ants, the goal is to reduce exterior entry pressure, treat trails and nesting zones when found, and support interior activity when it is included or needed.';
   }
@@ -761,7 +764,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
       : `I do not see lawn care on this estimate. Call or text Waves at ${phone} if you want it added.`;
   }
 
-  if (/\b(pest|bug|roach|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
+  if (/\b(pest|bug|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
     const pest = findService(context, /pest|roach|ant|spider|perimeter/i);
     const activeIngredients = activeIngredientsFromSupport(context, question);
     return pest
@@ -849,7 +852,7 @@ async function answerEstimateQuestion({
     };
   }
 
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
       && supportRows(context).length) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),

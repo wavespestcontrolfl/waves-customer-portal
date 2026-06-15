@@ -575,19 +575,37 @@ function slotWindowFitsDay(windowStart, windowEnd) {
 // of route optimization. Skips noon for lunch.
 const PREFERRED_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
 
-function spreadWindowsAcrossDay(slots, durationMinutes = DEFAULT_OPTS.durationMinutes) {
+function spreadWindowsAcrossDay(
+  slots,
+  durationMinutes = DEFAULT_OPTS.durationMinutes,
+  { now = new Date(), minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes } = {},
+) {
   if (!Array.isArray(slots) || slots.length <= 1) return slots;
-  const windows = PREFERRED_WINDOWS.filter((win) =>
+  const fittingWindows = PREFERRED_WINDOWS.filter((win) =>
     slotWindowFitsDay(win, addMinutesToHHMM(win, durationMinutes)));
-  if (!windows.length) return slots;
-  let nonOptimalIdx = 0;
+  if (!fittingWindows.length) return slots;
+  // Per-date rotation. On today's date, drop windows already past or inside
+  // the booking lead time so genuine same-day capacity re-packs onto the
+  // soonest bookable windows (e.g. 14:00/15:00) rather than being stamped to
+  // 09:00/10:00 — where the downstream past-slot filter would then discard it
+  // and same-day availability would vanish entirely.
+  const windowsForDate = (date) => {
+    const earliest = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
+    return earliest <= 0
+      ? fittingWindows
+      : fittingWindows.filter((win) => timeToMinutes(win) >= earliest);
+  };
+  const idxByDate = new Map();
   return slots.map((s) => {
     // Preserve the route-optimized time for slots placed near another
     // customer — moving them to a different hour would destroy the
     // routing benefit that earned them the "Nearby" tag.
     if (s.routeOptimal) return s;
-    const win = windows[nonOptimalIdx % windows.length];
-    nonOptimalIdx += 1;
+    const windows = windowsForDate(s.date);
+    if (!windows.length) return s; // no bookable window left today — past-filter drops it
+    const idx = idxByDate.get(s.date) || 0;
+    idxByDate.set(s.date, idx + 1);
+    const win = windows[idx % windows.length];
     return {
       ...s,
       windowStart: win,
@@ -956,7 +974,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       minimumLeadMinutes: opts.minimumLeadMinutes,
     });
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
-    const spread = spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes);
+    const spread = spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes });
     const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
     const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
@@ -1015,7 +1033,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
   const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
-  const spread = spreadWindowsAcrossDay(sortedPool, serviceProfile.durationMinutes);
+  const spread = spreadWindowsAcrossDay(sortedPool, serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes });
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
   // more before choosing the final customer-facing list.
