@@ -17,18 +17,6 @@ const WDO_CONSTRUCTION_OPTIONS = [
   'Manufactured / Mobile Home',
 ];
 
-export function describeStructure(profile = {}) {
-  const parts = [];
-  if (profile.stories) parts.push(`${profile.stories}-story`);
-  const cm = clean(profile.constructionMaterial || profile.construction_material).toLowerCase();
-  if (/(block|masonry|concrete|\bcb\b|cbs|cmu)/.test(cm)) parts.push('concrete block / masonry');
-  else if (/(manufactured|mobile|modular)/.test(cm)) parts.push('manufactured / mobile');
-  else if (/(metal|steel|aluminum)/.test(cm)) parts.push('metal frame');
-  else if (/(^|[\W_])wood(?:en)?([\W_]|$)|(^|[\W_])wood[_\s-]*frame([\W_]|$)|^frame$/.test(cm)) parts.push('wood frame');
-  const s = `${parts.join(' ')} single-family residential structure`.replace(/\s+/g, ' ').trim();
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 export function describeConstructionType(profile = {}) {
   const candidates = [
     profile.constructionMaterial,
@@ -41,7 +29,7 @@ export function describeConstructionType(profile = {}) {
   for (const candidate of candidates) {
     if (WDO_CONSTRUCTION_OPTIONS.includes(candidate)) return candidate;
     const lower = candidate.toLowerCase();
-    if (/\b(cmu|cbs|cb|concrete\s+masonry|masonry\s+unit|masonry|block|concrete\s+block)\b/.test(lower)) {
+    if (/\b(cmu|cbs|cb|concrete\s+masonry|masonry\s+unit|masonry|block|concrete\s+block|brick)\b/.test(lower)) {
       return 'CMU / Concrete Masonry Unit';
     }
     if (/\b(manufactured|mobile|modular)\b/.test(lower)) return 'Manufactured / Mobile Home';
@@ -65,9 +53,10 @@ export function applyProfileToWdoFindings(prev, profile, { overwrite = false } =
   };
 
   if (profile.squareFootage) set('structure_sqft', String(profile.squareFootage));
-  if (profile.stories || has(profile.constructionMaterial) || has(profile.construction_material)) {
-    set('structures_inspected', describeStructure(profile));
-  }
+  // structures_inspected is the FDACS list of structures actually inspected
+  // (main home, attached garage, shed…) and is entered by the tech — the
+  // property profile only knows construction material, which belongs in the
+  // separate structure_type dropdown. Do not derive structures_inspected here.
   set('structure_type', describeConstructionType(profile));
 
   const ft = clean(profile.foundationType).toLowerCase();

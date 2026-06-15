@@ -314,7 +314,7 @@ function normalizeWdoConstructionSelection(value, propertyProfile = null) {
   const mapCandidate = (candidate) => {
     if (WDO_CONSTRUCTION_OPTIONS.includes(candidate)) return candidate;
     const lower = candidate.toLowerCase();
-    if (/\b(cmu|cbs|cb|concrete\s+masonry|masonry\s+unit|masonry|block|concrete\s+block)\b/.test(lower)) {
+    if (/\b(cmu|cbs|cb|concrete\s+masonry|masonry\s+unit|masonry|block|concrete\s+block|brick)\b/.test(lower)) {
       return 'CMU / Concrete Masonry Unit';
     }
     if (/\b(manufactured|mobile|modular)\b/.test(lower)) return 'Manufactured / Mobile Home';
