@@ -192,6 +192,18 @@ describe('social content studio', () => {
     expect(Studio.serviceIntentKeywords({ service: 'mosquito' })).not.toContain('shrub');
   });
 
+  test('httpUrlOrNull accepts only http(s) absolute URLs', () => {
+    expect(Studio.httpUrlOrNull('https://example.com/post/123')).toBe('https://example.com/post/123');
+    expect(Studio.httpUrlOrNull('http://example.com')).toBe('http://example.com');
+    // XSS / non-web schemes and junk fail closed to null.
+    expect(Studio.httpUrlOrNull('javascript:alert(1)')).toBeNull();
+    expect(Studio.httpUrlOrNull('data:text/html,<script>')).toBeNull();
+    expect(Studio.httpUrlOrNull('/relative/path')).toBeNull();
+    expect(Studio.httpUrlOrNull('not a url')).toBeNull();
+    expect(Studio.httpUrlOrNull('')).toBeNull();
+    expect(Studio.httpUrlOrNull(null)).toBeNull();
+  });
+
   test('normalizePublishMode fails closed: invalid mode → draft, blank → default', () => {
     expect(Studio.normalizePublishMode('publish')).toBe('publish');
     expect(Studio.normalizePublishMode('Draft ')).toBe('draft');           // trim + lowercase

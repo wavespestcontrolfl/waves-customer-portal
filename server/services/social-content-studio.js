@@ -269,6 +269,21 @@ function cleanText(value, max = 500) {
     .slice(0, max);
 }
 
+// Competitor URLs are persisted then rendered as <a href> in the admin UI, and
+// this router only requires tech/admin — so a lower-privileged actor could
+// otherwise store a javascript:/data: URL another admin clicks. Accept only
+// http(s) absolute URLs at the storage boundary; everything else becomes null.
+function httpUrlOrNull(value, max = 1000) {
+  const cleaned = cleanText(value, max);
+  if (!cleaned) return null;
+  try {
+    const parsed = new URL(cleaned);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? cleaned : null;
+  } catch {
+    return null;
+  }
+}
+
 function firstSentence(value, max = 220) {
   const text = cleanText(value, max * 2);
   if (!text) return '';
@@ -1325,33 +1340,29 @@ async function ensureFastestRisersSeeded() {
         created_at: new Date(),
         updated_at: new Date(),
       })
+      // Insert-only: never .merge() over an existing row. Re-running this must
+      // not clobber admin edits to a seeded profile (rank/notes/active) — it
+      // only backfills profiles that don't exist yet.
       .onConflict('company_name')
-      .merge({
-        pct_rank: profile.pctRank,
-        revenue_rank: profile.revenueRank,
-        growth_pct: profile.growthPct,
-        city: profile.city,
-        state: profile.state,
-        source_label: 'PCT 2026 Top 100 poster',
-        strategic_notes: JSON.stringify(profile.strategicNotes || []),
-        active: true,
-        updated_at: new Date(),
-      });
+      .ignore();
   }
 }
 
 async function listCompetitorSwipeFile() {
   const hasProfiles = await hasTable('competitor_social_profiles');
   const hasPosts = await hasTable('competitor_social_posts');
-  if (hasProfiles) await ensureFastestRisersSeeded();
-
+  // Read-only endpoint: never write here. Seeding runs only on studio writes
+  // (createCompetitorPost, gated by requireStudioEnabled), so the kill switch
+  // truly blocks all studio DB writes. Until a row exists, fall back to the
+  // in-memory seed list for display.
   let profiles = FASTEST_RISER_PROFILES;
   if (hasProfiles) {
-    profiles = await db('competitor_social_profiles')
+    const rows = await db('competitor_social_profiles')
       .where({ active: true })
       .select('*')
       .orderBy('growth_pct', 'desc')
       .limit(50);
+    if (rows.length) profiles = rows;
   }
 
   let posts = [];
@@ -1405,8 +1416,8 @@ async function createCompetitorPost(input) {
       profile_id: profile?.id || null,
       company_name: companyName,
       platform,
-      profile_url: cleanText(input.profileUrl, 1000) || null,
-      post_url: cleanText(input.postUrl, 1000) || null,
+      profile_url: httpUrlOrNull(input.profileUrl),
+      post_url: httpUrlOrNull(input.postUrl),
       post_date: input.postDate || null,
       topic: cleanText(input.topic, 180) || null,
       hook_type: cleanText(input.hookType, 80) || null,
@@ -1443,6 +1454,7 @@ module.exports = {
   createCompetitorPost,
   createReviewGraphic,
   engagementScore,
+  httpUrlOrNull,
   getCampaignContext,
   listCompetitorSwipeFile,
   listAutonomousRuns,

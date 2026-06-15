@@ -36,6 +36,20 @@ const D = {
   inputBorder: "#D4D4D8",
 };
 
+// Defense-in-depth: the server already rejects non-http(s) competitor URLs at
+// the storage boundary, but never render a stored URL as an href without
+// re-checking the scheme — guards any legacy/edited row against javascript:/
+// data: links.
+function safeHttpHref(url) {
+  if (typeof url !== "string") return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -1509,8 +1523,8 @@ function CompetitorSwipeTab({ showToast }) {
                     {post.why_it_worked}
                   </div>
                 )}
-                {post.post_url && (
-                  <a href={post.post_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, marginTop: 8, display: "inline-block" }}>
+                {safeHttpHref(post.post_url) && (
+                  <a href={safeHttpHref(post.post_url)} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, marginTop: 8, display: "inline-block" }}>
                     Open post
                   </a>
                 )}
