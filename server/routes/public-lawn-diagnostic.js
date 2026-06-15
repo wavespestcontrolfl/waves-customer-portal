@@ -144,9 +144,15 @@ function validateQuoteRequest(body = {}) {
 
 async function loadSentDiagnostic(token) {
   if (!FULL_TOKEN_RE.test(String(token || ''))) return null;
-  const row = await db('lawn_diagnostics').where({ report_token: token, status: 'sent' }).first();
+  const row = await db('lawn_diagnostics')
+    .where({ report_token: token, status: 'sent' })
+    .whereNotNull('report_expires_at')
+    .where('report_expires_at', '>', db.fn.now())
+    .first();
   if (!row) return null;
-  if (row.report_expires_at && new Date(row.report_expires_at).getTime() < Date.now()) return null;
+  // Fail closed: a missing or past expiry is never public (defense in depth if a
+  // row is ever loaded without the DB predicate).
+  if (!row.report_expires_at || new Date(row.report_expires_at).getTime() <= Date.now()) return null;
   return row;
 }
 

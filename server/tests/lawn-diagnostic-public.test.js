@@ -7,6 +7,7 @@ function builder(table) {
   const b = {
     where: () => b,
     whereNull: () => b,
+    whereNotNull: () => b,
     first: () => Promise.resolve(table === 'lawn_diagnostics' ? mockDiagnosticRow : null),
     insert: (obj) => (table === 'leads' ? mockLeadInsert(obj) : { returning: () => Promise.resolve([{ id: 'x' }]) }),
     update: () => Promise.resolve(mockUpdateResult),
@@ -212,6 +213,14 @@ describe('GET /api/public/lawn-diagnostic/:token', () => {
 
   test('404s an expired report', async () => {
     mockDiagnosticRow = sentDiagnostic({ report_expires_at: new Date(Date.now() - 1000).toISOString() });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/public/lawn-diagnostic/${TOKEN}`);
+      expect(res.status).toBe(404);
+    });
+  });
+
+  test('fails closed when expiry is missing (null)', async () => {
+    mockDiagnosticRow = sentDiagnostic({ report_expires_at: null });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/api/public/lawn-diagnostic/${TOKEN}`);
       expect(res.status).toBe(404);
