@@ -50,7 +50,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
         slabSqFt: { type: 'number', description: 'Optional Pre-Slab Termiticide slab sqft override' },
         services: {
           type: 'object',
-              description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"enhanced"|"premium" }. Mosquito: { tier: "seasonal9"|"monthly12" }. Termite bait: { system, monitoringTier, measurements: { footprintSqFt, perimeterLF } }. Trenching: { productKey, applicationRate, trenchDepthFt, warrantyTier, labelConfirmed, measurements: { perimeterLF, concreteLF, dirtLF, concretePct } }. Bora-Care: { measurements: { atticSqFt } }. Pre-Slab Termiticide: { productKey, measurements: { slabSqFt }, volumeDiscount, includeWarrantyExtended, labelConfirmed }.',
+              description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"standard"|"enhanced"|"premium", lawnFreq: 4|6|9|12 }. Mosquito: { tier: "seasonal9"|"monthly12" }. Termite bait: { system, monitoringTier, measurements: { footprintSqFt, perimeterLF } }. Trenching: { productKey, applicationRate, trenchDepthFt, warrantyTier, labelConfirmed, measurements: { perimeterLF, concreteLF, dirtLF, concretePct } }. Bora-Care: { measurements: { atticSqFt } }. Pre-Slab Termiticide: { productKey, measurements: { slabSqFt }, volumeDiscount, includeWarrantyExtended, labelConfirmed }.',
           properties: {
             pest: { type: 'object' },
             lawn: { type: 'object' },

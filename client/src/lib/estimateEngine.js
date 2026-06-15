@@ -1588,9 +1588,10 @@ export function calculateEstimate(inputs) {
     const selectedFreq = resolveLawnFreq(lawnFreq);
 
     const freqs = [
-      { name: 'Standard', v: 6 },
-      { name: 'Enhanced', v: 9 },
-      { name: 'Premium', v: 12 },
+      { name: '4 Applications', v: 4 },
+      { name: '6 Applications', v: 6 },
+      { name: '9 Applications', v: 9 },
+      { name: '12 Applications', v: 12 },
     ];
     // Same complexity-minutes the server applies to the lawn cost floor, so the
     // preview matches the server-authoritative price (Decision #2).

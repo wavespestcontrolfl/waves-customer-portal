@@ -57,7 +57,7 @@ describe('Lawn Pricing V2 DB sync', () => {
     expect(lawn.pricingSource).toBe('COST_FLOOR');
     expect(lawn.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
     expect(lawn.marketAnnual).toBeGreaterThan(lawn.annual);
-    expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
   });
 
   test('DB-loaded estimate applies WaveGuard discounts to Lawn V2 while qualifying for WaveGuard', () => {
