@@ -28,6 +28,15 @@ describe('token health meta checks', () => {
     };
     global.fetch = jest.fn(async (url) => {
       const text = String(url);
+      if (text.includes('/debug_token')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: { is_valid: true, scopes: ['pages_show_list', 'pages_manage_posts', 'instagram_content_publish'] },
+          }),
+        };
+      }
       if (text.includes('/110336442031847?fields=')) {
         return {
           ok: true,
@@ -85,6 +94,7 @@ describe('token health meta checks', () => {
         linkedInstagramUsername: 'wavespestcontrol',
       },
     });
+    expect(result.details.checks.canCreateContent).toBe(true);
     expect(global.fetch).not.toHaveBeenCalledWith(expect.stringContaining('/feed'));
   });
 
@@ -107,6 +117,13 @@ describe('token health meta checks', () => {
     // and the platform false-flags as unhealthy.
     global.fetch = jest.fn(async (url) => {
       const text = String(url);
+      if (text.includes('/debug_token')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { is_valid: true, scopes: ['pages_manage_posts'] } }),
+        };
+      }
       if (text.includes('/110336442031847?fields=')) {
         if (text.includes('tasks')) {
           return {
@@ -140,6 +157,109 @@ describe('token health meta checks', () => {
     expect(result.status).toBe('healthy');
     expect(result.lastError).toBeNull();
     expect(global.fetch).not.toHaveBeenCalledWith(expect.stringContaining('tasks'));
+  });
+
+  test('facebook health errors when the token lacks the pages_manage_posts scope', async () => {
+    // Page resolves + IG links correctly, but the token cannot publish.
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { is_valid: true, scopes: ['pages_show_list', 'pages_read_engagement'] } }),
+        };
+      }
+      if (text.includes('/110336442031847?fields=')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: '110336442031847',
+            name: 'Waves Pest Control',
+            instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+
+    const result = await tokenHealth.checkSingle('facebook');
+
+    expect(result.status).toBe('error');
+    expect(result.lastError).toMatch(/pages_manage_posts/);
+    expect(result.details.checks.canCreateContent).toBe(false);
+  });
+
+  test('facebook health treats a granular-only pages_manage_posts grant as publish-capable', async () => {
+    // FB may report a permission only under granular_scopes — must not false-flag.
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              is_valid: true,
+              scopes: ['pages_show_list'],
+              granular_scopes: [{ scope: 'pages_manage_posts', target_ids: ['110336442031847'] }],
+            },
+          }),
+        };
+      }
+      if (text.includes('/110336442031847?fields=')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: '110336442031847',
+            name: 'Waves Pest Control',
+            instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+
+    const result = await tokenHealth.checkSingle('facebook');
+
+    expect(result.status).toBe('healthy');
+    expect(result.details.checks.canCreateContent).toBe(true);
+  });
+
+  test('facebook health stays healthy with unknown capability when scopes are unavailable', async () => {
+    // Some token introspection responses omit `scopes` — never false-flag then.
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { is_valid: true } }), // no scopes array
+        };
+      }
+      if (text.includes('/110336442031847?fields=')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: '110336442031847',
+            name: 'Waves Pest Control',
+            instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+
+    const result = await tokenHealth.checkSingle('facebook');
+
+    expect(result.status).toBe('healthy');
+    expect(result.details.checks.canCreateContent).toBeNull();
   });
 
   test('instagram health requires content publishing access', async () => {
