@@ -3303,6 +3303,18 @@ router.put('/:id/status', async (req, res, next) => {
       });
     }
 
+    // Setting no_show belongs to the dispatch action (PUT /admin/dispatch/
+    // :id/status), which runs the source/window guards and the no-show side
+    // effects (customer SMS, tech-status clear, invoice void, missed-
+    // appointment log). Persisting it through this bare status route would
+    // create a partial no-show, so reject the target here.
+    if (toStatus === 'no_show') {
+      return res.status(409).json({
+        error: 'Mark a no-show from the appointment detail sheet, not this action.',
+        code: 'no_show_wrong_route',
+      });
+    }
+
     // Day-of lifecycle guard — same as admin-dispatch PUT /:serviceId/status.
     // en_route / on_site / completed only happen on (or after) the
     // scheduled day; a future-dated job here is a stale tab racing a

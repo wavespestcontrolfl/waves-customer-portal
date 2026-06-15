@@ -1572,6 +1572,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
         } catch (e) { logger.error(`[admin-dispatch] no-show tech_status clear failed: ${e.message}`); }
       }
 
+      // Void any still-open invoice pre-minted for this visit (the
+      // pre-completion / Charge-now path links via invoices.scheduled_service_id)
+      // so billing doesn't chase a service the customer was just told was
+      // missed. Same money-state-safe helper the cancellation branch uses
+      // (skips applied payments / live PaymentIntents); best-effort.
+      try {
+        const InvoiceService = require('../services/invoice');
+        await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
+      } catch (e) { logger.error(`[admin-dispatch] no-show invoice void sweep failed: ${e.message}`); }
+
       // Notify the customer we missed them and invite a reschedule.
       // Best-effort — a Twilio/template failure must not fail the
       // status flip that already committed above.
