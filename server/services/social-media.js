@@ -964,9 +964,15 @@ const SocialMediaService = {
           // more CTA), matching the studio's branding instead of a generic AI
           // image. Square for FB/IG, 4:3 for GBP. Falls back to the normal image
           // path if the card can't be rendered/hosted (renderBrandCardUrl null).
-          const card = { variant: 'blog', title: item.title, excerpt: item.description, cta: 'Read the full guide' };
-          const imageUrl = await renderBrandCardUrl(card, 'square');
-          const gbpImageUrl = imageUrl ? await renderBrandCardUrl(card, 'gbp') : null;
+          // Skip rendering on a dry run — uploading to S3/CDN is a side effect a
+          // dry run must not have (publishToAll won't post anyway).
+          let imageUrl = null;
+          let gbpImageUrl = null;
+          if (!SOCIAL_FLAGS.dryRun) {
+            const card = { variant: 'blog', title: item.title, excerpt: item.description, cta: 'Read the full guide' };
+            imageUrl = await renderBrandCardUrl(card, 'square');
+            gbpImageUrl = imageUrl ? await renderBrandCardUrl(card, 'gbp') : null;
+          }
           const result = await this.publishToAll({
             title: item.title,
             description: item.description,
