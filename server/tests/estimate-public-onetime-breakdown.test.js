@@ -8,6 +8,7 @@ const {
   buildAcceptSuccessPayload,
   acceptedOneTimeChoiceListForEstimate,
   acceptanceServiceLists,
+  applySelectedLawnTierToEstimateData,
   applySelectedTreeShrubTierToEstimateData,
   assertExistingAppointmentUpdateApplied,
   buildEstimateAskQueryLog,
@@ -23,6 +24,7 @@ const {
   isEstimateAskAnswerable,
   isAnnualPrepayEligibleServiceMix,
   isStructuralOneTimeOnlyEstimate,
+  lawnFrequenciesFromResultStats,
   isReservationHeldAppointment,
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
@@ -1640,6 +1642,58 @@ describe('public estimate one-time breakdown', () => {
       amount: 99,
       waivedWithPrepay: true,
     }));
+  });
+
+  test('lawn-only public frequencies include and preserve 4-application basic tier', () => {
+    const estData = {
+      result: {
+        results: {
+          lawn: [
+            { tier: 'basic', label: '4 Applications', v: 4, mo: 80, ann: 960, pa: 240, recommended: true },
+            { tier: 'standard', label: '6 Applications', v: 6, mo: 90, ann: 1080, pa: 180 },
+            { tier: 'enhanced', label: '9 Applications', v: 9, mo: 105, ann: 1260, pa: 140 },
+            { tier: 'premium', label: '12 Applications', v: 12, mo: 120, ann: 1440, pa: 120 },
+          ],
+        },
+        recurring: {
+          services: [
+            { service: 'lawn_care', name: 'Lawn Care', mo: 80, perTreatment: 240, visitsPerYear: 4 },
+          ],
+        },
+      },
+    };
+
+    const frequencies = lawnFrequenciesFromResultStats(estData);
+    expect(frequencies.map((frequency) => frequency.key)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
+    expect(frequencies[0]).toMatchObject({
+      key: 'basic',
+      label: 'Quarterly',
+      serviceCategory: 'lawn_care',
+      serviceTierKey: 'basic',
+      monthly: 80,
+      annual: 960,
+      perTreatment: 240,
+      visitsPerYear: 4,
+      perServiceTreatments: [
+        expect.objectContaining({ service: 'lawn_care', perTreatment: 240, visitsPerYear: 4 }),
+      ],
+    });
+
+    const nextData = applySelectedLawnTierToEstimateData(estData, frequencies[0]);
+    expect(nextData.result.recurring.services[0]).toMatchObject({
+      service: 'lawn_care',
+      serviceKey: 'lawn_care_quarterly',
+      frequency: 'quarterly',
+      tier: 'basic',
+      visitsPerYear: 4,
+      perTreatment: 240,
+    });
+    expect(nextData.result.results.lawn.map((row) => ({ tier: row.tier, selected: row.selected }))).toEqual([
+      { tier: 'basic', selected: true },
+      { tier: 'standard', selected: false },
+      { tier: 'enhanced', selected: false },
+      { tier: 'premium', selected: false },
+    ]);
   });
 
   test('public pricing bundle exposes waived WaveGuard setup for termite bait stations', async () => {

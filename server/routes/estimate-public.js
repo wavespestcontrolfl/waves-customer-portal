@@ -8551,30 +8551,26 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
     });
 }
 
-// Lawn care tier → cadence. The lawn engine produces 6/9/12-visit tiers
-// (Standard/Enhanced/Premium); customers see them as cadences, matching the
-// house convention (6=Bi-monthly, 9=Every 6 weeks, 12=Monthly).
+// Lawn care tier → cadence. The lawn engine produces 4/6/9/12-visit tiers
+// (Basic/Standard/Enhanced/Premium); customers see them as cadences, matching
+// the house convention (4=Quarterly, 6=Bi-monthly, 9=Every 6 weeks, 12=Monthly).
 function lawnTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
   const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
   if (raw.includes('premium') || visits === 12) return 'premium';
   if (raw.includes('enhanced') || visits === 9) return 'enhanced';
   if (raw.includes('standard') || visits === 6) return 'standard';
-  // Basic (4 visits) is the hidden manager-only tier — keep it DISTINCT from
-  // standard so the customer-cadence whitelist drops it instead of aliasing it
-  // onto the 6-visit Standard slot (which would surface the cheaper 4-visit
-  // price as "Bi-monthly" while accept re-stamps to 6 visits).
   if (raw.includes('basic') || visits === 4) return 'basic';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
-const LAWN_CADENCE_LABEL = { standard: 'Bi-monthly', enhanced: 'Every 6 weeks', premium: 'Monthly' };
+const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: 'Every 6 weeks', premium: 'Monthly' };
 
 // Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
 // Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
 // estimates (when lawn is the sole recurring service); mixed bundles price
-// lawn inside the pest cadence. Pricing is unchanged — the 6/9/12 cost-floor
-// numbers, relabeled as Bi-monthly / Every 6 weeks / Monthly.
+// lawn inside the pest cadence. Pricing is unchanged — the 4/6/9/12 cost-floor
+// numbers, relabeled as Quarterly / Bi-monthly / Every 6 weeks / Monthly.
 function lawnFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];
@@ -8583,7 +8579,7 @@ function lawnFrequenciesFromResultStats(estData = {}) {
   return rows
     .map((row) => {
       const tierKey = lawnTierKey(row);
-      if (!['standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
+      if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
       seen.add(tierKey);
       const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
       const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
@@ -8648,7 +8644,7 @@ function lawnFrequenciesFromResultStats(estData = {}) {
     })
     .filter(Boolean)
     .sort((a, b) => {
-      const order = { standard: 0, enhanced: 1, premium: 2 };
+      const order = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
 }
@@ -8918,6 +8914,7 @@ function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) 
 // established (bi_monthly / every_6_weeks / monthly) so the accepted recurring
 // line rides the proven downstream scheduling + billing plumbing.
 const LAWN_CADENCE_RUNTIME = {
+  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly', visitsPerYear: 4 },
   standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 },
   enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 weeks', visitsPerYear: 9 },
   premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
@@ -8988,7 +8985,7 @@ function markSelectedLawnTierRows(rows = [], selectedTierKey = '') {
   const normalizedSelected = String(selectedTierKey || '').trim().toLowerCase();
   return rows.map((row) => {
     const tierKey = lawnTierKey(row);
-    if (!['standard', 'enhanced', 'premium'].includes(tierKey)) return row;
+    if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey)) return row;
     return { ...row, selected: tierKey === normalizedSelected, isSelected: tierKey === normalizedSelected };
   });
 }
