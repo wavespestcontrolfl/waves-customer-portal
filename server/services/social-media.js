@@ -58,10 +58,13 @@ const SOCIAL_FLAGS = {
 const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 
 function normalizePublishChannels(channels) {
-  // Omitted (undefined/null/not an array) → default to all platforms. An
-  // EXPLICIT list fails closed: an all-invalid or empty list resolves to no
-  // platforms, so a typo or stale client can't accidentally blast everywhere.
-  if (channels == null || !Array.isArray(channels)) return new Set(PUBLISH_PLATFORMS);
+  // ONLY an omitted value (undefined/null) defaults to all platforms. Any
+  // EXPLICIT value fails closed: a non-array (a typo/stale client sending
+  // "facebook" instead of ["facebook"]) and an all-invalid/empty list both
+  // resolve to NO platforms — never "all" — so a malformed filter can't blast
+  // everywhere.
+  if (channels == null) return new Set(PUBLISH_PLATFORMS);
+  if (!Array.isArray(channels)) return new Set();
   const selected = channels
     .map((channel) => String(channel || '').trim().toLowerCase())
     .filter((channel) => PUBLISH_PLATFORMS.includes(channel));
@@ -69,10 +72,12 @@ function normalizePublishChannels(channels) {
 }
 
 function normalizeGbpLocationIds(locationIds) {
-  // Omitted → null = all GBP locations (the default). An EXPLICIT list fails
-  // closed: all-invalid/empty yields an empty set, so no GBP location is
+  // ONLY an omitted value (undefined/null) → null = all GBP locations (the
+  // default). Any EXPLICIT value fails closed: a non-array (e.g. "sarasota")
+  // and an all-invalid/empty list both yield an empty set — no GBP location is
   // posted to rather than every one of them.
-  if (locationIds == null || !Array.isArray(locationIds)) return null;
+  if (locationIds == null) return null;
+  if (!Array.isArray(locationIds)) return new Set();
   const valid = new Set(WAVES_LOCATIONS.map((loc) => loc.id));
   const selected = locationIds
     .map((id) => String(id || '').trim())
@@ -1198,5 +1203,7 @@ module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.postToGBP = postToGBP;
 module.exports.isGbpMediaError = isGbpMediaError;
+module.exports.normalizePublishChannels = normalizePublishChannels;
+module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
 module.exports.buildSocialFailureAlert = buildSocialFailureAlert;

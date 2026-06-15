@@ -361,6 +361,23 @@ async function latestAutonomousRun() {
     .first();
 }
 
+// Cadence/claim guard source: like latestAutonomousRun but ALSO counts in-flight
+// 'started' rows. A run inserts its 'started' claim before publishing, so if the
+// process dies after Meta/GBP accepts a post but before the run is marked
+// complete, the leftover 'started' row still blocks the next tick from
+// re-publishing a duplicate (with a fresh source_guid). A crash *before*
+// publishing only costs one interval of autonomous posting — the safe trade vs.
+// double-posting. (The advisory lock covers genuinely-concurrent runs; this
+// covers a crashed run whose lock was already released.)
+async function latestAutonomousClaim() {
+  if (!(await hasTable('social_content_studio_runs'))) return null;
+  return db('social_content_studio_runs')
+    .where({ run_type: 'autonomous' })
+    .whereIn('status', ['published', 'draft_created', 'dry_run', 'started'])
+    .orderBy('started_at', 'desc')
+    .first();
+}
+
 async function insertAutonomousRun(row) {
   if (!(await hasTable('social_content_studio_runs'))) return null;
   const [inserted] = await db('social_content_studio_runs')
@@ -1081,11 +1098,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
   }
 
   if (!force) {
-    const latest = await latestAutonomousRun();
+    const latest = await latestAutonomousClaim();
     if (latest?.started_at) {
       const elapsedHours = (startedAt.getTime() - new Date(latest.started_at).getTime()) / 36e5;
       if (elapsedHours < AUTONOMOUS_FLAGS.intervalHours) {
-        const reason = `cadence guard: ${elapsedHours.toFixed(1)}h since last autonomous run`;
+        const reason = `cadence guard: ${elapsedHours.toFixed(1)}h since last autonomous run (status=${latest.status})`;
         return { skipped: true, reason, latestRun: latest };
       }
     }
