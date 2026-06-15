@@ -5,13 +5,13 @@ import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
 
-const ESTIMATE_BG = '#FAF8F3';
-const ESTIMATE_BORDER = '#E7E2D7';
-const ESTIMATE_INPUT_BORDER = '#CFE7F5';
-const ESTIMATE_INPUT_BG = '#F8FCFE';
-const ESTIMATE_TEXT = '#1B2C5B';
-const ESTIMATE_MUTED = '#6B7280';
-const ESTIMATE_BUTTON_BG = '#1B2C5B';
+const ESTIMATE_BG = '#FFFFFF';
+const ESTIMATE_BORDER = '#E4E4E7';
+const ESTIMATE_INPUT_BORDER = '#D4D4D8';
+const ESTIMATE_INPUT_BG = '#FFFFFF';
+const ESTIMATE_TEXT = '#09090B';
+const ESTIMATE_MUTED = '#71717A';
+const ESTIMATE_BUTTON_BG = '#09090B';
 
 /**
  * CreateProjectModal — form for creating a Project (inspection or
@@ -63,141 +63,9 @@ const PALETTES = {
     red: '#991B1B',
     accentText: '#fff',
     heading: ESTIMATE_TEXT,
-    headingFont: "'Source Serif 4', Georgia, serif",
-    bodyFont: "'Inter', system-ui, sans-serif",
+    headingFont: "'Roboto', 'Inter', system-ui, sans-serif",
+    bodyFont: "'Roboto', 'Inter', system-ui, sans-serif",
   },
-};
-
-const QUICK_ACTIONS = {
-  wdo_inspection: [
-    {
-      label: 'Clean WDO',
-      title: 'FDACS WDO Inspection Report',
-      findings: {
-        inspection_scope: 'Visible and readily accessible interior areas, attic access, garage, exterior perimeter, and accessible structural components.',
-        wdo_finding: 'No visible signs of WDO observed',
-        previous_treatment_evidence: 'No',
-        treated_at_inspection: 'No',
-        treatment_method: 'Not applicable',
-      },
-      prefix: 'Finding',
-      note: 'No visible evidence of active wood-destroying organisms was observed at the time of inspection.',
-    },
-    {
-      label: 'Inaccessible area',
-      findings: { inaccessible_areas: 'Specific area: \nReason: Obstructed or inaccessible at the time of inspection.' },
-      prefix: 'Limitation',
-      note: 'The listed area was obstructed or inaccessible, so no information on WDO status or WDO damage is provided for that area.',
-    },
-    {
-      label: 'Evidence found',
-      findings: {
-        wdo_finding: 'Visible evidence of WDO observed',
-        wdo_evidence: 'Evidence observed. Add common name, description, and exact location.',
-      },
-      prefix: 'Finding',
-      note: 'Visible evidence of wood-destroying organisms was observed and should be reviewed with the specific organism, description, and location notes.',
-    },
-    {
-      label: 'Treatment noted',
-      findings: {
-        previous_treatment_evidence: 'Yes',
-        previous_treatment_notes: 'Evidence of previous treatment was observed. Add visible treatment indicators and location.',
-      },
-      prefix: 'Treatment',
-      note: 'Evidence of previous treatment was observed. The company that performed that treatment should be contacted for treatment history and warranty information.',
-    },
-  ],
-  termite_inspection: [
-    {
-      label: 'No activity',
-      findings: { termite_type: 'None observed', activity_status: 'No activity' },
-      prefix: 'Finding',
-      note: 'No visible termite activity was observed in the accessible areas inspected today.',
-    },
-    {
-      label: 'Active activity',
-      findings: { activity_status: 'Active infestation' },
-      prefix: 'Finding',
-      note: 'Active termite activity was observed. Treatment should be quoted based on species, location, and extent.',
-    },
-    {
-      label: 'Monitor',
-      prefix: 'Next',
-      note: 'Monitor the noted areas and schedule follow-up if new tubes, frass, wings, or damaged wood appear.',
-    },
-  ],
-  pest_inspection: [
-    {
-      label: 'Light activity',
-      findings: { severity: 'Low' },
-      prefix: 'Finding',
-      note: 'Light pest activity was noted in limited areas. A targeted treatment plan should be sufficient based on today\'s findings.',
-    },
-    {
-      label: 'Sanitation',
-      prefix: 'Condition',
-      note: 'Improve sanitation, storage, or moisture conditions in the noted areas to reduce pest pressure.',
-    },
-    {
-      label: 'Treat entry points',
-      prefix: 'Next',
-      note: 'Focus treatment around entry points, harborage areas, and activity zones identified during the inspection.',
-    },
-  ],
-  flea: [
-    {
-      label: 'Light activity',
-      findings: { evidence_level: 'Low' },
-      prefix: 'Finding',
-      note: 'Light flea activity was documented. Treatment performance depends on treating active areas and keeping vacuuming and pet flea control consistent.',
-    },
-    {
-      label: 'Prep needed',
-      prefix: 'Next',
-      note: 'Customer prep is needed: vacuum floors and furniture edges, wash pet bedding on high heat, and coordinate pet flea prevention with a veterinarian.',
-    },
-    {
-      label: 'Follow-up',
-      prefix: 'Next',
-      note: 'A follow-up may be needed because flea eggs and pupae can continue emerging after the initial treatment cycle.',
-    },
-  ],
-  rodent_exclusion: [
-    {
-      label: 'Entry points',
-      prefix: 'Finding',
-      note: 'Potential rodent entry points were identified and should be sealed after activity is reduced.',
-    },
-    {
-      label: 'Traps set',
-      prefix: 'Action',
-      note: 'Traps were placed in activity zones. Follow-up is needed to check activity and adjust placement.',
-    },
-    {
-      label: 'Exclusion done',
-      prefix: 'Action',
-      note: 'Exclusion work was completed in the accessible areas noted in the report.',
-    },
-  ],
-  bed_bug: [
-    {
-      label: 'Low evidence',
-      findings: { evidence_level: 'Low (few bugs)' },
-      prefix: 'Finding',
-      note: 'Low-level bed bug evidence was observed in the inspected areas.',
-    },
-    {
-      label: 'Prep needed',
-      prefix: 'Next',
-      note: 'Customer prep is needed before the follow-up visit: reduce clutter, launder bedding on high heat, and keep treated rooms accessible.',
-    },
-    {
-      label: '14-day follow-up',
-      prefix: 'Next',
-      note: 'A follow-up visit should be completed in approximately 14 days to reassess activity and treat remaining harborage areas if needed.',
-    },
-  ],
 };
 
 function todayDateInput() {
@@ -237,16 +105,20 @@ function formatCustomerName(customer) {
 // "Jane Doe · (941) 555-0101 · jane@example.com" for the FDACS contact fields.
 function formatCustomerContact(customer) {
   if (!customer) return '';
-  return [formatCustomerName(customer), customer.phone || '', customer.email || '']
+  return [
+    formatCustomerName(customer),
+    customer.phone || customer.phone_number || customer.mobile || '',
+    customer.email || customer.email_address || '',
+  ]
     .filter(Boolean)
     .join(' · ');
 }
 
-// Default structure description from the customer's property type, falling back
-// to single-family residential (the common case / sample report wording).
+// Default structure list for the FDACS "Structures on Property Inspected" field.
 function formatStructuresInspected(customer) {
   const type = String(customer?.property_type || customer?.propertyType || '').toLowerCase();
   if (type.includes('commercial') || type.includes('business')) return 'Commercial structure';
+  if (type.includes('manufactured') || type.includes('mobile')) return 'Manufactured / mobile home';
   return 'Single-family residential structure';
 }
 
@@ -295,6 +167,7 @@ function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
   const allowed = [
     'property_address',
     'structures_inspected',
+    'structure_type',
     'inspection_scope',
     'previous_treatment_evidence',
     'previous_treatment_notes',
@@ -355,6 +228,7 @@ export default function CreateProjectModal({
   // Tracks the most recently requested prefill client so a slow, stale
   // latest-scheduled-service response can't clobber a newer selection.
   const prefillCustomerRef = useRef(null);
+  const autoTitleRef = useRef('');
   // What was last auto-filled into the WDO findings from the selected
   // customer — on a customer change, values still matching this map are
   // cleared so the previous customer's address/contacts never carry over
@@ -551,6 +425,39 @@ export default function CreateProjectModal({
   }, [typeCfg, productCatalog.length]);
 
   useEffect(() => {
+    if (!typeCfg?.findingsFields?.length) return;
+    setFindings(prev => {
+      const next = { ...prev };
+      let changed = false;
+      typeCfg.findingsFields.forEach((field) => {
+        if (!hasMeaningfulValue(field.defaultValue) || hasMeaningfulValue(next[field.key])) return;
+        next[field.key] = field.defaultValue;
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [typeCfg]);
+
+  useEffect(() => {
+    const defaultTitle = hasMeaningfulValue(typeCfg?.defaultTitle) ? typeCfg.defaultTitle : '';
+    setTitle(prev => {
+      if (defaultTitle) {
+        if (!hasMeaningfulValue(prev) || prev === autoTitleRef.current) {
+          autoTitleRef.current = defaultTitle;
+          return defaultTitle;
+        }
+        return prev;
+      }
+      if (autoTitleRef.current && prev === autoTitleRef.current) {
+        autoTitleRef.current = '';
+        return '';
+      }
+      autoTitleRef.current = '';
+      return prev;
+    });
+  }, [typeCfg?.defaultTitle]);
+
+  useEffect(() => {
     if (projectType !== 'wdo_inspection') return;
     if (!selectedCustomer) return;
     // Seamlessly fill address + requested-by + report-sent-to from the picked
@@ -581,19 +488,6 @@ export default function CreateProjectModal({
       ...(hasEpaField && epaRegistration ? { epa_registration: epaRegistration } : {}),
       ...(hasActiveIngredientField && activeIngredient ? { active_ingredient: activeIngredient } : {}),
     }));
-  }
-
-  function appendRecommendation(prefix, text) {
-    const line = `[${prefix}] ${text}`;
-    setRecommendations(prev => prev.trim() ? `${prev.trimEnd()}\n${line}` : line);
-  }
-
-  function applyQuickAction(action) {
-    if (action.findings) {
-      setFindings(prev => ({ ...prev, ...action.findings }));
-    }
-    if (action.note) appendRecommendation(action.prefix || 'Note', action.note);
-    if (action.title && !title.trim()) setTitle(action.title);
   }
 
   function fillWdoAddressFromCustomer() {
@@ -796,9 +690,9 @@ export default function CreateProjectModal({
       role="dialog"
       aria-modal="true"
       style={{
-        position: 'fixed', inset: 0, zIndex: 200, background: isEstimateStyle ? 'rgba(15, 23, 42, 0.42)' : 'rgba(0,0,0,0.6)',
+        position: 'fixed', inset: 0, zIndex: 200, background: isEstimateStyle ? 'rgba(9, 9, 11, 0.42)' : 'rgba(0,0,0,0.6)',
         display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-        overflowY: 'auto', padding: isEstimateStyle ? '28px 0' : '12px 0',
+        overflowY: 'auto', padding: isEstimateStyle ? '24px 0' : '12px 0',
       }}
       onClick={(e) => { if (e.target === e.currentTarget && !saving) onClose?.(); }}
     >
@@ -806,41 +700,42 @@ export default function CreateProjectModal({
         width: '100%', maxWidth: isEstimateStyle ? 720 : 520, margin: '0 12px',
         background: isEstimateStyle ? P.bg : P.card,
         border: `1px solid ${P.border}`,
-        borderRadius: isEstimateStyle ? 16 : 14,
+        borderRadius: isEstimateStyle ? 12 : 14,
         display: 'flex', flexDirection: 'column',
-        boxShadow: isEstimateStyle ? '0 24px 60px rgba(27, 44, 91, 0.22)' : undefined,
+        boxShadow: isEstimateStyle ? '0 24px 60px rgba(9, 9, 11, 0.18)' : undefined,
         overflow: 'hidden',
       }}>
         {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: isEstimateStyle ? '20px 24px' : '14px 16px',
+          padding: isEstimateStyle ? '18px 22px' : '14px 16px',
           borderBottom: `1px solid ${P.border}`,
           background: P.card,
         }}>
           <div>
             <div style={{
-              fontSize: isEstimateStyle ? 12 : 16,
+              fontSize: isEstimateStyle ? 18 : 16,
               fontWeight: 800,
-              color: isEstimateStyle ? P.muted : P.heading,
+              color: P.heading,
               fontFamily: P.bodyFont,
-              letterSpacing: isEstimateStyle ? '0.12em' : 0,
-              textTransform: isEstimateStyle ? 'uppercase' : 'none',
+              letterSpacing: 0,
+              textTransform: 'none',
             }}>
               Create Project Report
             </div>
             <div style={{
-              fontSize: isEstimateStyle ? 30 : 11,
-              color: P.heading,
-              marginTop: isEstimateStyle ? 4 : 2,
-              fontFamily: isEstimateStyle ? P.headingFont : P.bodyFont,
-              fontWeight: isEstimateStyle ? 500 : 400,
-              lineHeight: 1.1,
+              fontSize: isEstimateStyle ? 12 : 11,
+              color: P.muted,
+              marginTop: 3,
+              fontFamily: P.bodyFont,
+              fontWeight: 500,
+              lineHeight: 1.35,
             }}>
-              Inspection or documentation-heavy job
+              {projectType === 'wdo_inspection'
+                ? 'Wood Destroying Organism (WDO) Inspection Report'
+                : 'Inspection or documentation-heavy job'}
             </div>
           </div>
-          {isEstimateStyle && <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />}
           <button
             type="button"
             onClick={() => !saving && onClose?.()}
@@ -853,7 +748,7 @@ export default function CreateProjectModal({
         </div>
 
         {/* Body */}
-        <div style={{ padding: isEstimateStyle ? 24 : 16, display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 18 : 16 }}>
+        <div style={{ padding: isEstimateStyle ? 22 : 16, display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16 }}>
           {/* Restore saved draft */}
           {showDraftPrompt && (
             <div style={{
@@ -1111,12 +1006,6 @@ export default function CreateProjectModal({
                 </div>
               ))}
 
-              <QuickProjectActions
-                projectType={projectType}
-                palette={P}
-                onPick={applyQuickAction}
-              />
-
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                   <label style={{ ...labelStyle, marginBottom: 0 }}>Recommendations / notes</label>
@@ -1161,7 +1050,7 @@ export default function CreateProjectModal({
                     value={recommendations}
                     onChange={(e) => setRecommendations(e.target.value)}
                     rows={6}
-                    placeholder="Tap quick actions, write raw notes, or use AI draft to create the client-facing report sections."
+                    placeholder="Write raw notes, or use AI draft to create the client-facing report sections."
                     style={{ ...inputStyle, resize: 'vertical', minHeight: 132, paddingRight: 44 }}
                   />
                   <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
@@ -1219,7 +1108,7 @@ export default function CreateProjectModal({
               borderRadius: isEstimateStyle ? 10 : 8,
               fontSize: isEstimateStyle ? 14 : 13,
               fontWeight: 700,
-              background: isEstimateStyle ? '#fff' : 'transparent',
+              background: isEstimateStyle ? P.card : 'transparent',
               border: `1px solid ${P.border}`,
               color: P.text, cursor: saving ? 'default' : 'pointer',
             }}
@@ -1240,45 +1129,6 @@ export default function CreateProjectModal({
             }}
           >{saving ? 'Saving…' : 'Save Draft'}</button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function QuickProjectActions({ projectType, palette: P, onPick }) {
-  const actions = QUICK_ACTIONS[projectType] || [];
-  if (!actions.length) return null;
-  return (
-    <div>
-      <label style={{
-        display: 'block',
-        fontSize: 12,
-        fontWeight: 700,
-        color: P.muted,
-        textTransform: 'uppercase',
-        letterSpacing: 1,
-        marginBottom: 6,
-      }}>Quick actions</label>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {actions.map(action => (
-          <button
-            key={action.label}
-            type="button"
-            onClick={() => onPick(action)}
-            style={{
-              padding: '7px 10px',
-              borderRadius: 999,
-              fontSize: 12,
-              fontWeight: 800,
-              background: P.bg,
-              color: P.text,
-              border: `1px solid ${P.border}`,
-              cursor: 'pointer',
-            }}
-          >
-            {action.label}
-          </button>
-        ))}
       </div>
     </div>
   );
@@ -1368,11 +1218,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
         </label>
       </div>
 
-      {queue.length === 0 ? (
-        <div style={{ fontSize: 11, color: P.muted, padding: '10px 0' }}>
-          No photos yet — pick a category, then Camera or Library.
-        </div>
-      ) : (
+      {queue.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {queue.map(item => (
             <div key={item.id} style={{

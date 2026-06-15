@@ -225,6 +225,7 @@ function mergeWdoSuggestions(current, suggestions, overwrite = false) {
   const allowed = [
     "property_address",
     "structures_inspected",
+    "structure_type",
     "inspection_scope",
     "previous_treatment_evidence",
     "previous_treatment_notes",
