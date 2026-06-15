@@ -801,6 +801,14 @@ router.get('/', async (req, res, next) => {
     const productIds = products.map(p => p.id);
     const pricing = productIds.length ? await db('vendor_pricing')
       .whereIn('product_id', productIds)
+      // Hide review placeholders — inactive rows with no price yet (e.g. a Hermes
+      // report pending/rejected in the review queue) — so they don't surface here as
+      // a bogus $0 vendor price (this consumer coerces p.price || 0).
+      .whereNot(function hidePlaceholders() {
+        this.where('vendor_pricing.is_active', false)
+          .whereNull('vendor_pricing.price')
+          .whereNull('vendor_pricing.price_amount');
+      })
       .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
       .select('vendor_pricing.*', 'vendors.name as vendor_name')
       .orderBy('vendor_pricing.price') : [];
@@ -1785,8 +1793,14 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
         if (approval.snapshot_id) pricingUpdate.latest_snapshot_id = approval.snapshot_id;
         if (snapshot?.price_amount != null) pricingUpdate.price_amount = snapshot.price_amount;
         if (snapshot?.price != null) pricingUpdate.price = snapshot.price;
-        if (snapshot?.normalized_unit_price != null) pricingUpdate.normalized_unit_price = snapshot.normalized_unit_price;
-        if (snapshot?.landed_unit_price != null) pricingUpdate.landed_unit_price = snapshot.landed_unit_price;
+        // Apply the approved snapshot's unit costs verbatim — INCLUDING clearing them
+        // when the snapshot has none — so a price-only report can't leave a stale unit
+        // cost behind that then wins best-price ordering (COALESCE landed → normalized
+        // → price). Only when a snapshot is actually being applied.
+        if (snapshot) {
+          pricingUpdate.normalized_unit_price = snapshot.normalized_unit_price ?? null;
+          pricingUpdate.landed_unit_price = snapshot.landed_unit_price ?? null;
+        }
         if (snapshot?.source_type) pricingUpdate.source_type = snapshot.source_type;
         if (snapshot?.price_type) pricingUpdate.price_type = snapshot.price_type;
         if (snapshot?.price_confidence != null) pricingUpdate.price_confidence = snapshot.price_confidence;

@@ -28,11 +28,24 @@ const SOURCE_TYPE = 'hermes_price_report';
 // Hermes logs into vendor accounts, so account pricing is the sensible default.
 const DEFAULT_PRICE_TYPE = 'account';
 const REVIEW_REASON = 'Hermes price report — pending operator review';
+// Cap a single report batch — each item does per-row DB work in its own transaction,
+// so an unbounded batch could tie up a connection for a long time. A scanner splits
+// larger runs across requests.
+const MAX_BATCH_SIZE = 200;
 
 function cleanString(value) {
   if (value == null) return null;
   const s = String(value).trim();
   return s.length ? s : null;
+}
+
+// Bound a value to a legacy column's width so an over-long reported SKU/URL (e.g. a
+// product URL with a long query string) can't fail the insert and lose the price.
+// The snapshot keeps the full source_url; only the legacy vendor_pricing copies are
+// clipped (vendor_sku varchar(50), vendor_product_url varchar(500)).
+function clip(value, max) {
+  const s = cleanString(value);
+  return s == null ? null : s.slice(0, max);
 }
 
 // Strict numeric check: a finite JS number, or a plain decimal string. Rejects
@@ -156,11 +169,16 @@ function classifyAgainstPending(pendingEvents, newPrice, common) {
   // Duplicate detection spans ALL sources (never double-queue a price that's
   // already pending review, whoever queued it).
   const duplicate = rows.find((e) => priceFingerprintMatches(e, newPrice, common));
-  if (duplicate) return { duplicate: true, duplicateEvent: duplicate, supersedeIds: [] };
-  // Supersede only OUR OWN prior Hermes-sourced pending events — never reject a
-  // manual/feed review item (leave those for an operator to resolve).
-  const supersedeIds = rows.filter((e) => e.source_type === SOURCE_TYPE).map((e) => e.id);
-  return { duplicate: false, duplicateEvent: null, supersedeIds };
+  // Supersede our OWN prior Hermes-sourced pending events that are STALE (a price
+  // different from this report). This runs WHETHER OR NOT the report also duplicates
+  // a manual/feed item — otherwise a stale Hermes event left pending could be
+  // approved later and clobber the current price. The fingerprint filter excludes a
+  // matching event (including the duplicate we reuse); manual/feed items are never
+  // touched (we only collect SOURCE_TYPE rows).
+  const supersedeIds = rows
+    .filter((e) => e.source_type === SOURCE_TYPE && !priceFingerprintMatches(e, newPrice, common))
+    .map((e) => e.id);
+  return { duplicate: Boolean(duplicate), duplicateEvent: duplicate || null, supersedeIds };
 }
 
 /**
@@ -203,12 +221,15 @@ function buildCommonPriceFields(parsed, item, mapping) {
   const safe = item && typeof item === 'object' ? item : {};
   return {
     currency: parsed.currency || 'USD',
-    quantity: cleanString(safe.quantity),
+    // Clip scraper-sourced free text to the narrowest column width across the tables
+    // these go into (vendor_pricing + price_snapshots) so an over-long value can't
+    // fail the insert: quantity 50, branch_id 80, branch_name 160.
+    quantity: clip(safe.quantity, 50),
     normalized_unit_price: toPositiveDecimalOrNull(safe.normalized_unit_price),
     landed_unit_price: toPositiveDecimalOrNull(safe.landed_unit_price),
     availability_status: parsed.availabilityStatus,
-    branch_id: cleanString(safe.branch_id),
-    branch_name: cleanString(safe.branch_name),
+    branch_id: clip(safe.branch_id, 80),
+    branch_name: clip(safe.branch_name, 160),
     mapping_confidence: toDecimalOrNull(safe.mapping_confidence)
       ?? (mapping ? toDecimalOrNull(mapping.mapping_confidence) : null),
     price_confidence: toDecimalOrNull(safe.price_confidence),
@@ -230,10 +251,12 @@ function buildSnapshotRow({ parsed, item, mapping, vendorPricingId, change, oldP
     previous_price_amount: oldPrice,
     change_amount: change.changeAmount,
     change_percent: change.changePercent,
-    uom: cleanString(safe.unit),
+    uom: clip(safe.unit, 30),
     source_type: SOURCE_TYPE,
     price_type: parsed.priceType,
-    source_url: parsed.productUrl,
+    // price_snapshots.source_url is varchar(700); a scraped URL with a long query
+    // string would otherwise overflow and fail the insert (losing the price).
+    source_url: clip(parsed.productUrl, 700),
     raw_price_text: cleanString(safe.raw_price_text),
     raw_payload_json: JSON.stringify({ source: SOURCE_TYPE, item: safe }),
     requires_approval: true,
@@ -263,9 +286,10 @@ function buildPendingVendorPricingRow({ parsed, item, mapping }) {
     approval_status: 'pending',
     is_active: false,
     source_type: SOURCE_TYPE,
-    vendor_sku: parsed.vendorSku,
-    vendor_product_url: parsed.productUrl,
-    unit: cleanString(safe.unit),
+    // Legacy columns: vendor_sku varchar(50), vendor_product_url varchar(500), unit varchar(30).
+    vendor_sku: clip(parsed.vendorSku, 50),
+    vendor_product_url: clip(parsed.productUrl, 500),
+    unit: clip(safe.unit, 30),
     ...buildCommonPriceFields(parsed, item, mapping),
   };
 }
@@ -333,6 +357,9 @@ router.post('/report', async (req, res, next) => {
       : (Array.isArray(body.prices) ? body.prices : []);
     if (!items.length) {
       return res.status(400).json({ error: 'items[] (or prices[]) is required' });
+    }
+    if (items.length > MAX_BATCH_SIZE) {
+      return res.status(400).json({ error: `too many items: ${items.length} (max ${MAX_BATCH_SIZE} per request — split into multiple requests)` });
     }
     const topVendorId = cleanString(body.vendor_id);
 
@@ -445,17 +472,9 @@ router.post('/report', async (req, res, next) => {
               'ps.source_type',
             );
           const verdict = classifyAgainstPending(pendingEvents, parsed.price, common);
-          if (verdict.duplicate) {
-            const dup = verdict.duplicateEvent;
-            return {
-              duplicate: true,
-              eventId: dup.id,
-              snapshotId: dup.snapshot_id,
-              vendorPricingId: dup.vendor_pricing_id,
-              oldPrice: dup.old_price_amount != null ? Number(dup.old_price_amount) : null,
-              change,
-            };
-          }
+          // Supersede stale Hermes pending events FIRST — before any duplicate/no-op
+          // early return — so an old Hermes event is invalidated even when this
+          // report duplicates a manual/feed item or matches the live price.
           if (verdict.supersedeIds.length) {
             // Re-check approval_status in the UPDATE itself: between the SELECT
             // above and here an admin may have approved one of these events, so
@@ -470,6 +489,27 @@ router.post('/report', async (req, res, next) => {
                 rejected_at: trx.fn.now(),
                 approval_reason: 'Superseded by a newer Hermes price report',
               });
+          }
+          if (verdict.duplicate) {
+            const dup = verdict.duplicateEvent;
+            // Re-confirm the duplicate is STILL pending — an admin may have approved
+            // or rejected it since our SELECT (admin approve/reject is not covered by
+            // this report's advisory lock). If it's no longer pending, don't report
+            // 'already_queued' against a dead event (which would silently drop this
+            // price); fall through and queue a fresh one.
+            const stillPending = await trx('price_approval_events')
+              .where({ id: dup.id, approval_status: 'pending' })
+              .first();
+            if (stillPending) {
+              return {
+                duplicate: true,
+                eventId: dup.id,
+                snapshotId: dup.snapshot_id,
+                vendorPricingId: dup.vendor_pricing_id,
+                oldPrice: dup.old_price_amount != null ? Number(dup.old_price_amount) : null,
+                change,
+              };
+            }
           }
 
           // No-op a recurring scan that reports the already-live price AND the
@@ -571,6 +611,7 @@ router.post('/report', async (req, res, next) => {
 });
 
 router._test = {
+  clip,
   isNumericInput,
   toPositiveDecimalOrNull,
   approxEqual,

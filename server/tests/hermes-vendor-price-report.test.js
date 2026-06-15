@@ -1,6 +1,7 @@
 const priceWorkerRouter = require('../routes/integrations-vendor-price-worker');
 
 const {
+  clip,
   isNumericInput,
   toPositiveDecimalOrNull,
   approxEqual,
@@ -171,6 +172,60 @@ describe('Hermes vendor price report helpers', () => {
       const verdict = classifyAgainstPending(events, 100, { landed_unit_price: 1.99 });
       expect(verdict.duplicate).toBe(false);
       expect(verdict.supersedeIds).toEqual(['e1']);
+    });
+
+    test('supersedes a stale Hermes event EVEN WHEN the report duplicates a manual item', () => {
+      const events = [
+        { id: 'm1', new_price_amount: '120.00', source_type: 'manual' }, // duplicate of the new price
+        { id: 'h1', new_price_amount: '100.00', source_type: SOURCE_TYPE }, // stale Hermes
+      ];
+      const verdict = classifyAgainstPending(events, 120);
+      expect(verdict.duplicate).toBe(true);
+      expect(verdict.duplicateEvent.id).toBe('m1'); // reuse the manual dup
+      expect(verdict.supersedeIds).toEqual(['h1']); // ...but still kill the stale Hermes one
+    });
+
+    test('keeps a matching Hermes duplicate but supersedes a different stale Hermes event', () => {
+      const events = [
+        { id: 'h1', new_price_amount: '120.00', source_type: SOURCE_TYPE }, // matches → reuse
+        { id: 'h2', new_price_amount: '100.00', source_type: SOURCE_TYPE }, // stale → supersede
+      ];
+      const verdict = classifyAgainstPending(events, 120);
+      expect(verdict.duplicate).toBe(true);
+      expect(verdict.supersedeIds).toEqual(['h2']);
+      expect(verdict.supersedeIds).not.toContain('h1');
+    });
+  });
+
+  describe('clip (legacy column bounds)', () => {
+    test('truncates to width; passes short/blank/null through', () => {
+      expect(clip('abc', 50)).toBe('abc');
+      expect(clip(null, 50)).toBeNull();
+      expect(clip('   ', 50)).toBeNull();
+      expect(clip('x'.repeat(80), 50)).toHaveLength(50);
+    });
+
+    test('buildPendingVendorPricingRow clips an over-long SKU/URL to the legacy widths', () => {
+      const parsed = {
+        vendorId: 'v', productId: 'p', priceType: 'account', availabilityStatus: 'unknown',
+        currency: 'USD', vendorSku: 'S'.repeat(80), productUrl: `https://x.com/p?${'q'.repeat(600)}`,
+      };
+      const row = buildPendingVendorPricingRow({ parsed, item: {}, mapping: null });
+      expect(row.vendor_sku).toHaveLength(50);
+      expect(row.vendor_product_url).toHaveLength(500);
+    });
+
+    test('buildSnapshotRow clips a long source_url + over-long quantity/branch/uom to column widths', () => {
+      const parsed = {
+        vendorId: 'v', productId: 'p', price: 10, priceType: 'account',
+        availabilityStatus: 'unknown', currency: 'USD', productUrl: `https://x.com/p?${'q'.repeat(900)}`,
+      };
+      const item = { quantity: 'Q'.repeat(120), branch_name: 'B'.repeat(220), unit: 'U'.repeat(60) };
+      const row = buildSnapshotRow({ parsed, item, mapping: null, vendorPricingId: 'vp', change: { changeAmount: null, changePercent: null }, oldPrice: null });
+      expect(row.source_url).toHaveLength(700);  // price_snapshots.source_url varchar(700)
+      expect(row.quantity).toHaveLength(50);     // narrowest across tables
+      expect(row.branch_name).toHaveLength(160);
+      expect(row.uom).toHaveLength(30);
     });
   });
 
