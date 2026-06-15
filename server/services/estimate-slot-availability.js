@@ -595,6 +595,22 @@ function spreadWindowsAcrossDay(
       ? fittingWindows
       : fittingWindows.filter((win) => timeToMinutes(win) >= earliest);
   };
+  // Track windows already taken per (date, tech) so a re-windowed ASAP slot
+  // never lands on a window a preserved route slot — or another ASAP slot —
+  // already holds for that tech. Without this, a route slot at the day's first
+  // bookable window collides with the ASAP slot assigned windows[0], producing
+  // a duplicate slotId (and silently dropping the later real option).
+  const occupiedByTechDate = new Map(); // `${date}|${techId}` -> Set(window)
+  const takenKey = (date, techId) => `${date}|${techId || 'unassigned'}`;
+  const noteTaken = (date, techId, win) => {
+    const k = takenKey(date, techId);
+    if (!occupiedByTechDate.has(k)) occupiedByTechDate.set(k, new Set());
+    occupiedByTechDate.get(k).add(win);
+  };
+  // Pre-seed with the windows held by preserved (non-ASAP) slots.
+  for (const s of slots) {
+    if (s.capacityType !== 'asap_open') noteTaken(s.date, s.techId, s.windowStart);
+  }
   const idxByDate = new Map();
   return slots.map((s) => {
     // Only re-window synthetic open-capacity slots. They are not tied to a
@@ -609,9 +625,22 @@ function spreadWindowsAcrossDay(
     if (s.capacityType !== 'asap_open') return s;
     const windows = windowsForDate(s.date);
     if (!windows.length) return s; // no bookable window left today — past-filter drops it
-    const idx = idxByDate.get(s.date) || 0;
-    idxByDate.set(s.date, idx + 1);
-    const win = windows[idx % windows.length];
+    const taken = occupiedByTechDate.get(takenKey(s.date, s.techId));
+    // Rotate per date for cross-tech variety, but skip windows already taken
+    // for this tech so we never produce a duplicate slotId.
+    let win = null;
+    let idx = idxByDate.get(s.date) || 0;
+    for (let i = 0; i < windows.length; i += 1) {
+      const candidate = windows[(idx + i) % windows.length];
+      if (!taken || !taken.has(candidate)) {
+        win = candidate;
+        idx += i + 1;
+        break;
+      }
+    }
+    idxByDate.set(s.date, idx);
+    if (!win) return s; // every window already taken for this tech — leave as-is; dedupe handles residuals
+    noteTaken(s.date, s.techId, win);
     return {
       ...s,
       windowStart: win,
@@ -993,7 +1022,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       minimumLeadMinutes: opts.minimumLeadMinutes,
     });
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
-    const spread = spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    const spread = dedupeSlots(spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
     const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
     const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
@@ -1052,7 +1081,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
   const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
-  const spread = spreadWindowsAcrossDay(sortedPool, serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes });
+  // Re-dedupe after spreading: a re-windowed ASAP slot can land on the same
+  // slotId as a preserved route slot; dedupeSlots keeps the route/nearby one.
+  const spread = dedupeSlots(spreadWindowsAcrossDay(sortedPool, serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
   // more before choosing the final customer-facing list.

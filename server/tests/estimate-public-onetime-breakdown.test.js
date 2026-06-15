@@ -1298,9 +1298,10 @@ describe('public estimate one-time breakdown', () => {
     // German roach classifies as generic pest_control; the roach prompts lead
     // and the generic pest service chips are dropped (billing chips kept), so
     // the React path matches the server-rendered page.
-    expect(payload.askChips.slice(0, 2)).toEqual([
+    expect(payload.askChips.slice(0, 3)).toEqual([
       'How do you get rid of German roaches?',
       'How long until the roaches are gone?',
+      'Are pets and kids safe?',
     ]);
     expect(payload.askChips).not.toContain('How do you handle ants?');
     expect(payload.askChips).not.toContain('Can you treat inside?');

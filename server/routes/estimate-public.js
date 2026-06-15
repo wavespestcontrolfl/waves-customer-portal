@@ -1053,6 +1053,10 @@ const GERMAN_ROACH_ASK_CHIPS = [
 // charged?", "What happens after approval?") are kept.
 const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat inside?'];
 
+// Safety quick-question shown for any chemical service. Shared so the React
+// data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
+const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+
 // Service-aware "Ask Waves" quick-question chips: up to 2 estimate-specific
 // service prompts, a safety chip for any chemical service, then universal
 // billing chips — capped at 4 so the prompt row stays scannable.
@@ -1091,7 +1095,7 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
 
   const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm;
   const prompts = servicePrompts.slice(0, 2);
-  if (hasChemicalService) prompts.push('Are pets and kids safe?');
+  if (hasChemicalService) prompts.push(SAFETY_ASK_CHIP);
   for (const prompt of ['When am I charged?', 'What happens after approval?']) {
     if (prompts.length >= 4) break;
     prompts.push(prompt);
@@ -9581,12 +9585,14 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   const baseAskChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], oneTimeBreakdownItems)]);
   // German Roach Cleanout classifies as generic pest_control, so mergeAskChips
   // would surface the generic ant/treat-inside chips. Lead with the roach
-  // specialty prompts and drop those generic pest service chips — keeping the
-  // billing chips and any other category's chips — so the React path matches
-  // the server-rendered page (deduped, capped at 6).
+  // specialty prompts, keep the safety chip (it's a chemical service), and drop
+  // those generic pest service chips — keeping the billing chips and any other
+  // category's chips — so the React path matches the server-rendered page
+  // (deduped, capped at 6).
   const askChips = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
     ? Array.from(new Set([
         ...GERMAN_ROACH_ASK_CHIPS,
+        SAFETY_ASK_CHIP,
         ...baseAskChips.filter((chip) => !GENERIC_PEST_SERVICE_CHIPS.includes(chip)),
       ])).slice(0, 6)
     : baseAskChips;
