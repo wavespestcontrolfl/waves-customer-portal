@@ -7,6 +7,10 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
+      "schemaVersion": {
+        "type": "number",
+        "const": 2
+      },
       "title": {
         "type": "string",
         "minLength": 1
@@ -229,6 +233,7 @@
           "type": "string",
           "enum": [
             "Article",
+            "BlogPosting",
             "FAQPage",
             "BreadcrumbList",
             "HowTo",
@@ -290,7 +295,6 @@
       "spoke_links",
       "author",
       "technically_reviewed_by",
-      "fact_checked_by",
       "published",
       "updated",
       "technically_reviewed",

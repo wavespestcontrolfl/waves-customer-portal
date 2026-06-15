@@ -141,7 +141,7 @@ function syncDraftPublishTarget(draft, frontmatter) {
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
-const SCHEMA_TYPES = new Set(['Article', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
+const SCHEMA_TYPES = new Set(['Article', 'BlogPosting', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
 const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
 const DEFAULT_SERVICE_AREAS = Object.freeze(['Sarasota', 'Bradenton', 'Venice', 'Lakewood Ranch', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
 const DEFAULT_BLOG_AUTHOR = Object.freeze({
@@ -248,11 +248,10 @@ async function buildFrontmatter(post) {
       fdacs_license: reviewer.fdacs_license || undefined,
       bio_url: reviewer.bio_url,
     } : undefined,
-    fact_checked_by: post.fact_checked_by || undefined,
     published: today,
     updated: today,
     technically_reviewed: reviewer && technicallyReviewedDate ? technicallyReviewedDate : undefined,
-    fact_checked: post.fact_checked_by && factCheckedDate ? factCheckedDate : undefined,
+    fact_checked: factCheckedDate || undefined,
     review_cadence: 'quarterly',
     reading_time_min: post.reading_time_min || estimateReadingTime(post.content),
     hero_image: heroRef ? {
@@ -413,7 +412,6 @@ function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body =
     spoke_links: normalizeArray(frontmatter.spoke_links),
     author: normalizeAuthorBlock(frontmatter.author, DEFAULT_BLOG_AUTHOR),
     technically_reviewed_by: normalizeReviewerBlock(frontmatter.technically_reviewed_by, DEFAULT_TECHNICAL_REVIEWER),
-    fact_checked_by: String(frontmatter.fact_checked_by || 'Virginia Gelser').trim(),
     published,
     updated,
     technically_reviewed: reviewed,
