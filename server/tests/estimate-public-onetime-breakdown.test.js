@@ -1277,6 +1277,35 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.askChips).not.toContain('What products do you use?');
   });
 
+  test('German Roach Cleanout contract surfaces roach specialty chips, not generic ant chips', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-german-roach-askchips-test',
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 450,
+            items: [{ service: 'german_roach', name: 'German Roach Cleanout — 3 Visit Program', price: 450, visits: 3 }],
+          },
+          recurring: { services: [] },
+        },
+      },
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 450,
+      waveguard_tier: 'Bronze',
+    });
+
+    // German roach classifies as generic pest_control; without the specialty
+    // prepend the React path would only show the ant/billing chips. The React
+    // surface shows up to 6 chips, so the roach prompts lead and the generic
+    // pest chips may follow.
+    expect(payload.askChips.slice(0, 2)).toEqual([
+      'How do you get rid of German roaches?',
+      'How long until the roaches are gone?',
+    ]);
+    expect(payload.askChips.length).toBeLessThanOrEqual(6);
+  });
+
   test('phase 0 render flags do not expose WaveGuard setup or pest add-ons for one-time-only quotes', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-onetime-guard-test',

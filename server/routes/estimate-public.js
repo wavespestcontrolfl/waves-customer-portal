@@ -1029,6 +1029,16 @@ function germanRoachVisitPhrase(visits) {
   return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
 }
 
+// German-roach specialty Ask Waves prompts. Both carry the "roach" keyword so
+// the Ask Waves fallback routes them to the pest/roach answer branch (the
+// multi-visit cleanout copy), not the generic scheduling or catch-all reply.
+// Shared so the server-rendered page (buildEstimateAskPrompts) and the React
+// data contract (attachPublicPricingContract) surface identical chips.
+const GERMAN_ROACH_ASK_CHIPS = [
+  'How do you get rid of German roaches?',
+  'How long until the roaches are gone?',
+];
+
 // Service-aware "Ask Waves" quick-question chips: up to 2 estimate-specific
 // service prompts, a safety chip for any chemical service, then universal
 // billing chips — capped at 4 so the prompt row stays scannable.
@@ -1054,11 +1064,7 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
     || recurringList.some((s) => /german\s*roach/i.test(s?.name || s?.label || s?.service || ''));
   const hasPestAny = !!pestRecurring || hasPestOneTime || hasGermanRoach;
   if (hasGermanRoach) {
-    // Both carry the "roach" keyword so the Ask Waves fallback routes them to
-    // the pest/roach answer branch (the multi-visit cleanout copy), not the
-    // generic scheduling or catch-all response.
-    servicePrompts.push('How do you get rid of German roaches?');
-    servicePrompts.push('How long until the roaches are gone?');
+    servicePrompts.push(...GERMAN_ROACH_ASK_CHIPS);
   } else if (hasPestAny) {
     servicePrompts.push('How do you handle ants?');
   }
@@ -9557,7 +9563,15 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   const serviceCategories = services.map((section) => (
     section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)
   ));
-  const askChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], contractPayload.oneTimeBreakdown?.items || [])]);
+  const oneTimeBreakdownItems = contractPayload.oneTimeBreakdown?.items || [];
+  const baseAskChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], oneTimeBreakdownItems)]);
+  // German Roach Cleanout classifies as generic pest_control, so mergeAskChips
+  // would only surface the ant/billing chips. Prepend the roach specialty
+  // prompts (deduped, capped at 6) so React-rendered estimates match the
+  // server-rendered page.
+  const askChips = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
+    ? Array.from(new Set([...GERMAN_ROACH_ASK_CHIPS, ...baseAskChips])).slice(0, 6)
+    : baseAskChips;
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
   return {
     ...contractPayload,
