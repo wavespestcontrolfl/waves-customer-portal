@@ -870,7 +870,7 @@ const SocialMediaService = {
   /**
    * Publish content to all configured platforms.
    */
-  async publishToAll({ title, description, link, guid, source, imageUrl, customContent, channels, gbpLocationIds }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1063,12 +1063,15 @@ const SocialMediaService = {
         // run (see generatedImageUrl above) so GBP posts carry a photo too —
         // a GBP local post without media renders as a flat text card and its
         // "Learn more" CTA is easy to miss. Same public URL Instagram uses.
-        const gbpImageUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
-        let r = await postToGBP(loc.id, gbpContent, link, gbpImageUrl);
+        // Prefer a GBP-specific image (4:3, no center-crop of the card's logo/
+        // CTA); fall back to the shared square image when none was supplied.
+        const gbpImg = (typeof gbpImageUrl === 'string' && gbpImageUrl)
+          || (typeof generatedImageUrl === 'string' ? generatedImageUrl : null);
+        let r = await postToGBP(loc.id, gbpContent, link, gbpImg);
         // Media is best-effort: if Google rejects or can't fetch the image,
         // retry text-only so an image problem doesn't block a post that would
         // otherwise have succeeded. Other failures (auth/quota) skip the retry.
-        if (!r.success && gbpImageUrl && isGbpMediaError(r.error)) {
+        if (!r.success && gbpImg && isGbpMediaError(r.error)) {
           logger.warn(`[social] GBP post with image failed for ${loc.name} (${r.error}); retrying text-only`);
           r = await postToGBP(loc.id, gbpContent, link, null);
         }

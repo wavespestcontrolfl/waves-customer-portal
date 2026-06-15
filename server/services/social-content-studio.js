@@ -639,28 +639,33 @@ function buildReviewCardInput(candidate = {}) {
   };
 }
 
-async function uploadSocialCard(cardInput, filenameSeed) {
+async function uploadSocialCard(cardInput, filenameSeed, platform) {
   if (typeof SocialMediaService.uploadImageToS3 !== 'function') return null;
   try {
-    const base64 = await SocialCardRenderer.renderSocialCardJpegBase64(cardInput);
-    const filename = `${SocialCardRenderer.filenameSlug(filenameSeed)}-${Date.now()}.jpg`;
+    const base64 = await SocialCardRenderer.renderSocialCardJpegBase64(cardInput, { platform });
+    const suffix = platform && platform !== 'square' ? `-${platform}` : '';
+    const filename = `${SocialCardRenderer.filenameSlug(filenameSeed)}${suffix}-${Date.now()}.jpg`;
     return await SocialMediaService.uploadImageToS3(base64, filename);
   } catch {
     return null;
   }
 }
 
-async function renderCampaignImageUrl(input, preview) {
+// platform: 'square' (default, Instagram/Facebook 1:1) or 'gbp' (4:3) — GBP can
+// center-crop a square, clipping the logo/CTA, so it gets its own 4:3 render.
+async function renderCampaignImageUrl(input, preview, platform) {
   return uploadSocialCard(
     buildCampaignCardInput(input, preview),
-    `${preview?.inputs?.city || input.city}-${preview?.inputs?.topic || input.topic}`
+    `${preview?.inputs?.city || input.city}-${preview?.inputs?.topic || input.topic}`,
+    platform
   );
 }
 
-async function renderReviewGraphicImageUrl(candidate) {
+async function renderReviewGraphicImageUrl(candidate, platform) {
   return uploadSocialCard(
     buildReviewCardInput(candidate),
-    `review-${candidate.city || 'waves'}-${candidate.googleReviewId || Date.now()}`
+    `review-${candidate.city || 'waves'}-${candidate.googleReviewId || Date.now()}`,
+    platform
   );
 }
 
@@ -1155,7 +1160,9 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     }
 
     let imageUrl = null;
+    let gbpImageUrl = null;
     let finalPreview = preview;
+    const wantsGbp = Array.isArray(plan.channels) && plan.channels.includes('gbp');
     const isReviewRun = !!plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics');
 
     if (isReviewRun) {
@@ -1166,6 +1173,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       // publish. Persist + approve happens only after a confirmed successful
       // publish (below).
       imageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic);
+      if (wantsGbp) gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         variant: 'review',
@@ -1173,6 +1181,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       });
     } else {
       imageUrl = await renderCampaignImageUrl(plan, preview);
+      if (wantsGbp) gbpImageUrl = await renderCampaignImageUrl(plan, preview, 'gbp');
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         variant: 'campaign',
@@ -1208,6 +1217,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       customContent: finalPreview.drafts,
       channels: plan.channels,
       imageUrl,
+      gbpImageUrl,
       gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
     });
 
