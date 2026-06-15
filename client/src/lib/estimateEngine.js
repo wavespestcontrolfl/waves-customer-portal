@@ -1944,13 +1944,18 @@ export function calculateEstimate(inputs) {
   if (svcOnetimeMosquito && !isCommercial && lotSqFt > 0) {
     hasOT = true;
     const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
-    let p = 225;
-    if (treatableSqFt > 43560) p = 475 + Math.ceil((treatableSqFt - 43560) / 10000) * 75;
-    else if (treatableSqFt > 32000) p = 475;
-    else if (treatableSqFt > 24000) p = 425;
-    else if (treatableSqFt > 16000) p = 385;
-    else if (treatableSqFt > 11000) p = 325;
-    else if (treatableSqFt > 7500) p = 275;
+    // Mirrors the server-authoritative one-time mosquito band
+    // (server/services/pricing-engine/constants.js ONE_TIME.mosquito, repriced
+    // 2026-06 to the SW-FL single-visit market). Buckets and the over-acre
+    // increment ($40 / 10k sf over an acre) must stay in sync with the server so
+    // the previewed price matches what the server actually charges.
+    let p = 99;
+    if (treatableSqFt > 43560) p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
+    else if (treatableSqFt > 32000) p = 269;
+    else if (treatableSqFt > 24000) p = 239;
+    else if (treatableSqFt > 16000) p = 199;
+    else if (treatableSqFt > 11000) p = 159;
+    else if (treatableSqFt > 7500) p = 129;
     const addOns = mosquitoStationCount * 75 + mosquitoDunkCount * 15;
     const fp = Math.round((p + addOns) * rD);
     const detailParts = [];
