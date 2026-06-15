@@ -853,11 +853,16 @@ async function postToGBP(locationId, summary, link, imageUrl) {
   if (!loc?.googleLocationResourceName) throw new Error(`No GBP resource for ${locationId}`);
 
   try {
+    // GBP posts link out via a CTA button (URLs in the body aren't clickable),
+    // and the copy is generated WITHOUT a URL on purpose — so always attach a
+    // "Learn more" button. Prefer the post's own link (blog URL / suggested
+    // page); fall back to the site so a GBP post is never published linkless.
+    const ctaUrl = (typeof link === 'string' && link.trim()) ? link.trim() : 'https://www.wavespestcontrol.com';
     const result = await gbpService.createPost(
       loc.googleLocationResourceName,
       {
         summary,
-        callToAction: link ? { actionType: 'LEARN_MORE', url: link } : undefined,
+        callToAction: { actionType: 'LEARN_MORE', url: ctaUrl },
         mediaUrl: imageUrl || undefined,
       },
       locationId
@@ -871,6 +876,21 @@ async function postToGBP(locationId, summary, link, imageUrl) {
 }
 
 // ── RSS Feed Polling ──
+// RSS title/description arrive XML-escaped (&amp;, &apos;, &#8217;, …). Decode
+// them so the values aren't double-escaped when painted into the SVG card or fed
+// to the caption model (otherwise the post shows literal "&apos;").
+function decodeEntities(value) {
+  return String(value || '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch { return _; } })
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch { return _; } })
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&'); // amp last so "&amp;lt;" decodes to "&lt;", not "<"
+}
+
 async function fetchRSSFeed(feedUrl) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
@@ -894,9 +914,9 @@ async function fetchRSSFeed(feedUrl) {
       return m ? m[1].trim() : '';
     };
     items.push({
-      title: get('title'),
+      title: decodeEntities(get('title')),
       link: get('link'),
-      description: get('description').replace(/<[^>]+>/g, '').substring(0, 500),
+      description: decodeEntities(get('description').replace(/<[^>]+>/g, '')).substring(0, 500),
       pubDate: get('pubDate'),
       guid: get('guid') || get('link'),
     });
@@ -926,6 +946,16 @@ const SocialMediaService = {
 
     const items = await fetchRSSFeed(feedUrl);
     if (!items.length) return { processed: 0, results: [] };
+
+    // Only render+upload brand cards when the run will actually publish AND the
+    // image can be hosted — otherwise a manual /check-rss while paused/disabled,
+    // or an env without S3+CDN, would create orphan S3 objects per item with no
+    // post. Mirrors publishToAll's own dry-run/pause/hosting gates (publishToAll
+    // still re-checks; this just avoids the wasted upload before it).
+    const hasImageHosting = !!config.s3.accessKeyId && !!config.s3.secretAccessKey
+      && !!config.s3.bucket && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    const cardsEligible = !SOCIAL_FLAGS.dryRun && SOCIAL_FLAGS.automationEnabled
+      && hasImageHosting && !(await isPausedByAdmin());
 
     // Advisory lock prevents overlapping cron runs / deploys from double-posting.
     // Uses transaction-scoped lock so acquire+release use the same connection.
@@ -962,13 +992,13 @@ const SocialMediaService = {
         try {
           // Share the blog post with the on-brand card (title + excerpt + read-
           // more CTA), matching the studio's branding instead of a generic AI
-          // image. Square for FB/IG, 4:3 for GBP. Falls back to the normal image
-          // path if the card can't be rendered/hosted (renderBrandCardUrl null).
-          // Skip rendering on a dry run — uploading to S3/CDN is a side effect a
-          // dry run must not have (publishToAll won't post anyway).
+          // image. Square for FB/IG, 4:3 for GBP. Only when the run will publish
+          // and the image can be hosted (cardsEligible) — otherwise skip and let
+          // publishToAll fall back to its normal image path with no orphan
+          // uploads.
           let imageUrl = null;
           let gbpImageUrl = null;
-          if (!SOCIAL_FLAGS.dryRun) {
+          if (cardsEligible) {
             const card = { variant: 'blog', title: item.title, excerpt: item.description, cta: 'Read the full guide' };
             imageUrl = await renderBrandCardUrl(card, 'square');
             gbpImageUrl = imageUrl ? await renderBrandCardUrl(card, 'gbp') : null;
