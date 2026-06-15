@@ -1261,6 +1261,28 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
+    // No-show is only valid FROM an active visit state. The mobile detail
+    // sheet exposes "Mark as no-show" regardless of status, and the flip
+    // below uses the row's current status as fromStatus (so the atomic
+    // guard alone won't stop a terminal→no_show overwrite). Without this:
+    // tapping it on a completed/cancelled/skipped visit would overwrite
+    // that terminal status, append a history row, and clear the tech;
+    // tapping it again on an already-no_show visit would re-send the
+    // missed-visit SMS. Make already-no_show idempotent (no re-flip, no
+    // re-notify) and reject every other terminal source.
+    if (toStatus === 'no_show') {
+      if (svc.status === 'no_show') {
+        return res.json({ success: true, alreadyNoShow: true });
+      }
+      const NO_SHOW_SOURCE_STATES = new Set(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
+      if (!NO_SHOW_SOURCE_STATES.has(svc.status)) {
+        return res.status(409).json({
+          error: `Can't mark this visit as a no-show — it's already ${svc.status}. Refresh and try again.`,
+          code: 'not_active_visit',
+        });
+      }
+    }
+
     if (toStatus === 'cancelled' && ['following', 'series'].includes(scope)) {
       const parentId = svc.recurring_parent_id || svc.id;
       const parent = await db('scheduled_services').where({ id: parentId }).first();

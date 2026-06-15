@@ -403,7 +403,7 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
 
 // ─── Today's completion gauge (radial) ────────────────────────────
 
-export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cancelled = 0 }) {
+export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cancelled = 0, noShow = 0 }) {
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
   const data = [{ name: 'Completed', value: pct, fill: CHART_SUCCESS }];
   return (
@@ -444,6 +444,10 @@ export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cance
         <Row label="Completed" value={completed} fill={CHART_SUCCESS} />
         <Row label="Remaining" value={remaining} fill={CHART_PRIMARY} />
         <Row label="Cancelled" value={cancelled} fill={CHART_PRIOR} dim />
+        {/* No-show only renders when present — excluded from Remaining
+            server-side, so without this row the buckets wouldn't sum to
+            Scheduled today on a day with a missed visit. */}
+        {noShow > 0 ? <Row label="No-show" value={noShow} fill={CHART_PRIOR} dim /> : null}
         <li className="pt-2 mt-2 flex items-baseline justify-between">
           <span className="u-label text-ink-secondary">Scheduled today</span>
           <span className="u-nums font-medium">{total}</span>

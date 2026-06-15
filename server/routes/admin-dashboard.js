@@ -808,6 +808,7 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
         db.raw("COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled"),
+        db.raw("COUNT(*) FILTER (WHERE status = 'no_show') as no_show"),
         db.raw("COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled','no_show')) as remaining")
       ).first();
     const total = parseInt(row?.total || 0);
@@ -817,6 +818,7 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
       total,
       completed,
       cancelled: parseInt(row?.cancelled || 0),
+      noShow: parseInt(row?.no_show || 0),
       remaining: parseInt(row?.remaining || 0),
       pct: total > 0 ? Math.round((completed / total) * 100) : null,
     });
