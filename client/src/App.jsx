@@ -152,6 +152,7 @@ const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPag
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
+const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
@@ -289,6 +290,7 @@ export default function App() {
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
           <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
           <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
+          <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportViewPage /></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
           <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ServiceOutlinePage /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
