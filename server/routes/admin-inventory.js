@@ -1750,18 +1750,24 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
   try {
     const approval = await db('price_approval_events').where({ id: req.params.id }).first();
     if (!approval) return res.status(404).json({ error: 'Approval event not found' });
+    if (approval.approval_status !== 'pending') {
+      return res.status(409).json({ error: `Approval event already ${approval.approval_status}; refresh the queue`, approvalStatus: approval.approval_status });
+    }
+    let stale = false;
     await db.transaction(async (trx) => {
       const approvedBy = req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin';
+      // Claim atomically: only a still-pending event may be approved, so a
+      // superseded (auto-rejected) or stale queue tab cannot re-apply an
+      // outdated price over a newer one.
+      const claimed = await trx('price_approval_events')
+        .where({ id: req.params.id, approval_status: 'pending' })
+        .update({ approval_status: 'approved', approved_by: approvedBy, approved_at: new Date() });
+      if (!claimed) { stale = true; return; }
+
       const snapshot = approval.snapshot_id
         ? await trx('price_snapshots').where({ id: approval.snapshot_id }).first()
         : null;
       const vendorPricingId = approval.vendor_pricing_id || snapshot?.vendor_pricing_id || null;
-
-      await trx('price_approval_events').where({ id: req.params.id }).update({
-        approval_status: 'approved',
-        approved_by: approvedBy,
-        approved_at: new Date(),
-      });
 
       if (approval.snapshot_id) {
         await trx('price_snapshots').where({ id: approval.snapshot_id }).update({
@@ -1815,6 +1821,7 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
         }
       }
     });
+    if (stale) return res.status(409).json({ error: 'Approval event was already decided; refresh the queue' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -1823,12 +1830,18 @@ router.post('/price-sync/review-queue/:id/reject', async (req, res, next) => {
   try {
     const approval = await db('price_approval_events').where({ id: req.params.id }).first();
     if (!approval) return res.status(404).json({ error: 'Approval event not found' });
-    await db('price_approval_events').where({ id: req.params.id }).update({
-      approval_status: 'rejected',
-      rejected_by: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin',
-      rejected_at: new Date(),
-      approval_reason: req.body?.reason || approval.approval_reason,
-    });
+    if (approval.approval_status !== 'pending') {
+      return res.status(409).json({ error: `Approval event already ${approval.approval_status}; refresh the queue`, approvalStatus: approval.approval_status });
+    }
+    const rejected = await db('price_approval_events')
+      .where({ id: req.params.id, approval_status: 'pending' })
+      .update({
+        approval_status: 'rejected',
+        rejected_by: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || 'admin',
+        rejected_at: new Date(),
+        approval_reason: req.body?.reason || approval.approval_reason,
+      });
+    if (!rejected) return res.status(409).json({ error: 'Approval event was already decided; refresh the queue' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
