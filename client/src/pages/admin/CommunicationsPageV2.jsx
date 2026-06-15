@@ -469,48 +469,54 @@ function ConversationViewV2({
   return (
     <div className="flex flex-col h-full">
       {" "}
-      <div className="flex flex-wrap items-center gap-2 md:gap-3 mb-4 pb-3 border-b border-hairline border-zinc-200">
+      <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-3 mb-4 pb-3 border-b border-hairline border-zinc-200">
         {" "}
-        <Button size="sm" variant="secondary" onClick={onBack}>
-          Back
-        </Button>{" "}
-        <div className="flex-1 min-w-0">
-          {canOpenProfile ? (
-            <button
-              type="button"
-              onClick={() => onOpenProfile(thread.customerId)}
-              className="text-14 font-medium text-zinc-900 truncate hover:underline text-left block"
-              title="Open customer profile"
-            >
-              {contactName}
-            </button>
-          ) : (
-            <div className="text-14 font-medium text-zinc-900 truncate">
-              {contactName}
-            </div>
-          )}
-          <div className="font-mono text-12 text-ink-secondary truncate">
-            {contactPhone}
+        <div className="flex items-center gap-2 min-w-0 md:flex-1">
+          <Button size="sm" variant="secondary" onClick={onBack}>
+            Back
+          </Button>{" "}
+          <div className="min-w-0 flex-1">
+            {canOpenProfile ? (
+              <button
+                type="button"
+                onClick={() => onOpenProfile(thread.customerId)}
+                className="text-14 font-medium text-zinc-900 truncate hover:underline text-left block max-w-full"
+                title="Open customer profile"
+              >
+                {contactName}
+              </button>
+            ) : (
+              <div className="text-14 font-medium text-zinc-900 truncate">
+                {contactName}
+              </div>
+            )}
+            <div className="font-mono text-12 text-ink-secondary truncate">
+              {contactPhone}
+            </div>{" "}
           </div>{" "}
         </div>{" "}
-        <Button
-          size="sm"
-          variant="secondary"
-          onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber)}
-        >
-          <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
-          Call back
-        </Button>{" "}
-        <Button
-          size="sm"
-          variant="primary"
-          onClick={() =>
-            onReply(contactPhone, thread.ourNumber, thread.customerId)
-          }
-        >
-          <MessageSquare size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
-          Text back
-        </Button>{" "}
+        <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          <Button
+            size="sm"
+            variant="secondary"
+            className="flex-1 md:flex-none"
+            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber)}
+          >
+            <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+            Call back
+          </Button>{" "}
+          <Button
+            size="sm"
+            variant="primary"
+            className="flex-1 md:flex-none"
+            onClick={() =>
+              onReply(contactPhone, thread.ourNumber, thread.customerId)
+            }
+          >
+            <MessageSquare size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+            Text back
+          </Button>{" "}
+        </div>{" "}
       </div>{" "}
       <div className="flex-1 md:max-h-[500px] md:overflow-y-auto flex flex-col gap-2">
         {messages.map((m) => {
