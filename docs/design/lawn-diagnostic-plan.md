@@ -497,3 +497,41 @@ Curated reference is an inline condensed copy of the verified sources; compiling
 `facts-bank` at build time is a follow-up. PASS B is a second LLM call (acceptable for a
 low-volume prospecting tool); collapse to one call if latency matters. `requires_label_review`
 rename deferred.
+
+## v1 backend API (built 2026-06-15)
+
+The analyze route was step 1; the persist → send → public chain is now built (backend
+only — photo S3 persistence and the React tech UI + public `/lawn-report/:token` page are
+deferred; the public page's satellite hero is address-based so it does not need stored photos).
+
+Routes (all never-block, all on the existing `tech-lawn-diagnostic.js` router unless noted):
+- `POST /api/tech/lawn-diagnostic` — persist an analyzed diagnostic as a draft
+  (`status='analyzed'`); stores `report_contract`, `ai_analysis`, contact/address snapshots,
+  overall_score, ai_summary, ai_confidence. Requires a `reportContract` body.
+- `POST /api/tech/lawn-diagnostic/:id/send` — **hard gate**: `hasSendableContact` (name +
+  email or address) → 422 otherwise. Mints a 32-hex `report_token`
+  (`crypto.randomBytes(16)`), sets `report_expires_at` (30d), flips `mode='prospect'`,
+  `status='sent'`. Returns `{ token, url: '/lawn-report/:token', expiresAt }`.
+- `POST /api/tech/lawn-diagnostic/:id/lead` — optional save-as-lead; idempotent
+  (`lead_id` short-circuit + atomic `whereNull('lead_id')` guard, race re-reads).
+- `server/routes/public-lawn-diagnostic.js` (new, mounted `/api/public/lawn-diagnostic`):
+  - `GET /:token` — `FULL_TOKEN_RE` gate, 60/min limit, privacy headers
+    (`no-store`/`noindex`/`no-referrer`), only `status='sent'` + unexpired, generic 404.
+    Returns `buildPublicLawnReport` — a strict allowlist (summary, primary_finding,
+    confidence, findings[name/confidence/severity/customer_note], watering customer copy,
+    expectations, watch_items, seasonal_context, first_name, city, overall_status label).
+    **Never** internal scores, raw AI, product names, label constraints, reconciliation/QA
+    internals, tech notes, or the street line.
+  - `POST /:token/quote-request` — 10/min limit, `validateQuoteRequest` strict-before-coercion
+    (name + valid email or phone; rejects null/''/false/[]), links one lead per diagnostic via
+    atomic `whereNull('lead_id')` → 409 on repeat. No raw PII logged.
+
+Both public routes added to the **AGENTS.md** public-by-token allowlist (P0 gate) with contracts.
+Tests: `lawn-diagnostic-public.test.js` (whitelisting no-leak, strict validation, token-gate
+404s, one-shot 409) + send-gate helper units in the route test. 54 lawn-diagnostic tests green.
+
+### v1 still to build
+Photo S3 persistence into `lawn_diagnostic_photos` (best-effort, for findings thumbnails);
+the `/tech/*` Lawn Diagnostic UI (D palette: capture → diagnosis → save/send/lead/archive);
+the public `/lawn-report/:token` React page (clone `EstimateViewPage`, satellite hero, plain
+findings, grass-type context, fix-it plan, quote CTA). v1.5: SMS/email link delivery.

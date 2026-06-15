@@ -314,6 +314,7 @@ app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
+app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));

@@ -40,7 +40,13 @@ jest.mock('../services/lawn-assessment', () => ({
 
 const express = require('express');
 const techLawnDiagnosticRouter = require('../routes/tech-lawn-diagnostic');
-const { enrichAppliedProducts, labelConstraintsFromCatalog } = techLawnDiagnosticRouter._test;
+const {
+  enrichAppliedProducts,
+  labelConstraintsFromCatalog,
+  normalizeContact,
+  hasSendableContact,
+  contactName,
+} = techLawnDiagnosticRouter._test;
 
 function appServer() {
   const app = express();
@@ -305,5 +311,28 @@ describe('tech lawn diagnostic analyze route', () => {
       expect(body.reportContract.customer_summary).toMatch(/most consistent|photos show/i);
       expect(mockAnalyzePhoto).toHaveBeenCalledWith('base64-photo', 'image/jpeg');
     });
+  });
+});
+
+describe('lawn diagnostic send-gate helpers', () => {
+  test('contactName prefers explicit name, else first+last', () => {
+    expect(contactName({ name: 'Dana Prospect' })).toBe('Dana Prospect');
+    expect(contactName({ first_name: 'Dana', last_name: 'Prospect' })).toBe('Dana Prospect');
+    expect(contactName(null)).toBeNull();
+  });
+
+  test('normalizeContact drops empties and returns null when blank', () => {
+    expect(normalizeContact({ first_name: '  ', email: '', phone: '' })).toBeNull();
+    expect(normalizeContact({ name: 'Dana', email: 'dana@example.com' })).toMatchObject({ name: 'Dana', email: 'dana@example.com' });
+    expect(normalizeContact('nope')).toBeNull();
+  });
+
+  test('hasSendableContact requires a name plus email or address', () => {
+    expect(hasSendableContact({ name: 'Dana' }, null)).toBe(false);
+    expect(hasSendableContact({ name: 'Dana', email: 'dana@example.com' }, null)).toBe(true);
+    expect(hasSendableContact({ name: 'Dana' }, { line1: '123 Palm St' })).toBe(true);
+    expect(hasSendableContact({ name: 'Dana' }, { city: 'Venice', state: 'FL' })).toBe(true);
+    expect(hasSendableContact(null, { line1: '123 Palm St' })).toBe(false);
+    expect(hasSendableContact({ email: 'dana@example.com' }, null)).toBe(false);
   });
 });

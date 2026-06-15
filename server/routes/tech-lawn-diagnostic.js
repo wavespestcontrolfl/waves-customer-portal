@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 
 const db = require('../models/db');
@@ -15,6 +16,67 @@ const { runDiagnosis, runNarrative, PROMPT_VERSION } = require('../services/lawn
 const { etParts } = require('../utils/datetime-et');
 
 const MAX_ANALYZE_PHOTOS = 5;
+const DIAGNOSTIC_MODES = ['internal', 'prospect'];
+const REPORT_TTL_DAYS = 30;
+
+function cleanString(value, max = 200) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : null;
+}
+
+function parseJsonObject(value, fallback = null) {
+  if (value == null) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeContact(contact) {
+  if (!contact || typeof contact !== 'object' || Array.isArray(contact)) return null;
+  const out = {
+    first_name: cleanString(contact.first_name ?? contact.firstName),
+    last_name: cleanString(contact.last_name ?? contact.lastName),
+    name: cleanString(contact.name),
+    email: cleanString(contact.email),
+    phone: cleanString(contact.phone),
+  };
+  return Object.values(out).some(Boolean) ? out : null;
+}
+
+function normalizeAddress(address) {
+  if (!address || typeof address !== 'object' || Array.isArray(address)) return null;
+  const lat = Number(address.lat);
+  const lng = Number(address.lng);
+  const out = {
+    line1: cleanString(address.line1 ?? address.address ?? address.street),
+    city: cleanString(address.city),
+    state: cleanString(address.state, 20),
+    zip: cleanString(address.zip ?? address.postal_code, 12),
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+  };
+  return Object.values(out).some((v) => v != null && v !== '') ? out : null;
+}
+
+function contactName(contact) {
+  if (!contact) return null;
+  return contact.name
+    || [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim()
+    || null;
+}
+
+// Send gate: a contact name plus either an email or a usable address.
+function hasSendableContact(contact, address) {
+  const name = contactName(contact);
+  const hasEmail = Boolean(contact && contact.email);
+  const hasAddress = Boolean(address && (address.line1 || (address.city && address.state)));
+  return Boolean(name && (hasEmail || hasAddress));
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -390,6 +452,129 @@ router.post('/analyze', async (req, res, next) => {
   }
 });
 
+// POST /api/tech/lawn-diagnostic — persist an analyzed diagnostic as a draft.
+router.post('/', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const reportContract = body.reportContract && typeof body.reportContract === 'object' && !Array.isArray(body.reportContract)
+      ? body.reportContract
+      : null;
+    if (!reportContract) return res.status(400).json({ error: 'reportContract is required' });
+
+    const mode = DIAGNOSTIC_MODES.includes(body.mode) ? body.mode : 'internal';
+    const contact = normalizeContact(body.contact);
+    const address = normalizeAddress(body.address);
+    const aiAnalysis = body.aiAnalysis && typeof body.aiAnalysis === 'object' ? body.aiAnalysis : {};
+    const overallScore = Number.isFinite(Number(body.overallScore)) ? Math.round(Number(body.overallScore)) : null;
+    const aiConfidence = Number.isFinite(Number(body.aiConfidence)) ? Number(body.aiConfidence) : null;
+    const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(reportContract.customer_summary, 2000);
+
+    const [row] = await db('lawn_diagnostics').insert({
+      mode,
+      status: 'analyzed',
+      created_by_technician_id: req.technicianId || req.technician?.id || null,
+      contact_snapshot: contact ? JSON.stringify(contact) : null,
+      address_snapshot: address ? JSON.stringify(address) : null,
+      ai_analysis: JSON.stringify(aiAnalysis),
+      report_contract: JSON.stringify(reportContract),
+      ai_confidence: aiConfidence,
+      overall_score: overallScore,
+      ai_summary: aiSummary,
+    }).returning(['id', 'mode', 'status']);
+
+    return res.status(201).json({ success: true, id: row.id, mode: row.mode, status: row.status });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// POST /api/tech/lawn-diagnostic/:id/send — capture contact, mint token, mark sent.
+router.post('/:id/send', async (req, res, next) => {
+  try {
+    const row = await db('lawn_diagnostics').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'Diagnostic not found' });
+
+    const contact = normalizeContact(req.body?.contact) || parseJsonObject(row.contact_snapshot, null);
+    const address = normalizeAddress(req.body?.address) || parseJsonObject(row.address_snapshot, null);
+
+    // Hard gate: no token is minted without sendable contact info.
+    if (!hasSendableContact(contact, address)) {
+      return res.status(422).json({ error: 'A contact name and an email or address are required to send a report.' });
+    }
+
+    const token = row.report_token || crypto.randomBytes(16).toString('hex');
+    const expiresAt = row.report_expires_at || new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
+
+    await db('lawn_diagnostics').where({ id: row.id }).update({
+      mode: 'prospect',
+      status: 'sent',
+      contact_snapshot: JSON.stringify(contact),
+      address_snapshot: address ? JSON.stringify(address) : row.address_snapshot,
+      report_token: token,
+      report_expires_at: expiresAt,
+      last_sent_at: db.fn.now(),
+      updated_at: db.fn.now(),
+    });
+
+    return res.json({ success: true, token, url: `/lawn-report/${token}`, expiresAt });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// POST /api/tech/lawn-diagnostic/:id/lead — optionally save the diagnostic as a lead.
+router.post('/:id/lead', async (req, res, next) => {
+  try {
+    const row = await db('lawn_diagnostics').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'Diagnostic not found' });
+    if (row.lead_id) return res.json({ success: true, leadId: row.lead_id, alreadyLinked: true });
+
+    const contact = normalizeContact(req.body?.contact) || parseJsonObject(row.contact_snapshot, null);
+    const address = normalizeAddress(req.body?.address) || parseJsonObject(row.address_snapshot, null);
+    const name = contactName(contact);
+    if (!name && !(contact && (contact.phone || contact.email))) {
+      return res.status(422).json({ error: 'A contact name, phone, or email is required to save a lead.' });
+    }
+    const [firstName, ...restName] = String(name || '').split(/\s+/);
+
+    let leadId = null;
+    await db.transaction(async (trx) => {
+      const [lead] = await trx('leads').insert({
+        first_name: firstName || name || null,
+        last_name: restName.join(' ') || (contact && contact.last_name) || null,
+        phone: (contact && contact.phone) || null,
+        email: (contact && contact.email) || null,
+        address: (address && address.line1) || null,
+        city: (address && address.city) || null,
+        zip: (address && address.zip) || null,
+        lead_type: 'lawn_diagnostic',
+        service_interest: 'lawn care',
+        first_contact_channel: 'lawn_diagnostic',
+        status: 'new',
+        extracted_data: JSON.stringify({ diagnostic_id: row.id, source: 'tech_save_as_lead' }),
+      }).returning(['id']);
+      leadId = lead.id;
+      const updated = await trx('lawn_diagnostics')
+        .where({ id: row.id })
+        .whereNull('lead_id')
+        .update({ lead_id: lead.id, updated_at: trx.fn.now() });
+      if (updated === 0) {
+        const err = new Error('already_linked');
+        err.code = 'ALREADY_LINKED';
+        throw err;
+      }
+    }).catch(async (txErr) => {
+      if (txErr.code !== 'ALREADY_LINKED') throw txErr;
+      const fresh = await db('lawn_diagnostics').where({ id: row.id }).first('lead_id');
+      leadId = (fresh && fresh.lead_id) || null;
+    });
+
+    return res.status(201).json({ success: true, leadId });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 module.exports = router;
 
 module.exports._test = {
@@ -398,4 +583,8 @@ module.exports._test = {
   enrichAppliedProducts,
   labelConstraintsFromCatalog,
   normalizePhoto,
+  normalizeContact,
+  normalizeAddress,
+  contactName,
+  hasSendableContact,
 };
