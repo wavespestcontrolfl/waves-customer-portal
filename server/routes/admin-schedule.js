@@ -3287,6 +3287,22 @@ router.put('/:id/status', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // A no-show is terminal. The V2 dispatch board routes row actions
+    // (Skip, etc.) through here, and the flip below reads fromStatus from
+    // the current row — so without this, a just-no-showed visit could be
+    // flipped to skipped/other, erasing the public state:'no_show'
+    // derivation and re-exposing the stale scheduled/en-route tracker.
+    // Mirror admin-dispatch: idempotent on no_show, 409 on any other target.
+    if (svc.status === 'no_show') {
+      if (toStatus === 'no_show') {
+        return res.json({ success: true, alreadyNoShow: true });
+      }
+      return res.status(409).json({
+        error: 'This visit was already marked as a no-show. Refresh and try again.',
+        code: 'already_no_show',
+      });
+    }
+
     // Day-of lifecycle guard — same as admin-dispatch PUT /:serviceId/status.
     // en_route / on_site / completed only happen on (or after) the
     // scheduled day; a future-dated job here is a stale tab racing a

@@ -29,8 +29,6 @@ const STATUS_VALUES = [
   'no_show',
 ];
 
-const PREV_STATUS_VALUES = STATUS_VALUES.filter((s) => s !== 'no_show');
-
 function inList(values) {
   return values.map((v) => `'${v}'`).join(',');
 }
@@ -59,27 +57,33 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // Best-effort revert to the pre-no_show set. Any rows already at
-  // 'no_show' would block the narrower CHECK, so leave them be — the
-  // down path is only meaningful on a DB that never recorded one.
+  // Deliberately keep 'no_show' in the restored CHECK set. Postgres
+  // validates existing rows when a CHECK is (re)added, so narrowing the
+  // set after any visit was marked no_show — or any job_status_history
+  // row recorded a no_show transition — would fail the ADD CONSTRAINT and
+  // block the rollback. Mutating those rows instead would either rewrite
+  // live operational state or corrupt the append-only audit log. Once the
+  // value has been writable in an environment it can't be cleanly removed,
+  // so down() re-asserts the same widened constraints (idempotent, never
+  // fails); rolling back the feature code simply stops new no_show writes.
   await knex.raw('ALTER TABLE scheduled_services DROP CONSTRAINT IF EXISTS scheduled_services_status_check');
   await knex.raw(`
     ALTER TABLE scheduled_services
       ADD CONSTRAINT scheduled_services_status_check
-      CHECK (status IN (${inList(PREV_STATUS_VALUES)}))
+      CHECK (status IN (${inList(STATUS_VALUES)}))
   `);
 
   await knex.raw('ALTER TABLE job_status_history DROP CONSTRAINT IF EXISTS job_status_history_to_status_check');
   await knex.raw(`
     ALTER TABLE job_status_history
       ADD CONSTRAINT job_status_history_to_status_check
-      CHECK (to_status IN (${inList(PREV_STATUS_VALUES)}))
+      CHECK (to_status IN (${inList(STATUS_VALUES)}))
   `);
 
   await knex.raw('ALTER TABLE job_status_history DROP CONSTRAINT IF EXISTS job_status_history_from_status_check');
   await knex.raw(`
     ALTER TABLE job_status_history
       ADD CONSTRAINT job_status_history_from_status_check
-      CHECK (from_status IS NULL OR from_status IN (${inList(PREV_STATUS_VALUES)}))
+      CHECK (from_status IS NULL OR from_status IN (${inList(STATUS_VALUES)}))
   `);
 };
