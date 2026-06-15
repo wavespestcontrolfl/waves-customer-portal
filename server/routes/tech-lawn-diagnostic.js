@@ -490,6 +490,16 @@ router.post('/', async (req, res, next) => {
       seasonal_context: body.seasonalContext || body.seasonal_context || '',
     });
     const releaseMode = classifyReleaseMode(contract);
+    // Mirror /analyze: re-run the narrative pass server-side on the authoritative
+    // rebuilt contract so the published summary matches what the tech reviewed
+    // (and stays server-generated, not client-trusted). Best-effort; the
+    // deterministic summary stands if the model is unavailable.
+    if (releaseMode !== 'minimal') {
+      try {
+        const narrative = await runNarrative(contract, { season: body.seasonalContext || body.seasonal_context || '' });
+        if (narrative.ok) contract.customer_summary = narrative.customer_summary;
+      } catch { /* keep deterministic summary */ }
+    }
     const sanitizedContract = applyAutoReleaseRepair(contract, releaseMode);
     const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(sanitizedContract.customer_summary, 2000);
 

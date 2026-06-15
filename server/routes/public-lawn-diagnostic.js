@@ -229,10 +229,15 @@ router.post('/:token/quote-request', quoteLimiter, async (req, res, next) => {
           }),
         }).returning(['id']);
 
-        // One-shot guard: only the first quote-request links a lead; repeats 409.
+        // One-shot guard + eligibility re-check inside the txn: only the first
+        // quote-request on a still-sent, unexpired report links a lead. Re-asserting
+        // status/expiry closes the TOCTOU between loadSentDiagnostic and this update
+        // (archive/expiry mid-flight rolls back the lead insert). 0 rows → 409.
         const updated = await trx('lawn_diagnostics')
-          .where({ id: row.id })
+          .where({ id: row.id, report_token: req.params.token, status: 'sent' })
           .whereNull('lead_id')
+          .whereNotNull('report_expires_at')
+          .where('report_expires_at', '>', trx.fn.now())
           .update({ lead_id: lead.id, updated_at: trx.fn.now() });
         if (updated === 0) {
           const err = new Error('already_submitted');
