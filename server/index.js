@@ -316,6 +316,7 @@ app.use('/api/public/track', require('./routes/track-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
+app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // Twilio webhook signature validation. Runs before BOTH Twilio routers
