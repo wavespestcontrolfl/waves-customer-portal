@@ -1031,6 +1031,10 @@ const SocialMediaService = {
             source: 'rss',
             imageUrl,
             gbpImageUrl,
+            // Autonomous (cron) shares use the brand card or go text-only — never
+            // the AI image generator (irrelevant literal images). A manual admin
+            // /check-rss keeps the existing AI fallback (admin is supervising).
+            noAiImage: !manual,
           });
           results.push({ item: item.title, ...result });
         } catch (err) {
@@ -1047,7 +1051,7 @@ const SocialMediaService = {
   /**
    * Publish content to all configured platforms.
    */
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds, noAiImage = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1067,6 +1071,9 @@ const SocialMediaService = {
     // image. Without S3 hosting + at least one consumer, generating would
     // spend image credits and discard the result.
     let generatedImageUrl = imageUrl || null;
+    // GBP's own image (4:3) — caller-supplied, or rendered in the noAiImage
+    // fallback below. The GBP loop reads this (falls back to generatedImageUrl).
+    let resolvedGbpImageUrl = (typeof gbpImageUrl === 'string' && gbpImageUrl) ? gbpImageUrl : null;
     // SOCIAL_MEDIA_CDN_DOMAIN is required too: uploadImageToS3 returns null
     // without it (private S3 URLs aren't publicly fetchable), so generating
     // an image without a CDN just burns credits and discards the result.
@@ -1083,10 +1090,11 @@ const SocialMediaService = {
     const instagramCanConsume =
       requestedPlatforms.has('instagram')
       && SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
-    // Decide whether to generate the shared image. Skip on a dry run (nothing
-    // posts, so it'd just burn credits) and when an image already exists or
-    // hosting is unconfigured — establish that cheaply before any DB work.
-    let shouldGenerateImage = false;
+    // Decide whether an image is NEEDED, tracking Meta (FB/IG, 1:1) and GBP
+    // (4:3) separately so the noAiImage path can render the right size(s). Skip
+    // on a dry run, when one already exists, or when hosting is unconfigured.
+    let metaWantsImage = false;
+    let gbpWantsImage = false;
     if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
@@ -1100,26 +1108,44 @@ const SocialMediaService = {
       // location filter (which posts to zero locations) doesn't burn image
       // credits either. (The autonomous single-profile path uses a per-location
       // check via assertSocialPublishingReady.)
-      if (instagramCanConsume) {
-        shouldGenerateImage = true;
-      } else if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+      metaWantsImage = instagramCanConsume; // FB/IG consume the 1:1 image
+      if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
-        shouldGenerateImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
+        gbpWantsImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
       }
     }
-    if (shouldGenerateImage) {
-      try {
-        const img = await generateImage(title);
-        if (img && img.base64) {
-          // Upload to S3 to get a public URL (required by Instagram)
-          const filename = `post-${Date.now()}.jpg`;
-          const s3Url = await uploadImageToS3(img.base64, filename);
-          if (s3Url) {
-            generatedImageUrl = s3Url;
-          }
+    if (metaWantsImage || gbpWantsImage) {
+      if (noAiImage) {
+        // Autonomous callers (RSS cron blog shares, studio campaigns, scheduled
+        // blog/newsletter shares) NEVER use the AI image generator — it produces
+        // irrelevant literal images (a stone "fairy ring" for a fairy-ring
+        // FUNGUS post). Render the on-brand card per consumer: 1:1 for FB/IG,
+        // 4:3 for GBP (so Google doesn't center-crop the logo/CTA). Text-only if
+        // a card can't be rendered.
+        const eyebrow = source === 'newsletter' ? 'Waves newsletter' : 'From the Waves blog';
+        const card = { variant: 'blog', title, excerpt: description, cta: 'Learn more', eyebrow };
+        if (metaWantsImage) {
+          const u = await renderBrandCardUrl(card, 'square');
+          if (u) generatedImageUrl = u;
         }
-      } catch { /* non-critical */ }
+        if (gbpWantsImage && !resolvedGbpImageUrl) {
+          const u = await renderBrandCardUrl(card, 'gbp');
+          if (u) resolvedGbpImageUrl = u;
+        }
+      } else {
+        try {
+          const img = await generateImage(title);
+          if (img && img.base64) {
+            // Upload to S3 to get a public URL (required by Instagram)
+            const filename = `post-${Date.now()}.jpg`;
+            const s3Url = await uploadImageToS3(img.base64, filename);
+            if (s3Url) {
+              generatedImageUrl = s3Url;
+            }
+          }
+        } catch { /* non-critical */ }
+      }
     }
 
     // Generate content for each platform and post
@@ -1242,7 +1268,7 @@ const SocialMediaService = {
         // "Learn more" CTA is easy to miss. Same public URL Instagram uses.
         // Prefer a GBP-specific image (4:3, no center-crop of the card's logo/
         // CTA); fall back to the shared square image when none was supplied.
-        const gbpImg = (typeof gbpImageUrl === 'string' && gbpImageUrl)
+        const gbpImg = (typeof resolvedGbpImageUrl === 'string' && resolvedGbpImageUrl)
           || (typeof generatedImageUrl === 'string' ? generatedImageUrl : null);
         let r = await postToGBP(loc.id, gbpContent, link, gbpImg);
         // Media is best-effort: if Google rejects or can't fetch the image,

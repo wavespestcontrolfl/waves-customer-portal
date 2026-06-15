@@ -1267,6 +1267,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       channels: plan.channels,
       imageUrl,
       gbpImageUrl,
+      noAiImage: true, // brand card only — never a literal AI image
       gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
     });
 

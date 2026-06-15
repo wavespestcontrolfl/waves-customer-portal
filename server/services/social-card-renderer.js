@@ -275,7 +275,7 @@ function renderBlogSvg(input = {}, logoDataUri = null) {
   return `
     <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
       ${frame}
-      ${eyebrow('From the Waves blog', box.padL, eyebrowY, COLORS.blueDark)}
+      ${eyebrow(cleanText(input.eyebrow, 40) || 'From the Waves blog', box.padL, eyebrowY, COLORS.blueDark)}
       ${textBlock(titleLines, { x: box.padL, y: titleY, size: titleSize, weight: 800, fill: COLORS.blueDeeper, family: FONTS.display, lineHeight: 1.06 })}
       <line x1="${box.padL}" y1="${detailY - 42}" x2="${box.padR - 180}" y2="${detailY - 42}" stroke="${COLORS.blueLight}" stroke-width="4"/>
       ${textBlock(detailLines, { x: box.padL, y: detailY, size: detailSize, weight: 500, fill: COLORS.textBody, family: FONTS.body, lineHeight: 1.34 })}
