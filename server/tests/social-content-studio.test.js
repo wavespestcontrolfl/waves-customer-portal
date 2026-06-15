@@ -68,6 +68,42 @@ describe('social content studio', () => {
     expect(drafts.gbp).not.toContain('cockroach');
   });
 
+  test('campaignFactPack builds a grounded bullet list from context only', () => {
+    const context = {
+      location: { city: 'Sarasota', id: 'sarasota', name: 'Sarasota' },
+      services: [{ name: 'Mosquito Control', short_name: 'Mosquito', description: 'Targeted mosquito control treats shady, humid resting spots.' }],
+      content: [{ title: 'Mosquitoes after rain', meta_description: 'Standing water breeds mosquitoes fast.' }],
+      recentSocials: [],
+      pestPressure: { explanation: 'Pest Pressure estimates current activity (0-5).' },
+      reviews: [],
+      competitorPatterns: Studio.DEFAULT_COMPETITOR_PATTERNS,
+    };
+    const pack = Studio.campaignFactPack(context, { topic: 'mosquitoes after rain', service: 'mosquito', city: 'Sarasota' });
+    expect(pack).toMatch(/^- /m);
+    expect(pack).toContain('Targeted mosquito control treats shady, humid resting spots.');
+    expect(pack).toContain('Pest Pressure estimates current activity (0-5).');
+  });
+
+  test('buildCampaignDraftsAI falls back to the deterministic template when AI is unavailable', async () => {
+    const prev = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY; // force the no-AI path
+    try {
+      const context = {
+        location: { city: 'Sarasota', id: 'sarasota', name: 'Sarasota' },
+        services: [{ name: 'Cockroach Control', short_name: 'Cockroach', description: 'Two-treatment cockroach control program.' }],
+        content: [{ title: 'Lawn fungus after rain in Sarasota', meta_description: 'Rain and humidity raise turf disease pressure.' }],
+        recentSocials: [], pestPressure: null, reviews: [],
+        competitorPatterns: Studio.DEFAULT_COMPETITOR_PATTERNS,
+      };
+      const input = { topic: 'lawn fungus after rain', city: 'Sarasota', service: 'lawn care', angle: 'signs to check', cta: 'read guide', channels: ['gbp', 'facebook'] };
+      const ai = await Studio.buildCampaignDraftsAI(input, context);
+      expect(ai).toEqual(Studio.buildCampaignDrafts(input, context));
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prev;
+    }
+  });
+
   test('review graphic candidate defaults to first name and city only', () => {
     const candidate = Studio.buildReviewGraphicCandidate({
       id: 'review-1',

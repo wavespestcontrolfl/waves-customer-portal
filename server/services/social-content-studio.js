@@ -906,9 +906,52 @@ function buildSourcePanel(context, input = {}) {
   return rows;
 }
 
+// Grounded fact pack for AI copy — the same context buildCampaignDrafts draws
+// from, as a short bullet list the model may use (and must not exceed/invent
+// beyond). Keeps the AI captions factual and local.
+function campaignFactPack(context, input) {
+  const lines = [];
+  const svc = relevantServices(context, input)[0];
+  if (svc?.description) lines.push(svc.description);
+  for (const f of (sourceFacts(context, input) || [])) lines.push(f);
+  if (context?.pestPressure?.explanation) lines.push(context.pestPressure.explanation);
+  return Array.from(new Set(lines.map((l) => cleanText(l, 400)).filter(Boolean)))
+    .slice(0, 6)
+    .map((l) => `- ${l}`)
+    .join('\n');
+}
+
+// Brand-voice AI drafts grounded in the campaign context. Per-channel fall back
+// to the deterministic template, so a Claude outage/invalid output never blocks
+// a post and the copy is always present + length-valid.
+async function buildCampaignDraftsAI(input, context) {
+  const template = buildCampaignDrafts(input, context);
+  try {
+    if (typeof SocialMediaService.generateCampaignDrafts !== 'function' || !process.env.ANTHROPIC_API_KEY) {
+      return template;
+    }
+    const channels = normalizeChannels(input.channels);
+    if (!channels.length) return template;
+    const svc = relevantServices(context, input)[0];
+    const ai = await SocialMediaService.generateCampaignDrafts({
+      topic: cleanText(input.topic, 200),
+      facts: campaignFactPack(context, input),
+      cta: ctaText(input.cta),
+      city: context?.location?.city || input.city,
+      service: svc?.name || svc?.short_name || input.service,
+      channels,
+    });
+    const out = { ...template };
+    for (const ch of channels) if (ai && ai[ch]) out[ch] = ai[ch];
+    return out;
+  } catch {
+    return template;
+  }
+}
+
 async function previewCampaign(input) {
   const context = await getCampaignContext(input);
-  const drafts = buildCampaignDrafts(input, context);
+  const drafts = await buildCampaignDraftsAI(input, context);
   return {
     inputs: {
       topic: cleanText(input.topic, 120),
@@ -1543,6 +1586,8 @@ module.exports = {
   autonomousStatus,
   buildCampaignCardInput,
   buildCampaignDrafts,
+  buildCampaignDraftsAI,
+  campaignFactPack,
   buildReviewCardInput,
   buildReviewGraphicCandidate,
   normalizePublishMode,
