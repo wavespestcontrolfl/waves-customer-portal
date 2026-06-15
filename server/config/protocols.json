@@ -1,7 +1,69 @@
 {
+  "operations": {
+    "prepay": {
+      "name": "Prepay Protocol",
+      "summary": "Use this for annual WaveGuard prepay and scheduled-service prepaid credits. Annual prepay is an account billing term; scheduled-service prepaid is a visit or series payment stamp.",
+      "sections": [
+        {
+          "title": "Annual prepay eligibility",
+          "items": [
+            "Available only for recurring estimates.",
+            "Do not use with invoice-mode estimates.",
+            "Do not use when the estimate offers a one-time choice; customer must accept through the public estimate link so recurring vs one-time is recorded.",
+            "Eligible mixes include recurring pest, lawn-only recurring plans, and termite-bait-only recurring plans."
+          ]
+        },
+        {
+          "title": "Customer-link acceptance",
+          "items": [
+            "Customer chooses Pay the year upfront after selecting a slot or linked appointment.",
+            "System marks the estimate accepted, activates the customer, skips onboarding, and creates a draft annual prepay invoice.",
+            "System creates an annual_prepay_terms row in payment_pending status tied to that invoice.",
+            "If the annual term cannot be created, acceptance returns an error instead of pretending the prepay invoice is ready."
+          ]
+        },
+        {
+          "title": "Manual verbal annual prepay",
+          "items": [
+            "Use Mark annual prepay only after the customer has verbally approved paying the year upfront.",
+            "This creates the pending annual prepay invoice and renewal term but does not text, email, or auto-schedule the customer.",
+            "Review and send the invoice from Admin Invoices.",
+            "Do not use the standard Mark Won button for annual prepay; that path is for monthly/manual invoice follow-up."
+          ]
+        },
+        {
+          "title": "Invoice review and payment",
+          "items": [
+            "Draft annual prepay invoices should show Annual Prepay status and coverage dates on invoice views.",
+            "Coverage activates only after the invoice is paid.",
+            "Manual payment, Stripe payment, void, refund, and cancellation paths sync the annual term status.",
+            "Customer 360 should show payment_pending until payment clears."
+          ]
+        },
+        {
+          "title": "Renewal and cancellation",
+          "items": [
+            "Active and renewal_pending annual terms surface in recurring renewal alerts near term end or last scheduled service.",
+            "Use Contacted, Renew, Switch, or Cancel from the renewal alert to record the decision.",
+            "Voiding or refunding an undecided annual prepay invoice cancels the linked term.",
+            "Do not schedule beyond the paid term without renewal approval or plan switch."
+          ]
+        },
+        {
+          "title": "Scheduled-service prepaid credits",
+          "items": [
+            "Use Mark prepaid on an appointment when cash, check, Zelle, phone card, or another off-invoice payment was collected for a visit or recurring series.",
+            "Apply to entire series only when the collected amount covers the plan, not just today’s visit.",
+            "Prepaid credits reduce the completion invoice and create a paid ledger row when the visit is charged/completed.",
+            "Rescheduled, skipped, cancelled, no-show, and completed rows do not receive new prepaid stamps."
+          ]
+        }
+      ]
+    }
+  },
   "lawn": {
     "st_augustine": {
-      "name": "St. Augustine Lawn Care Protocol",
+      "name": "ST. AUGUSTINE (v4.0 — unified SWFL protocol)",
       "notes": [
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
@@ -203,7 +265,7 @@
       }
     },
     "bermuda": {
-      "name": "Bermuda Lawn Care Protocol",
+      "name": "⚠ THIS IS BERMUDA ONLY — DO NOT USE THIS TRACK FOR ZOYSIA. S",
       "notes": [
         "⚠ SpeedZone Southern: NEVER apply above 90°F. In SWFL summer, use Celsius WG for Jul/Aug/Sep broadleaf instead.",
         "⚠ NO Atrazine on Bermuda — Atrazine is ST. AUGUSTINE ONLY.",
@@ -400,7 +462,7 @@
       ]
     },
     "zoysia": {
-      "name": "Zoysia Protocol",
+      "name": "⚠ THIS IS ZOYSIA ONLY — DO NOT USE THIS TRACK FOR BERMUDA. S",
       "notes": [
         "⚠ N budget: 2.0-3.0 lb N/K/yr MAX (UF/IFAS). Excess N = explosive thatch → severe Large Patch in fall.",
         "⚠ PGR: Primo Maxx at CONSERVATIVE rates only. Document response. Over-regulation = months of thin turf.",
@@ -597,7 +659,7 @@
       ]
     },
     "bahia": {
-      "name": "Bahia Protocol",
+      "name": "TRACK D: BAHIA (5-10% of accounts) [v4.0 REVISED]",
       "notes": [
         "⚠ Bahia is LOW-INPUT turf. 2.0 lb N/K/yr MAX. More N = more mowing, NOT better quality.",
         "⚠ Mole cricket is THE primary insect threat — not chinch bugs. Soapy flush scout, not leaf inspection.",
@@ -797,7 +859,7 @@
     }
   },
   "tree_shrub": {
-    "name": "Tree & Shrub Protocol",
+    "name": "10/10 SWFL Tree & Shrub Protocol",
     "version": "2026.06-swfl-tree-shrub-10",
     "service_area": "Venice / North Port / Parrish",
     "notes": [
@@ -1090,7 +1152,7 @@
     ]
   },
   "pest": {
-    "name": "Pest Control Protocol",
+    "name": "Residential Pest Control Protocol Templates",
     "notes": [
       "Use these templates as service-line SOPs. Product quantities still come from Inventory service-product usage so estimate pricing stays rule-based while margin checks stay inventory-aware.",
       "Rotate active ingredient classes when a callback shows live activity after the expected control window.",
@@ -1180,266 +1242,8 @@
       }
     ]
   },
-  "rodent": {
-    "name": "Rodent Control Protocol",
-    "notes": [
-      "Rodent service is inspection-led. Confirm activity, entry points, sanitation pressure, and access before promising remediation.",
-      "Baiting without exclusion is monitoring, not a rodent-free structural warranty.",
-      "Use tamper-resistant stations for exterior rodenticide placements and document station count, location, and follow-up cadence."
-    ],
-    "safety_rules": [
-      "Use tamper-resistant stations for exterior bait.",
-      "Do not place rodenticide where children, pets, wildlife, or non-target animals can access it.",
-      "Photo-document entry points before quoting exclusion.",
-      "Separate trapping, baiting, exclusion, and sanitation recommendations in notes."
-    ],
-    "visits": [
-      {
-        "visit": 1,
-        "month": "Any",
-        "primary": "Rodent Inspection / Activity Assessment\nInspect attic, garage, roof returns, soffits, AC chase, utility penetrations, doors, weep gaps, and exterior perimeter\nDocument droppings, rub marks, gnawing, nesting, odor, sounds, food sources, and water sources\nPhotograph active or potential entry points",
-        "secondary": "Classify as monitoring, trapping, baiting, exclusion, or sanitation follow-up\nSet temporary monitors only when activity is unclear\nQuote exclusion separately when entry points are active",
-        "material_cost": "inspection",
-        "labor_cost": "inspection",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Do not start with bait alone when active interior activity suggests a structural entry issue."
-      },
-      {
-        "visit": 2,
-        "month": "Any",
-        "primary": "Trap / Bait Station Setup\nInstall tamper-resistant exterior bait stations where label and site conditions allow\nSet snap traps or mechanical traps in attic, garage, or utility zones when active interior movement is present\nMap station and trap locations",
-        "secondary": "Use non-toxic monitors when risk, access, or customer preference blocks rodenticide\nRecord bait type, station count, trap count, and placement areas\nSchedule follow-up based on activity and customer access",
-        "lineMeta": {
-          "Install tamper-resistant exterior bait stations where label and site conditions allow": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Contrac Blox"] },
-          "Set snap traps or mechanical traps in attic, garage, or utility zones when active interior movement is present": { "scope": "interior", "treatmentApplied": false }
-        },
-        "material_cost": "inventory",
-        "labor_cost": "station_count",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Exterior bait stations manage pressure. Interior activity still requires trapping and entry-point work."
-      },
-      {
-        "visit": 3,
-        "month": "Any",
-        "primary": "Exclusion / Entry-Point Repair\nSeal approved entry points with rodent-resistant materials\nPrioritize roof returns, AC line sets, utility penetrations, gaps at doors, soffits, vents, and garage transitions\nConfirm no active trapping conflict before sealing major pathways",
-        "secondary": "Do not seal animals into occupied voids\nFlag inaccessible or declined repairs in the customer note\nRecommend sanitation or landscape trimming when pressure is recurring",
-        "material_cost": "materials",
-        "labor_cost": "scope",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Exclusion is a separate scope unless the estimate explicitly includes it."
-      },
-      {
-        "visit": 4,
-        "month": "Any",
-        "primary": "Follow-Up / Monitoring\nCheck and refresh stations or traps\nRemove captured rodents or carcasses when accessible\nReinspect sealed areas and active pathways\nUpdate activity level and customer-facing status",
-        "secondary": "If activity persists, identify missed access, food/water pressure, or sanitation source\nReset cadence until activity drops to monitoring level\nEscalate structural or wildlife issue if evidence does not match standard rodent pressure",
-        "material_cost": "inventory",
-        "labor_cost": "follow_up",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "A clean follow-up should say what changed: station activity, trap captures, new evidence, sealed gaps, and next cadence."
-      }
-    ]
-  },
-  "mosquito": {
-    "name": "Mosquito Control Protocol",
-    "notes": [
-      "Mosquito service depends on source reduction plus directed barrier treatment. Outdoor pressure can rebuild from neighboring breeding and resting sites.",
-      "Peak SWFL pressure is typically May through October, but shaded, irrigated, or water-adjacent properties can need service outside that window.",
-      "Avoid pollinator activity and blooming plants when selecting treatment zones."
-    ],
-    "safety_rules": [
-      "Wind and rain conditions must support safe application.",
-      "Do not spray open water, edible plants, blooming plants with active pollinators, or inaccessible areas.",
-      "Document standing water sources that cannot be corrected.",
-      "Use customer notes to separate source reduction from adult mosquito suppression."
-    ],
-    "visits": [
-      {
-        "visit": 1,
-        "month": "Any",
-        "primary": "Mosquito Barrier Treatment\nTreat shaded resting zones, foliage edges, fence lines, lanai perimeter, pool cage edges, under decks, and vegetation transitions\nUse adulticide selected from inventory and label/site fit\nApply with directed backpack or approved equipment",
-        "secondary": "Inspect gutters, drains, planters, bromeliads, saucers, tarps, toys, and water-holding containers\nDump standing water where practical\nDocument inaccessible breeding sources",
-        "material_cost": "inventory",
-        "labor_cost": "standard",
-        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
-        "notes": "This is the default recurring mosquito template. The customer note should mention both treatment areas and source findings."
-      },
-      {
-        "visit": 2,
-        "month": "Any",
-        "primary": "Source Reduction / Larval Support\nInspect and correct standing water sources\nApply Bti dunk tablets or approved mosquito stations where breeding sources cannot be removed\nUse IGR support only where label, water source, and site conditions fit",
-        "secondary": "Recheck prior breeding sources\nFlag drainage, irrigation, screen, or gutter issues\nExplain that adult pressure can persist when sources are off-property",
-        "material_cost": "inventory",
-        "labor_cost": "standard",
-        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
-        "notes": "Use this template when breeding-source pressure is the main driver, not just resting adult pressure."
-      },
-      {
-        "visit": 3,
-        "month": "Any",
-        "primary": "Event / Heavy-Pressure Mosquito Service\nInspect event-use zones, seating areas, lanai, pool deck, paths, and shaded perimeter\nTreat high-use resting zones only where label, wind, rain, and pollinator conditions allow\nPrioritize customer-visible use areas over blanket coverage",
-        "secondary": "Set expectations for short-term knockdown versus recurring pressure\nRecommend recurring mosquito plan if pressure is structural or seasonal\nDocument weather limits and inaccessible zones",
-        "material_cost": "inventory",
-        "labor_cost": "event",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Use for one-time event prep or heavy-pressure corrective visits. Do not overpromise duration."
-      }
-    ]
-  },
-  "palm_injection": {
-    "name": "Palm Injection Protocol",
-    "notes": [
-      "Palm injections are add-ons, not default Tree & Shrub inclusions.",
-      "Diagnose the target issue before injecting. Do not use injections as a substitute for full palm fertility, irrigation correction, or disease diagnosis.",
-      "Record species or palm type, size class, product, dose, port count, target issue, photos, and follow-up timing."
-    ],
-    "safety_rules": [
-      "Confirm product label and palm suitability before drilling or injecting.",
-      "Do not inject a palm with unclear diagnosis or severe irreversible decline without office review.",
-      "Disinfect equipment between palms when disease is suspected.",
-      "Document ports, dose, and follow-up date."
-    ],
-    "visits": [
-      {
-        "visit": 1,
-        "month": "Any",
-        "primary": "Palm Injection Assessment\nIdentify palm species/type, size class, symptoms, canopy pattern, spear condition, trunk wounds, irrigation/salt stress, and fertility history\nPhotograph canopy, spear, trunk, root zone, and affected fronds\nDetermine whether Mg, Mn/Fe, systemic pest, or diagnosed disease support injection",
-        "secondary": "Recommend soil/root-zone correction when injection is not the right tool\nEscalate severe decline, bud rot suspicion, or unclear diagnosis before treatment\nQuote injection separately from Tree & Shrub service",
-        "material_cost": "inspection",
-        "labor_cost": "inspection",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Assessment comes first. Never sell injection from a single yellow-frond observation."
-      },
-      {
-        "visit": 2,
-        "month": "Any",
-        "primary": "Palm Injection Application\nApply selected injection product per label and diagnosis\nUse Palm-Jet Mg for diagnosed magnesium deficiency pattern where appropriate\nUse Mn-Jet Fe for diagnosed manganese/iron deficiency pattern where appropriate\nUse IMA-jet or Propizol only when pest/disease diagnosis and label fit support it",
-        "secondary": "Record product, dose, port count, palm count, and application date\nKeep injection work separate from routine foliar or granular Tree & Shrub work\nClean and disinfect injection equipment as needed",
-        "lineMeta": {
-          "Use Palm-Jet Mg for diagnosed magnesium deficiency pattern where appropriate": { "scope": "plant", "treatmentApplied": true, "catalogProductHints": ["Palm-Jet Mg"] },
-          "Use Mn-Jet Fe for diagnosed manganese/iron deficiency pattern where appropriate": { "scope": "plant", "treatmentApplied": true, "catalogProductHints": ["Mn-Jet Fe"] },
-          "Use IMA-jet or Propizol only when pest/disease diagnosis and label fit support it": { "scope": "plant", "treatmentApplied": true, "catalogProductHints": ["IMA-jet", "Propizol"] }
-        },
-        "material_cost": "inventory",
-        "labor_cost": "per_palm",
-        "tiers": { "bronze": false, "silver": false, "enhanced": false, "premium": true },
-        "notes": "Injection pricing is per palm and should remain separate from recurring Tree & Shrub tier inclusions."
-      },
-      {
-        "visit": 3,
-        "month": "Any",
-        "primary": "Palm Injection Follow-Up\nReinspect treated palms for symptom progression, spear condition, canopy response, and new stress signs\nPhotograph the same angles as the assessment\nUpdate next injection or fertility recommendation",
-        "secondary": "Do not repeat injection automatically without diagnosis and timing review\nEscalate non-response, worsening crown decline, or suspected pathogen issue\nDocument customer-facing expectations for slow visible response",
-        "material_cost": "0.00",
-        "labor_cost": "follow_up",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Palm recovery is slow. Follow-up should focus on trend, not instant color change."
-      }
-    ]
-  },
-  "cockroach": {
-    "name": "Cockroach Control Protocol",
-    "notes": [
-      "Cockroach control is species-specific. German roach work is bait, IGR, sanitation, and follow-up driven; exterior palmetto bug work is perimeter and exclusion driven.",
-      "Do not contaminate bait placements with repellent sprays.",
-      "Document sanitation, moisture, harborage, and customer prep issues clearly."
-    ],
-    "safety_rules": [
-      "Confirm interior re-entry and ventilation instructions when interior products are applied.",
-      "Keep bait away from spray contamination and cleaning products.",
-      "Use monitors to verify progress on German roach jobs.",
-      "Schedule follow-up when live German roach activity is confirmed."
-    ],
-    "visits": [
-      {
-        "visit": 1,
-        "month": "Any",
-        "primary": "German Roach Cleanout\nInspect kitchen, bathrooms, hinges, appliance motors, plumbing voids, cabinet seams, and food storage areas\nApply cockroach gel bait in targeted placements\nUse non-repellent crack-and-crevice treatment where label allows\nApply IGR point-source or aerosol where label allows",
-        "secondary": "Vacuum visible aggregation before application when practical\nPlace monitors and record count/location\nExplain sanitation and follow-up requirements",
-        "lineMeta": {
-          "Apply cockroach gel bait in targeted placements": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Advion Cockroach Gel Bait"] },
-          "Use non-repellent crack-and-crevice treatment where label allows": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Alpine WSG"] },
-          "Apply IGR point-source or aerosol where label allows": { "scope": "interior", "treatmentApplied": true, "catalogProductHints": ["Gentrol IGR"] }
-        },
-        "material_cost": "inventory",
-        "labor_cost": "elevated",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Bait-first, non-repellent approach. Schedule 10-14 day follow-up for confirmed live German roach activity."
-      },
-      {
-        "visit": 2,
-        "month": "Any",
-        "primary": "American / Smokybrown / Palmetto Bug Control\nInspect exterior entry points, garage, lanai, drains, mulch, irrigation boxes, and moisture zones\nTreat exterior perimeter, cracks, crevices, and harborage zones where label allows\nUse granular bait in landscape or utility zones where appropriate",
-        "secondary": "Interior treatment is targeted only where activity is present\nRecommend door sweeps, moisture correction, drain sanitation, or exclusion when pressure is structural\nDocument species and likely source",
-        "lineMeta": {
-          "Treat exterior perimeter, cracks, crevices, and harborage zones where label allows": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Demand CS", "Talstar P", "Alpine WSG"] },
-          "Use granular bait in landscape or utility zones where appropriate": { "scope": "exterior", "treatmentApplied": true, "catalogProductHints": ["Advion WDG Granular"] }
-        },
-        "material_cost": "inventory",
-        "labor_cost": "standard",
-        "tiers": { "bronze": true, "silver": true, "enhanced": true, "premium": true },
-        "notes": "Exterior roach pressure is usually moisture and access driven. Do not treat it like a German roach infestation."
-      },
-      {
-        "visit": 3,
-        "month": "Any",
-        "primary": "Cockroach Follow-Up\nInspect monitors, bait consumption, live activity, egg cases, droppings, and customer prep progress\nRefresh bait only where consumed or contaminated\nSpot treat cracks, crevices, or harborages as needed",
-        "secondary": "Adjust plan if monitor counts are not dropping\nReinforce sanitation, moisture, and food-source corrections\nEscalate severe or multi-unit activity for office review",
-        "material_cost": "inventory",
-        "labor_cost": "follow_up",
-        "tiers": { "bronze": false, "silver": true, "enhanced": true, "premium": true },
-        "notes": "Progress should be measured by monitor counts and live sightings, not just product applied."
-      }
-    ]
-  },
-  "bed_bug": {
-    "name": "Bed Bug Control Protocol",
-    "notes": [
-      "Bed bug work is inspection-led and prep-dependent. Do not treat without documenting rooms, evidence, method, prep status, and follow-up plan.",
-      "Pricing and scope depend on method: chemical/IPM, heat, or hybrid. Keep quote-required cases out of generic pest workflows.",
-      "Customer prep, laundry, clutter reduction, and follow-up timing are part of the protocol, not optional extras."
-    ],
-    "safety_rules": [
-      "Confirm customer prep and vacancy instructions before treatment.",
-      "Do not apply products to mattresses, furniture, or belongings unless the label explicitly allows that use.",
-      "Protect occupants, pets, aquariums, sensitive items, and heat-sensitive materials.",
-      "Schedule or recommend follow-up inspection according to the treatment method."
-    ],
-    "visits": [
-      {
-        "visit": 1,
-        "month": "Any",
-        "primary": "Bed Bug Inspection / Scope\nInspect sleeping and resting areas, mattress seams, box spring, bed frame, headboard, baseboards, furniture seams, luggage zones, outlets, and adjacent rooms\nDocument live bugs, cast skins, eggs, fecal spotting, bites reported, rooms affected, prep status, and occupancy type\nClassify method: chemical/IPM, heat, or hybrid",
-        "secondary": "Photograph evidence before quoting or treating\nSend prep instructions and confirm customer can comply\nEscalate severe, multi-unit, or cluttered jobs for office review",
-        "material_cost": "inspection",
-        "labor_cost": "inspection",
-        "tiers": { "bronze": false, "silver": false, "enhanced": false, "premium": true },
-        "notes": "Inspection must identify rooms affected and treatment method before any customer promise."
-      },
-      {
-        "visit": 2,
-        "month": "Any",
-        "primary": "Bed Bug Treatment\nUse approved chemical/IPM, heat, or hybrid method from the estimate scope\nTreat cracks, crevices, bed frame, baseboards, furniture voids, and harborages where label allows\nUse dust, residual, contact, steam, vacuum, encasement, or heat steps only when included in method and label/site fit",
-        "secondary": "Bag or isolate items according to prep guide\nDocument rooms treated, products/method, re-entry timing, and inaccessible areas\nSchedule follow-up or post-treatment inspection window",
-        "material_cost": "inventory",
-        "labor_cost": "room_count",
-        "tiers": { "bronze": false, "silver": false, "enhanced": false, "premium": true },
-        "notes": "Do not merge bed bug with general pest. This is a specialty treatment with separate prep, pricing, and follow-up."
-      },
-      {
-        "visit": 3,
-        "month": "Any",
-        "primary": "Bed Bug Follow-Up / Post-Treatment Inspection\nReinspect treated rooms and adjacent rooms\nCheck monitors, mattress seams, furniture seams, baseboards, and customer-reported areas\nDocument live activity, new evidence, or no activity",
-        "secondary": "Spot treat only where label and scope allow\nReinforce laundry, bagging, clutter, and travel/luggage precautions\nEscalate ongoing activity for method review or additional treatment scope",
-        "material_cost": "inventory",
-        "labor_cost": "follow_up",
-        "tiers": { "bronze": false, "silver": false, "enhanced": true, "premium": true },
-        "notes": "Follow-up determines whether the original method is working or the scope needs revision."
-      }
-    ]
-  },
   "termite": {
-    "name": "Termite Control Protocol",
+    "name": "Termite Service Protocol Templates",
     "notes": [
       "Termite protocols are compliance-sensitive. These templates define workflow and product family, while final application must follow the product label, graph/diagram, and state documentation requirements.",
       "Keep bait, liquid, foam, and wood-treatment scopes separate because cost drivers, warranty language, and follow-up cadence differ.",
