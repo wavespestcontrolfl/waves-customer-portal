@@ -808,7 +808,7 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
         db.raw("COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled"),
-        db.raw("COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled')) as remaining")
+        db.raw("COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled','no_show')) as remaining")
       ).first();
     const total = parseInt(row?.total || 0);
     const completed = parseInt(row?.completed || 0);

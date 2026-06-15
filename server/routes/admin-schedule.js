@@ -525,7 +525,7 @@ function httpError(status, message) {
 }
 
 const ASSIGNMENT_SCOPES = new Set(['this_only', 'following', 'series']);
-const ASSIGNMENT_TERMINAL_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped'];
+const ASSIGNMENT_TERMINAL_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show'];
 
 function normalizeAssignmentScope(scope) {
   const normalized = scope || 'this_only';

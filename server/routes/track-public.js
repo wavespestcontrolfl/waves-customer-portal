@@ -365,16 +365,21 @@ router.get('/:token', async (req, res, next) => {
           ? (row.service_description || null)
           : null,
       },
-      vehicle: row.track_state === 'en_route' ? await buildVehicle(row) : null,
-      summary: row.track_state === 'complete' ? await buildSummary(row) : null,
-      cancellation: row.track_state === 'cancelled'
+      // Gate live-vehicle exposure + the 30s poll on the customer-facing
+      // state, not raw track_state: a no-show on an already-en_route job
+      // leaves track_state='en_route', and keying off it here would keep
+      // streaming fresh tech GPS coords and polling until token expiry
+      // even though the customer is shown a terminal missed-visit card.
+      vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
+      summary: customerState === 'complete' ? await buildSummary(row) : null,
+      cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
       prepToken: null,
       meta: {
-        pollIntervalSeconds: row.track_state === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
+        pollIntervalSeconds: customerState === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
       },
     };
 

@@ -1821,6 +1821,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
 
+    // No-show is terminal and non-completable. A completion/recap sheet
+    // opened before another dispatcher marked the visit no_show would
+    // otherwise mint completion artifacts (and text the customer) for a
+    // visit the status machine says was missed — fromStatus is read fresh
+    // here, so the transitionJobStatus atomic guard wouldn't catch it.
+    // The typed recap path enforces the same via pest-recap's
+    // NON_COMPLETABLE_STATUSES.
+    if (svc.status === 'no_show') {
+      return res.status(409).json({
+        error: 'This visit was marked as a no-show and can no longer be completed. Refresh and try again.',
+        code: 'service_no_show',
+      });
+    }
+
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
       waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
     }

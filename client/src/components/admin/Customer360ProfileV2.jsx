@@ -2037,6 +2037,7 @@ export default function Customer360ProfileV2({
       status !== "completed" &&
       status !== "rescheduled" &&
       status !== "skipped" &&
+      status !== "no_show" &&
       scheduledDate >= today
     );
   });

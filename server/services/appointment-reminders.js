@@ -922,6 +922,19 @@ const AppointmentReminders = {
    */
   async handleNoShow(scheduledServiceId, options = {}) {
     try {
+      // Supersede any reminder row for this visit so a deferred
+      // confirmation still queued for the same-day appointment can't fire
+      // after it's been no-showed — the deferred-confirmation path
+      // suppresses on cancelled/confirmation_sent. Runs regardless of the
+      // notify preference: the visit is terminal either way. Best-effort.
+      try {
+        await db('appointment_reminders')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .update({ cancelled: true, updated_at: new Date() });
+      } catch (e) {
+        logger.warn(`[appt-remind] no-show reminder supersede failed: ${e.message}`);
+      }
+
       const sendNotification = options.sendNotification !== false;
       if (!sendNotification) {
         logger.info(`[appt-remind] No-show notice suppressed for ${scheduledServiceId}`);
