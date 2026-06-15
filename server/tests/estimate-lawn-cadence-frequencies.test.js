@@ -183,6 +183,19 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(basic.monthly).toBe(29.75); // 420 gross * 0.85 / 12
   });
 
+  test('applies a manual recurring discount surfaced on the live engine summary', () => {
+    // engineInputs carry a 10% manual discount the stored blob doesn't record;
+    // the engine summary surfaces it. Each tier must price after that discount.
+    const engineResult = {
+      lineItems: [lawnLineItem()],
+      summary: { manualDiscount: { type: 'PERCENT', value: 10, amount: 74.7, scope: 'recurring_annual_after_waveguard' } },
+    };
+    const freqs = lawnFrequenciesFromEngineResult(engineResult, {});
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.manualDiscount).toBeTruthy();
+    expect(enhanced.monthly).toBe(56.02); // 62.25/mo base − 6.23 (10% of 747, /12)
+  });
+
   test('honors the accepted tier from customerSelection over the engine default', () => {
     // Stored as Enhanced but accepted as Basic: the re-rendered ladder must mark
     // Basic selected, not the engine's resolved Enhanced tier.
@@ -240,6 +253,15 @@ describe('snapshotMayHideLawnLadder — bypass stale pre-ladder lawn snapshots',
     const pestEstData = { engineInputs: { services: { pest: { frequency: 'quarterly' }, lawn: {} } } };
     expect(snapshotMayHideLawnLadder(collapsedSnapshot, pestEstData)).toBe(false);
     expect(snapshotMayHideLawnLadder(collapsedSnapshot, { result: { results: {} } })).toBe(false);
+  });
+
+  test('does not bypass a mixed no-pest bundle (lawn + mosquito / tree & shrub)', () => {
+    // lawnFrequenciesFromEngineResult would refuse the mixed bundle, so bypassing
+    // a valid frozen snapshot here could reprice an already-sent estimate.
+    const lawnMosquito = { engineInputs: { services: { lawn: {}, mosquito: { tier: 'seasonal9' } } } };
+    const lawnTreeShrub = { engineInputs: { services: { lawn: {}, treeShrub: { tier: 'standard' } } } };
+    expect(snapshotMayHideLawnLadder(collapsedSnapshot, lawnMosquito)).toBe(false);
+    expect(snapshotMayHideLawnLadder(collapsedSnapshot, lawnTreeShrub)).toBe(false);
   });
 });
 

@@ -14,13 +14,15 @@ jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-05-29' }));
 const { variantsForService } = require('../services/customer-pricing-ai');
 
 describe('variantsForService — lawn_care', () => {
-  test('offers all four tiers including basic (4 applications)', () => {
+  test('offers all four tiers but keeps Standard first so it stays the default', () => {
+    // The portal panel auto-selects options[0]; Standard must lead so a generic
+    // "add lawn care" quote does not silently default to the 4-application Basic.
     const all = variantsForService('lawn_care', 'lawn care please');
     const ids = all.map((o) => o.id);
-    const tiers = all.map((o) => o.tier);
-    expect(ids).toEqual(['lawn-basic', 'lawn-standard', 'lawn-enhanced', 'lawn-premium']);
-    expect(tiers).toEqual(['basic', 'standard', 'enhanced', 'premium']);
+    expect(ids[0]).toBe('lawn-standard');
+    expect(ids).toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
     const basic = all.find((o) => o.id === 'lawn-basic');
+    expect(basic.tier).toBe('basic');
     expect(basic.lawnFreq).toBe(4);
     expect(basic.label).toBe('Basic lawn care');
   });
@@ -33,5 +35,10 @@ describe('variantsForService — lawn_care', () => {
   test('premium/monthly/12 intent returns premium only', () => {
     const prem = variantsForService('lawn_care', 'I want premium monthly 12 visits');
     expect(prem.map((o) => o.id)).toEqual(['lawn-premium']);
+  });
+
+  test('explicit basic / 4-application / quarterly intent returns basic only', () => {
+    expect(variantsForService('lawn_care', 'just the basic lawn plan').map((o) => o.id)).toEqual(['lawn-basic']);
+    expect(variantsForService('lawn_care', 'quarterly lawn service').map((o) => o.id)).toEqual(['lawn-basic']);
   });
 });

@@ -8580,10 +8580,14 @@ function lawnFrequenciesFromResultStats(estData = {}) {
 // Shared core: turn lawn cost-floor tier rows into the customer-facing cadence
 // ladder. Fed by stored result.results.lawn (v1 path) and by the live engine
 // lawn line item tiers (engine-invocation path) so both surfaces present the
-// same 4/6/9/12 application options instead of one collapsed entry.
-function lawnFrequenciesFromRows(rows = [], estData = {}) {
+// same 4/6/9/12 application options instead of one collapsed entry. Callers may
+// pass an explicit manual discount (e.g. one read off a just-generated engine
+// summary that the stored blob doesn't carry); otherwise it's read from estData.
+function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride) {
   const seen = new Set();
-  const rawManualDiscount = normalizeManualDiscountSummary(estData);
+  const rawManualDiscount = manualDiscountOverride !== undefined
+    ? manualDiscountOverride
+    : normalizeManualDiscountSummary(estData);
   return (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
@@ -8742,7 +8746,16 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
       selected: t.tier === selectedTierKey,
     };
   });
-  return lawnFrequenciesFromRows(rows, estData);
+
+  // The per-tier values above carry the WaveGuard membership discount but not
+  // any manual recurring discount, which the engine surfaces on the live
+  // summary. When the replayed engineInputs apply a manual discount the stored
+  // blob doesn't already record, read it off the just-generated summary so each
+  // tier prices/bills after the manual discount (matching the old single-entry
+  // shapeFrequencyEntry path).
+  const manualDiscount = normalizeManualDiscountSummary({ summary: engineResult?.summary })
+    || normalizeManualDiscountSummary(estData);
+  return lawnFrequenciesFromRows(rows, estData, manualDiscount);
 }
 
 function mosquitoTierKey(row = {}) {
@@ -9797,18 +9810,34 @@ function invalidateSendSnapshotPricingBundle(estData = {}) {
   return true;
 }
 
+// Non-lawn recurring (ongoing-plan) engine input service keys. Their presence
+// means a bundle is NOT lawn-only, so the lawn ladder doesn't apply.
+const ENGINE_NON_LAWN_RECURRING_KEYS = [
+  'pest', 'commercialPest', 'commercialLawn', 'treeShrub',
+  'palmInjection', 'palm', 'mosquito',
+  'termite', 'termiteBait', 'termite_bait', 'rodentBait',
+];
+function engineInputsAreLawnOnly(engineInputs = {}) {
+  const services = engineInputs?.services;
+  if (!services || typeof services !== 'object' || !services.lawn) return false;
+  return !ENGINE_NON_LAWN_RECURRING_KEYS.some((key) => services[key]);
+}
+
 // Lawn-only engine-input estimates sent before the 4/6/9/12 ladder shipped have
 // a single collapsed "Quarterly" snapshot. That snapshot's totals still match
 // the estimate, so buildPricingBundle would serve it and the customer would
 // never see the new tiers. Detect that stale shape so the snapshot is bypassed
-// and the engine path rebuilds the ladder. No-op for healthy multi-tier
-// snapshots and for non-lawn / pest estimates.
+// and the engine path rebuilds the ladder. Restricted to genuinely lawn-only
+// engine inputs — a no-pest bundle that pairs lawn with mosquito/tree & shrub
+// keeps its frozen snapshot (lawnFrequenciesFromEngineResult would refuse the
+// mixed bundle, and rebuilding could reprice an already-sent estimate). No-op
+// for healthy multi-tier snapshots too.
 function snapshotMayHideLawnLadder(snapshotBundle = {}, estData = {}) {
   const freqs = Array.isArray(snapshotBundle?.frequencies) ? snapshotBundle.frequencies : [];
   if (freqs.length > 1) return false;
   if (freqs.some((f) => lawnTierRuntimeMeta(f?.key))) return false;
   const engineInputs = extractEngineInputs(estData);
-  return !!engineInputs && !canVaryPestFrequency(engineInputs) && !!engineInputs.services?.lawn;
+  return !!engineInputs && engineInputsAreLawnOnly(engineInputs);
 }
 
 function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {

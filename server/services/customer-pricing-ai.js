@@ -192,14 +192,17 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
   if (serviceKey === 'lawn_care') {
     // 'basic' (lawnFreq 4) is now a sold tier and prices distinctly as the
     // 4-application plan, so it is offered alongside Standard/Enhanced/Premium.
+    // Standard stays first so the portal panel (which auto-selects options[0])
+    // keeps defaulting to the 6-application plan, not the new 4-application one.
     const all = [
-      { id: 'lawn-basic', serviceKey, label: 'Basic lawn care', tier: 'basic', lawnFreq: 4, cadence: '4 visits/year' },
       { id: 'lawn-standard', serviceKey, label: 'Standard lawn care', tier: 'standard', lawnFreq: 6, cadence: '6 visits/year' },
       { id: 'lawn-enhanced', serviceKey, label: 'Enhanced lawn care', tier: 'enhanced', lawnFreq: 9, cadence: '9 visits/year' },
       { id: 'lawn-premium', serviceKey, label: 'Premium lawn care', tier: 'premium', lawnFreq: 12, cadence: '12 visits/year' },
+      { id: 'lawn-basic', serviceKey, label: 'Basic lawn care', tier: 'basic', lawnFreq: 4, cadence: '4 visits/year' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');
     if (/premium|monthly|12/i.test(prompt)) return all.filter(o => o.id === 'lawn-premium');
+    if (/\bbasic\b|\b4\b|quarterly/i.test(prompt)) return all.filter(o => o.id === 'lawn-basic');
     return all;
   }
   if (serviceKey === 'mosquito') {
