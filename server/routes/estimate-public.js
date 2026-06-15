@@ -8658,18 +8658,24 @@ function lawnFrequenciesFromRows(rows = [], estData = {}) {
 }
 
 // Recurring (ongoing-plan) service keys, used to decide whether an engine
-// result is lawn-only. One-time follow-ups are excluded so they don't block
-// the lawn cadence ladder.
+// result is lawn-only. Mirrors the canonical recurring-line set — note 'rodent'
+// is NOT recurring (the recurring rodent service is rodent_bait; rodent_trapping
+// is a one-time specialty that fuzzily maps onto 'rodent').
 const RECURRING_SERVICE_KEYS = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'mosquito',
-  'termite_bait', 'palm_injection', 'rodent_bait', 'rodent',
+  'termite_bait', 'palm_injection', 'rodent_bait',
 ]);
 
-// One-time line items carry an explicit `one_time_*` service key. They must be
-// dropped before recurring-service detection — recurringServiceKey would alias
-// one_time_pest → pest_control, one_time_mosquito → mosquito, etc.
-function isOneTimeEngineLineItem(li = {}) {
-  return /^one[_-]?time/.test(String(li?.service || '').toLowerCase());
+// A recurring engine line carries real monthly/annual billing. One-time
+// follow-ups (one_time_*) and specialty one-time rows (e.g. rodent_trapping)
+// do NOT, so they're excluded from the lawn-only check even when their service
+// key maps onto a recurring family.
+function isRecurringEngineLineItem(li = {}) {
+  if (!li || /^one[_-]?time/.test(String(li.service || '').toLowerCase())) return false;
+  if (!RECURRING_SERVICE_KEYS.has(recurringServiceKey(li))) return false;
+  const annual = finiteNumberOrNull(li.annual ?? li.annualAfterDiscount ?? li.annualBeforeDiscount);
+  const monthly = finiteNumberOrNull(li.monthly ?? li.monthlyAfterDiscount);
+  return (annual != null && annual > 0) || (monthly != null && monthly > 0);
 }
 
 // Apply a flat (WaveGuard) discount factor to a pre-discount tier value,
@@ -8689,15 +8695,11 @@ function applyLawnTierDiscount(value, factor) {
 // inside the pest cadence. Returns [] for any non-lawn-only result so the
 // caller falls back to the single-frequency view.
 function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
-  const lineItems = (Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [])
-    .filter((li) => li && !isOneTimeEngineLineItem(li));
-  const recurringServices = new Set(
-    lineItems
-      .map((li) => recurringServiceKey(li))
-      .filter((key) => RECURRING_SERVICE_KEYS.has(key)),
-  );
+  const recurringLineItems = (Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [])
+    .filter(isRecurringEngineLineItem);
+  const recurringServices = new Set(recurringLineItems.map((li) => recurringServiceKey(li)));
   if (recurringServices.size !== 1 || !recurringServices.has('lawn_care')) return [];
-  const lawnLine = lineItems.find((li) => recurringServiceKey(li) === 'lawn_care');
+  const lawnLine = recurringLineItems.find((li) => recurringServiceKey(li) === 'lawn_care');
   const tiers = Array.isArray(lawnLine?.tiers) ? lawnLine.tiers : [];
 
   // The per-tier monthly/annual/per-app values are pre-discount market prices,
@@ -9795,6 +9797,20 @@ function invalidateSendSnapshotPricingBundle(estData = {}) {
   return true;
 }
 
+// Lawn-only engine-input estimates sent before the 4/6/9/12 ladder shipped have
+// a single collapsed "Quarterly" snapshot. That snapshot's totals still match
+// the estimate, so buildPricingBundle would serve it and the customer would
+// never see the new tiers. Detect that stale shape so the snapshot is bypassed
+// and the engine path rebuilds the ladder. No-op for healthy multi-tier
+// snapshots and for non-lawn / pest estimates.
+function snapshotMayHideLawnLadder(snapshotBundle = {}, estData = {}) {
+  const freqs = Array.isArray(snapshotBundle?.frequencies) ? snapshotBundle.frequencies : [];
+  if (freqs.length > 1) return false;
+  if (freqs.some((f) => lawnTierRuntimeMeta(f?.key))) return false;
+  const engineInputs = extractEngineInputs(estData);
+  return !!engineInputs && !canVaryPestFrequency(engineInputs) && !!engineInputs.services?.lawn;
+}
+
 function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
   const annual = Number(annualTotal);
   if (Number.isFinite(annual) && annual > 0) {
@@ -9849,6 +9865,7 @@ async function buildPricingBundle(estimate) {
     snapshotBundle
     && Array.isArray(snapshotBundle.frequencies)
     && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    && !snapshotMayHideLawnLadder(snapshotBundle, estData)
   ) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
@@ -10389,6 +10406,7 @@ module.exports.isMosquitoServiceName = isMosquitoServiceName;
 module.exports.isLawnServiceName = isLawnServiceName;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
+module.exports.snapshotMayHideLawnLadder = snapshotMayHideLawnLadder;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;

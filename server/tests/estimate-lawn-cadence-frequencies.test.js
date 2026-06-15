@@ -1,6 +1,7 @@
 const {
   lawnFrequenciesFromResultStats,
   lawnFrequenciesFromEngineResult,
+  snapshotMayHideLawnLadder,
   applySelectedLawnTierToEstimateData,
   buildRenderFlags,
   sectionTierEligibleFromKeys,
@@ -116,6 +117,8 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     return {
       service: 'lawn_care',
       tier: 'enhanced',
+      monthly: 62.25,
+      annual: 747,
       tiers: [
         { tier: 'basic', label: '4 Applications', monthly: 35, annual: 420, perApp: 105, visits: 4, freq: 4, recommended: false },
         { tier: 'standard', label: '6 Applications', monthly: 45, annual: 540, perApp: 90, visits: 6, freq: 6, recommended: false },
@@ -139,7 +142,7 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
   test('returns [] for mixed bundles so lawn keeps pricing inside the pest cadence', () => {
     const mixed = {
       lineItems: [
-        { service: 'pest_control', perApp: 40 },
+        { service: 'pest_control', perApp: 40, monthly: 55, annual: 660 },
         lawnLineItem(),
       ],
     };
@@ -189,6 +192,54 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     );
     expect(freqs.find((f) => f.selected)).toMatchObject({ key: 'basic' });
     expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(false);
+  });
+
+  test('still expands the ladder beside a specialty one-time row (rodent_trapping)', () => {
+    // rodent_trapping has no recurring monthly/annual and fuzzily maps to the
+    // 'rodent' family — it must not count as a second recurring service.
+    const withSpecialty = {
+      lineItems: [
+        lawnLineItem(),
+        { service: 'rodent_trapping', name: 'Rodent Trapping', price: 450, finalPrice: 450 },
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(withSpecialty).map((f) => f.key))
+      .toEqual(['basic', 'standard', 'enhanced', 'premium']);
+  });
+
+  test('still returns [] for a genuine recurring bundle (lawn + rodent_bait)', () => {
+    const bundle = {
+      lineItems: [
+        lawnLineItem(),
+        { service: 'rodent_bait', monthly: 35, annual: 420 },
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(bundle)).toEqual([]);
+  });
+});
+
+describe('snapshotMayHideLawnLadder — bypass stale pre-ladder lawn snapshots', () => {
+  const collapsedSnapshot = { frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 62 }] };
+  const lawnOnlyEstData = { engineInputs: { services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } } };
+
+  test('flags a single-Quarterly snapshot on a lawn-only engine-input estimate', () => {
+    expect(snapshotMayHideLawnLadder(collapsedSnapshot, lawnOnlyEstData)).toBe(true);
+  });
+
+  test('leaves healthy multi-tier lawn snapshots alone', () => {
+    const ladderSnapshot = { frequencies: [{ key: 'basic' }, { key: 'standard' }, { key: 'enhanced' }, { key: 'premium' }] };
+    expect(snapshotMayHideLawnLadder(ladderSnapshot, lawnOnlyEstData)).toBe(false);
+  });
+
+  test('does not touch snapshots that already carry a lawn-tier key', () => {
+    const singleTier = { frequencies: [{ key: 'enhanced', label: 'Every 6 weeks' }] };
+    expect(snapshotMayHideLawnLadder(singleTier, lawnOnlyEstData)).toBe(false);
+  });
+
+  test('does not touch pest or non-engine-input estimates', () => {
+    const pestEstData = { engineInputs: { services: { pest: { frequency: 'quarterly' }, lawn: {} } } };
+    expect(snapshotMayHideLawnLadder(collapsedSnapshot, pestEstData)).toBe(false);
+    expect(snapshotMayHideLawnLadder(collapsedSnapshot, { result: { results: {} } })).toBe(false);
   });
 });
 
