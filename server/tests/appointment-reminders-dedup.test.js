@@ -198,7 +198,7 @@ describe('appointment reminder reschedule windows', () => {
     jest.useRealTimers();
   });
 
-  function mockRescheduleRecord({ customer, sendResult } = {}) {
+  function mockRescheduleRecord({ customer, sendResult, reminderOverrides } = {}) {
     const reminder = {
       id: 'reminder-reschedule',
       scheduled_service_id: 'svc-reschedule',
@@ -207,6 +207,7 @@ describe('appointment reminder reschedule windows', () => {
       service_type: 'Pest Control',
       reminder_72h_sent: true,
       reminder_24h_sent: true,
+      ...reminderOverrides,
     };
     const lookupReminder = chain({
       first: jest.fn().mockResolvedValue(reminder),
@@ -289,6 +290,34 @@ describe('appointment reminder reschedule windows', () => {
     // The dispatch route sends its own reschedule SMS after this sync and only
     // then marks the windows covered. coverDueWindows keeps the due 24h flag
     // covered now so the 15-min cron can't fire a duplicate reminder in the gap.
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: expect.any(Date),
+      reminder_24h_sent: true,
+      reminder_24h_sent_at: expect.any(Date),
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('same-start edit that notifies still covers a not-yet-sent due window', async () => {
+    // Same start (2026-05-12T14:00Z = 10:00 AM ET — but inside the 24h window
+    // relative to fixedNow via the move below) with the 24h reminder NOT yet
+    // sent. A notifying same-start edit must cover the due window so the cron
+    // can't fire in the gap before the route's SMS + markRescheduleNoticeSent.
+    const { updateReminder } = mockRescheduleRecord({
+      reminderOverrides: {
+        appointment_time: new Date('2026-05-07T13:00:00.000Z'), // 9:00 AM ET tomorrow
+        reminder_72h_sent: false,
+        reminder_24h_sent: false,
+      },
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00', // same start as the record above
+      { sendNotification: false, coverDueWindows: true },
+    );
+
     expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
       reminder_72h_sent: true,
       reminder_72h_sent_at: expect.any(Date),

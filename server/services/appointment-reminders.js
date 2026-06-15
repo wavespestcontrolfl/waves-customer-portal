@@ -777,24 +777,29 @@ const AppointmentReminders = {
           ? reminderFlagsCoveredByNotice(newApptTime)
           : { ...reminderFlagsCoveredByNotice(newApptTime), alreadyInside24hWindow: false };
 
-      // Only re-arm reminder flags when the start time actually moves. A
-      // duration-only resize (dispatch sends the same start with a new window
-      // end, notifyCustomer:false) keeps the start unchanged — re-arming an
-      // already-fired 24h reminder there would make the next cron tick send a
-      // duplicate. When the start is unchanged we preserve the existing sent
-      // flags; only a real move applies the covered/pending values above.
+      // Resolve the post-reschedule state of each reminder window:
+      //   • A real start-time move re-arms from the covered/pending value
+      //     above (old sent state is irrelevant — it was for a different time).
+      //   • A same-start edit (duration-only resize, notifyCustomer:false)
+      //     preserves an ALREADY-SENT flag so the cron can't re-send a
+      //     duplicate. A still-pending flag on a same-start edit falls through
+      //     to the covered value, so a notifying edit (coverDueWindows) still
+      //     covers the due window and the cron can't race the route's SMS.
       const startMoved = newApptTime.getTime() !== new Date(record.appointment_time).getTime();
+      const now = new Date();
+      const resolveFlag = (coveredVal, prevSent, prevSentAt) => {
+        if (!startMoved && prevSent) return { sent: true, at: prevSentAt };
+        return { sent: coveredVal, at: coveredVal ? now : null };
+      };
+      const r72 = resolveFlag(covered.alreadyInside72hWindow, record.reminder_72h_sent, record.reminder_72h_sent_at);
+      const r24 = resolveFlag(covered.alreadyInside24hWindow, record.reminder_24h_sent, record.reminder_24h_sent_at);
       const rescheduleUpdate = {
         appointment_time: newApptTime,
-        reminder_72h_sent: startMoved ? covered.alreadyInside72hWindow : record.reminder_72h_sent,
-        reminder_72h_sent_at: startMoved
-          ? (covered.alreadyInside72hWindow ? new Date() : null)
-          : record.reminder_72h_sent_at,
-        reminder_24h_sent: startMoved ? covered.alreadyInside24hWindow : record.reminder_24h_sent,
-        reminder_24h_sent_at: startMoved
-          ? (covered.alreadyInside24hWindow ? new Date() : null)
-          : record.reminder_24h_sent_at,
-        updated_at: new Date(),
+        reminder_72h_sent: r72.sent,
+        reminder_72h_sent_at: r72.at,
+        reminder_24h_sent: r24.sent,
+        reminder_24h_sent_at: r24.at,
+        updated_at: now,
       };
       // A reschedule supersedes a still-pending creation confirmation — admin
       // saves defer the confirmation SMS off the request path, so a reschedule
