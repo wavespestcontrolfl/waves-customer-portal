@@ -14,6 +14,10 @@ const CONFIDENCE_ORDER = {
   high: 3,
 };
 
+// Conditions that cannot be confirmed from photos alone — kept in sync with the
+// nouns stripConfirmedLanguage knows how to downgrade.
+const PHOTO_ONLY_UNCERTAIN = /chinch|fung|large.?patch|gray.?leaf|disease|drought|grub|insect/i;
+
 function asArray(value) {
   if (Array.isArray(value)) return value.filter((item) => item != null);
   if (value == null || value === '') return [];
@@ -385,8 +389,10 @@ function buildReconciliationFlags({ findings = [], products = [], treatmentRatio
 
 function productNutrients(product = {}) {
   return {
-    nitrogen: numberOrNull(product.analysis_n || product.nitrogen_pct || product.nitrogenPct || product.n),
-    phosphorus: numberOrNull(product.analysis_p || product.phosphorus_pct || product.phosphorusPct || product.p),
+    // Nullish, not ||, so a catalog-authoritative 0 (product genuinely has no N/P)
+    // is not overridden by a stale request-supplied analysis value.
+    nitrogen: numberOrNull(product.analysis_n ?? product.nitrogen_pct ?? product.nitrogenPct ?? product.n),
+    phosphorus: numberOrNull(product.analysis_p ?? product.phosphorus_pct ?? product.phosphorusPct ?? product.p),
   };
 }
 
@@ -440,11 +446,14 @@ function runQaSafetyCheck({ products = [], findings = [], compliance = {}, water
       issue: 'One or more products are not mapped to a finding.',
     });
   }
-  if (findings.some((finding) => normalizeKey(finding.name).includes('chinch') && confidenceRank(finding.confidence) < 3)) {
+  // Any photo-only pest/disease/drought call below high confidence cannot be
+  // confirmed from images alone — covers everything stripConfirmedLanguage scrubs,
+  // not just chinch, so applyAutoReleaseRepair can keep that copy suggestive.
+  if (findings.some((finding) => PHOTO_ONLY_UNCERTAIN.test(finding.name || '') && confidenceRank(finding.confidence) < 3)) {
     flags.push({
       type: 'photo_confirmation_honesty',
       severity: 'medium',
-      issue: 'Chinch pressure cannot be confirmed from photos alone; customer copy must stay suggestive.',
+      issue: 'Photo-only pest, disease, or drought findings below high confidence cannot be confirmed from images; customer copy must stay suggestive.',
     });
   }
   return flags;

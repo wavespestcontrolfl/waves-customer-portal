@@ -448,4 +448,31 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(report.input_assessment.human_review_required).toBe(false);
     expect(report.input_assessment.human_review_reason).toBe('');
   });
+
+  test('confirmed-language repair covers non-chinch photo-only disease/drought, not just chinch', () => {
+    const base = reportWith({
+      findings: [{ finding_id: 'F1', name: 'Possible large patch disease', confidence: 'low', severity: 'moderate', urgency: 'monitor' }],
+    });
+    expect(base.internal_quality_flags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'photo_confirmation_honesty' }),
+    ]));
+    const tampered = { ...base, customer_summary: 'We confirmed active disease across the back lawn.' };
+    const repaired = applyAutoReleaseRepair(tampered, 'conservative');
+    expect(repaired.customer_summary).not.toMatch(/\bconfirmed\b/i);
+    expect(repaired.repairs_applied).toContain('confirmed_language_downgraded');
+  });
+
+  test('catalog-authoritative 0 N/P is not overridden by a stale request value', () => {
+    const conflicts = fertilizerBlackoutConflicts([{
+      product_id: 'P1',
+      product_name: 'Catalog says zero N/P',
+      analysis_n: 0,
+      analysis_p: 0,
+      nitrogen_pct: 16,
+      phosphorus_pct: 4,
+    }], {
+      fertilizer_blackout: { active: true, applies_to: ['nitrogen', 'phosphorus'] },
+    });
+    expect(conflicts).toEqual([]);
+  });
 });
