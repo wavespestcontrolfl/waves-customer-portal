@@ -97,11 +97,12 @@ describe('buildPublicLawnReport whitelisting', () => {
     const report = buildPublicLawnReport(sentDiagnostic());
     expect(report.summary).toContain('suspected insect pressure');
     expect(report.primary_finding).toBe('Chinch bug pressure');
-    expect(report.findings[0].customer_note).toContain('suspected insect pressure');
     expect(report.first_name).toBe('Dana');
     expect(report.city).toBe('Venice');
     expect(report.watering.customer_sequence).toBe('Water Wednesday and Saturday only.');
     expect(report.overall_status).toBe('Keep an eye on it');
+    // Finding note is server-generated from the scrubbed name, not the raw wording.
+    expect(report.findings[0].customer_note).toBe('We saw signs consistent with chinch bug pressure.');
   });
 
   test('never leaks internal scores, raw AI, product names, or tech notes', () => {
@@ -133,7 +134,9 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(serialized).not.toMatch(/talstar/i);
     expect(serialized).not.toMatch(/\bconfirmed\b/i);
     expect(serialized).not.toContain('123 Palm Street');
-    expect(report.findings[0].customer_note.toLowerCase()).toContain('suspected');
+    // Raw client finding wording is never published — the note is server-generated.
+    expect(serialized).not.toMatch(/we applied/i);
+    expect(report.findings[0].customer_note).toMatch(/signs consistent with/i);
   });
 
   test('clamps enum fields and uses a fixed expectations shape — no injected keys leak', () => {

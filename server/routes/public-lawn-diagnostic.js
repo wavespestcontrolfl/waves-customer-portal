@@ -62,6 +62,17 @@ function clampEnum(value, allowed) {
   return allowed.has(key) ? key : null;
 }
 
+// Generate the customer-facing finding note SERVER-SIDE from safe fields. The raw
+// finding customer_wording is client/LLM free-text and is never published — only a
+// confidence-matched template over the scrubbed condition name reaches a prospect.
+function safeFindingNote(name, confidence) {
+  if (!name) return null;
+  const lower = name.toLowerCase();
+  return confidence === 'high'
+    ? `We saw ${lower}.`
+    : `We saw signs consistent with ${lower}.`;
+}
+
 /**
  * Whitelist a stored diagnostic into the customer-facing report payload.
  * Pure + exhaustive allowlist: only the fields named here ever leave the server.
@@ -80,12 +91,17 @@ function buildPublicLawnReport(diagnostic = {}) {
   // values. Even if a stale/buggy client stored unsanitized or extra nested data,
   // no raw AI text, brand/active-ingredient name, or confirmed-pest claim escapes.
   const findings = Array.isArray(diagnosis.findings)
-    ? diagnosis.findings.slice(0, 12).map((finding) => ({
-      name: scrubCustomerText(finding.name) || null,
-      confidence: clampEnum(finding.confidence, CONFIDENCE_VALUES),
-      severity: clampEnum(finding.severity, SEVERITY_VALUES),
-      customer_note: scrubCustomerText(finding.customer_wording) || null,
-    }))
+    ? diagnosis.findings.slice(0, 12).map((finding) => {
+      const name = scrubCustomerText(finding.name) || null;
+      const confidence = clampEnum(finding.confidence, CONFIDENCE_VALUES);
+      return {
+        name,
+        confidence,
+        severity: clampEnum(finding.severity, SEVERITY_VALUES),
+        // Server-generated from the scrubbed name — never the raw client wording.
+        customer_note: safeFindingNote(name, confidence),
+      };
+    })
     : [];
 
   const firstName = contact.first_name
