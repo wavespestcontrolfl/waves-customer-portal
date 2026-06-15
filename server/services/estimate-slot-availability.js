@@ -985,20 +985,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {
-    // Re-apply the lead-time filter on read. The result was cached for 5 min
-    // but the bucket can straddle a lead-time boundary — a slot bookable when
-    // cached (e.g. 13:00 at 10:59 ET) can be inside the cutoff by the time it's
-    // served (11:01 ET). Re-filtering here keeps stale, no-longer-bookable
-    // same-day windows out without recomputing the whole pool.
-    const primary = filterPastSlotsForToday(cached.result.primary || [], { minimumLeadMinutes: opts.minimumLeadMinutes });
-    const expander = filterPastSlotsForToday(cached.result.expander || [], { minimumLeadMinutes: opts.minimumLeadMinutes });
-    return {
-      ...cached.result,
-      primary,
-      expander,
-      nearby: [...primary, ...expander].some((s) => s.routeOptimal),
-      metadata: { ...cached.result.metadata, cacheHit: true },
-    };
+    // The result was cached for 5 min but the bucket can straddle a lead-time
+    // boundary — a slot bookable when cached (e.g. 13:00 at 10:59 ET) can be
+    // inside the cutoff by the time it's served (11:01 ET). If re-applying the
+    // lead-time filter would drop nothing, serve the cache as-is. If it would
+    // drop a stale same-day window, the capped cache can't backfill the next
+    // bookable window from the full pool, so invalidate and recompute below.
+    const cachedPrimary = cached.result.primary || [];
+    const cachedExpander = cached.result.expander || [];
+    const primary = filterPastSlotsForToday(cachedPrimary, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    const expander = filterPastSlotsForToday(cachedExpander, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    if (primary.length === cachedPrimary.length && expander.length === cachedExpander.length) {
+      return { ...cached.result, metadata: { ...cached.result.metadata, cacheHit: true } };
+    }
+    wrapperCache.delete(cacheKey);
   }
 
   // A caller-supplied explicit window (specific date or AI-parsed range)

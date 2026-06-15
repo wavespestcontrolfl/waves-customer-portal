@@ -661,7 +661,10 @@ function isGermanRoachCleanoutContextRow(row = {}) {
   const text = cleanText([row.label, row.detail, row.summary].filter(Boolean).join(' '))
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
-  return /\broach(?:es)?\b/.test(text) && /\bclean\s*out\b|\bcleanout\b/.test(text);
+  // Both clauses must hold: the row must mention roaches AND be a cleanout.
+  // `\bclean\s*out\b` matches "cleanout" and "clean out" in one pattern, so the
+  // roach `&&` gate can't be bypassed by a non-roach cleanout row.
+  return /\broach(?:es)?\b/.test(text) && /\bclean\s*out\b/.test(text);
 }
 
 // True when the estimate itself is a German Roach Cleanout (canonical service
@@ -704,8 +707,15 @@ function treatmentApproachForQuestion(question = '', context = {}) {
 }
 
 function findService(context = {}, pattern) {
-  return (Array.isArray(context.services) ? context.services : [])
-    .find((row) => pattern.test(`${row.label} ${row.detail} ${row.summary}`));
+  // Search both the recurring service list and one-time items. In recurring
+  // mode context.services holds only the recurring rows, so a separately-billed
+  // one-time line (e.g. a German Roach Cleanout alongside a lawn plan) would be
+  // missed and the fallback would wrongly say "I do not see pest control".
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.find((row) => pattern.test(`${row.label || ''} ${row.detail || ''} ${row.summary || ''}`));
 }
 
 function listFirstVisitFees(context = {}) {

@@ -102,4 +102,35 @@ describe('Ask Waves fallback — German roach questions', () => {
     expect(answer.toLowerCase()).not.toContain('breeding cycle');
     expect(answer.toLowerCase()).not.toContain('number of visits');
   });
+
+  test('a recurring estimate with a one-time German Roach Cleanout answers the roach question (not "I do not see pest control")', () => {
+    const lawnPlusCleanoutContext = {
+      serviceMode: 'recurring',
+      services: [
+        { service: 'lawn_care', label: 'Lawn Care', summary: 'Lawn Care - quarterly' },
+      ],
+      oneTime: {
+        items: [
+          { service: 'german_roach', label: 'German Roach Cleanout', detail: '3 visit program', summary: 'German Roach Cleanout - 3 visit program' },
+        ],
+      },
+    };
+    const answer = answerEstimateQuestionFallback('How do you get rid of German roaches?', lawnPlusCleanoutContext);
+    expect(answer.toLowerCase()).not.toContain('i do not see pest control');
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('a non-roach Initial Pest Cleanout does NOT get treated as a German Roach Cleanout', () => {
+    const pestCleanoutContext = {
+      serviceMode: 'one_time',
+      services: [
+        { service: 'pest_initial_cleanout', label: 'Initial Pest Cleanout', detail: 'one-time', summary: 'Initial Pest Cleanout - one-time' },
+      ],
+    };
+    const answer = answerEstimateQuestionFallback('How do you treat roaches?', pestCleanoutContext);
+    // "cleanout" present but no roach → must not surface German-roach cleanout copy.
+    expect(answer.toLowerCase()).not.toContain('german roaches');
+    expect(answer.toLowerCase()).not.toContain('breeding cycle');
+  });
 });
