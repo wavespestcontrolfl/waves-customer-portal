@@ -347,4 +347,5 @@ module.exports = {
   textToHtml,
   dailyCap,
   DEFAULT_DAILY_CAP,
+  STALE_SENDING_MS,
 };
