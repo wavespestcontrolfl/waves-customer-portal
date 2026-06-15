@@ -283,6 +283,13 @@ finding and warns on P1. Reviewers must return JSON matching
   is deliberately cacheable and indexable — it exposes only modeled,
   non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
   NOT apply here).
+  `/api/public/social-feed` (read-only aggregate of already-public social
+  posts for the marketing /social page — Instagram + Facebook Graph API,
+  Google Business Profile localPosts, YouTube channel RSS, TikTok Display
+  API; no tokens, no PII, returns only public post metadata
+  (caption/thumbnail/permalink/timestamp), 60 req/min rate limit, 15-min
+  in-memory cache + 5-min public Cache-Control, per-source graceful failure,
+  never 500s — returns an empty payload on total upstream failure).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

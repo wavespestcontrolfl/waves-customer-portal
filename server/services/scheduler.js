@@ -1831,6 +1831,41 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY — Autonomous Social Content Studio
+  // Fires every hour but self-throttles to SOCIAL_AUTONOMOUS_INTERVAL_HOURS:
+  // runAutonomous enforces the kill switch (SOCIAL_AUTONOMOUS_STUDIO_ENABLED),
+  // the DB-backed cadence guard, and a Postgres advisory lock internally, so an
+  // hourly tick honors the configured cadence shortly after each interval
+  // elapses without double-posting across restarts/pods.
+  // =========================================================================
+  cron.schedule('20 * * * *', async () => {
+    const SocialContentStudio = require('./social-content-studio');
+    const flags = SocialContentStudio.AUTONOMOUS_FLAGS;
+    // Requires BOTH the studio kill switch AND the distinct cron opt-in, so
+    // enabling the Studio for manual admin use does not by itself start hourly
+    // automatic publishing.
+    if (!flags.enabled || !flags.cronEnabled) {
+      return; // silently skip — studio off, or autonomous cron not opted in
+    }
+    try {
+      const result = await SocialContentStudio.runAutonomous({ force: false });
+      if (result?.skipped) {
+        // result.reason can embed validateContent output, which may include a
+        // full phone number or email — never log raw PII (AGENTS.md P1). Redact
+        // phone/email-like substrings before logging the skip reason.
+        const safeReason = String(result.reason || '')
+          .replace(/\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g, '[redacted-phone]')
+          .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[redacted-email]');
+        logger.info(`[social-studio] autonomous run skipped: ${safeReason}`);
+      } else {
+        logger.info(`[social-studio] autonomous run complete: status=${result?.run?.status || result?.status || 'done'}`);
+      }
+    } catch (err) {
+      logger.error(`[social-studio] autonomous run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 HOURS — Adjust ad budgets based on capacity
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {

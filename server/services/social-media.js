@@ -55,6 +55,36 @@ const SOCIAL_FLAGS = {
   get dryRun() { return socialFlag('SOCIAL_DRY_RUN'); },
 };
 
+const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp'];
+
+function normalizePublishChannels(channels) {
+  // ONLY an omitted value (undefined/null) defaults to all platforms. Any
+  // EXPLICIT value fails closed: a non-array (a typo/stale client sending
+  // "facebook" instead of ["facebook"]) and an all-invalid/empty list both
+  // resolve to NO platforms — never "all" — so a malformed filter can't blast
+  // everywhere.
+  if (channels == null) return new Set(PUBLISH_PLATFORMS);
+  if (!Array.isArray(channels)) return new Set();
+  const selected = channels
+    .map((channel) => String(channel || '').trim().toLowerCase())
+    .filter((channel) => PUBLISH_PLATFORMS.includes(channel));
+  return new Set(selected);
+}
+
+function normalizeGbpLocationIds(locationIds) {
+  // ONLY an omitted value (undefined/null) → null = all GBP locations (the
+  // default). Any EXPLICIT value fails closed: a non-array (e.g. "sarasota")
+  // and an all-invalid/empty list both yield an empty set — no GBP location is
+  // posted to rather than every one of them.
+  if (locationIds == null) return null;
+  if (!Array.isArray(locationIds)) return new Set();
+  const valid = new Set(WAVES_LOCATIONS.map((loc) => loc.id));
+  const selected = locationIds
+    .map((id) => String(id || '').trim())
+    .filter((id) => valid.has(id));
+  return new Set(selected);
+}
+
 async function isPausedByAdmin() {
   try {
     const row = await db('system_settings').where('key', 'social_automation_paused').first();
@@ -549,6 +579,23 @@ async function postToFacebook(message, link, imageUrl) {
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
   if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
 
+  if (imageUrl) {
+    const caption = link ? `${message}\n\n${link}` : message;
+    const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/photos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: imageUrl, caption, access_token: token }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Facebook photo API ${res.status}: ${err}`);
+    }
+    const data = await res.json();
+    logger.info(`[social] Facebook photo post created: ${data.post_id || data.id}`);
+    return { platform: 'facebook', postId: data.post_id || data.id, success: true, imageUrl };
+  }
+
   const body = { message, access_token: token };
   if (link) body.link = link;
 
@@ -565,6 +612,39 @@ async function postToFacebook(message, link, imageUrl) {
   const data = await res.json();
   logger.info(`[social] Facebook post created: ${data.id}`);
   return { platform: 'facebook', postId: data.id, success: true };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Poll Meta until the IG media container finishes ingesting, bounded by a wall-
+// clock budget that stays UNDER a typical proxy/request timeout (~60s). An
+// unbounded wait blocks the publish request for minutes, and a proxy 504 +
+// admin retry then produces duplicate posts. If the media isn't ready within
+// the budget we give up (IG is recorded as a partial failure; FB/GBP already
+// posted) rather than hang.
+async function waitForInstagramContainer(containerId, token, { maxWaitMs = 45000 } = {}) {
+  let lastStatus = null;
+  const deadline = Date.now() + maxWaitMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    await sleep(attempt === 0 ? 3000 : 5000);
+    attempt += 1;
+    const statusRes = await fetch(
+      `https://graph.facebook.com/v25.0/${containerId}?fields=status_code,status&access_token=${encodeURIComponent(token)}`
+    );
+    const status = await statusRes.json().catch(() => ({}));
+    if (!statusRes.ok) {
+      throw new Error(`Instagram status ${statusRes.status}: ${JSON.stringify(status)}`);
+    }
+    lastStatus = status;
+    if (status.status_code === 'FINISHED') return status;
+    if (status.status_code === 'ERROR') {
+      throw new Error(`Instagram media error: ${JSON.stringify(status)}`);
+    }
+  }
+  throw new Error(`Instagram media not ready after ${Math.round(maxWaitMs / 1000)}s: ${JSON.stringify(lastStatus)}`);
 }
 
 async function postToInstagram(caption, imageUrl) {
@@ -587,7 +667,11 @@ async function postToInstagram(caption, imageUrl) {
   }
   const container = await containerRes.json();
 
-  // Step 2: Publish
+  // Step 2: Wait for Meta to finish ingesting the image. Publishing
+  // immediately often returns code 9007: "Media ID is not available".
+  const containerStatus = await waitForInstagramContainer(container.id, token);
+
+  // Step 3: Publish
   const publishRes = await fetch(
     `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media_publish`,
     {
@@ -602,7 +686,7 @@ async function postToInstagram(caption, imageUrl) {
   }
   const data = await publishRes.json();
   logger.info(`[social] Instagram post published: ${data.id}`);
-  return { platform: 'instagram', postId: data.id, success: true };
+  return { platform: 'instagram', postId: data.id, success: true, mediaContainerId: container.id, mediaStatus: containerStatus.status_code };
 }
 
 async function postToLinkedIn(text, link, title, description, imageUrl) {
@@ -786,7 +870,7 @@ const SocialMediaService = {
   /**
    * Publish content to all configured platforms.
    */
-  async publishToAll({ title, description, link, guid, source, imageUrl, customContent }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, customContent, channels, gbpLocationIds }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -795,6 +879,8 @@ const SocialMediaService = {
     }
 
     const platformResults = [];
+    const requestedPlatforms = normalizePublishChannels(channels);
+    const requestedGbpLocations = normalizeGbpLocationIds(gbpLocationIds);
 
     // Only generate an AI image if a platform can actually consume it.
     // Both Instagram and GBP use generatedImageUrl, and both need the image
@@ -810,26 +896,40 @@ const SocialMediaService = {
     const hasImageHosting =
       !!config.s3.accessKeyId && !!config.s3.secretAccessKey && !!config.s3.bucket
       && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    // Only a REQUESTED channel can justify generating the image. A run that
+    // didn't ask for an image-consuming channel (e.g. channels:['linkedin'],
+    // or channels:['facebook'] when Instagram/GBP merely happen to be
+    // configured globally) must NOT burn image credits on a result every
+    // requested channel discards. Instagram requires the image; GBP attaches
+    // it when present; Facebook reuses the shared image opportunistically but
+    // never triggers generation on its own (text+link posts fine without one).
     const instagramCanConsume =
-      SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
+      requestedPlatforms.has('instagram')
+      && SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
     // Decide whether to generate the shared image. Skip on a dry run (nothing
     // posts, so it'd just burn credits) and when an image already exists or
     // hosting is unconfigured — establish that cheaply before any DB work.
     let shouldGenerateImage = false;
     if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
-      // A platform must actually be able to consume the image. Instagram is a
-      // sync env check. GBP needs a profile that can PUBLISH — a usable client
-      // (client creds + a refresh token), NOT just gbpService.configured, which
-      // is client-creds-only: a GBP deploy whose admin OAuth connect never ran
-      // (no stored refresh token) would otherwise generate/upload an image
-      // before every postToGBP fails with "No GBP credentials". One image is
-      // shared across all WAVES_LOCATIONS GBP posts below, so any one publish-
-      // ready profile justifies it. GBP is checked lazily (only when Instagram
-      // can't already consume) so the DB is touched only when warranted. (The
-      // autonomous single-profile path uses a per-location check via
-      // assertSocialPublishingReady.)
-      shouldGenerateImage = instagramCanConsume
-        || (SOCIAL_FLAGS.gbpEnabled && (await gbpService.getConfiguredLocations()).length > 0);
+      // A requested platform must actually be able to consume the image.
+      // Instagram is a sync env check. GBP is checked lazily (only when
+      // Instagram can't already consume) and must have at least one location
+      // that is BOTH requested AND publish-ready — a usable client (client
+      // creds + a refresh token), NOT just gbpService.configured (client-creds-
+      // only: a GBP deploy whose admin OAuth connect never ran would otherwise
+      // generate/upload an image before every postToGBP fails with "No GBP
+      // credentials"). The location predicate mirrors the WAVES_LOCATIONS
+      // filter on the GBP post loop below, so a malformed/empty explicit
+      // location filter (which posts to zero locations) doesn't burn image
+      // credits either. (The autonomous single-profile path uses a per-location
+      // check via assertSocialPublishingReady.)
+      if (instagramCanConsume) {
+        shouldGenerateImage = true;
+      } else if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+        && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
+        const configured = await gbpService.getConfiguredLocations();
+        shouldGenerateImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
+      }
     }
     if (shouldGenerateImage) {
       try {
@@ -869,7 +969,7 @@ const SocialMediaService = {
         enabled: false,
         reason: 'Disabled',
       },
-    ];
+    ].filter((platform) => requestedPlatforms.has(platform.key));
 
     for (const p of platforms) {
       if (!p.enabled) {
@@ -894,12 +994,32 @@ const SocialMediaService = {
         }
 
         if (p.key === 'facebook') {
-          const r = await withRetry(() => postToFacebook(content, link), { label: 'facebook' });
+          // The image is OPTIONAL for Facebook (text+link /feed posts fine). If
+          // the /photos path fails — Meta rejected or couldn't fetch the image —
+          // fall back to a text/link /feed post instead of dropping a post that
+          // would otherwise publish. Mirrors the GBP media-fallback below.
+          let r;
+          try {
+            r = await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
+          } catch (fbErr) {
+            if (generatedImageUrl && /Facebook photo API/i.test(String(fbErr.message))) {
+              logger.warn(`[social] Facebook photo post failed (${fbErr.message}); retrying text-only`);
+              r = await withRetry(() => postToFacebook(content, link, null), { label: 'facebook' });
+            } else {
+              throw fbErr;
+            }
+          }
           platformResults.push({ ...r, content });
         } else if (p.key === 'instagram') {
           const imgUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
           if (imgUrl) {
-            const r = await withRetry(() => postToInstagram(content, imgUrl), { label: 'instagram' });
+            // NOT wrapped in withRetry: postToInstagram already polls Meta for
+            // media ingestion (bounded ~45s). Retrying the whole call would
+            // redo that wait (blocking the request for minutes) and create a
+            // fresh, duplicate media container each attempt. A transient
+            // failure here surfaces as an IG partial failure; FB/GBP are
+            // unaffected and IG can be retried on its own.
+            const r = await postToInstagram(content, imgUrl);
             platformResults.push({ ...r, content });
           } else {
             platformResults.push({ platform: 'instagram', skipped: 'No public image URL' });
@@ -912,11 +1032,14 @@ const SocialMediaService = {
     }
 
     // Post to all 4 GBP locations
-    if (!SOCIAL_FLAGS.gbpEnabled) {
+    if (requestedPlatforms.has('gbp') && !SOCIAL_FLAGS.gbpEnabled) {
       platformResults.push({ platform: 'gbp', skipped: 'Disabled' });
     }
     // customContent.gbp may be a string (same copy for all locations) or an object keyed by location id
-    for (const loc of (SOCIAL_FLAGS.gbpEnabled ? WAVES_LOCATIONS : [])) {
+    const gbpLocations = requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+      ? WAVES_LOCATIONS.filter((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id))
+      : [];
+    for (const loc of gbpLocations) {
       try {
         const gbpCustom = customContent?.gbp;
         const gbpContent =
@@ -1099,5 +1222,7 @@ module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.postToGBP = postToGBP;
 module.exports.isGbpMediaError = isGbpMediaError;
+module.exports.normalizePublishChannels = normalizePublishChannels;
+module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
 module.exports.buildSocialFailureAlert = buildSocialFailureAlert;

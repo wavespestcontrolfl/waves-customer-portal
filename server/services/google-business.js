@@ -332,6 +332,20 @@ class GoogleBusinessService {
     return readJsonOrThrow(res, 'GBP createPost');
   }
 
+  /**
+   * List recent local posts for a location (newest first). Read-only.
+   * Each post carries a public `searchUrl` (the post as it appears on the
+   * profile) plus optional media. Used by the public /social feed.
+   */
+  async listLocalPosts(locationResourceName, locationId, pageSize = 5) {
+    const headers = await this._getHeaders(locationId);
+    const params = new URLSearchParams({ pageSize: String(pageSize) });
+    const url = `https://mybusiness.googleapis.com/v4/${locationResourceName}/localPosts?${params.toString()}`;
+    const res = await fetch(url, { headers });
+    const data = await readJsonOrThrow(res, 'GBP listLocalPosts');
+    return Array.isArray(data.localPosts) ? data.localPosts : [];
+  }
+
   _normalizeGbpReview(review, loc) {
     const ownerReply = firstDefined(review.reviewReply?.comment, review.ownerResponse?.comment, review.owner_response?.text);
     return {

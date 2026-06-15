@@ -324,6 +324,7 @@ app.use('/api/admin/email-templates', require('./routes/admin-email-templates'))
 app.use('/api/admin/notification-events', require('./routes/admin-notification-events'));
 app.use('/api/admin/newsletter', require('./routes/admin-newsletter'));
 app.use('/api/public/newsletter', require('./routes/public-newsletter'));
+app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
@@ -413,6 +414,7 @@ app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/integrations', require('./routes/admin-integrations'));
 app.use('/api/integrations/backlink-worker', require('./routes/integrations-backlink-worker'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
+app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
