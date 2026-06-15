@@ -1,5 +1,6 @@
 const {
   lawnFrequenciesFromResultStats,
+  lawnFrequenciesFromEngineResult,
   applySelectedLawnTierToEstimateData,
   buildRenderFlags,
   sectionTierEligibleFromKeys,
@@ -103,6 +104,129 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     const std = lawnFrequenciesFromResultStats(lawnEstData()).find((f) => f.key === 'standard');
     expect(std.included.map((i) => i.key)).toEqual(['lawn_care_standard', 'lawn_care_treatments']);
     expect(std.included[0].detail).toBe('6 visits per year');
+  });
+});
+
+describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder', () => {
+  // Server-authoritative / IB estimates store engineInputs, not a precomputed
+  // result.results.lawn. The lawn line item the engine emits carries its tier
+  // ladder (4/6/9/12), which must expand into the same cadence options instead
+  // of collapsing into one Quarterly entry.
+  function lawnLineItem() {
+    return {
+      service: 'lawn_care',
+      tier: 'enhanced',
+      monthly: 62.25,
+      annual: 747,
+      tiers: [
+        { tier: 'basic', label: '4 Applications', monthly: 35, annual: 420, perApp: 105, visits: 4, freq: 4, recommended: false },
+        { tier: 'standard', label: '6 Applications', monthly: 45, annual: 540, perApp: 90, visits: 6, freq: 6, recommended: false },
+        { tier: 'enhanced', label: '9 Applications', monthly: 62.25, annual: 747, perApp: 83, visits: 9, freq: 9, recommended: true },
+        { tier: 'premium', label: '12 Applications', monthly: 84, annual: 1008, perApp: 84, visits: 12, freq: 12, recommended: false },
+      ],
+    };
+  }
+
+  test('expands the lawn line item tiers into all four cadences, in order', () => {
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [lawnLineItem()] });
+    expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear, f.monthly])).toEqual([
+      ['basic', 'Quarterly', 4, 35],
+      ['standard', 'Bi-monthly', 6, 45],
+      ['enhanced', 'Every 6 weeks', 9, 62.25],
+      ['premium', 'Monthly', 12, 84],
+    ]);
+    expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(true);
+  });
+
+  test('returns [] for mixed bundles so lawn keeps pricing inside the pest cadence', () => {
+    const mixed = {
+      lineItems: [
+        { service: 'pest_control', perApp: 40, monthly: 55, annual: 660 },
+        lawnLineItem(),
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(mixed)).toEqual([]);
+  });
+
+  test('returns [] when there is no lawn line item', () => {
+    expect(lawnFrequenciesFromEngineResult({ lineItems: [{ service: 'mosquito', tiers: [] }] })).toEqual([]);
+    expect(lawnFrequenciesFromEngineResult({})).toEqual([]);
+  });
+
+  test('still expands the ladder when a one-time add-on rides alongside recurring lawn', () => {
+    // one_time_pest aliases to pest_control via recurringServiceKey — it must be
+    // dropped before the lawn-only check so the ladder is not suppressed.
+    const withOneTime = {
+      lineItems: [
+        lawnLineItem(),
+        { service: 'one_time_pest', perApp: 250 },
+        { service: 'one_time_mosquito', perApp: 120 },
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(withOneTime).map((f) => f.key))
+      .toEqual(['basic', 'standard', 'enhanced', 'premium']);
+  });
+
+  test('carries the WaveGuard membership discount into every tier price', () => {
+    // Existing-customer reprice: the engine discounted the lawn line 15%
+    // (annualBeforeDiscount → annualAfterDiscount). Each tier must reflect that,
+    // since accept bills selectedFrequency.monthly/annual directly.
+    const discounted = lawnLineItem();
+    discounted.annualBeforeDiscount = 747; // enhanced gross annual
+    discounted.annualAfterDiscount = 634.95; // 15% off
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [discounted] });
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.annual).toBe(634.95); // 747 * 0.85
+    expect(enhanced.monthly).toBe(52.91); // 634.95 / 12
+    const basic = freqs.find((f) => f.key === 'basic');
+    expect(basic.monthly).toBe(29.75); // 420 gross * 0.85 / 12
+  });
+
+  test('applies a manual recurring discount surfaced on the live engine summary', () => {
+    // engineInputs carry a 10% manual discount the stored blob doesn't record;
+    // the engine summary surfaces it. Each tier must price after that discount.
+    const engineResult = {
+      lineItems: [lawnLineItem()],
+      summary: { manualDiscount: { type: 'PERCENT', value: 10, amount: 74.7, scope: 'recurring_annual_after_waveguard' } },
+    };
+    const freqs = lawnFrequenciesFromEngineResult(engineResult, {});
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.manualDiscount).toBeTruthy();
+    expect(enhanced.monthly).toBe(56.02); // 62.25/mo base − 6.23 (10% of 747, /12)
+  });
+
+  test('honors the accepted tier from customerSelection over the engine default', () => {
+    // Stored as Enhanced but accepted as Basic: the re-rendered ladder must mark
+    // Basic selected, not the engine's resolved Enhanced tier.
+    const freqs = lawnFrequenciesFromEngineResult(
+      { lineItems: [lawnLineItem()] },
+      { customerSelection: { serviceTierKey: 'basic' } },
+    );
+    expect(freqs.find((f) => f.selected)).toMatchObject({ key: 'basic' });
+    expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(false);
+  });
+
+  test('still expands the ladder beside a specialty one-time row (rodent_trapping)', () => {
+    // rodent_trapping has no recurring monthly/annual and fuzzily maps to the
+    // 'rodent' family — it must not count as a second recurring service.
+    const withSpecialty = {
+      lineItems: [
+        lawnLineItem(),
+        { service: 'rodent_trapping', name: 'Rodent Trapping', price: 450, finalPrice: 450 },
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(withSpecialty).map((f) => f.key))
+      .toEqual(['basic', 'standard', 'enhanced', 'premium']);
+  });
+
+  test('still returns [] for a genuine recurring bundle (lawn + rodent_bait)', () => {
+    const bundle = {
+      lineItems: [
+        lawnLineItem(),
+        { service: 'rodent_bait', monthly: 35, annual: 420 },
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(bundle)).toEqual([]);
   });
 });
 

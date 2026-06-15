@@ -8574,9 +8574,21 @@ const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhance
 function lawnFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];
+  return lawnFrequenciesFromRows(rows, estData);
+}
+
+// Shared core: turn lawn cost-floor tier rows into the customer-facing cadence
+// ladder. Fed by stored result.results.lawn (v1 path) and by the live engine
+// lawn line item tiers (engine-invocation path) so both surfaces present the
+// same 4/6/9/12 application options instead of one collapsed entry. Callers may
+// pass an explicit manual discount (e.g. one read off a just-generated engine
+// summary that the stored blob doesn't carry); otherwise it's read from estData.
+function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride) {
   const seen = new Set();
-  const rawManualDiscount = normalizeManualDiscountSummary(estData);
-  return rows
+  const rawManualDiscount = manualDiscountOverride !== undefined
+    ? manualDiscountOverride
+    : normalizeManualDiscountSummary(estData);
+  return (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
       if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
@@ -8647,6 +8659,103 @@ function lawnFrequenciesFromResultStats(estData = {}) {
       const order = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
+}
+
+// Recurring (ongoing-plan) service keys, used to decide whether an engine
+// result is lawn-only. Mirrors the canonical recurring-line set — note 'rodent'
+// is NOT recurring (the recurring rodent service is rodent_bait; rodent_trapping
+// is a one-time specialty that fuzzily maps onto 'rodent').
+const RECURRING_SERVICE_KEYS = new Set([
+  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito',
+  'termite_bait', 'palm_injection', 'rodent_bait',
+]);
+
+// A recurring engine line carries real monthly/annual billing. One-time
+// follow-ups (one_time_*) and specialty one-time rows (e.g. rodent_trapping)
+// do NOT, so they're excluded from the lawn-only check even when their service
+// key maps onto a recurring family.
+function isRecurringEngineLineItem(li = {}) {
+  if (!li || /^one[_-]?time/.test(String(li.service || '').toLowerCase())) return false;
+  if (!RECURRING_SERVICE_KEYS.has(recurringServiceKey(li))) return false;
+  const annual = finiteNumberOrNull(li.annual ?? li.annualAfterDiscount ?? li.annualBeforeDiscount);
+  const monthly = finiteNumberOrNull(li.monthly ?? li.monthlyAfterDiscount);
+  return (annual != null && annual > 0) || (monthly != null && monthly > 0);
+}
+
+// Apply a flat (WaveGuard) discount factor to a pre-discount tier value,
+// keeping cents. factor === 1 (no membership discount) returns the value as-is.
+function applyLawnTierDiscount(value, factor) {
+  const n = finiteNumberOrNull(value);
+  if (n == null) return null;
+  if (!(factor < 1)) return n;
+  return Math.round(n * factor * 100) / 100;
+}
+
+// Engine-invocation lawn-only equivalent of lawnFrequenciesFromResultStats.
+// Server-authoritative / IB estimates store engineInputs (not a precomputed
+// result.results.lawn), so the no-pest pricing branch reads the lawn line
+// item's tier ladder off a live generateEstimate() result. Only fires when
+// lawn_care is the sole recurring line — mixed bundles keep pricing lawn
+// inside the pest cadence. Returns [] for any non-lawn-only result so the
+// caller falls back to the single-frequency view.
+function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
+  const recurringLineItems = (Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [])
+    .filter(isRecurringEngineLineItem);
+  const recurringServices = new Set(recurringLineItems.map((li) => recurringServiceKey(li)));
+  if (recurringServices.size !== 1 || !recurringServices.has('lawn_care')) return [];
+  const lawnLine = recurringLineItems.find((li) => recurringServiceKey(li) === 'lawn_care');
+  const tiers = Array.isArray(lawnLine?.tiers) ? lawnLine.tiers : [];
+
+  // The per-tier monthly/annual/per-app values are pre-discount market prices,
+  // but generateEstimate applies the WaveGuard membership % to the lawn line for
+  // existing customers (priorQualifyingServices lifts the combined tier). The
+  // accept handler bills selectedFrequency.monthly/annual directly, so each tier
+  // must carry the same discounted price the line total reflects.
+  const beforeAnnual = finiteNumberOrNull(lawnLine?.annualBeforeDiscount);
+  const afterAnnual = finiteNumberOrNull(lawnLine?.annualAfterDiscount);
+  const discountFactor = (beforeAnnual && beforeAnnual > 0 && afterAnnual != null)
+    ? afterAnnual / beforeAnnual
+    : 1;
+
+  // After acceptance the chosen tier is persisted in customerSelection (the
+  // engine inputs are NOT restamped), so honor it when marking the selected row;
+  // otherwise fall back to the engine's resolved tier.
+  const selection = estData?.customerSelection || estData?.result?.customerSelection || {};
+  const selectedKey = String(selection.serviceTierKey || selection.serviceTier || '').trim().toLowerCase();
+  const selectedTierKey = ['basic', 'standard', 'enhanced', 'premium'].includes(selectedKey)
+    ? selectedKey
+    : lawnLine.tier;
+
+  const rows = tiers.map((t) => {
+    const annual = applyLawnTierDiscount(t.annual, discountFactor);
+    const visits = finiteNumberOrNull(t.visits ?? t.freq);
+    const monthly = annual != null
+      ? Math.round((annual / 12) * 100) / 100
+      : applyLawnTierDiscount(t.monthly, discountFactor);
+    const perApp = (annual != null && visits)
+      ? Math.round((annual / visits) * 100) / 100
+      : applyLawnTierDiscount(t.perApp, discountFactor);
+    return {
+      name: t.label,
+      tier: t.tier,
+      mo: monthly,
+      ann: annual,
+      pa: perApp,
+      v: visits,
+      recommended: t.recommended === true,
+      selected: t.tier === selectedTierKey,
+    };
+  });
+
+  // The per-tier values above carry the WaveGuard membership discount but not
+  // any manual recurring discount, which the engine surfaces on the live
+  // summary. When the replayed engineInputs apply a manual discount the stored
+  // blob doesn't already record, read it off the just-generated summary so each
+  // tier prices/bills after the manual discount (matching the old single-entry
+  // shapeFrequencyEntry path).
+  const manualDiscount = normalizeManualDiscountSummary({ summary: engineResult?.summary })
+    || normalizeManualDiscountSummary(estData);
+  return lawnFrequenciesFromRows(rows, estData, manualDiscount);
 }
 
 function mosquitoTierKey(row = {}) {
@@ -9908,12 +10017,21 @@ async function buildPricingBundle(estimate) {
       }
     }
   } else {
-    // No pest in the estimate — slider is meaningless. Single entry
-    // using the single engine call at whatever was stored.
+    // No pest in the estimate — the pest cadence slider is meaningless. Run
+    // the engine once at whatever was stored.
     try {
       const engineResult = generateEstimate(engineInputs);
       anchorEngineResult = engineResult;
-      frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
+      // Lawn-only estimates expose the 4/6/9/12 application ladder
+      // (Basic/Standard/Enhanced/Premium) off the live lawn line item, mirroring
+      // the v1 result.results.lawn path. Mixed bundles and other single-service
+      // estimates keep the existing single-entry view.
+      const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
+      if (lawnFreqs.length) {
+        frequencies.push(...lawnFreqs);
+      } else {
+        frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
+      }
     } catch (err) {
       logger.error(`[estimate-data] engine failed (no-pest path): ${err.message}`);
     }
@@ -10285,6 +10403,7 @@ module.exports.isTreeShrubServiceName = isTreeShrubServiceName;
 module.exports.isMosquitoServiceName = isMosquitoServiceName;
 module.exports.isLawnServiceName = isLawnServiceName;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
+module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;
