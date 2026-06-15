@@ -42,7 +42,6 @@ describe('email automation SMS template governance', () => {
     expect(EmailAutomationService.AUTOMATIONS.new_appointment.smsTemplateKey).toBe('auto_new_appointment');
     expect(EmailAutomationService.AUTOMATIONS.bed_bug.smsTemplateKey).toBe('auto_bed_bug');
     expect(EmailAutomationService.AUTOMATIONS.cockroach.smsTemplateKey).toBe('auto_cockroach');
-    expect(EmailAutomationService.AUTOMATIONS.new_lead.smsTemplateKey).toBe('auto_new_lead');
     expect(EmailAutomationService.AUTOMATIONS.service_renewal.smsTemplateKey).toBe('auto_service_renewal');
 
     for (const auto of Object.values(EmailAutomationService.AUTOMATIONS)) {

@@ -15,7 +15,6 @@ const TEMPLATE_KEYS = [
   'estimate_followup_unviewed',
   'estimate_accepted_onetime',
   'estimate_extended',
-  'lead_safe_ack',
   'referral_enrollment',
   'referral_invite',
   'referral_reward',

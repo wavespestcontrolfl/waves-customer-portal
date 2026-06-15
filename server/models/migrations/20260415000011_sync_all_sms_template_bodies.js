@@ -53,14 +53,6 @@ exports.up = async function (knex) {
       sort_order: 44,
     },
     {
-      template_key: 'auto_new_lead',
-      name: 'New Lead',
-      category: 'automations',
-      body: 'Hello {first_name}! Thanks for your interest in Waves Pest Control. We just sent you an email with more info about our services.\n\nIf you have any questions or need assistance, simply reply to this message.',
-      variables: ['first_name'],
-      sort_order: 45,
-    },
-    {
       template_key: 'auto_service_renewal',
       name: 'Service Renewal Reminder',
       category: 'automations',
@@ -152,17 +144,6 @@ exports.up = async function (knex) {
       variables: ['first_name'],
       sort_order: 21,
     },
-
-    // ── internal ────────────────────────────────────────────────
-    {
-      template_key: 'admin_new_lead',
-      name: 'New Lead Alert',
-      category: 'internal',
-      body: '🔔 New lead! {name} 📞 {phone} 📍 {address} 🌐 {source}',
-      variables: ['name', 'phone', 'address', 'source'],
-      sort_order: 60,
-    },
-
     // ── referrals ───────────────────────────────────────────────
     {
       template_key: 'referral_nudge',
