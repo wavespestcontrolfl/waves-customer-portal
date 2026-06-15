@@ -169,6 +169,13 @@ router.post('/review-graphics', requireStudioEnabled, async (req, res, next) => 
 // POST /review-graphics/:id/approve — mark a review graphic approved
 router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, res, next) => {
   try {
+    const existing = await db('review_graphics').where({ id: req.params.id }).first();
+    if (!existing) return res.status(404).json({ error: 'review graphic not found' });
+    // Never approve a graphic with no rendered image — approving publishes it as
+    // a "5-star review" card, and a blank card is worse than none.
+    if (!existing.image_url) {
+      return res.status(400).json({ error: 'review graphic has no rendered image; regenerate it before approving' });
+    }
     const [graphic] = await db('review_graphics')
       .where({ id: req.params.id })
       .update({
@@ -177,7 +184,6 @@ router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, re
         updated_at: new Date(),
       })
       .returning('*');
-    if (!graphic) return res.status(404).json({ error: 'review graphic not found' });
     res.json({ success: true, graphic });
   } catch (err) { next(err); }
 });

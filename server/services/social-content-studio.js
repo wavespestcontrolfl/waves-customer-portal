@@ -1355,6 +1355,14 @@ async function createReviewGraphic(input) {
   // UI, so a caller-supplied override must be an http(s) URL — never a
   // javascript:/data: link. Anything else falls back to the rendered card.
   const imageUrl = httpUrlOrNull(input.imageUrl) || await renderReviewGraphicImageUrl(candidate);
+  // Refuse to create a graphic with no image. listReviewGraphicCandidates
+  // excludes any review that already has a review_graphics row, so inserting a
+  // null-image row (e.g. when S3/CDN/sharp render failed) would consume the
+  // review from the candidate queue forever and leave an approvable-but-blank
+  // draft. Fail loudly instead so the caller can retry once rendering works.
+  if (!imageUrl) {
+    throw new Error('Review graphic image could not be rendered (check S3/CDN config); refusing to create a graphic without an image');
+  }
   const row = {
     google_review_id: candidate.googleReviewId,
     status: input.status || 'draft',
