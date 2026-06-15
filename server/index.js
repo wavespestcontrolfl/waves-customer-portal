@@ -144,6 +144,21 @@ app.use((req, res, next) => {
   return strictHelmet(req, res, next);
 });
 
+// Public, embeddable endpoints must be CORS-open to ANY origin and must answer
+// their own preflights BEFORE the credentialed allowlist below — the cors()
+// middleware terminates OPTIONS for non-allowlisted origins without an
+// Access-Control-Allow-Origin header, which would break third-party embeds.
+// (Approved public surface — see AGENTS.md.) Keep this above the global cors().
+app.use('/api/public/pest-forecast', (req, res, next) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Max-Age', '86400');
+  res.set('Vary', 'Origin');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({

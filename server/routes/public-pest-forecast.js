@@ -21,16 +21,10 @@ const logger = require('../services/logger');
 const { getForecast } = require('../services/pest-forecast/forecast');
 const { listLocations } = require('../services/pest-forecast/locations');
 
-// Open CORS for embedding on any domain. Public, no credentials.
-router.use((req, res, next) => {
-  res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type');
-  res.set('Access-Control-Max-Age', '86400');
-  res.set('Vary', 'Origin');
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  next();
-});
+// CORS (Access-Control-Allow-Origin: * + OPTIONS preflight) is handled at the
+// app level in server/index.js, mounted ABOVE the global credentialed cors()
+// allowlist so third-party-embed preflights aren't terminated before they reach
+// here. This router only owns routing + cache headers.
 
 router.get('/locations', (_req, res) => {
   res.set('Cache-Control', 'public, max-age=86400');
