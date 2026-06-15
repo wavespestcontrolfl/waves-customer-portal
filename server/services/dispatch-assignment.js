@@ -5,7 +5,7 @@ const { etDateString } = require('../utils/datetime-et');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
-const TERMINAL_STATUSES = ['completed', 'cancelled', 'skipped'];
+const TERMINAL_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 const BOARD_HIDDEN_STATUSES = ['cancelled', 'rescheduled'];
 const TERMINAL_RACE = 'TERMINAL_STATUS_RACE';
 

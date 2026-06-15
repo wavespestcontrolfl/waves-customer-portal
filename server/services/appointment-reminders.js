@@ -971,7 +971,12 @@ const AppointmentReminders = {
           entity_type: 'scheduled_service',
           entity_id: scheduledServiceId,
         });
-      }, 'appointment_no_show', 'appointment_no_show');
+        // messageType keeps the no-show label for analytics; the messaging
+        // policy `purpose` reuses the registered transactional
+        // 'appointment_cancellation' profile (a no-show notice is the same
+        // class of "your appointment isn't happening — let's rebook" comms,
+        // and 'appointment_no_show' is not a registered MessagePurpose).
+      }, 'appointment_no_show', 'appointment_cancellation');
       logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
 
       return { customer_id: svc.customer_id };

@@ -1252,7 +1252,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // freed. Reject before the transition; cancelling or confirming a
     // future job stays allowed. To genuinely run a job early,
     // reschedule it to today first.
-    const DAY_OF_LIFECYCLE_STATUSES = new Set(['en_route', 'on_site', 'completed']);
+    const DAY_OF_LIFECYCLE_STATUSES = new Set(['en_route', 'on_site', 'completed', 'no_show']);
     if (DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
       && trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
       return res.status(409).json({
@@ -1509,6 +1509,23 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       }
     } else if (toStatus === 'no_show') {
+      // Free the tech on the dispatch roster. A no-show marked after the
+      // job already went en_route/on_site leaves tech_status.current_job_id
+      // pointing at it — completed/cancelled clear it via track-transitions
+      // (markComplete/cancel), but this path runs none of those. No-op if
+      // the tech has already moved on (clearTechCurrentJob matches on the
+      // current_job_id). Best-effort.
+      if (svc.technician_id) {
+        try {
+          const { clearTechCurrentJob } = require('../services/tech-status');
+          await clearTechCurrentJob({
+            tech_id: svc.technician_id,
+            current_job_id: svc.id,
+            status: 'idle',
+          });
+        } catch (e) { logger.error(`[admin-dispatch] no-show tech_status clear failed: ${e.message}`); }
+      }
+
       // Notify the customer we missed them and invite a reschedule.
       // Best-effort — a Twilio/template failure must not fail the
       // status flip that already committed above.

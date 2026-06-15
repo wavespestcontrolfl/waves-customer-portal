@@ -155,7 +155,7 @@ async function findScheduledJob(techId, customerId, date = new Date()) {
     const assigned = await db('scheduled_services')
       .where({ technician_id: techId, customer_id: customerId })
       .where('scheduled_date', dateStr)
-      .whereNotIn('status', ['completed', 'cancelled'])
+      .whereNotIn('status', ['completed', 'cancelled', 'no_show'])
       .orderBy('window_start', 'asc')
       .first();
     if (assigned) return assigned;
@@ -164,7 +164,7 @@ async function findScheduledJob(techId, customerId, date = new Date()) {
     return await db('scheduled_services')
       .where({ customer_id: customerId })
       .where('scheduled_date', dateStr)
-      .whereNotIn('status', ['completed', 'cancelled'])
+      .whereNotIn('status', ['completed', 'cancelled', 'no_show'])
       .orderBy('window_start', 'asc')
       .first();
   } catch (err) {
@@ -217,11 +217,12 @@ async function findNextScheduledJobForTech(techId, afterTime, excludeCustomerId 
     //  LIMIT 1
     let q = db('scheduled_services')
       .where({ technician_id: techId })
-      // 'skipped' is a terminal status (see migration 20260426000004)
-      // and admin-dispatch.js:1358 already excludes it from active-job
-      // queries. Mirroring that here so a manually-skipped appointment
-      // can never be re-flipped to en_route by auto-flip.
-      .whereNotIn('status', ['completed', 'cancelled', 'skipped'])
+      // 'skipped' and 'no_show' are terminal statuses (see migrations
+      // 20260426000004 / 20260615000005) and admin-dispatch.js already
+      // excludes them from active-job queries. Mirroring that here so a
+      // manually-skipped or no-showed appointment can never be re-flipped
+      // to en_route (and re-fire the en-route SMS) by auto-flip.
+      .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .where('track_state', 'scheduled')
       .where(function () {
         this.where(function () {
