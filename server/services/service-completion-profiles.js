@@ -175,6 +175,36 @@ async function tableAvailable(knex) {
   }
 }
 
+function serviceNameCandidates(serviceType) {
+  const raw = String(serviceType || '').trim();
+  if (!raw) return [];
+
+  const candidates = [raw];
+  const suffixless = raw.replace(/\s+service$/i, '').trim();
+  if (suffixless && suffixless.toLowerCase() !== raw.toLowerCase()) {
+    candidates.push(suffixless);
+  }
+
+  const expanded = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = candidate.toLowerCase();
+    if (!seen.has(key)) {
+      expanded.push(candidate);
+      seen.add(key);
+    }
+    if (/^pest\s+and\s+rodent\s+control$/i.test(candidate)) {
+      const alias = 'Pest & Rodent Control';
+      const aliasKey = alias.toLowerCase();
+      if (!seen.has(aliasKey)) {
+        expanded.push(alias);
+        seen.add(aliasKey);
+      }
+    }
+  }
+  return expanded;
+}
+
 async function lookupServiceForScheduledService(scheduledService = {}, knex = db) {
   if (!scheduledService) return null;
   if (scheduledService.service_id) {
@@ -186,16 +216,21 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
 
   const serviceType = String(scheduledService.service_type || scheduledService.serviceType || '').trim();
   if (!serviceType) return null;
+  const serviceTypeCandidates = serviceNameCandidates(serviceType);
 
-  const exact = await knex('services')
-    .whereRaw('lower(name) = lower(?)', [serviceType])
-    .first('service_key', 'name', 'category', 'billing_type');
-  if (exact) return exact;
+  for (const candidate of serviceTypeCandidates) {
+    const exact = await knex('services')
+      .whereRaw('lower(name) = lower(?)', [candidate])
+      .first('service_key', 'name', 'category', 'billing_type');
+    if (exact) return exact;
+  }
 
-  return knex('services')
+  const shortName = await knex('services')
     .whereRaw('lower(short_name) = lower(?)', [serviceType])
     .first('service_key', 'name', 'category', 'billing_type')
     .catch(() => null);
+  if (shortName) return shortName;
+  return null;
 }
 
 async function profileByServiceKey(serviceKey, knex = db) {
