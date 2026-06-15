@@ -15,6 +15,8 @@ const { buildPressureTrendContext } = require('./pressure-trend');
 const { fetchApplicationConditions, fetchServiceWeekWeather } = require('./application-conditions');
 const { detectServiceLine } = require('./service-line-configs');
 const { etDateString } = require('../../utils/datetime-et');
+const { loadActiveConfig } = require('../pest-pressure/store');
+const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -258,17 +260,21 @@ async function buildReportCopyContext({
   // Single normalized ET calendar date for this service — reused for history
   // bounds, the weather window, and the real-time check.
   const serviceYmd = toYmd(serviceDate);
+  // Live conditions are only usable when the report is generated ON the service
+  // date; otherwise we skip the fetch entirely (no point paying FAWN/Open-Meteo
+  // latency for a value we'd discard).
+  const isRealTime = serviceYmd === etDateString();
 
   const customer = await loadCustomer(customerId, knex);
   const lat = finiteOrNull(customer?.latitude);
   const lng = finiteOrNull(customer?.longitude);
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
-  const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend] = await Promise.all([
+  const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend, ppConfig] = await Promise.all([
     loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
-    (lat != null && lng != null)
+    (isRealTime && lat != null && lng != null)
       ? fetchApplicationConditions({ latitude: lat, longitude: lng }).catch(() => null)
       : Promise.resolve(null),
     (lat != null && lng != null)
@@ -281,7 +287,18 @@ async function buildReportCopyContext({
         knex,
       }).catch(() => null)
       : Promise.resolve(null),
+    loadActiveConfig(knex).catch(() => null),
   ]);
+
+  // Respect the same customer-visibility gate the normal report paths use: when
+  // Pest Pressure is hidden (feature off, showOnCustomerReport off, service line
+  // not enabled, or one-time/specialty excluded), buildPestPressureCustomerView
+  // returns null — and we must NOT surface a pressure trend in the copy either.
+  const pressureVisible = buildPestPressureCustomerView({
+    config: ppConfig,
+    scoreRow: null,
+    serviceRecord: { service_line: line, service_type: serviceType },
+  }) !== null;
 
   const { monthName, monthNum } = etMonth(serviceDate);
   const seasonHint = SWFL_SEASON_BY_MONTH[monthNum] || null;
@@ -319,7 +336,7 @@ async function buildReportCopyContext({
   // row in that window, NOT the customer's true first visit — don't cite a percent
   // or "first visit" baseline that the data can't support; describe the direction.
   let pressureLine = null;
-  if (pressureTrend && ['down', 'flat', 'up'].includes(pressureTrend.direction)) {
+  if (pressureVisible && pressureTrend && ['down', 'flat', 'up'].includes(pressureTrend.direction)) {
     const cur = pressureTrend.current?.pressureIndex;
     const reading = typeof cur === 'number' ? ` Most recent reading ~${cur.toFixed(1)} on a 0–5 scale (lower is better).` : '';
     if (pressureTrend.direction === 'down') {
@@ -332,11 +349,8 @@ async function buildReportCopyContext({
     sections.push(`PEST PRESSURE (history through the last completed visit — NOT a reading for this visit): ${pressureLine}`);
   }
 
-  // fetchApplicationConditions returns LIVE conditions, so only label them
-  // "at service" when the report is generated on the service date itself.
-  // Generated later, current temp/wind/rain would be miscited as the visit's;
-  // the trailing rainfall is windowed on the service date and stays valid.
-  const isRealTime = serviceYmd === etDateString();
+  // Live conditions are labeled "at service" only for a same-day report (the
+  // fetch was already skipped otherwise); trailing rainfall stays valid either way.
   const condLine = isRealTime ? conditionsLine(conditions) : null;
   if (condLine || weekWeather?.rainInches != null) {
     const wx = [
