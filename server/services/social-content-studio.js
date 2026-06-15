@@ -890,7 +890,13 @@ async function saveCampaignDraft(input) {
     throw new Error('social_media_posts table is not available');
   }
   const preview = input.preview || await previewCampaign(input);
-  const imageUrl = cleanText(input.imageUrl || preview.visual?.imageUrl, 1000) || await renderCampaignImageUrl(input, preview);
+  // image_url is persisted then rendered as <a href>/<img src> in the admin UI,
+  // and both input.imageUrl and a caller-supplied preview.visual.imageUrl reach
+  // here from req.body — so validate each to http(s) before trusting it, falling
+  // back to the freshly rendered card (an https S3/CDN URL).
+  const imageUrl = httpUrlOrNull(input.imageUrl)
+    || httpUrlOrNull(preview.visual?.imageUrl)
+    || await renderCampaignImageUrl(input, preview);
   const finalPreview = previewWithVisual(preview, {
     imageUrl,
     variant: 'campaign',
@@ -1102,14 +1108,21 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     let finalPreview = preview;
 
     if (plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics')) {
-      const graphic = await createReviewGraphic({
-        googleReviewId: plan.reviewGraphic.googleReviewId,
-        privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
-        templateKey: 'waves_clean_square',
-        channels: plan.channels,
-        status: 'approved',
-      }).catch(() => null);
-      imageUrl = graphic?.image_url || await renderReviewGraphicImageUrl(plan.reviewGraphic);
+      if (SOCIAL_FLAGS.dryRun) {
+        // Dry run = no side effects. Render a preview image only; never
+        // create/approve the graphic, which would consume the review from
+        // future candidates even though nothing is published.
+        imageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic);
+      } else {
+        const graphic = await createReviewGraphic({
+          googleReviewId: plan.reviewGraphic.googleReviewId,
+          privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
+          templateKey: 'waves_clean_square',
+          channels: plan.channels,
+          status: 'approved',
+        }).catch(() => null);
+        imageUrl = graphic?.image_url || await renderReviewGraphicImageUrl(plan.reviewGraphic);
+      }
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         variant: 'review',
@@ -1289,7 +1302,10 @@ async function createReviewGraphic(input) {
     throw new Error('Review is not eligible for a 5-star graphic (requires star_rating=5 and non-empty review text)');
   }
   const candidate = buildReviewGraphicCandidate(review, input);
-  const imageUrl = cleanText(input.imageUrl, 1000) || await renderReviewGraphicImageUrl(candidate);
+  // image_url is persisted then rendered as an <a href>/<img src> in the admin
+  // UI, so a caller-supplied override must be an http(s) URL — never a
+  // javascript:/data: link. Anything else falls back to the rendered card.
+  const imageUrl = httpUrlOrNull(input.imageUrl) || await renderReviewGraphicImageUrl(candidate);
   const row = {
     google_review_id: candidate.googleReviewId,
     status: input.status || 'draft',

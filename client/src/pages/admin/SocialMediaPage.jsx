@@ -932,8 +932,8 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                   )}
 
                   <div style={{ display: "flex", gap: 12, marginTop: 12, flexWrap: "wrap", fontSize: 12 }}>
-                    {run.imageUrl && (
-                      <a href={run.imageUrl} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                    {safeHttpHref(run.imageUrl) && (
+                      <a href={safeHttpHref(run.imageUrl)} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
                         Open image
                       </a>
                     )}
@@ -948,10 +948,10 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                   </div>
                 </div>
 
-                {run.imageUrl && (
-                  <a href={run.imageUrl} target="_blank" rel="noopener noreferrer" style={{ display: "block" }}>
+                {safeHttpHref(run.imageUrl) && (
+                  <a href={safeHttpHref(run.imageUrl)} target="_blank" rel="noopener noreferrer" style={{ display: "block" }}>
                     <img
-                      src={run.imageUrl}
+                      src={safeHttpHref(run.imageUrl)}
                       alt=""
                       style={{
                         width: "100%",
@@ -1175,10 +1175,10 @@ function CampaignBuilderTab({ showToast, onSaved }) {
                 </a>
               </div>
             )}
-            {preview.visual?.imageUrl && (
+            {safeHttpHref(preview.visual?.imageUrl) && (
               <div style={{ ...sCard, marginBottom: 0, fontSize: 12, color: D.muted }}>
                 Visual card:{" "}
-                <a href={preview.visual.imageUrl} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                <a href={safeHttpHref(preview.visual.imageUrl)} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
                   Open rendered image
                 </a>
               </div>
@@ -1365,8 +1365,8 @@ function ReviewGraphicsTab({ showToast }) {
                       Approve
                     </button>
                   )}
-                  {graphic.image_url && (
-                    <a href={graphic.image_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, marginTop: 8, display: "inline-block" }}>
+                  {safeHttpHref(graphic.image_url) && (
+                    <a href={safeHttpHref(graphic.image_url)} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: D.teal, marginTop: 8, display: "inline-block" }}>
                       Open image
                     </a>
                   )}
