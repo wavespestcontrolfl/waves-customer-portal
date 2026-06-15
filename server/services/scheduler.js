@@ -893,6 +893,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY MONDAY 3:40AM ET — Call extraction replay eval. Replays the
+  // reviewed-call fixture (server/fixtures/call-extraction-eval/) through the
+  // LIVE v2 extractor and notifies admin on repeated fixture/replay failure.
+  // The fixture stores only call ids and expected routing/scheduling shape; the
+  // replay reads production call_log rows but does not write business records.
+  // runExclusive: live model calls; don't double-spend on deploy-overlap ticks.
+  // Kill switch: GATE_CALL_REPLAY_EVAL=false.
+  // =========================================================================
+  cron.schedule('40 3 * * 1', async () => {
+    if (!isEnabled('callReplayEval')) return;
+    logger.info('Running: call extraction replay eval');
+    try {
+      await runExclusive('call-extraction-replay-eval', async () => {
+        const { runCallExtractionReplayEval } = require('./eval/call-extraction-replay');
+        const result = await runCallExtractionReplayEval();
+        logger.info(`Call extraction replay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0}`);
+      });
+    } catch (err) {
+      logger.error(`Call extraction replay eval failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5:30AM ET — Expire past events. classifyFreshness never emits an
   // 'expired' status and nothing else transitions an event out of its fresh
   // state once its date passes, so a one_time/annual event would keep its high

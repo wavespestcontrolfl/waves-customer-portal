@@ -23,6 +23,7 @@
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
+ *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -204,6 +205,13 @@ const gates = {
   // inbox classifier to catch prompt/model drift. Read-only except one admin
   // notification on regression. Enable with GATE_INCIDENT_EVAL=true.
   incidentRegressionEval: isProd ? process.env.GATE_INCIDENT_EVAL === 'true' : true,
+
+  // Weekly call extraction replay eval — replays the reviewed-call corpus
+  // (server/fixtures/call-extraction-eval/) through the LIVE v2 call
+  // extractor to catch prompt/model drift before routing regresses. Read-only
+  // except one admin notification on regression. Enable with
+  // GATE_CALL_REPLAY_EVAL=true.
+  callReplayEval: isProd ? process.env.GATE_CALL_REPLAY_EVAL === 'true' : true,
 
   // Estimate "Show your work" — public estimate page trust block: property
   // facts with friendly data-source labels, the county parcel match line,

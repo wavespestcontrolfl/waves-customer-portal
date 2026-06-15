@@ -1055,6 +1055,100 @@ function shouldFailRun(summary, options) {
     );
 }
 
+function buildOptions(rawOptions = {}) {
+  const defaults = parseArgs([]);
+  const ids = Array.isArray(rawOptions.ids) ? [...rawOptions.ids] : [...defaults.ids];
+  return {
+    ...defaults,
+    ...rawOptions,
+    ids,
+    explicitIds: Object.prototype.hasOwnProperty.call(rawOptions, 'explicitIds')
+      ? rawOptions.explicitIds
+      : ids.length > 0,
+    statuses: Array.isArray(rawOptions.statuses) ? [...rawOptions.statuses] : [...defaults.statuses],
+  };
+}
+
+function defaultReplayHelpers() {
+  const triageFlags = require('../services/call-triage-flags');
+  const extractionCompat = require('../utils/extraction-compat');
+  return { ...triageFlags, ...extractionCompat };
+}
+
+async function runReplayVariance(rawOptions = {}, context = {}) {
+  const options = buildOptions(rawOptions);
+
+  if (context.requireGeminiKey !== false && !process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not present; the current v2 extractor cannot be replayed here');
+  }
+
+  const db = context.db || require('../models/db');
+  const CRP = context.CRP || require('../services/call-recording-processor');
+  const helpers = context.helpers || defaultReplayHelpers();
+  const fixture = Object.prototype.hasOwnProperty.call(context, 'fixture')
+    ? context.fixture
+    : loadReplayFixture(options.fixturePath);
+  const explicitFixtureIds = applyFixtureReplayOptions(options, fixture);
+  const fixtureCaseByCallId = fixture?.byCallId || new Map();
+  const tableExistsFn = context.tableExists || tableExists;
+  const columnInfoFn = context.columnInfo || columnInfo;
+  const loadCandidateCallsFn = context.loadCandidateCalls || loadCandidateCalls;
+  const replayCallFn = context.replayCall || replayCall;
+
+  const scheduledColumns = Object.prototype.hasOwnProperty.call(context, 'scheduledColumns')
+    ? context.scheduledColumns
+    : ((await tableExistsFn(db, 'scheduled_services'))
+        ? await columnInfoFn(db, 'scheduled_services')
+        : null);
+  const rows = await loadCandidateCallsFn(db, options);
+  if (typeof context.onRowsLoaded === 'function') context.onRowsLoaded(rows, options);
+
+  const results = [];
+  for (const call of rows) {
+    let result;
+    try {
+      result = await replayCallFn(call, {
+        helpers,
+        CRP,
+        db,
+        scheduledColumns,
+        includeValues: options.includeValues,
+        retranscribe: options.retranscribe,
+        fixtureCaseByCallId,
+      });
+    } catch (err) {
+      result = buildReplayErrorResult(call, err, {
+        includeValues: options.includeValues,
+        retranscribe: options.retranscribe,
+        fixtureCaseByCallId,
+      });
+    }
+    results.push(result);
+    if (typeof context.onResult === 'function') context.onResult(result, results.length - 1, options);
+  }
+
+  const missingFixtureResults = buildMissingFixtureResults(fixture, rows, {
+    includeValues: options.includeValues,
+    retranscribe: options.retranscribe,
+    fixtureCaseByCallId,
+    requiredCallIds: explicitFixtureIds,
+  });
+  for (const result of missingFixtureResults) {
+    results.push(result);
+    if (typeof context.onResult === 'function') context.onResult(result, results.length - 1, options);
+  }
+
+  const summary = summarizeResults(results, options);
+  return {
+    options,
+    fixture,
+    rows,
+    results,
+    summary,
+    failed: shouldFailRun(summary, options),
+  };
+}
+
 async function main() {
   const options = parseArgs();
   if (options.help) {
@@ -1062,76 +1156,28 @@ async function main() {
     return;
   }
 
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is not present; the current v2 extractor cannot be replayed here');
-  }
-
   const db = require('../models/db');
-  const CRP = require('../services/call-recording-processor');
-  const triageFlags = require('../services/call-triage-flags');
-  const extractionCompat = require('../utils/extraction-compat');
-  const helpers = { ...triageFlags, ...extractionCompat };
-  const fixture = loadReplayFixture(options.fixturePath);
-  const explicitFixtureIds = applyFixtureReplayOptions(options, fixture);
-  const fixtureCaseByCallId = fixture?.byCallId || new Map();
-
   try {
-    const scheduledColumns = (await tableExists(db, 'scheduled_services'))
-      ? await columnInfo(db, 'scheduled_services')
-      : null;
-    const rows = await loadCandidateCalls(db, options);
-    if (!options.jsonl) printHumanHeader(options, rows.length);
-
-    const results = [];
-    for (const call of rows) {
-      let result;
-      try {
-        result = await replayCall(call, {
-          helpers,
-          CRP,
-          db,
-          scheduledColumns,
-          includeValues: options.includeValues,
-          retranscribe: options.retranscribe,
-          fixtureCaseByCallId,
-        });
-      } catch (err) {
-        result = buildReplayErrorResult(call, err, {
-          includeValues: options.includeValues,
-          retranscribe: options.retranscribe,
-          fixtureCaseByCallId,
-        });
-      }
-      results.push(result);
-      if (options.jsonl) {
-        console.log(JSON.stringify({ type: 'call', ...result }));
-      } else {
-        printHumanResult(result, results.length - 1);
-      }
-    }
-
-    const missingFixtureResults = buildMissingFixtureResults(fixture, rows, {
-      includeValues: options.includeValues,
-      retranscribe: options.retranscribe,
-      fixtureCaseByCallId,
-      requiredCallIds: explicitFixtureIds,
+    const run = await runReplayVariance(options, {
+      db,
+      onRowsLoaded: (rows, resolvedOptions) => {
+        if (!resolvedOptions.jsonl) printHumanHeader(resolvedOptions, rows.length);
+      },
+      onResult: (result, index, resolvedOptions) => {
+        if (resolvedOptions.jsonl) {
+          console.log(JSON.stringify({ type: 'call', ...result }));
+        } else {
+          printHumanResult(result, index);
+        }
+      },
     });
-    for (const result of missingFixtureResults) {
-      results.push(result);
-      if (options.jsonl) {
-        console.log(JSON.stringify({ type: 'call', ...result }));
-      } else {
-        printHumanResult(result, results.length - 1);
-      }
-    }
 
-    const summary = summarizeResults(results, options);
-    if (options.jsonl) {
-      console.log(JSON.stringify({ type: 'summary', ...summary }));
+    if (run.options.jsonl) {
+      console.log(JSON.stringify({ type: 'summary', ...run.summary }));
     } else {
-      printHumanSummary(summary);
+      printHumanSummary(run.summary);
     }
-    if (shouldFailRun(summary, options)) {
+    if (run.failed) {
       process.exitCode = 1;
     }
   } finally {
@@ -1157,5 +1203,6 @@ module.exports = {
   loadReplayFixture,
   validateExplicitFixtureIds,
   applyFixtureReplayOptions,
+  runReplayVariance,
   etScheduleParts,
 };
