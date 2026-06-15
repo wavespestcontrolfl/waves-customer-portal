@@ -4458,18 +4458,31 @@ export default function EstimateToolViewV2({
               {form.svcLawn && !commercialDetected && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <FieldV2 label="Grass Type / Track" className="mb-0">
-                    {" "}
-                    <SelectV2
-                      k="grassType"
-                      options={[
-                        { value: "st_augustine", label: "St. Augustine" },
-                        { value: "bermuda", label: "Bermuda" },
-                        { value: "zoysia", label: "Zoysia" },
-                        { value: "bahia", label: "Bahia" },
-                      ]}
-                    />{" "}
-                  </FieldV2>{" "}
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Grass Type / Track" className="mb-0">
+                      {" "}
+                      <SelectV2
+                        k="grassType"
+                        options={[
+                          { value: "st_augustine", label: "St. Augustine" },
+                          { value: "bermuda", label: "Bermuda" },
+                          { value: "zoysia", label: "Zoysia" },
+                          { value: "bahia", label: "Bahia" },
+                        ]}
+                      />{" "}
+                    </FieldV2>
+                    <FieldV2 label="Applications / year" className="mb-0">
+                      <SelectV2
+                        k="lawnFreq"
+                        options={[
+                          { value: "4", label: "4 — Quarterly" },
+                          { value: "6", label: "6 — Bi-monthly" },
+                          { value: "9", label: "9 — Every 6 weeks" },
+                          { value: "12", label: "12 — Monthly" },
+                        ]}
+                      />
+                    </FieldV2>
+                  </div>{" "}
                 </div>
               )}
               {hasTurfPricedSelection && (
