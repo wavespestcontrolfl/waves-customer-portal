@@ -284,9 +284,24 @@ async function buildReportCopyContext({
     sections.push(`PESTS TARGETED TODAY (tech-tagged): ${targets.join(', ')}`);
   }
 
-  if (pressureTrend?.customerSummary) {
-    const dir = pressureTrend.direction && pressureTrend.direction !== 'unknown' ? ` [${pressureTrend.direction}]` : '';
-    sections.push(`PEST PRESSURE TREND${dir}: ${cleanText(pressureTrend.customerSummary)}`);
+  // The current visit isn't scored at generate time, so buildPressureTrendContext
+  // computes the trend from PRIOR completed visits only (its placeholder "current"
+  // point is really the last completed visit). Present it honestly as history
+  // through the last visit — never as "this visit's" reading — and don't reuse the
+  // helper's customerSummary, which is phrased as if the latest point were today.
+  // direction is only 'down'/'flat'/'up' when there are >=2 prior visits.
+  let pressureLine = null;
+  if (pressureTrend && ['down', 'flat', 'up'].includes(pressureTrend.direction)) {
+    const cur = pressureTrend.current?.pressureIndex;
+    const reading = typeof cur === 'number' ? ` Most recent reading ~${cur.toFixed(1)} on a 0–5 scale (lower is better).` : '';
+    if (pressureTrend.direction === 'down') {
+      pressureLine = `Across recent visits, pest pressure has trended down${pressureTrend.percentChange != null ? ` (about ${pressureTrend.percentChange}% below the first visit)` : ''}.${reading}`;
+    } else if (pressureTrend.direction === 'flat') {
+      pressureLine = `Pest pressure has held steady across recent visits.${reading}`;
+    } else {
+      pressureLine = `Pest pressure has been trending up across recent visits.${reading}`;
+    }
+    sections.push(`PEST PRESSURE (history through the last completed visit — NOT a reading for this visit): ${pressureLine}`);
   }
 
   const condLine = conditionsLine(conditions);
@@ -338,7 +353,7 @@ async function buildReportCopyContext({
     priorVisitCount: priorVisits.length,
     productSafetyCount: productSafety.length,
     hasConditions: !!condLine,
-    hasPressureTrend: !!pressureTrend?.customerSummary,
+    hasPressureTrend: !!pressureLine,
     targets,
     monthNum,
   };

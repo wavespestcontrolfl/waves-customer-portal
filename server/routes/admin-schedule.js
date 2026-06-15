@@ -4126,7 +4126,7 @@ router.post('/generate-report', async (req, res) => {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
 
     const {
-      scheduledServiceId, customerName, serviceType, serviceLine, technicianName, serviceDate, arrivalTime,
+      scheduledServiceId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
@@ -4381,7 +4381,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         const isAssignedTech = req.technicianId != null && String(svc.technician_id) === String(req.technicianId);
         if (isAdmin || isAssignedTech) {
           groundingCustomerId = svc.customer_id;
-          groundingServiceType = serviceType || svc.service_type;
+          // The scheduled service — not the request body — is the source of truth
+          // for what was serviced; a stale/crafted body could otherwise ground the
+          // report in the wrong service line and pull unrelated prior-visit context.
+          // The service line is derived from this type inside buildReportCopyContext.
+          groundingServiceType = svc.service_type || serviceType;
           // The scheduled service is the source of truth for the date, so season
           // and trailing-rainfall grounding match the visit, not "today" (the
           // client builds serviceDate from new Date()). Fall back to the client
@@ -4402,7 +4406,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
         serviceType: groundingServiceType,
-        serviceLine,
+        serviceLine: null, // derived from the server-side service type, not the body
         products: Array.isArray(products) ? products : [],
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
