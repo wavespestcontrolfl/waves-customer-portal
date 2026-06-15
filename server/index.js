@@ -426,6 +426,7 @@ app.use('/api/admin/pest-pressure', require('./routes/admin-pest-pressure'));
 app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
 app.use('/api/admin/pricing-reality-check', require('./routes/admin-pricing-reality-check'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
+app.use('/api/tech/lawn-diagnostic', require('./routes/tech-lawn-diagnostic'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
 app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
