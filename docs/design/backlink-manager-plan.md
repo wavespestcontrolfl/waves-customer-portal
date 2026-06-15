@@ -367,7 +367,10 @@ Env: `HERMES_SERVICE_TOKEN` (claim/report auth), `HERMES_BASE_URL` (if portal ev
     `outreach_to_email/subject/body/status/send_token/attempted_at`. Admin routes `prospects/outreach/pending`,
     `prospects/:id/outreach/{draft,send,reconcile}` (the auth'd send IS the approval click). 51 unit tests.
     The approval-queue UI in the Link Building board is the immediate follow-up.
-  - **M3c — Hermes agent deployment** (Docker, skill that calls claim/report) — infra, not repo code — TODO.
+  - **M3c — Hermes agent deployment** (Docker, skill that calls claim/report) — signup skill SHIPPED in the
+    dashboard; the **outreach auto-draft skill is authored** at `docs/hermes/waves-outreach-drafter-skill.md`
+    (claim `?type=outreach` → research → compose one-to-one draft → report `outcome:"drafted"` → lands in the
+    M3b approval queue). Deploying it into the Hostinger Skills tab + flipping `GATE_LINK_OUTREACH` are operator steps.
 - **M4 — Cutover:** retire Playwright worker per §11.
 
 M1 alone satisfies "Backlink Manager with all the columns." Hermes is M3 — additive, gated,
