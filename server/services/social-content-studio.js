@@ -1071,6 +1071,15 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     return { skipped: true, reason: 'social automation is paused by admin' };
   }
 
+  // Fail closed if the audit/cadence table is missing. latestAutonomousRun()
+  // and insertAutonomousRun() both no-op when social_content_studio_runs is
+  // absent, so without this the cadence guard would see "no prior run" on every
+  // tick and the hourly cron would publish each fire with no throttle and no
+  // audit trail. Require the table before selecting/rendering/publishing.
+  if (!(await hasTable('social_content_studio_runs'))) {
+    return { skipped: true, reason: 'social_content_studio_runs table is unavailable' };
+  }
+
   if (!force) {
     const latest = await latestAutonomousRun();
     if (latest?.started_at) {
@@ -1110,23 +1119,16 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
 
     let imageUrl = null;
     let finalPreview = preview;
+    const isReviewRun = !!plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics');
 
-    if (plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics')) {
-      if (SOCIAL_FLAGS.dryRun) {
-        // Dry run = no side effects. Render a preview image only; never
-        // create/approve the graphic, which would consume the review from
-        // future candidates even though nothing is published.
-        imageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic);
-      } else {
-        const graphic = await createReviewGraphic({
-          googleReviewId: plan.reviewGraphic.googleReviewId,
-          privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
-          templateKey: 'waves_clean_square',
-          channels: plan.channels,
-          status: 'approved',
-        }).catch(() => null);
-        imageUrl = graphic?.image_url || await renderReviewGraphicImageUrl(plan.reviewGraphic);
-      }
+    if (isReviewRun) {
+      // Render the review card for preview/publish, but do NOT persist or approve
+      // the graphic yet. listReviewGraphicCandidates() excludes any review
+      // already joined to review_graphics, so creating the row here would consume
+      // the review from the candidate queue even on a dry run or a failed
+      // publish. Persist + approve happens only after a confirmed successful
+      // publish (below).
+      imageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic);
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         variant: 'review',
@@ -1177,6 +1179,21 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       .orderBy('created_at', 'desc')
       .first()
       .catch(() => null);
+
+    // Now that the post actually published, record + approve the review graphic,
+    // which consumes the review from the candidate queue. A dry run
+    // (publishResult.success === false) or a total publish failure leaves the
+    // review available for a future run. Reuse the already-rendered card URL.
+    if (isReviewRun && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+      await createReviewGraphic({
+        googleReviewId: plan.reviewGraphic.googleReviewId,
+        privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
+        templateKey: 'waves_clean_square',
+        channels: plan.channels,
+        status: 'approved',
+        imageUrl,
+      }).catch(() => null);
+    }
 
     const status = SOCIAL_FLAGS.dryRun ? 'dry_run' : publishResult.success ? 'published' : 'failed';
     const updated = await updateAutonomousRun(run?.id, {
