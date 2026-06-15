@@ -585,6 +585,11 @@ function applyAutoReleaseRepair(contract = {}, mode = 'standard') {
   if (mode === 'minimal') {
     repaired.customer_summary = MINIMAL_SAFE_SUMMARY;
     repaired.watch_items = ['Watch for any area that spreads, thins, or does not recover, and we will take a closer look on the next visit.'];
+    // Minimal means inputs are too poor to defend a diagnosis — name no pest or
+    // disease anywhere downstream (the public presenter reads these fields).
+    repaired.diagnosis = { ...(contract.diagnosis || {}), primary_finding: null, confidence: 'unknown', findings: [] };
+    repaired.reconciliation_flags = [];
+    repaired.expectations = {};
     repaired.repairs_applied = ['minimal_safe_summary'];
     return repaired;
   }

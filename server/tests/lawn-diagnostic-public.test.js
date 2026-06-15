@@ -133,6 +133,28 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(serialized).not.toMatch(/\bconfirmed\b/i);
     expect(report.findings[0].customer_note.toLowerCase()).toContain('suspected');
   });
+
+  test('clamps enum fields and uses a fixed expectations shape — no injected keys leak', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Weed pressure',
+          confidence: 'HACKED',
+          findings: [{ name: 'Weed pressure', confidence: 'bogus', severity: 'evil', customer_wording: 'ok' }],
+        },
+        expectations: { weeds: 'Visible response ~10-14 days.', secret_internal_note: 'TECH ONLY do not show' },
+        watering: {},
+        customer_summary: 'ok',
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    expect(report.confidence).toBeNull();
+    expect(report.findings[0].confidence).toBeNull();
+    expect(report.findings[0].severity).toBeNull();
+    expect(Object.keys(report.expectations).sort()).toEqual(['fungus', 'insects', 'turf_recovery', 'weeds']);
+    expect(JSON.stringify(report)).not.toContain('secret_internal_note');
+    expect(JSON.stringify(report)).not.toContain('TECH ONLY');
+  });
 });
 
 describe('validateQuoteRequest', () => {

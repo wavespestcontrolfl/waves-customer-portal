@@ -54,6 +54,14 @@ function overallStatusLabel(score) {
   return 'Needs attention';
 }
 
+const CONFIDENCE_VALUES = new Set(['low', 'moderate', 'high', 'unknown']);
+const SEVERITY_VALUES = new Set(['mild', 'moderate', 'severe']);
+
+function clampEnum(value, allowed) {
+  const key = String(value || '').toLowerCase();
+  return allowed.has(key) ? key : null;
+}
+
 /**
  * Whitelist a stored diagnostic into the customer-facing report payload.
  * Pure + exhaustive allowlist: only the fields named here ever leave the server.
@@ -65,15 +73,17 @@ function buildPublicLawnReport(diagnostic = {}) {
   const diagnosis = contract.diagnosis || {};
   const watering = contract.watering || {};
   const ongoing = watering.ongoing_irrigation || {};
+  const expectations = contract.expectations || {};
 
-  // Every published free-text field is scrubbed at egress (defense in depth):
-  // even if a stale/buggy client stored unsanitized copy, no confirmed-pest claim
-  // or brand/active-ingredient name leaves the server.
+  // Fixed response shape: only the keys named here ever leave the server, every
+  // customer-visible string is scrubbed at egress, and enums are clamped to known
+  // values. Even if a stale/buggy client stored unsanitized or extra nested data,
+  // no raw AI text, brand/active-ingredient name, or confirmed-pest claim escapes.
   const findings = Array.isArray(diagnosis.findings)
-    ? diagnosis.findings.map((finding) => ({
-      name: finding.name || null,
-      confidence: finding.confidence || null,
-      severity: finding.severity || null,
+    ? diagnosis.findings.slice(0, 12).map((finding) => ({
+      name: scrubCustomerText(finding.name) || null,
+      confidence: clampEnum(finding.confidence, CONFIDENCE_VALUES),
+      severity: clampEnum(finding.severity, SEVERITY_VALUES),
       customer_note: scrubCustomerText(finding.customer_wording) || null,
     }))
     : [];
@@ -83,19 +93,24 @@ function buildPublicLawnReport(diagnostic = {}) {
     || null;
 
   return {
-    first_name: firstName,
-    city: address.city || null,
+    first_name: typeof firstName === 'string' ? firstName.slice(0, 80) : null,
+    city: typeof address.city === 'string' ? address.city.slice(0, 80) : null,
     overall_status: overallStatusLabel(diagnostic.overall_score),
     summary: scrubCustomerText(contract.customer_summary) || null,
-    primary_finding: diagnosis.primary_finding || null,
-    confidence: diagnosis.confidence || null,
+    primary_finding: scrubCustomerText(diagnosis.primary_finding) || null,
+    confidence: clampEnum(diagnosis.confidence, CONFIDENCE_VALUES),
     findings,
     watering: {
-      customer_sequence: watering.customer_sequence || null,
-      restriction_summary: ongoing.restriction_summary_customer || null,
+      customer_sequence: scrubCustomerText(watering.customer_sequence) || null,
+      restriction_summary: scrubCustomerText(ongoing.restriction_summary_customer) || null,
     },
-    expectations: contract.expectations || {},
-    watch_items: (Array.isArray(contract.watch_items) ? contract.watch_items : []).map(scrubCustomerText),
+    expectations: {
+      weeds: scrubCustomerText(expectations.weeds) || null,
+      fungus: scrubCustomerText(expectations.fungus) || null,
+      insects: scrubCustomerText(expectations.insects) || null,
+      turf_recovery: scrubCustomerText(expectations.turf_recovery) || null,
+    },
+    watch_items: (Array.isArray(contract.watch_items) ? contract.watch_items : []).slice(0, 12).map(scrubCustomerText),
     seasonal_context: scrubCustomerText(contract.seasonal_context || ''),
   };
 }

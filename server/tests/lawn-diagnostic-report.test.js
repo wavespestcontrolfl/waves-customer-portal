@@ -452,6 +452,18 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(repaired.repairs_applied).toEqual(['minimal_safe_summary']);
   });
 
+  test('minimal repair clears the diagnosis so no pest or disease is named', () => {
+    const base = reportWith({
+      photos: [{ quality: 'poor' }],
+      findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'low', severity: 'moderate' }],
+    });
+    expect(base.diagnosis.primary_finding).toBe('Chinch bug pressure');
+    const repaired = applyAutoReleaseRepair(base, 'minimal');
+    expect(repaired.diagnosis.primary_finding).toBeNull();
+    expect(repaired.diagnosis.findings).toEqual([]);
+    expect(repaired.expectations).toEqual({});
+  });
+
   test('buildMinimalSafeReport never names a pest or disease', () => {
     const report = buildMinimalSafeReport({ photos: [], products: [], compliance: {} });
     expect(report.customer_summary).toBe(MINIMAL_SAFE_SUMMARY);
