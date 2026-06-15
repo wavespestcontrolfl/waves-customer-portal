@@ -135,6 +135,10 @@ async function fetchGoogle() {
       const raw = await gbpService.listLocalPosts(loc.googleLocationResourceName, loc.id, GBP_PER_LOCATION);
       any = true;
       for (const post of raw) {
+        // Only surface posts that are actually live on the profile — never
+        // REJECTED / PROCESSING / unspecified lifecycle states (this is a
+        // public endpoint; see the AGENTS.md allowlist guardrails).
+        if (post.state !== 'LIVE') continue;
         const summary = post.summary || post.event?.title || '';
         if (!summary && !(post.media && post.media.length)) continue;
         posts.push({
