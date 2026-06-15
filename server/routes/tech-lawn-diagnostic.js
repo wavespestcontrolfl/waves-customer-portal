@@ -524,10 +524,12 @@ router.post('/:id/send', async (req, res, next) => {
     const mintedToken = crypto.randomBytes(16).toString('hex');
     const freshExpiry = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
 
-    // Atomic mint/refresh: COALESCE keeps an existing token (row lock serializes
-    // concurrent sends so both return the same live token), and expiry is only
-    // refreshed when missing or already past — so a resend never returns a link
-    // the public route would immediately 404. Return the stored values, not locals.
+    // Atomic mint/rotate. Keep the existing token + expiry ONLY when it is still
+    // active (true idempotent resend); otherwise rotate to a fresh token + expiry
+    // so an old expired /lawn-report link is never reactivated. The row lock
+    // serializes concurrent sends (the second re-evaluates against the first's
+    // committed active token and keeps it), and we return the stored values.
+    const ACTIVE_TOKEN = 'report_token IS NOT NULL AND report_expires_at IS NOT NULL AND report_expires_at > now()';
     const [saved] = await db('lawn_diagnostics')
       .where({ id: row.id })
       .update({
@@ -535,11 +537,8 @@ router.post('/:id/send', async (req, res, next) => {
         status: 'sent',
         contact_snapshot: JSON.stringify(contact),
         address_snapshot: address ? JSON.stringify(address) : row.address_snapshot,
-        report_token: db.raw('COALESCE(report_token, ?)', [mintedToken]),
-        report_expires_at: db.raw(
-          'CASE WHEN report_expires_at IS NULL OR report_expires_at < now() THEN ? ELSE report_expires_at END',
-          [freshExpiry],
-        ),
+        report_token: db.raw(`CASE WHEN ${ACTIVE_TOKEN} THEN report_token ELSE ? END`, [mintedToken]),
+        report_expires_at: db.raw(`CASE WHEN ${ACTIVE_TOKEN} THEN report_expires_at ELSE ? END`, [freshExpiry]),
         last_sent_at: db.fn.now(),
         updated_at: db.fn.now(),
       })
