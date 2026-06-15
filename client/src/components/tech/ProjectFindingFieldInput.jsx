@@ -11,13 +11,13 @@ function appendDictation(current, chunk) {
 
 const ESTIMATE_INPUT_STYLE = {
   minHeight: 48,
-  border: '1px solid #CFE7F5',
+  border: '1px solid #D4D4D8',
   borderRadius: 10,
   padding: '12px 14px',
   fontSize: 15,
   fontWeight: 500,
-  color: '#1B2C5B',
-  background: '#F8FCFE',
+  color: '#09090B',
+  background: '#FFFFFF',
   outline: 'none',
 };
 
@@ -409,7 +409,57 @@ function customerDisplayName(customer) {
   return company || person;
 }
 
-function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyle }) {
+function customerContactSummary(customer) {
+  return [
+    customerDisplayName(customer),
+    customer?.phone || customer?.phone_number || customer?.mobile || '',
+    customer?.email || customer?.email_address || '',
+  ].map((item) => String(item || '').trim()).filter(Boolean).join(' · ');
+}
+
+function customerSearchValue(customer, field) {
+  if (field?.customerValue === 'contact_summary') {
+    return customerContactSummary(customer) || customerDisplayName(customer) || '';
+  }
+  return customerDisplayName(customer) || '';
+}
+
+function customerSearchMeta(customer, field) {
+  if (field?.customerValue === 'contact_summary') {
+    return [
+      customer?.phone || customer?.phone_number || customer?.mobile,
+      customer?.email || customer?.email_address,
+      customer?.city,
+    ].filter(Boolean).join(' · ');
+  }
+  return [customer.address, customer.city].filter(Boolean).join(' · ');
+}
+
+function noDictationInputProps(field = {}) {
+  const noDictationKeys = new Set([
+    'property_address',
+    'requested_by',
+    'inspection_fee',
+    'structure_sqft',
+    'structures_inspected',
+    'structure_footprint',
+    'structure_footprint_approx',
+    'structure_footprint_approx_sq_ft',
+    'structure_footprint_sqft',
+    'structure_footprint_sq_ft',
+    'report_sent_to',
+  ]);
+  if (!field.disableDictation && !noDictationKeys.has(field.key)) return {};
+  return {
+    autoComplete: 'off',
+    inputMode: field.inputMode || 'text',
+    enterKeyHint: 'done',
+    spellCheck: false,
+    'data-no-dictation': 'true',
+  };
+}
+
+function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyle, field }) {
   const [focused, setFocused] = useState(false);
   const [results, setResults] = useState([]);
   const query = String(value || '').trim();
@@ -443,6 +493,7 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
         onBlur={() => setTimeout(() => setFocused(false), 120)}
         placeholder={placeholder || 'Search customers or type contractor name'}
         autoComplete="off"
+        {...noDictationInputProps(field)}
         style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE }}
       />
       {focused && results.length > 0 && (
@@ -463,13 +514,14 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
         >
           {results.map((customer, index) => {
             const label = customerDisplayName(customer) || 'Customer';
+            const meta = customerSearchMeta(customer, field);
             return (
               <button
                 key={customer.id || `${label}-${index}`}
                 type="button"
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  onChange(label);
+                  onChange(customerSearchValue(customer, field) || label);
                   setFocused(false);
                 }}
                 style={{
@@ -485,9 +537,9 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
                 }}
               >
                 <span style={{ display: 'block', fontSize: 14, fontWeight: 800 }}>{label}</span>
-                {(customer.address || customer.city) && (
+                {meta && (
                   <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: '#6B7280' }}>
-                    {[customer.address, customer.city].filter(Boolean).join(' · ')}
+                    {meta}
                   </span>
                 )}
               </button>
@@ -514,7 +566,7 @@ export default function ProjectFindingFieldInput({
   onProductSelect,
   palette,
 }) {
-  if (field.type === 'address') {
+  if (field.type === 'address' && field.key !== 'property_address') {
     return (
       <AddressAutocomplete
         id={id}
@@ -553,11 +605,15 @@ export default function ProjectFindingFieldInput({
         onChange={onChange}
         placeholder={field.placeholder}
         inputStyle={inputStyle}
+        field={field}
       />
     );
   }
 
   if (field.type === 'select') {
+    const options = field.options || [];
+    const currentValue = String(value || '').trim();
+    const hasCurrentOption = !currentValue || options.some((option) => String(option) === currentValue);
     return (
       <select
         id={id}
@@ -567,7 +623,10 @@ export default function ProjectFindingFieldInput({
         style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE }}
       >
         <option value="">Select...</option>
-        {(field.options || []).map((option) => (
+        {!hasCurrentOption && (
+          <option value={currentValue}>{currentValue}</option>
+        )}
+        {options.map((option) => (
           <option key={option} value={option}>
             {option}
           </option>
@@ -613,6 +672,8 @@ export default function ProjectFindingFieldInput({
   }
 
   if (field.type === 'textarea') {
+    const noDictationProps = noDictationInputProps(field);
+    const suppressDictation = Boolean(noDictationProps['data-no-dictation']);
     return (
       <div style={{ position: 'relative' }}>
         <textarea
@@ -622,16 +683,27 @@ export default function ProjectFindingFieldInput({
           onChange={(event) => onChange(event.target.value)}
           placeholder={field.placeholder || ''}
           rows={3}
-          style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE, resize: 'vertical', minHeight: 92, paddingRight: 44 }}
+          {...noDictationProps}
+          style={{
+            ...inputStyle,
+            ...ESTIMATE_INPUT_STYLE,
+            resize: 'vertical',
+            minHeight: 92,
+            ...(suppressDictation ? {} : { paddingRight: 44 }),
+          }}
         />
-        <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
-          <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
-        </div>
+        {!suppressDictation && (
+          <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
+            <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
+          </div>
+        )}
       </div>
     );
   }
 
   const isDateOrTime = field.type === 'date' || field.type === 'time';
+  const noDictationProps = noDictationInputProps(field);
+  const suppressDictation = Boolean(noDictationProps['data-no-dictation']);
   return (
     <div style={{ position: 'relative' }}>
       <input
@@ -641,9 +713,10 @@ export default function ProjectFindingFieldInput({
         value={value || ''}
         onChange={(event) => onChange(event.target.value)}
         placeholder={field.placeholder || ''}
-        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE, ...(isDateOrTime ? {} : { paddingRight: 44 }) }}
+        {...noDictationProps}
+        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE, ...((isDateOrTime || suppressDictation) ? {} : { paddingRight: 44 }) }}
       />
-      {!isDateOrTime && (
+      {!isDateOrTime && !suppressDictation && (
         <div style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)' }}>
           <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
         </div>

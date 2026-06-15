@@ -10,15 +10,33 @@ function has(v) {
   return clean(v) !== '';
 }
 
-// "2-story concrete block / masonry single-family residential structure"
-export function describeStructure(profile = {}) {
-  const parts = [];
-  if (profile.stories) parts.push(`${profile.stories}-story`);
-  const cm = clean(profile.constructionMaterial).toLowerCase();
-  if (/(block|masonry|concrete|\bcb\b|cbs|cmu|stucco)/.test(cm)) parts.push('concrete block / masonry');
-  else if (/(wood|frame)/.test(cm)) parts.push('wood frame');
-  const s = `${parts.join(' ')} single-family residential structure`.replace(/\s+/g, ' ').trim();
-  return s.charAt(0).toUpperCase() + s.slice(1);
+const WDO_CONSTRUCTION_OPTIONS = [
+  'CMU / Concrete Masonry Unit',
+  'Wood Frame',
+  'Metal Frame',
+  'Manufactured / Mobile Home',
+];
+
+export function describeConstructionType(profile = {}) {
+  const candidates = [
+    profile.constructionMaterial,
+    profile.construction_material,
+    profile.structureType,
+    profile.structure_type,
+    profile.propertyType,
+    profile.property_type,
+  ].map((item) => clean(item)).filter(Boolean);
+  for (const candidate of candidates) {
+    if (WDO_CONSTRUCTION_OPTIONS.includes(candidate)) return candidate;
+    const lower = candidate.toLowerCase();
+    if (/\b(cmu|cbs|cb|concrete\s+masonry|masonry\s+unit|masonry|block|concrete\s+block|brick)\b/.test(lower)) {
+      return 'CMU / Concrete Masonry Unit';
+    }
+    if (/\b(manufactured|mobile|modular)\b/.test(lower)) return 'Manufactured / Mobile Home';
+    if (/\b(metal|steel|aluminum)\b/.test(lower)) return 'Metal Frame';
+    if (/(^|[\W_])wood(?:en)?([\W_]|$)|(^|[\W_])wood[_\s-]*frame([\W_]|$)|^frame$/.test(lower)) return 'Wood Frame';
+  }
+  return '';
 }
 
 export function applyProfileToWdoFindings(prev, profile, { overwrite = false } = {}) {
@@ -35,7 +53,11 @@ export function applyProfileToWdoFindings(prev, profile, { overwrite = false } =
   };
 
   if (profile.squareFootage) set('structure_sqft', String(profile.squareFootage));
-  if (profile.stories || has(profile.constructionMaterial)) set('structures_inspected', describeStructure(profile));
+  // structures_inspected is the FDACS list of structures actually inspected
+  // (main home, attached garage, shed…) and is entered by the tech — the
+  // property profile only knows construction material, which belongs in the
+  // separate structure_type dropdown. Do not derive structures_inspected here.
+  set('structure_type', describeConstructionType(profile));
 
   const ft = clean(profile.foundationType).toLowerCase();
   if (ft.includes('slab')) append('inaccessible_areas', 'Crawlspace: N/A — slab-on-grade foundation.');
