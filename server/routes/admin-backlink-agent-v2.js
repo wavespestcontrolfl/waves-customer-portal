@@ -316,17 +316,31 @@ router.post('/prospects/verify', async (req, res, next) => {
 // OUTREACH — approval-gated editorial outreach send (Backlink Manager M3b)
 // =========================================================================
 
-// GET /api/admin/backlink-agent/prospects/outreach/pending — drafts awaiting approval
+// GET /api/admin/backlink-agent/prospects/outreach/pending — drafts awaiting approval,
+// plus send_error rows needing reconciliation (ambiguous Gmail failures).
 router.get('/prospects/outreach/pending', async (req, res, next) => {
   try {
-    const items = await db('seo_link_prospects')
-      .where({ outreach_status: 'drafted', status: 'prospect' })
+    const orderByPriority = (q) => q
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('updated_at', 'desc');
     const Outreach = require('../services/seo/link-prospect-outreach');
+    const items = await orderByPriority(
+      db('seo_link_prospects').where({ outreach_status: 'drafted', status: 'prospect' })
+    );
+    // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
+    // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
+    const staleCutoff = new Date(Date.now() - Outreach.STALE_SENDING_MS);
+    const needsReconcile = await orderByPriority(
+      db('seo_link_prospects')
+        .where({ status: 'prospect' })
+        .where((b) => b
+          .where('outreach_status', 'send_error')
+          .orWhere((s) => s.where('outreach_status', 'sending').andWhere('updated_at', '<', staleCutoff)))
+    );
     const sentToday = await Outreach.dailySendCount();
     res.json({
       items,
+      needsReconcile,
       gateOn: isEnabled('linkProspectOutreach'),
       rateLimit: { sentToday, cap: Outreach.dailyCap() },
     });
