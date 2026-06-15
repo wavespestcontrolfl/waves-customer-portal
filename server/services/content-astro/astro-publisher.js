@@ -141,7 +141,7 @@ function syncDraftPublishTarget(draft, frontmatter) {
 
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
-const SCHEMA_TYPES = new Set(['Article', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
+const SCHEMA_TYPES = new Set(['Article', 'BlogPosting', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
 const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
 const DEFAULT_SERVICE_AREAS = Object.freeze(['Sarasota', 'Bradenton', 'Venice', 'Lakewood Ranch', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
 const DEFAULT_BLOG_AUTHOR = Object.freeze({
