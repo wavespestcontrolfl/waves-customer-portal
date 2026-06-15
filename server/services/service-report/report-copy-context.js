@@ -63,6 +63,19 @@ function formatShortDate(value) {
   return d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// fetchServiceWeekWeather needs a Date or 'YYYY-MM-DD' — the client sends a long
+// US date ("June 15, 2026"), which it would slice into an invalid range and
+// silently drop trailing-rainfall context. Normalize to 'YYYY-MM-DD' from the
+// date's own components so the server's timezone can't shift the calendar day
+// (date-only strings are noon-UTC anchored; long dates parse at local midnight,
+// and both expose the intended Y/M/D directly).
+function pad2(n) { return String(n).padStart(2, '0'); }
+function toYmd(value) {
+  const d = parseServiceDate(value);
+  const safe = Number.isNaN(d.getTime()) ? new Date() : d;
+  return `${safe.getFullYear()}-${pad2(safe.getMonth() + 1)}-${pad2(safe.getDate())}`;
+}
+
 function etMonth(serviceDate) {
   try {
     const d = serviceDate ? parseServiceDate(serviceDate) : new Date();
@@ -210,7 +223,7 @@ async function buildReportCopyContext({
       ? fetchApplicationConditions({ latitude: lat, longitude: lng }).catch(() => null)
       : Promise.resolve(null),
     (lat != null && lng != null)
-      ? fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: serviceDate || new Date() }).catch(() => null)
+      ? fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: toYmd(serviceDate) }).catch(() => null)
       : Promise.resolve(null),
     customerId
       ? buildPressureTrendContext({
