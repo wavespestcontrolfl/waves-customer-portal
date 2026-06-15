@@ -912,19 +912,24 @@ const SocialMediaService = {
     let shouldGenerateImage = false;
     if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
       // A requested platform must actually be able to consume the image.
-      // Instagram is a sync env check. GBP needs a profile that can PUBLISH — a
-      // usable client (client creds + a refresh token), NOT just
-      // gbpService.configured, which is client-creds-only: a GBP deploy whose
-      // admin OAuth connect never ran (no stored refresh token) would otherwise
+      // Instagram is a sync env check. GBP is checked lazily (only when
+      // Instagram can't already consume) and must have at least one location
+      // that is BOTH requested AND publish-ready — a usable client (client
+      // creds + a refresh token), NOT just gbpService.configured (client-creds-
+      // only: a GBP deploy whose admin OAuth connect never ran would otherwise
       // generate/upload an image before every postToGBP fails with "No GBP
-      // credentials". One image is shared across all WAVES_LOCATIONS GBP posts
-      // below, so any one publish-ready profile justifies it. GBP is checked
-      // lazily (only when Instagram can't already consume, and only when GBP was
-      // requested) so the DB is touched only when warranted. (The autonomous
-      // single-profile path uses a per-location check via
-      // assertSocialPublishingReady.)
-      shouldGenerateImage = instagramCanConsume
-        || (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled && (await gbpService.getConfiguredLocations()).length > 0);
+      // credentials"). The location predicate mirrors the WAVES_LOCATIONS
+      // filter on the GBP post loop below, so a malformed/empty explicit
+      // location filter (which posts to zero locations) doesn't burn image
+      // credits either. (The autonomous single-profile path uses a per-location
+      // check via assertSocialPublishingReady.)
+      if (instagramCanConsume) {
+        shouldGenerateImage = true;
+      } else if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+        && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
+        const configured = await gbpService.getConfiguredLocations();
+        shouldGenerateImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
+      }
     }
     if (shouldGenerateImage) {
       try {

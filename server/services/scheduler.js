@@ -1823,7 +1823,13 @@ function initScheduledJobs() {
     try {
       const result = await SocialContentStudio.runAutonomous({ force: false });
       if (result?.skipped) {
-        logger.info(`[social-studio] autonomous run skipped: ${result.reason}`);
+        // result.reason can embed validateContent output, which may include a
+        // full phone number or email — never log raw PII (AGENTS.md P1). Redact
+        // phone/email-like substrings before logging the skip reason.
+        const safeReason = String(result.reason || '')
+          .replace(/\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g, '[redacted-phone]')
+          .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[redacted-email]');
+        logger.info(`[social-studio] autonomous run skipped: ${safeReason}`);
       } else {
         logger.info(`[social-studio] autonomous run complete: status=${result?.run?.status || result?.status || 'done'}`);
       }
