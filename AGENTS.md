@@ -272,6 +272,17 @@ finding and warns on P1. Reviewers must return JSON matching
   policies, PaymentIntent idempotent per estimate+amount with
   metadata-pinned purpose/estimate id; dark behind
   ESTIMATE_DEPOSIT_REQUIRED).
+  `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
+  no auth, no DB writes, no PII — returns a deterministic Florida
+  pest-pressure model keyed only on a curated city slug / FL ZIP plus
+  public NWS + FAWN weather; no request body. Intentionally CORS-open
+  (`Access-Control-Allow-Origin: *`) so the free embeddable forecast
+  widget can run on third-party domains; inherits the global `/api/` IP
+  rate limit, served from a 3h per-location server cache and public CDN
+  `Cache-Control`. Note: unlike the token-gated read routes, this surface
+  is deliberately cacheable and indexable — it exposes only modeled,
+  non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
+  NOT apply here).
   `/api/public/social-feed` (read-only aggregate of already-public social
   posts for the marketing /social page — Instagram + Facebook Graph API,
   Google Business Profile localPosts, YouTube channel RSS, TikTok Display
