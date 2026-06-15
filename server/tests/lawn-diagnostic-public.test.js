@@ -116,6 +116,11 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(Object.keys(report.findings[0]).sort()).toEqual(['confidence', 'customer_note', 'name', 'severity']);
   });
 
+  test('a null overall_score reads as Reviewed, not Needs attention', () => {
+    expect(buildPublicLawnReport(sentDiagnostic({ overall_score: null })).overall_status).toBe('Reviewed');
+    expect(buildPublicLawnReport(sentDiagnostic({ overall_score: 30 })).overall_status).toBe('Needs attention');
+  });
+
   test('scrubs confirmed-language and brand names from published free text (egress defense)', () => {
     const diag = sentDiagnostic({
       report_contract: JSON.stringify({

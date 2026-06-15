@@ -47,6 +47,7 @@ function parseJson(value, fallback = {}) {
 }
 
 function overallStatusLabel(score) {
+  if (score == null || score === '') return 'Reviewed';
   const n = Number(score);
   if (!Number.isFinite(n)) return 'Reviewed';
   if (n >= 70) return 'Healthy';
