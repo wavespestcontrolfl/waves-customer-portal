@@ -8,6 +8,8 @@ const {
   normalizeUrl,
 } = require('./social-media');
 const SocialCardRenderer = require('./social-card-renderer');
+const { runExclusive } = require('../utils/cron-lock');
+const { etParts } = require('../utils/datetime-et');
 
 const FASTEST_RISER_PROFILES = [
   {
@@ -587,8 +589,9 @@ function previewWithVisual(preview, { imageUrl, variant, templateKey }) {
 }
 
 function selectAutonomousCampaign(now = new Date()) {
-  const month = now.getMonth() + 1;
-  const day = now.getDate();
+  // Anchor seasonal topic + city rotation to Eastern business dates, not UTC
+  // (Railway runs TZ=UTC, which would flip topics a few hours early each day).
+  const { month, day } = etParts(now);
   const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
   const seasonal = SEASONAL_AUTONOMOUS_TOPICS[month] || SEASONAL_AUTONOMOUS_TOPICS[6];
   const topic = seasonal[day % seasonal.length];
@@ -601,7 +604,7 @@ function selectAutonomousCampaign(now = new Date()) {
 
 async function selectAutonomousReviewPlan(now = new Date()) {
   if (!AUTONOMOUS_FLAGS.includeReviews) return null;
-  const day = now.getDate();
+  const { day } = etParts(now); // Eastern business date, not UTC (see selectAutonomousCampaign)
   if (day % 4 !== 0) return null;
 
   const { candidates } = await listReviewGraphicCandidates({ limit: 10 });
@@ -974,7 +977,15 @@ function hasValidationFailure(preview) {
     .filter(Boolean);
 }
 
-async function runAutonomous({ force = false, mode } = {}) {
+// Serialize the whole run behind a Postgres advisory lock: the cadence guard
+// reads-then-writes and then calls external Meta/GBP APIs, so without this two
+// concurrent triggers (double force-clicks, overlapping pods) could each pass
+// the guard and double-post. If the lease is held elsewhere, this tick skips.
+async function runAutonomous(opts = {}) {
+  return runExclusive('social_autonomous_studio', () => runAutonomousLocked(opts));
+}
+
+async function runAutonomousLocked({ force = false, mode } = {}) {
   const startedAt = new Date();
   const effectiveMode = mode || AUTONOMOUS_FLAGS.mode;
 

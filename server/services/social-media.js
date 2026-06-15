@@ -58,20 +58,26 @@ const SOCIAL_FLAGS = {
 const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 
 function normalizePublishChannels(channels) {
-  if (!Array.isArray(channels) || channels.length === 0) return new Set(PUBLISH_PLATFORMS);
+  // Omitted (undefined/null/not an array) → default to all platforms. An
+  // EXPLICIT list fails closed: an all-invalid or empty list resolves to no
+  // platforms, so a typo or stale client can't accidentally blast everywhere.
+  if (channels == null || !Array.isArray(channels)) return new Set(PUBLISH_PLATFORMS);
   const selected = channels
     .map((channel) => String(channel || '').trim().toLowerCase())
     .filter((channel) => PUBLISH_PLATFORMS.includes(channel));
-  return new Set(selected.length ? selected : PUBLISH_PLATFORMS);
+  return new Set(selected);
 }
 
 function normalizeGbpLocationIds(locationIds) {
-  if (!Array.isArray(locationIds) || locationIds.length === 0) return null;
+  // Omitted → null = all GBP locations (the default). An EXPLICIT list fails
+  // closed: all-invalid/empty yields an empty set, so no GBP location is
+  // posted to rather than every one of them.
+  if (locationIds == null || !Array.isArray(locationIds)) return null;
   const valid = new Set(WAVES_LOCATIONS.map((loc) => loc.id));
   const selected = locationIds
     .map((id) => String(id || '').trim())
     .filter((id) => valid.has(id));
-  return selected.length ? new Set(selected) : null;
+  return new Set(selected);
 }
 
 async function isPausedByAdmin() {
