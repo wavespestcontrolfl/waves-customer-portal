@@ -14,6 +14,7 @@ const logger = require('../logger');
 const { buildPressureTrendContext } = require('./pressure-trend');
 const { fetchApplicationConditions, fetchServiceWeekWeather } = require('./application-conditions');
 const { detectServiceLine } = require('./service-line-configs');
+const { etDateString } = require('../../utils/datetime-et');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -63,29 +64,30 @@ function formatShortDate(value) {
   return d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// fetchServiceWeekWeather needs a Date or 'YYYY-MM-DD' — the client sends a long
-// US date ("June 15, 2026"), which it would slice into an invalid range and
-// silently drop trailing-rainfall context. Normalize to 'YYYY-MM-DD' from the
-// date's own components so the server's timezone can't shift the calendar day
-// (date-only strings are noon-UTC anchored; long dates parse at local midnight,
-// and both expose the intended Y/M/D directly).
+// Resolve a service date to an ET calendar 'YYYY-MM-DD'. fetchServiceWeekWeather
+// needs a Date or 'YYYY-MM-DD'; the client sends a long US date ("June 15, 2026")
+// which it would otherwise slice into an invalid range and silently drop rainfall
+// context. ET discipline (AGENTS.md): the server runs UTC, so anything carrying a
+// time component is projected onto the ET calendar day via etDateString; a bare
+// calendar string parses at local midnight and exposes its intended Y/M/D, and an
+// empty/unparseable value falls back to today in ET.
 function pad2(n) { return String(n).padStart(2, '0'); }
 function toYmd(value) {
-  const d = parseServiceDate(value);
-  const safe = Number.isNaN(d.getTime()) ? new Date() : d;
-  return `${safe.getFullYear()}-${pad2(safe.getMonth() + 1)}-${pad2(safe.getDate())}`;
+  const raw = String(value == null ? '' : value).trim();
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+  if (!raw) return etDateString();
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return etDateString();
+  if (/[T:]/.test(raw)) return etDateString(d);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
 function etMonth(serviceDate) {
-  try {
-    const d = serviceDate ? parseServiceDate(serviceDate) : new Date();
-    const monthName = d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'long' });
-    const monthNum = Number(d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'numeric' }));
-    return { monthName, monthNum: Number.isFinite(monthNum) ? monthNum : new Date().getMonth() + 1 };
-  } catch {
-    const now = new Date();
-    return { monthName: now.toLocaleString('en-US', { month: 'long' }), monthNum: now.getMonth() + 1 };
-  }
+  const ymd = toYmd(serviceDate);
+  const monthNum = Number(ymd.slice(5, 7)) || 1;
+  const monthName = new Date(`${ymd}T12:00:00Z`).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+  return { monthName, monthNum };
 }
 
 async function loadCustomer(customerId, knex) {
@@ -168,12 +170,13 @@ async function loadPropertyContext(customerId, knex) {
   try {
     const prefs = await knex('property_preferences').where({ customer_id: customerId }).first();
     if (!prefs) return null;
+    // Deliberately NOT included: access_notes / gate / lockbox details. Those can
+    // carry entry codes; feeding them to a customer-facing LLM (alongside
+    // untrusted visit notes) is not a safe boundary. Chemical sensitivity is
+    // surfaced only as a redacted flag, never the free-text health detail.
     return {
       pets: Number(prefs.pet_count) > 0 ? (cleanText(prefs.pet_details) || `${prefs.pet_count} pet(s) on site`) : null,
-      chemicalSensitivity: prefs.chemical_sensitivities
-        ? (cleanText(prefs.chemical_sensitivity_details) || 'chemical sensitivity noted')
-        : null,
-      accessNotes: truncate(prefs.access_notes, 160) || null,
+      chemicalSensitivity: prefs.chemical_sensitivities ? 'a household chemical sensitivity is on file' : null,
     };
   } catch (err) {
     logger.warn(`[report-copy-context] property-preferences load failed: ${err.message}`);
@@ -289,8 +292,7 @@ async function buildReportCopyContext({
   if (property) {
     const bits = [
       property.pets ? `pets on site: ${property.pets}` : null,
-      property.chemicalSensitivity ? `chemical sensitivity: ${property.chemicalSensitivity}` : null,
-      property.accessNotes ? `access: ${property.accessNotes}` : null,
+      property.chemicalSensitivity || null,
     ].filter(Boolean).join(' · ');
     if (bits) sections.push(`HOUSEHOLD NOTES: ${bits}`);
   }

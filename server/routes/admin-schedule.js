@@ -4126,7 +4126,7 @@ router.post('/generate-report', async (req, res) => {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
 
     const {
-      customerId, customerName, serviceType, serviceLine, technicianName, serviceDate, arrivalTime,
+      scheduledServiceId, customerName, serviceType, serviceLine, technicianName, serviceDate, arrivalTime,
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
@@ -4362,6 +4362,33 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
     // throws or returns nothing, we still generate from the technician's inputs.
+    // Derive the grounding customer from the scheduled service SERVER-SIDE and
+    // authorize the caller. Never trust a body-supplied customer id: this route is
+    // open to techs, so a crafted request could otherwise pull another customer's
+    // prior-report copy / property context out through the model. Only an admin,
+    // or the technician assigned to the service, gets per-customer grounding;
+    // anyone else degrades to a notes-only report (no cross-customer data).
+    let groundingCustomerId = null;
+    let groundingServiceType = serviceType;
+    let groundingServiceDate = serviceDate;
+    if (scheduledServiceId) {
+      const svc = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id')
+        .catch(() => null);
+      if (svc && svc.customer_id) {
+        const isAdmin = req.techRole === 'admin';
+        const isAssignedTech = req.technicianId != null && String(svc.technician_id) === String(req.technicianId);
+        if (isAdmin || isAssignedTech) {
+          groundingCustomerId = svc.customer_id;
+          groundingServiceType = serviceType || svc.service_type;
+          groundingServiceDate = serviceDate || svc.scheduled_date;
+        } else {
+          logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
+        }
+      }
+    }
+
     const fallbackProductNames = productsText
       ? productsText.split(',').map((s) => s.replace(/\(.*?\)/g, '').trim()).filter(Boolean)
       : [];
@@ -4369,12 +4396,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let contextSignals = {};
     try {
       const ctx = await buildReportCopyContext({
-        customerId,
-        serviceType,
+        customerId: groundingCustomerId,
+        serviceType: groundingServiceType,
         serviceLine,
         products: Array.isArray(products) ? products : [],
         productNames: fallbackProductNames,
-        serviceDate,
+        serviceDate: groundingServiceDate,
       });
       contextText = ctx.contextText || '';
       contextSignals = ctx.signals || {};
@@ -4396,7 +4423,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
 
     const report = msg.content?.[0]?.text || '';
     if (report) reportCopyCacheSet(cacheKey, report);
-    logger.info('[generate-report] generated', { customerId: customerId || null, ...contextSignals });
+    logger.info('[generate-report] generated', { hasGrounding: !!groundingCustomerId, ...contextSignals });
     res.json({ report });
   } catch (err) {
     logger.error('[generate-report] AI failed', {

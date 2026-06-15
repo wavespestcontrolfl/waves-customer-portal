@@ -7670,7 +7670,7 @@ export function CompletionPanel({
       (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
     )?.label || "";
     const payload = {
-      customerId: service.customerId || service.customer_id || null,
+      scheduledServiceId: service.id || null,
       customerName: service.customerName,
       serviceType: service.serviceType,
       serviceLine: service.serviceLine || service.service_line || undefined,
