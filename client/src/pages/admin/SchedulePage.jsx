@@ -5815,6 +5815,7 @@ function normalizeProductArea(product = {}, serviceType = "") {
     ...product,
     applicationMethod,
     areaUnit: areaRequirement?.unit || product.areaUnit || "",
+    targets: Array.isArray(product.targets) ? product.targets : [],
   };
 }
 
