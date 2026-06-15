@@ -253,6 +253,23 @@ describe('social content studio', () => {
     }
   });
 
+  test('AUTONOMOUS_FLAGS.intervalHours clamps to 22h (below the spring-forward ET tick gap)', () => {
+    const orig = process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS;
+    try {
+      delete process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS;
+      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(20); // default
+      process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = '24';
+      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(22); // stale 24 -> capped (DST-safe)
+      process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = '23';
+      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(22); // 23 would skip the spring-forward day
+      process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = '12';
+      expect(Studio.AUTONOMOUS_FLAGS.intervalHours).toBe(12); // under cap preserved
+    } finally {
+      if (orig === undefined) delete process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS;
+      else process.env.SOCIAL_AUTONOMOUS_INTERVAL_HOURS = orig;
+    }
+  });
+
   test('httpUrlOrNull accepts only http(s) absolute URLs', () => {
     expect(Studio.httpUrlOrNull('https://example.com/post/123')).toBe('https://example.com/post/123');
     expect(Studio.httpUrlOrNull('http://example.com')).toBe('http://example.com');

@@ -354,7 +354,13 @@ const AUTONOMOUS_FLAGS = {
   // use never silently starts autonomous posting.
   get cronEnabled() { return boolEnv('SOCIAL_AUTONOMOUS_CRON_ENABLED', false); },
   get includeReviews() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_REVIEWS', true); },
-  get intervalHours() { return numberEnv('SOCIAL_AUTONOMOUS_INTERVAL_HOURS', 24); },
+  // CLAMPED below the minimum gap between two daily 6:30 AM ET ticks. This is a
+  // same-day DEDUPE guard, NOT the schedule (the fixed once-daily cron is). Two
+  // consecutive ET ticks are normally 24h apart but only 23h across the
+  // spring-forward DST transition, so cap at 22 — a higher value (e.g. a stale
+  // 24 copied from old config) could see <interval elapsed on the DST day and
+  // skip the only daily fire. Default 20. To change frequency, change the cron.
+  get intervalHours() { return Math.min(numberEnv('SOCIAL_AUTONOMOUS_INTERVAL_HOURS', 20), 22); },
   get mode() {
     return normalizePublishMode(process.env.SOCIAL_AUTONOMOUS_MODE, 'publish');
   },

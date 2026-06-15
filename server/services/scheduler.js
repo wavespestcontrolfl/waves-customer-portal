@@ -1831,14 +1831,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Autonomous Social Content Studio
-  // Fires every hour but self-throttles to SOCIAL_AUTONOMOUS_INTERVAL_HOURS:
-  // runAutonomous enforces the kill switch (SOCIAL_AUTONOMOUS_STUDIO_ENABLED),
-  // the DB-backed cadence guard, and a Postgres advisory lock internally, so an
-  // hourly tick honors the configured cadence shortly after each interval
-  // elapses without double-posting across restarts/pods.
+  // DAILY 6:30 AM ET — Autonomous Social Content Studio
+  // One post per day at a fixed, good-engagement time (avoids the off-hours
+  // drift an hourly check + 24h interval produced). runAutonomous still enforces
+  // the kill switch (SOCIAL_AUTONOMOUS_STUDIO_ENABLED), the distinct cron opt-in,
+  // the DB-backed cadence guard, and a Postgres advisory lock — so duplicate
+  // fires (restart/pod overlap, a recent manual force) are still deduped. The
+  // cadence interval is < 24h (see SOCIAL_AUTONOMOUS_INTERVAL_HOURS default) so
+  // this fixed daily tick always clears the guard instead of being skipped by
+  // sub-minute drift.
   // =========================================================================
-  cron.schedule('20 * * * *', async () => {
+  cron.schedule('30 6 * * *', async () => {
     const SocialContentStudio = require('./social-content-studio');
     const flags = SocialContentStudio.AUTONOMOUS_FLAGS;
     // Requires BOTH the studio kill switch AND the distinct cron opt-in, so
