@@ -118,6 +118,43 @@ function normalizeFrequencyKey(value) {
   return raw;
 }
 
+function normalizeSelectionToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+const LAWN_TIER_META = {
+  basic: { label: 'Quarterly', visitsPerYear: 4, frequencyKey: 'quarterly' },
+  standard: { label: 'Bi-monthly', visitsPerYear: 6, frequencyKey: 'bi_monthly' },
+  enhanced: { label: 'Every 6 weeks', visitsPerYear: 9, frequencyKey: 'every_6_weeks' },
+  premium: { label: 'Monthly', visitsPerYear: 12, frequencyKey: 'monthly' },
+};
+
+function lawnTierKeyForValue(value) {
+  if (value == null) return '';
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return '';
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  const numeric = Number(raw);
+  if (raw.includes('premium') || compact === 'monthly' || compact === '12x' || compact === '12xperyear' || numeric === 12) return 'premium';
+  if (raw.includes('enhanced') || compact === 'every6weeks' || compact === '9x' || compact === '9xperyear' || numeric === 9) return 'enhanced';
+  if (raw.includes('standard') || compact === 'bimonthly' || compact === '6x' || compact === '6xperyear' || numeric === 6) return 'standard';
+  if (raw.includes('basic') || compact === 'quarterly' || compact === '4x' || compact === '4xperyear' || numeric === 4) return 'basic';
+  return '';
+}
+
+function lawnTierKeyForRow(row = {}) {
+  return lawnTierKeyForValue(
+    row.serviceTierKey
+    || row.tier
+    || row.key
+    || row.name
+    || row.label
+    || row.v
+    || row.visitsPerYear
+    || row.frequency
+  );
+}
+
 function serviceKeyFor(value = {}) {
   const raw = String(
     value.service || value.service_key || value.key || value.kind
@@ -221,6 +258,16 @@ function pestTiersForEstimateData(estData = {}) {
   return [];
 }
 
+function lawnTiersForEstimateData(estData = {}) {
+  const result = estData.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : estData);
+  const inner = result.results && typeof result.results === 'object' ? result.results : {};
+  if (Array.isArray(inner.lawn)) return inner.lawn;
+  if (Array.isArray(result.lawn)) return result.lawn;
+  return [];
+}
+
 function frequencyKeyForPestTier(tier = {}) {
   return normalizeFrequencyKey(
     tier.key
@@ -230,6 +277,77 @@ function frequencyKeyForPestTier(tier = {}) {
     || tier.apps
     || tier.v
   );
+}
+
+function selectedFrequencyValue(estData = {}, selectedFrequency = '') {
+  return selectedFrequency
+    || estData.customerSelection?.serviceTierKey
+    || estData.customerSelection?.frequencyKey
+    || estData.customerSelection?.frequency
+    || '';
+}
+
+function frequencyMatchesSelection(frequency = {}, selectedValue = '') {
+  if (!selectedValue) return false;
+  const requestedToken = normalizeSelectionToken(selectedValue);
+  const requestedFrequency = normalizeFrequencyKey(selectedValue);
+  const candidateValues = [
+    frequency.key,
+    frequency.frequencyKey,
+    frequency.billingFrequencyKey,
+    frequency.serviceTierKey,
+    frequency.tier,
+    frequency.label,
+  ];
+  if (candidateValues.some((value) => normalizeSelectionToken(value) === requestedToken)) return true;
+  if (requestedFrequency && candidateValues.some((value) => normalizeFrequencyKey(value) === requestedFrequency)) return true;
+
+  const serviceCategory = serviceKeyFor({
+    service: frequency.serviceCategory || frequency.service || frequency.serviceKey || frequency.category,
+    label: frequency.label,
+  });
+  if (serviceCategory === 'lawn_care') {
+    const requestedTierKey = lawnTierKeyForValue(selectedValue);
+    const candidateTierKey = lawnTierKeyForRow(frequency);
+    return !!requestedTierKey && requestedTierKey === candidateTierKey;
+  }
+  return false;
+}
+
+function selectedGeneratedLawnFrequency(estimate = {}, estData = {}, selectedFrequency = '') {
+  const requestedValue = selectedFrequencyValue(estData, selectedFrequency);
+  const requestedTierKey = lawnTierKeyForValue(requestedValue);
+  if (!requestedTierKey) return null;
+
+  const lawnTiers = lawnTiersForEstimateData(estData);
+  const recurringRows = storedRecurringRowsForEstimate(estimate, estData);
+  const hasLawnSignal = lawnTiers.length > 0
+    || recurringRows.some((row) => serviceKeyFor(row) === 'lawn_care')
+    || /lawn|turf|fertili[sz]|weed|fungus|chinch/i.test(String(estimate.service_interest || ''))
+    || !!estData.inputs?.services?.lawn
+    || !!estData.engineInputs?.services?.lawn;
+  if (!hasLawnSignal) return null;
+
+  const tier = lawnTiers.find((row) => lawnTierKeyForRow(row) === requestedTierKey) || {};
+  const meta = LAWN_TIER_META[requestedTierKey];
+  const visits = firstPositiveNumber(tier.v, tier.visitsPerYear, tier.appsPerYear, tier.frequency, meta.visitsPerYear);
+  const perTreatment = firstPositiveNumber(tier.pa, tier.perTreatment, tier.perApp, tier.perVisit);
+
+  return {
+    key: requestedTierKey,
+    label: meta.label,
+    serviceCategory: 'lawn_care',
+    serviceTierKey: requestedTierKey,
+    frequencyKey: meta.frequencyKey,
+    visitsPerYear: visits,
+    perServiceTreatments: [{
+      ...tier,
+      service: 'lawn_care',
+      label: `Lawn Care (${meta.label})`,
+      visitsPerYear: visits,
+      perTreatment,
+    }],
+  };
 }
 
 function storedRecurringRowsForEstimate(estimate = {}, estData = {}) {
@@ -252,8 +370,8 @@ function storedRecurringRowsForEstimate(estimate = {}, estData = {}) {
 }
 
 function selectedGeneratedPricingFrequency(estimate = {}, estData = {}, selectedFrequency = '') {
-  const requested = normalizeFrequencyKey(selectedFrequency)
-    || normalizeFrequencyKey(estData.customerSelection?.frequency);
+  const requestedValue = selectedFrequencyValue(estData, selectedFrequency);
+  const requested = normalizeFrequencyKey(requestedValue);
   if (!requested) return null;
 
   const pestTiers = pestTiersForEstimateData(estData);
@@ -263,7 +381,7 @@ function selectedGeneratedPricingFrequency(estimate = {}, estData = {}, selected
     || /pest/i.test(String(estimate.service_interest || ''))
     || !!estData.inputs?.services?.pest
     || !!estData.engineInputs?.services?.pest;
-  if (!hasPestSignal) return null;
+  if (!hasPestSignal) return selectedGeneratedLawnFrequency(estimate, estData, selectedFrequency);
 
   const pestTier = pestTiers.find((tier) => frequencyKeyForPestTier(tier) === requested) || null;
   const pestVisits = firstPositiveNumber(
@@ -311,9 +429,8 @@ function selectedPricingFrequency(estimate = {}, estData = {}, selectedFrequency
   const bundle = estData.sendSnapshot?.pricingBundle;
   const frequencies = Array.isArray(bundle?.frequencies) ? bundle.frequencies : [];
   if (frequencies.length && pricingBundleMatchesEstimateTotals(bundle, estimate)) {
-    const requested = normalizeFrequencyKey(selectedFrequency)
-      || normalizeFrequencyKey(estData.customerSelection?.frequency);
-    return frequencies.find((frequency) => normalizeFrequencyKey(frequency.key || frequency.label) === requested)
+    const requestedValue = selectedFrequencyValue(estData, selectedFrequency);
+    return frequencies.find((frequency) => frequencyMatchesSelection(frequency, requestedValue))
       || frequencies[0];
   }
   return selectedGeneratedPricingFrequency(estimate, estData, selectedFrequency);

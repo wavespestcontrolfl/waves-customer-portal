@@ -6,12 +6,14 @@ const {
 } = require('../routes/estimate-public');
 
 // Lawn cost-floor tiers as the engine stores them in result.results.lawn
-// (6/9/12 visits = Standard/Enhanced/Premium). The builder turns these into
-// the customer-facing cadence options shown in the estimate frequency slider.
+// (4/6/9/12 visits = Basic/Standard/Enhanced/Premium). The builder turns
+// these into the customer-facing cadence options shown in the estimate
+// frequency slider.
 function lawnEstData({ recommendedVisits = 9 } = {}) {
   return {
     results: {
       lawn: [
+        { name: 'Basic', v: 4, mo: 35, ann: 420, pa: 105, recommended: recommendedVisits === 4 },
         { name: 'Standard', v: 6, mo: 45.5, ann: 546, pa: 91, recommended: recommendedVisits === 6 },
         { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: recommendedVisits === 9 },
         { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89, recommended: recommendedVisits === 12 },
@@ -21,9 +23,10 @@ function lawnEstData({ recommendedVisits = 9 } = {}) {
 }
 
 describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () => {
-  test('maps the 6/9/12 tiers to Bi-monthly / Every 6 weeks / Monthly, in order', () => {
+  test('maps the 4/6/9/12 tiers to Quarterly / Bi-monthly / Every 6 weeks / Monthly, in order', () => {
     const freqs = lawnFrequenciesFromResultStats(lawnEstData());
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear])).toEqual([
+      ['basic', 'Quarterly', 4],
       ['standard', 'Bi-monthly', 6],
       ['enhanced', 'Every 6 weeks', 9],
       ['premium', 'Monthly', 12],
@@ -72,9 +75,9 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     expect(lawnFrequenciesFromResultStats({})).toEqual([]);
   });
 
-  test('drops a hidden Basic (4-visit) row without stealing the Standard slot', () => {
+  test('keeps Basic (4-visit) distinct without stealing the Standard slot', () => {
     // Basic listed BEFORE Standard — must NOT alias onto standard and drop the
-    // real 6-visit Standard row (Codex P2). Basic is excluded; Standard stays at 6.
+    // real 6-visit Standard row. Basic is sold separately at 4 visits.
     const freqs = lawnFrequenciesFromResultStats({
       results: {
         lawn: [
@@ -85,7 +88,11 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
         ],
       },
     });
-    expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(freqs.map((f) => f.key)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
+    const basic = freqs.find((f) => f.key === 'basic');
+    expect(basic.label).toBe('Quarterly');
+    expect(basic.visitsPerYear).toBe(4);
+    expect(basic.monthly).toBe(35);
     const std = freqs.find((f) => f.key === 'standard');
     expect(std.label).toBe('Bi-monthly');
     expect(std.visitsPerYear).toBe(6);

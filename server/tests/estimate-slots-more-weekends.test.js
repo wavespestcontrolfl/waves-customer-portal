@@ -228,6 +228,80 @@ describe('estimate slot weekend and expander behavior', () => {
     ]);
   });
 
+  test('estimate slot profile matches lawn tier keys from pricing snapshots', () => {
+    const profile = slotAvailabilityInternals.resolveEstimateSlotProfile({
+      service_interest: 'Lawn Care',
+      monthly_total: 120,
+      annual_total: 1440,
+      estimate_data: {
+        inputs: { lotSqFt: 7326, lawnSqFt: 3200 },
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [
+              {
+                key: 'quarterly',
+                serviceCategory: 'lawn_care',
+                serviceTierKey: 'basic',
+                monthly: 80,
+                annual: 960,
+                perServiceTreatments: [
+                  { service: 'lawn_care', label: 'Lawn Care', visitsPerYear: 4 },
+                ],
+              },
+              {
+                key: 'monthly',
+                serviceCategory: 'lawn_care',
+                serviceTierKey: 'premium',
+                monthly: 120,
+                annual: 1440,
+                perServiceTreatments: [
+                  { service: 'lawn_care', label: 'Lawn Care', visitsPerYear: 12 },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    }, { selectedFrequency: 'premium' });
+
+    expect(profile.durationMinutes).toBe(45);
+    expect(profile.serviceLabel).toBe('12x Lawn Care');
+    expect(profile.services).toEqual([
+      expect.objectContaining({ service: 'lawn_care', visitsPerYear: 12 }),
+    ]);
+  });
+
+  test('estimate slot profile honors lawn-only generated tier keys without a send snapshot', () => {
+    const profile = slotAvailabilityInternals.resolveEstimateSlotProfile({
+      service_interest: 'Lawn Care',
+      estimate_data: {
+        inputs: { lotSqFt: 7326, lawnSqFt: 3200 },
+        result: {
+          results: {
+            lawn: [
+              { tier: 'basic', label: '4 Applications', v: 4, pa: 240 },
+              { tier: 'standard', label: '6 Applications', v: 6, pa: 180 },
+              { tier: 'enhanced', label: '9 Applications', v: 9, pa: 140 },
+              { tier: 'premium', label: '12 Applications', v: 12, pa: 120 },
+            ],
+          },
+          recurring: {
+            services: [
+              { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 },
+            ],
+          },
+        },
+      },
+    }, { selectedFrequency: 'basic' });
+
+    expect(profile.durationMinutes).toBe(45);
+    expect(profile.selectedFrequency).toBe('basic');
+    expect(profile.serviceLabel).toBe('4x Lawn Care');
+    expect(profile.services).toEqual([
+      expect.objectContaining({ service: 'lawn_care', visitsPerYear: 4 }),
+    ]);
+  });
+
   test('estimate slot profile ignores stale pricing snapshots before sizing duration', () => {
     const profile = slotAvailabilityInternals.resolveEstimateSlotProfile({
       service_interest: 'Pest Control + Lawn Care',
