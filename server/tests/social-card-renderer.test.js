@@ -40,6 +40,22 @@ describe('social card renderer', () => {
     expect(svg).not.toContain('profilePhoto');
   });
 
+  test('renders a brand blog-share card from a post title + excerpt', () => {
+    const svg = Renderer.renderSocialCardSvg({
+      variant: 'blog',
+      title: 'Sand Fleas in Southwest Florida: What is Actually Biting You',
+      excerpt: 'Those itchy welts after the beach usually are not sand fleas at all — here is what is really biting.',
+      cta: 'Read the full guide',
+    });
+
+    expect(svg).toContain('FROM THE WAVES BLOG');
+    expect(svg).toContain('Sand'); // title word survives wrapping
+    expect(svg).toContain('really'); // excerpt word survives wrapping
+    expect(svg).toContain('READ THE FULL GUIDE'); // uppercase brand CTA
+    expect(svg).toContain('#009CDE');
+    expect(svg).not.toMatch(/#007f83/i);
+  });
+
   test('sizes the card per platform (square for IG/FB, 4:3 for GBP)', () => {
     const square = Renderer.renderSocialCardSvg({ variant: 'campaign', topic: 'x', platform: 'instagram' });
     expect(square).toContain('width="1080"');

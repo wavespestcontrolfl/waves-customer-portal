@@ -668,6 +668,23 @@ async function uploadImageToS3(base64Data, filename) {
   }
 }
 
+// Render a deterministic brand card (SVG -> JPEG) and host it on S3/CDN, so
+// autonomous posts (incl. blog shares) carry the on-brand card instead of a
+// generic AI image. Returns null on any failure (no S3/CDN, render error) so
+// the caller falls back to its normal image path.
+async function renderBrandCardUrl(cardInput, platform) {
+  try {
+    const SocialCardRenderer = require('./social-card-renderer');
+    const base64 = await SocialCardRenderer.renderSocialCardJpegBase64(cardInput, { platform });
+    const seed = SocialCardRenderer.filenameSlug(`${cardInput.variant || 'card'}-${cardInput.title || cardInput.topic || 'waves'}`);
+    const suffix = platform && platform !== 'square' ? `-${platform}` : '';
+    return await uploadImageToS3(base64, `${seed}${suffix}-${Date.now()}.jpg`);
+  } catch (err) {
+    logger.warn(`[social] brand card render failed: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Platform Posting ──
 
 async function postToFacebook(message, link, imageUrl) {
@@ -943,12 +960,21 @@ const SocialMediaService = {
         if (existing) continue;
 
         try {
+          // Share the blog post with the on-brand card (title + excerpt + read-
+          // more CTA), matching the studio's branding instead of a generic AI
+          // image. Square for FB/IG, 4:3 for GBP. Falls back to the normal image
+          // path if the card can't be rendered/hosted (renderBrandCardUrl null).
+          const card = { variant: 'blog', title: item.title, excerpt: item.description, cta: 'Read the full guide' };
+          const imageUrl = await renderBrandCardUrl(card, 'square');
+          const gbpImageUrl = imageUrl ? await renderBrandCardUrl(card, 'gbp') : null;
           const result = await this.publishToAll({
             title: item.title,
             description: item.description,
             link: normalizedUrl,
             guid: normalizedGuid,
             source: 'rss',
+            imageUrl,
+            gbpImageUrl,
           });
           results.push({ item: item.title, ...result });
         } catch (err) {
