@@ -179,6 +179,19 @@ describe('social content studio', () => {
     expect(run.platformResults[0]).toMatchObject({ platform: 'facebook', dryRun: true });
   });
 
+  test('service intent keywords cover tree & shrub so campaign content ranks correctly', () => {
+    // Regression for the missing tree/shrub group: a tree & shrub campaign
+    // must be able to rank an ornamental/palm blog post ahead of city-only
+    // matches in getCampaignContext.
+    const kws = Studio.serviceIntentKeywords({ service: 'tree and shrub' });
+    expect(kws).toEqual(expect.arrayContaining(['tree', 'shrub', 'ornamental', 'palm']));
+    // A topic phrasing should resolve the same group.
+    expect(Studio.serviceIntentKeywords({ topic: 'palm tree fungus' }))
+      .toEqual(expect.arrayContaining(['tree', 'palm']));
+    // Unrelated services must not pull in the tree group.
+    expect(Studio.serviceIntentKeywords({ service: 'mosquito' })).not.toContain('shrub');
+  });
+
   test('normalizePublishMode fails closed: invalid mode → draft, blank → default', () => {
     expect(Studio.normalizePublishMode('publish')).toBe('publish');
     expect(Studio.normalizePublishMode('Draft ')).toBe('draft');           // trim + lowercase

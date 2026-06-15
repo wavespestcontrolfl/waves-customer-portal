@@ -9,6 +9,21 @@ const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// The Social Content Studio kill switch (SOCIAL_AUTONOMOUS_STUDIO_ENABLED) must
+// disable the WHOLE feature, not just the autonomous cron. Guard every studio
+// endpoint that writes to the DB or spends image credits so flipping the switch
+// off is a true single-point kill — manual admin writes included. Read-only
+// preview/context/list endpoints stay open (no DB write, no image render).
+function requireStudioEnabled(req, res, next) {
+  if (!SocialContentStudio.AUTONOMOUS_FLAGS.enabled) {
+    return res.status(503).json({
+      error: 'Social Content Studio is disabled',
+      detail: 'Set SOCIAL_AUTONOMOUS_STUDIO_ENABLED=true to enable studio writes.',
+    });
+  }
+  next();
+}
+
 // GET /status — platform connection status + feature flags
 router.get('/status', async (req, res, next) => {
   try {
@@ -97,7 +112,7 @@ router.post('/campaign-builder/preview', async (req, res, next) => {
 });
 
 // POST /campaign-builder/save — save generated campaign as a social draft
-router.post('/campaign-builder/save', async (req, res, next) => {
+router.post('/campaign-builder/save', requireStudioEnabled, async (req, res, next) => {
   try {
     const result = await SocialContentStudio.saveCampaignDraft(req.body || {});
     res.json({ success: true, ...result });
@@ -144,7 +159,7 @@ router.get('/review-graphics', async (req, res, next) => {
 });
 
 // POST /review-graphics — create or update a review graphic draft
-router.post('/review-graphics', async (req, res, next) => {
+router.post('/review-graphics', requireStudioEnabled, async (req, res, next) => {
   try {
     const graphic = await SocialContentStudio.createReviewGraphic(req.body || {});
     res.json({ success: true, graphic });
@@ -152,7 +167,7 @@ router.post('/review-graphics', async (req, res, next) => {
 });
 
 // POST /review-graphics/:id/approve — mark a review graphic approved
-router.post('/review-graphics/:id/approve', async (req, res, next) => {
+router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, res, next) => {
   try {
     const [graphic] = await db('review_graphics')
       .where({ id: req.params.id })
@@ -176,7 +191,7 @@ router.get('/competitor-swipe', async (req, res, next) => {
 });
 
 // POST /competitor-swipe/posts — manual competitor post engagement capture
-router.post('/competitor-swipe/posts', async (req, res, next) => {
+router.post('/competitor-swipe/posts', requireStudioEnabled, async (req, res, next) => {
   try {
     const post = await SocialContentStudio.createCompetitorPost(req.body || {});
     res.json({ success: true, post });

@@ -882,26 +882,35 @@ const SocialMediaService = {
     const hasImageHosting =
       !!config.s3.accessKeyId && !!config.s3.secretAccessKey && !!config.s3.bucket
       && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    // Only a REQUESTED channel can justify generating the image. A run that
+    // didn't ask for an image-consuming channel (e.g. channels:['linkedin'],
+    // or channels:['facebook'] when Instagram/GBP merely happen to be
+    // configured globally) must NOT burn image credits on a result every
+    // requested channel discards. Instagram requires the image; GBP attaches
+    // it when present; Facebook reuses the shared image opportunistically but
+    // never triggers generation on its own (text+link posts fine without one).
     const instagramCanConsume =
-      SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
+      requestedPlatforms.has('instagram')
+      && SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
     // Decide whether to generate the shared image. Skip on a dry run (nothing
     // posts, so it'd just burn credits) and when an image already exists or
     // hosting is unconfigured — establish that cheaply before any DB work.
     let shouldGenerateImage = false;
     if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
-      // A platform must actually be able to consume the image. Instagram is a
-      // sync env check. GBP needs a profile that can PUBLISH — a usable client
-      // (client creds + a refresh token), NOT just gbpService.configured, which
-      // is client-creds-only: a GBP deploy whose admin OAuth connect never ran
-      // (no stored refresh token) would otherwise generate/upload an image
-      // before every postToGBP fails with "No GBP credentials". One image is
-      // shared across all WAVES_LOCATIONS GBP posts below, so any one publish-
-      // ready profile justifies it. GBP is checked lazily (only when Instagram
-      // can't already consume) so the DB is touched only when warranted. (The
-      // autonomous single-profile path uses a per-location check via
+      // A requested platform must actually be able to consume the image.
+      // Instagram is a sync env check. GBP needs a profile that can PUBLISH — a
+      // usable client (client creds + a refresh token), NOT just
+      // gbpService.configured, which is client-creds-only: a GBP deploy whose
+      // admin OAuth connect never ran (no stored refresh token) would otherwise
+      // generate/upload an image before every postToGBP fails with "No GBP
+      // credentials". One image is shared across all WAVES_LOCATIONS GBP posts
+      // below, so any one publish-ready profile justifies it. GBP is checked
+      // lazily (only when Instagram can't already consume, and only when GBP was
+      // requested) so the DB is touched only when warranted. (The autonomous
+      // single-profile path uses a per-location check via
       // assertSocialPublishingReady.)
       shouldGenerateImage = instagramCanConsume
-        || (SOCIAL_FLAGS.gbpEnabled && (await gbpService.getConfiguredLocations()).length > 0);
+        || (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled && (await gbpService.getConfiguredLocations()).length > 0);
     }
     if (shouldGenerateImage) {
       try {

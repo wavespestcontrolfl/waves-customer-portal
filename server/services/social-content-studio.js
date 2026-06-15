@@ -446,6 +446,11 @@ async function getCampaignContext({ topic, city, service }) {
         .where(function activeServices() {
           this.where('is_active', true).orWhereNull('is_active');
         })
+        // Campaign facts/CTAs are public-facing, so never seed copy from a
+        // service the customer site hides (internal-only or retired offerings).
+        .where(function visibleServices() {
+          this.where('customer_visible', true).orWhereNull('customer_visible');
+        })
         .limit(8);
       query = applySearch(query, ['name', 'short_name', 'description', 'category', 'subcategory'], [topic, service]);
       context.services = await query;
@@ -458,8 +463,15 @@ async function getCampaignContext({ topic, city, service }) {
     try {
       let query = db('blog_posts')
         .select('id', 'title', 'slug', 'city', 'tag', 'keyword', 'meta_description', 'status', 'publish_date', 'source')
+        // suggestedLink turns context.content[0] into a public social CTA, so
+        // only live posts may feed copy/links — never queued/draft/idea rows
+        // (unapproved facts, 404 slugs).
+        .where('status', 'published')
         .orderBy('publish_date', 'desc')
-        .limit(8);
+        // Rank relevance BEFORE capping: take a wider recency window so a
+        // topic/service-relevant post that isn't in the 8 newest still wins,
+        // then slice to 8 after the sort below.
+        .limit(40);
       query = applySearch(query, ['title', 'keyword', 'tag', 'city', 'meta_description'], [topic, city, service]);
       const rows = await query;
       // The OR search also matches city-only posts; context.content[0] feeds
@@ -476,7 +488,8 @@ async function getCampaignContext({ topic, city, service }) {
       context.content = rows
         .map((row, index) => ({ row, index, relevant: matchesIntent(row) }))
         .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index))
-        .map((entry) => entry.row);
+        .map((entry) => entry.row)
+        .slice(0, 8);
     } catch {
       context.content = [];
     }
@@ -731,6 +744,7 @@ const SERVICE_INTENT_KEYWORDS = [
   { match: ['ant', 'ants'] },
   { match: ['flea', 'fleas'] },
   { match: ['bed bug', 'bedbug'] },
+  { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub'] },
 ];
 
 function serviceIntentKeywords(input = {}) {
@@ -1268,7 +1282,11 @@ async function createReviewGraphic(input) {
     reviewer_display_name: candidate.reviewerDisplayName,
     location_id: candidate.locationId,
     city: candidate.city,
-    excerpt: cleanText(input.excerpt || candidate.excerpt, 500),
+    // The excerpt is the verbatim review text rendered on a "5-star Google
+    // review" card, so it MUST come from the stored review (candidate.excerpt
+    // = reviewExcerpt(review.review_text)) — never a caller-supplied override,
+    // which would let an admin paint arbitrary words as a real review.
+    excerpt: cleanText(candidate.excerpt, 500),
     caption: cleanText(input.caption || candidate.caption, 1000),
     template_key: candidate.templateKey,
     channels: JSON.stringify(candidate.channels),
@@ -1432,6 +1450,7 @@ module.exports = {
   previewCampaign,
   privacyDisplayName,
   reviewExcerpt,
+  serviceIntentKeywords,
   runAutonomous,
   saveCampaignDraft,
   serializeAutonomousRun,
