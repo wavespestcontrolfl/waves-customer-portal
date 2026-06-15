@@ -4128,15 +4128,34 @@ router.get('/eta/:serviceId', async (req, res, next) => {
   }
 });
 
-// POST /api/admin/schedule/generate-report — AI tactical service report
+// Small in-process cache so re-clicking "Generate AI report" with identical
+// inputs (e.g. a double-click, or before the visit is saved) does not re-bill the
+// model. Keyed by a hash of the fully-assembled prompt; short TTL because the
+// grounding context (weather) drifts over time.
+const _reportCopyCache = new Map();
+const REPORT_COPY_TTL_MS = 30 * 60 * 1000;
+function reportCopyCacheGet(key) {
+  const hit = _reportCopyCache.get(key);
+  if (hit && Date.now() - hit.at < REPORT_COPY_TTL_MS) return hit.value;
+  if (hit) _reportCopyCache.delete(key);
+  return null;
+}
+function reportCopyCacheSet(key, value) {
+  _reportCopyCache.set(key, { at: Date.now(), value });
+  if (_reportCopyCache.size > 200) _reportCopyCache.delete(_reportCopyCache.keys().next().value);
+}
+
+// POST /api/admin/schedule/generate-report — AI customer-facing service report copy
 router.post('/generate-report', async (req, res) => {
   try {
     const Anthropic = require('@anthropic-ai/sdk');
+    const crypto = require('crypto');
+    const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
 
     const {
-      customerName, serviceType, technicianName, serviceDate, arrivalTime,
-      serviceNotes, productsApplied,
+      scheduledServiceId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
+      serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
     } = req.body;
@@ -4168,7 +4187,7 @@ router.post('/generate-report', async (req, res) => {
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v2
+    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v3
 
 ## CONTEXT
 
@@ -4178,6 +4197,12 @@ The two sections are:
 
 - **WHAT WE DID** — a treatment summary
 - **WHAT WE FOUND** — a follow-up setting expectations
+
+You are given the technician's structured inputs for THIS visit and, when available, a GROUNDING CONTEXT block of real facts about this specific customer (prior visits, pest-pressure trend, weather, product label data, season, household notes). Turn those into copy that reads hand-written for this exact visit.
+
+## THE RULE THAT MATTERS MOST: BE SPECIFIC TO THIS VISIT
+
+A generic report is a failed report. Build both sections around the concrete details actually present in the inputs — the specific pest, area, product, condition, or change since last visit. If a sentence could be pasted onto a different customer's report unchanged, rewrite it or cut it. Each section should carry at least one detail specific to this visit or this customer. If the inputs are genuinely thin, write a SHORTER honest summary — do not pad with filler to reach a length.
 
 ## HARD CONSTRAINTS (READ FIRST — THESE OVERRIDE EVERYTHING ELSE)
 
@@ -4205,6 +4230,29 @@ The two sections are:
 9. **Active ingredients come only from Products applied.** Never infer an active ingredient or product from an action label or area (e.g. "Exterior perimeter band" does not imply bifenthrin). If Products applied is empty, use functional descriptions only.
 
 10. **Pest activity rating** is 0–5 (0 = none … 5 = severe). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided.
+
+11. **No invented tenure or timeframes.** Never state how long someone has been a customer, how many visits they've had, or "X years/seasons" unless that number is explicitly provided. Do not default to stock recovery windows like "7–14 days" or "10–14 days" — give a timeframe only when a specific product or the grounding context justifies one, and make it fit the situation.
+
+## ANTI-TEMPLATE RULES (this is what was making reports read stale)
+
+Do NOT reuse these worn phrasings — they have appeared on too many reports and now read as canned:
+- "Today's service focused on…" / "This service focused on…"
+- "positioned to intercept" / "at the most common access points"
+- "Visible response should begin within 10–14 days" / any default "7–14 days" window
+- "sets the foundation for…" / "ongoing quarterly service will help maintain consistent coverage"
+- "harborage areas," "cobweb removal," "structural transitions" used as filler rather than because an input actually mentions them
+
+Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pest or problem, sometimes the area treated, sometimes the product or method, sometimes what was observed on arrival. Do not open every report the same way.
+
+## USING THE GROUNDING CONTEXT (when present)
+
+The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
+- **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (improvement, a recurring pest, a resolved issue). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
+- **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
+- **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
+- **Product safety / re-entry**: when label REI / rainfast data is given, ground re-entry and rainfast guidance in it. Never invent a number that isn't there.
+- **Season**: set expectations that fit the SW Florida season — don't promise off-season behavior.
+- **Household notes (pets, chemical sensitivity, access)**: tailor re-entry/safety wording when relevant; never repeat private access details (gate codes, etc.) in customer copy.
 
 ## VOICE
 
@@ -4246,7 +4294,7 @@ Write a short expectations paragraph (2–3 sentences) that:
 
 ## SERVICE TYPE GUIDANCE
 
-Use these focal points based on the service type. Do not force all of them in — pick what's relevant to the actual service notes.
+These are concepts to understand what's relevant per service type — translate them into plain, visit-specific language. Do NOT copy these exact words as filler; pick only what the actual inputs support.
 
 - General Pest Control: Exterior perimeter treatment, crack-and-crevice targeting, harborage reduction, residual control, cobweb removal
 - Ant Control: Colony-level suppression, non-repellent transfer effect, bait placement, reproductive disruption
@@ -4261,6 +4309,8 @@ Use these focal points based on the service type. Do not force all of them in �
 - Bed Bug: Harborage targeting, crack-and-crevice treatment, concealment areas, follow-up timing
 
 ## EXAMPLES
+
+The examples below show STRUCTURE, LENGTH, and PROVENANCE handling ONLY. Their exact wording is BANNED per the Anti-template rules — do not reuse their phrasing (e.g. "Today's service focused on", "positioned to intercept", "sets the foundation", "Visible response should begin within 10–14 days").
 
 ### Good Output (General Pest Control with Fipronil)
 
@@ -4337,14 +4387,86 @@ Recommendations: ${recs.length ? recs.join('; ') : 'None'}
 
 Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you cannot see them; do not describe their contents)`;
 
+    // Assemble real, customer-specific grounding (prior visits, pressure trend,
+    // weather, product label data, season, household notes). Fail-soft: if it
+    // throws or returns nothing, we still generate from the technician's inputs.
+    // Derive the grounding customer from the scheduled service SERVER-SIDE and
+    // authorize the caller. Never trust a body-supplied customer id: this route is
+    // open to techs, so a crafted request could otherwise pull another customer's
+    // prior-report copy / property context out through the model. Only an admin,
+    // or the technician assigned to the service, gets per-customer grounding;
+    // anyone else degrades to a notes-only report (no cross-customer data).
+    let groundingCustomerId = null;
+    let groundingServiceType = serviceType;
+    let groundingServiceDate = serviceDate;
+    let groundingSuppressPressure = false;
+    if (scheduledServiceId) {
+      const svc = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id')
+        .catch(() => null);
+      if (svc && svc.customer_id) {
+        const isAdmin = req.techRole === 'admin';
+        const isAssignedTech = req.technicianId != null && String(svc.technician_id) === String(req.technicianId);
+        if (isAdmin || isAssignedTech) {
+          groundingCustomerId = svc.customer_id;
+          // The scheduled service — not the request body — is the source of truth
+          // for what was serviced; a stale/crafted body could otherwise ground the
+          // report in the wrong service line and pull unrelated prior-visit context.
+          // The service line is derived from this type inside buildReportCopyContext.
+          groundingServiceType = svc.service_type || serviceType;
+          // The scheduled service is the source of truth for the date, so season
+          // and trailing-rainfall grounding match the visit, not "today" (the
+          // client builds serviceDate from new Date()). Fall back to the client
+          // value only if the row has no scheduled_date.
+          groundingServiceDate = svc.scheduled_date || serviceDate;
+          // Typed specialty completions (profile.findingsType set) hide Pest
+          // Pressure on the real report even though their type can detect to the
+          // pest line — suppress the pressure trend in the grounding to match.
+          const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+          groundingSuppressPressure = Boolean(completionProfile && completionProfile.findingsType);
+        } else {
+          logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
+        }
+      }
+    }
+
+    const fallbackProductNames = productsText
+      ? productsText.split(',').map((s) => s.replace(/\(.*?\)/g, '').trim()).filter(Boolean)
+      : [];
+    let contextText = '';
+    let contextSignals = {};
+    try {
+      const ctx = await buildReportCopyContext({
+        customerId: groundingCustomerId,
+        serviceType: groundingServiceType,
+        serviceLine: null, // derived from the server-side service type, not the body
+        suppressPressureTrend: groundingSuppressPressure,
+        products: Array.isArray(products) ? products : [],
+        productNames: fallbackProductNames,
+        serviceDate: groundingServiceDate,
+      });
+      contextText = ctx.contextText || '';
+      contextSignals = ctx.signals || {};
+    } catch (ctxErr) {
+      logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    const fullUserMessage = `${userMessage}${contextText}`;
+    const cacheKey = crypto.createHash('sha256').update(`v3|${model}|${fullUserMessage}`).digest('hex');
+    const cached = reportCopyCacheGet(cacheKey);
+    if (cached) return res.json({ report: cached, cached: true });
+
     const msg = await anthropic.messages.create({
       model,
       max_tokens: 800,
       system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
+      messages: [{ role: 'user', content: fullUserMessage }],
     });
 
     const report = msg.content?.[0]?.text || '';
+    if (report) reportCopyCacheSet(cacheKey, report);
+    logger.info('[generate-report] generated', { hasGrounding: !!groundingCustomerId, ...contextSignals });
     res.json({ report });
   } catch (err) {
     logger.error('[generate-report] AI failed', {

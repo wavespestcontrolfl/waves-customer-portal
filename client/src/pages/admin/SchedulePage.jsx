@@ -7670,8 +7670,17 @@ export function CompletionPanel({
       (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
     )?.label || "";
     const payload = {
+      scheduledServiceId: service.id || null,
       customerName: service.customerName,
       serviceType: service.serviceType,
+      serviceLine: service.serviceLine || service.service_line || undefined,
+      products: selectedProducts.map((p) => ({
+        productId: p.productId || null,
+        name: p.name,
+        rate: p.rate || null,
+        rateUnit: p.rateUnit || null,
+        targets: Array.isArray(p.targets) ? p.targets : [],
+      })),
       technicianName: service.technicianName || "Waves Tech",
       serviceDate: new Date().toLocaleDateString("en-US", {
         month: "long", day: "numeric", year: "numeric",
