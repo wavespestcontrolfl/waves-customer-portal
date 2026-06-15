@@ -32,7 +32,16 @@ const TRACK_MAP = {
   C2_Zoysia: 'zoysia',
   D_Bahia: 'bahia',
 };
-const PROGRAM_KEYS = ['tree_shrub', 'pest', 'termite'];
+const PROGRAM_KEYS = [
+  'tree_shrub',
+  'pest',
+  'rodent',
+  'mosquito',
+  'palm_injection',
+  'cockroach',
+  'bed_bug',
+  'termite',
+];
 
 function programSummary(key, program) {
   if (!program) return null;
@@ -2445,6 +2454,11 @@ router.get('/programs', async (req, res, next) => {
       programs: PROGRAM_KEYS.map((key) => programSummary(key, protocols[key])).filter(Boolean),
       tree_shrub: programSummary('tree_shrub', protocols.tree_shrub),
       pest: programSummary('pest', protocols.pest),
+      rodent: programSummary('rodent', protocols.rodent),
+      mosquito: programSummary('mosquito', protocols.mosquito),
+      palm_injection: programSummary('palm_injection', protocols.palm_injection),
+      cockroach: programSummary('cockroach', protocols.cockroach),
+      bed_bug: programSummary('bed_bug', protocols.bed_bug),
       termite: programSummary('termite', protocols.termite),
     });
   } catch (err) { next(err); }
