@@ -1,8 +1,10 @@
 # Lawn Diagnostic — implementation plan
 
 **Status:** Planning (approved 2026-05-28). v0.2 report contract scaffold, diagnostic
-tables migration, and analyze-only tech route added 2026-06-15. Persist/send/public
-report routes and UI still not built.
+tables migration, and analyze-only tech route added 2026-06-15. v0.3 added the LLM
+diagnosis + narrative layer and replaced the human-review gate with a no-block
+auto-release ladder (2026-06-15 — see "v0.3" section below). Persist/send/public report
+routes and UI still not built.
 **Owner:** Adam.
 
 ## What this is
@@ -408,3 +410,90 @@ identical blackout.
 ## Non-goals
 Existing customer lawn assessment system untouched. Projects untouched. No baselines, no
 customer history, no promotion-to-baseline, no auto-customer-creation.
+
+## v0.3 — no-block diagnosis + narrative prompt (built 2026-06-15)
+
+The v0.2 contract layer (`lawn-diagnostic-report.js`) was fully deterministic: vision
+scores → threshold findings (`buildFindingsFromVision`) → templated `customer_summary`.
+v0.3 adds an LLM diagnosis + narrative layer **and removes the human-review gate** in
+favor of an auto-release safety ladder. Decision (Adam, 2026-06-15): **never block,
+degrade.** No manual-review queue, no stuck reports.
+
+### Architecture
+Two focused LLM passes wrap the deterministic contract, which stays as the
+reconciliation/QA spine and the fallback:
+
+```
+analyzePhotos (vision scores)
+  → PASS A runDiagnosis()      photos + scores + product/compliance → structured findings
+  → buildDiagnosticReportContract()   PASS 2-4 deterministic (reconcile, watering, QA)
+  → classifyReleaseMode()      standard | conservative | label_limited | minimal
+  → PASS B runNarrative()      reconciled contract → customer_summary (skipped if minimal)
+  → applyAutoReleaseRepair()   flag-driven scrub / degrade
+  → release  (always)
+```
+
+Files: `server/services/lawn-diagnostic-prompt.js` (new — both prompts, `runDiagnosis`,
+`runNarrative`, `normalizeDiagnosisJson`, `PROMPT_VERSION='lawn-diagnostic-v0.3'`);
+`lawn-diagnostic-report.js` (+ `classifyReleaseMode`, `applyAutoReleaseRepair`,
+`buildMinimalSafeReport`, `MINIMAL_SAFE_SUMMARY`); `routes/tech-lawn-diagnostic.js`
+(`/analyze` rewired). Diagnosis uses `MODELS.VISION` (multimodal + temperature), narrative
+uses `MODELS.FLAGSHIP`.
+
+### No human-review gate (the v0.2 reversal)
+`human_review_required` was a JSON field inside `report_contract` jsonb (migration
+`20260615000001:19`), **not a column** — neutralizing it needed no migration. It is now
+pinned `false` in both `assessInputSufficiency` and `buildDiagnosticReportContract`, kept
+only for backward compatibility, and the prompts are told never to request review. The
+field is deprecated; `requires_label_review` is kept and reinterpreted as non-blocking
+(it already drives `label_limited`) — rename to `label_guidance_limited` is a future item.
+
+### Auto-release safety ladder (`classifyReleaseMode`, internal-only)
+Precedence, most → least restrictive: **minimal > conservative > label_limited > standard.**
+(Diagnosis-honesty degradation outranks label-data degradation because watering-timing
+omission is independently guaranteed by `buildWateringPlan` regardless of mode.)
+- `minimal` — no usable photos, or no defensible diagnosis. Names no pest/disease.
+- `conservative` — confidence < high, limited photos, or an untreated finding. Symptom-first.
+- `label_limited` — sound diagnosis but label/watering data not authoritative, or a
+  compliance conflict. Exact timing omitted.
+- `standard` — evidence and label data sufficient.
+
+`release_mode` is returned in the `/analyze` envelope (`releaseMode`, `findingsSource`,
+`fallbackReason`, `promptVersion`) and is for routing/logging only — **never** placed in
+`report_contract` (the customer payload). No new column; persist later under
+`ai_analysis._internal` if needed.
+
+### Repair-not-route (`applyAutoReleaseRepair`)
+Flag-driven (applies every applicable fix regardless of the mode label):
+- `photo_confirmation_honesty` flag → downgrade "confirmed/active chinch" → "suspected".
+- label gap / `watering_label_conflict` → strip exact hour/day timing, sub general guidance.
+- `fertilizer_blackout_conflict` → remove N/P fertility copy, add the blackout line.
+- gutted/empty summary, or `minimal` mode → `MINIMAL_SAFE_SUMMARY` (no diagnosis).
+Repairs are recorded on `repairs_applied` (internal).
+
+### Two no-block paths
+- **Mechanical failure** (no API key, parse fail, model error) → deterministic
+  `buildFindingsFromVision` / `buildCustomerSummary`, then classified + repaired.
+- **Evidence weakness** (LLM succeeded, inputs poor) → LLM self-degrades per the
+  AUTO-RELEASE rule, then `applyAutoReleaseRepair` polishes.
+
+### The 6 prompt-quality mechanisms (in `DIAGNOSIS_SYSTEM_PROMPT` / `NARRATIVE_SYSTEM_PROMPT`)
+Confidence rubric (evidence-based, photo-only pest/disease/drought caps at moderate),
+minimum-evidence table (curated SWFL conditions), conflict-resolution precedence
+(field test > photo > vision score > weather prior), false-precision constraints (bands
+not %, ranges not day-counts, no label numbers unless db_authoritative, no brand/MOA
+codes), customer-summary realism pass (write last, reconciliation-honest, confidence-
+matched, skeptical-homeowner check), stronger photo interpretation (artifact awareness,
+dual-shot rule, cue→evidence mapping).
+
+### Tests
+`lawn-diagnostic-report.test.js` extended with the auto-release ladder + repair fixtures;
+the three v0.2 `human_review_required: true` assertions migrated to `false` +
+`classifyReleaseMode`. `tech-lawn-diagnostic-route.test.js` manual-findings assertion
+migrated to `findingsSource: 'manual'` / `releaseMode: 'conservative'`.
+
+### Still open
+Curated reference is an inline condensed copy of the verified sources; compiling it from
+`facts-bank` at build time is a follow-up. PASS B is a second LLM call (acceptable for a
+low-volume prospecting tool); collapse to one call if latency matters. `requires_label_review`
+rename deferred.

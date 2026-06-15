@@ -8,7 +8,10 @@ const lawnAssessment = require('../services/lawn-assessment');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const {
   buildDiagnosticReportContract,
+  classifyReleaseMode,
+  applyAutoReleaseRepair,
 } = require('../services/lawn-diagnostic-report');
+const { runDiagnosis, runNarrative, PROMPT_VERSION } = require('../services/lawn-diagnostic-prompt');
 const { etParts } = require('../utils/datetime-et');
 
 const MAX_ANALYZE_PHOTOS = 5;
@@ -309,14 +312,40 @@ router.post('/analyze', async (req, res, next) => {
       });
     }
 
-    const findings = suppliedFindings.length
-      ? suppliedFindings
-      : buildFindingsFromVision({
-        composite: photoAnalysis.composite,
-        adjustedScores: photoAnalysis.adjustedScores,
-        divergenceFlags: photoAnalysis.divergenceFlags,
-      });
     const products = await enrichAppliedProducts(appliedProducts);
+
+    // Findings priority: manual supplied > LLM diagnosis (PASS A) > deterministic
+    // vision fallback. Mechanical failure degrades to deterministic — never blocks.
+    let findings;
+    let findingsSource;
+    let fallbackReason = null;
+    if (suppliedFindings.length) {
+      findings = suppliedFindings;
+      findingsSource = 'manual';
+    } else {
+      const llm = await runDiagnosis({
+        photos,
+        visionScores: photoAnalysis.adjustedScores,
+        divergenceFlags: photoAnalysis.divergenceFlags,
+        products,
+        compliance,
+        season: photoAnalysis.season,
+        grassType: photoAnalysis.composite?.grass_type,
+      });
+      if (llm.ok && llm.findings.length) {
+        findings = llm.findings;
+        findingsSource = 'llm';
+      } else {
+        findings = buildFindingsFromVision({
+          composite: photoAnalysis.composite,
+          adjustedScores: photoAnalysis.adjustedScores,
+          divergenceFlags: photoAnalysis.divergenceFlags,
+        });
+        findingsSource = 'deterministic_fallback';
+        fallbackReason = llm.reason || null;
+      }
+    }
+
     const inputPhotos = photos.map((photo) => ({
       photo_id: photo.photo_id,
       quality: photo.quality || 'limited',
@@ -330,16 +359,30 @@ router.post('/analyze', async (req, res, next) => {
       seasonal_context: req.body.seasonalContext || req.body.seasonal_context || '',
     });
 
+    // Auto-release: classify, write the summary in one LLM voice (PASS B) when the
+    // diagnosis came from the model and is defensible, then repair/degrade unsafe
+    // copy. The report always releases in one of four modes.
+    const releaseMode = classifyReleaseMode(reportContract);
+    if (findingsSource === 'llm' && releaseMode !== 'minimal') {
+      const narrative = await runNarrative(reportContract, { season: photoAnalysis.season });
+      if (narrative.ok) reportContract.customer_summary = narrative.customer_summary;
+    }
+    const finalContract = applyAutoReleaseRepair(reportContract, releaseMode);
+
     return res.json({
       success: true,
       persisted: false,
       aiAvailable: photoAnalysis.aiAvailable,
+      promptVersion: PROMPT_VERSION,
+      findingsSource,
+      fallbackReason,
+      releaseMode,
       photoCount: photos.length,
       analyzedPhotoCount: photoAnalysis.validResults.length,
       composite: photoAnalysis.adjustedScores,
       rawComposite: photoAnalysis.composite,
       divergenceFlags: photoAnalysis.divergenceFlags,
-      reportContract,
+      reportContract: finalContract,
     });
   } catch (err) {
     return next(err);

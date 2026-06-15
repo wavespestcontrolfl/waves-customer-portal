@@ -119,7 +119,11 @@ describe('tech lawn diagnostic analyze route', () => {
       expect(body.reportContract.reconciliation_flags).toEqual(expect.arrayContaining([
         expect.objectContaining({ type: 'untreated_condition', finding_id: 'F1' }),
       ]));
-      expect(body.reportContract.human_review_required).toBe(true);
+      // Auto-release model: never blocks. Manual low-confidence findings with an
+      // untreated condition release in conservative mode, gate pinned false.
+      expect(body.reportContract.human_review_required).toBe(false);
+      expect(body.findingsSource).toBe('manual');
+      expect(body.releaseMode).toBe('conservative');
       expect(mockAnalyzePhoto).not.toHaveBeenCalled();
     });
   });

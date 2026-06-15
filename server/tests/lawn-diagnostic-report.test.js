@@ -2,6 +2,10 @@ const {
   buildDiagnosticReportContract,
   buildWateringPlan,
   fertilizerBlackoutConflicts,
+  classifyReleaseMode,
+  applyAutoReleaseRepair,
+  buildMinimalSafeReport,
+  MINIMAL_SAFE_SUMMARY,
 } = require('../services/lawn-diagnostic-report');
 
 describe('lawn diagnostic report contract', () => {
@@ -33,8 +37,9 @@ describe('lawn diagnostic report contract', () => {
 
     expect(report.input_assessment).toMatchObject({
       photo_quality: 'limited',
-      human_review_required: true,
+      human_review_required: false,
     });
+    expect(classifyReleaseMode(report)).toBe('conservative');
     expect(report.input_assessment.photo_limitations).toEqual([
       'No close-up blade image',
       'No view of patch margin',
@@ -148,7 +153,7 @@ describe('lawn diagnostic report contract', () => {
     expect(watering.customer_sequence).not.toContain('48-hour hold');
   });
 
-  test('adequate photos with missing-view limitations still require review', () => {
+  test('adequate photos with missing-view limitations auto-release conservative, never blocked', () => {
     const report = buildDiagnosticReportContract({
       photos: [{ quality: 'adequate', limitations: ['No close-up blade image'] }],
       findings: [{
@@ -173,8 +178,10 @@ describe('lawn diagnostic report contract', () => {
     });
 
     expect(report.input_assessment.photo_quality).toBe('adequate');
-    expect(report.input_assessment.human_review_required).toBe(true);
-    expect(report.input_assessment.human_review_reason).toContain('No close-up blade image');
+    expect(report.input_assessment.human_review_required).toBe(false);
+    expect(report.input_assessment.human_review_reason).toBe('');
+    expect(report.input_assessment.photo_limitations).toContain('No close-up blade image');
+    expect(classifyReleaseMode(report)).toBe('conservative');
   });
 
   test('fertilizer blackout flags N/P products but not fungicide or allowed iron', () => {
@@ -288,7 +295,8 @@ describe('lawn diagnostic report contract', () => {
       }),
     ]));
     expect(report.diagnosis.negative_evidence).toContain('No close-up lesions visible');
-    expect(report.human_review_required).toBe(true);
+    expect(report.human_review_required).toBe(false);
+    expect(classifyReleaseMode(report)).toBe('conservative');
   });
 
   test('flags preventive applications without implying a visible confirmed condition', () => {
@@ -330,5 +338,114 @@ describe('lawn diagnostic report contract', () => {
       }),
     ]));
     expect(report.customer_summary).toContain('We did not map a treatment to that finding today');
+  });
+});
+
+describe('lawn diagnostic auto-release ladder', () => {
+  function reportWith({ findings, products = [], photos = [{ quality: 'adequate' }], compliance = { irrigation_compliance: { assigned_days: ['Tuesday', 'Friday'] } } }) {
+    return buildDiagnosticReportContract({ photos, findings, products, compliance });
+  }
+
+  test('confident, cleanly reconciled report classifies standard', () => {
+    const report = reportWith({
+      findings: [{ finding_id: 'F1', name: 'Visible weed pressure', confidence: 'high', severity: 'moderate', urgency: 'monitor', observed_evidence: ['broadleaf weeds across the front lawn'] }],
+      products: [{
+        product_id: 'P1',
+        product_name: 'Reviewed herbicide',
+        addresses_findings: ['F1'],
+        product_label_constraints: { source: 'product_db', post_app_irrigation: 'hold 24h', confidence: 'db_authoritative', requires_label_review: false },
+      }],
+    });
+    expect(classifyReleaseMode(report)).toBe('standard');
+  });
+
+  test('weak / low-confidence diagnosis classifies conservative', () => {
+    const report = reportWith({
+      findings: [{ finding_id: 'F1', name: 'Turf color stress', confidence: 'moderate', severity: 'mild', urgency: 'monitor' }],
+      products: [{
+        product_id: 'P1',
+        product_name: 'Reviewed product',
+        addresses_findings: ['F1'],
+        product_label_constraints: { source: 'product_db', post_app_irrigation: 'hold 12h', confidence: 'db_authoritative', requires_label_review: false },
+      }],
+    });
+    expect(classifyReleaseMode(report)).toBe('conservative');
+  });
+
+  test('sound diagnosis with non-authoritative label data classifies label_limited', () => {
+    const report = reportWith({
+      findings: [{ finding_id: 'F1', name: 'Visible weed pressure', confidence: 'high', severity: 'moderate', urgency: 'monitor', observed_evidence: ['broadleaf weeds'] }],
+      products: [{ product_id: 'P1', product_name: 'Unreviewed product', addresses_findings: ['F1'] }],
+    });
+    expect(classifyReleaseMode(report)).toBe('label_limited');
+  });
+
+  test('poor photos classify minimal', () => {
+    const report = reportWith({
+      photos: [{ quality: 'poor' }],
+      findings: [{ finding_id: 'F1', name: 'Turf color stress', confidence: 'low', severity: 'mild' }],
+    });
+    expect(classifyReleaseMode(report)).toBe('minimal');
+  });
+
+  test('no defensible finding classifies minimal', () => {
+    const report = reportWith({
+      findings: [{ finding_id: 'F1', name: 'No major visible lawn stress signal', confidence: 'moderate', severity: 'mild' }],
+    });
+    expect(classifyReleaseMode(report)).toBe('minimal');
+  });
+
+  test('repair downgrades confirmed photo-only language to suspected', () => {
+    const base = reportWith({
+      findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', urgency: 'monitor' }],
+    });
+    expect(base.internal_quality_flags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'photo_confirmation_honesty' }),
+    ]));
+    const tampered = { ...base, customer_summary: 'We confirmed active chinch in the front lawn.' };
+    const repaired = applyAutoReleaseRepair(tampered, 'conservative');
+    expect(repaired.customer_summary).not.toMatch(/\bconfirmed\b/i);
+    expect(repaired.customer_summary.toLowerCase()).toContain('suspected');
+    expect(repaired.repairs_applied).toContain('confirmed_language_downgraded');
+  });
+
+  test('repair strips unauthoritative watering timing from customer copy', () => {
+    const base = reportWith({
+      findings: [{ finding_id: 'F1', name: 'Visible weed pressure', confidence: 'moderate', severity: 'mild', urgency: 'monitor' }],
+      products: [{ product_id: 'P1', product_name: 'Unreviewed', addresses_findings: ['F1'] }],
+      compliance: { irrigation_compliance: { assigned_days: ['Tuesday'] } },
+    });
+    const tampered = { ...base, customer_summary: 'Hold watering for 48 hours after treatment. We saw weed pressure across the lawn.' };
+    const repaired = applyAutoReleaseRepair(tampered, 'conservative');
+    expect(repaired.customer_summary).not.toMatch(/48\s*hours?/i);
+    expect(repaired.customer_summary).toContain('post-service watering guidance');
+    expect(repaired.repairs_applied).toContain('unauthoritative_timing_stripped');
+  });
+
+  test('minimal repair replaces the summary with a no-diagnosis service note', () => {
+    const base = reportWith({
+      photos: [{ quality: 'poor' }],
+      findings: [{ finding_id: 'F1', name: 'Turf color stress', confidence: 'low', severity: 'mild' }],
+    });
+    const repaired = applyAutoReleaseRepair(base, 'minimal');
+    expect(repaired.customer_summary).toBe(MINIMAL_SAFE_SUMMARY);
+    expect(repaired.repairs_applied).toEqual(['minimal_safe_summary']);
+  });
+
+  test('buildMinimalSafeReport never names a pest or disease', () => {
+    const report = buildMinimalSafeReport({ photos: [], products: [], compliance: {} });
+    expect(report.customer_summary).toBe(MINIMAL_SAFE_SUMMARY);
+    expect(report.diagnosis.primary_finding).toBeNull();
+    expect(report.human_review_required).toBe(false);
+  });
+
+  test('every classification path leaves human_review_required false', () => {
+    const report = reportWith({
+      findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'low', severity: 'severe', urgency: 'immediate_callback' }],
+      products: [{ product_id: 'P1', product_name: 'Unreviewed' }],
+    });
+    expect(report.human_review_required).toBe(false);
+    expect(report.input_assessment.human_review_required).toBe(false);
+    expect(report.input_assessment.human_review_reason).toBe('');
   });
 });

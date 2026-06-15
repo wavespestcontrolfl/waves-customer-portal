@@ -142,26 +142,17 @@ function assessInputSufficiency({ photos = [], products = [], compliance = {}, f
     missingInputs.push('assigned irrigation days missing');
   }
 
-  const lowConfidence = findings.some((finding) => confidenceRank(finding.confidence) <= 1);
-  const humanReviewRequired = photoQuality !== 'adequate'
-    || photoLimitations.length > 0
-    || missingInputs.length > 0
-    || lowConfidence;
-  const humanReviewReason = humanReviewRequired
-    ? [
-      photoQuality !== 'adequate' ? `Photo quality is ${photoQuality}.` : null,
-      photoLimitations.length ? `Photo limitations: ${photoLimitations.join('; ')}.` : null,
-      lowConfidence ? 'One or more findings has low diagnostic confidence.' : null,
-      missingInputs.length ? `Missing inputs: ${missingInputs.join('; ')}.` : null,
-    ].filter(Boolean).join(' ')
-    : null;
-
+  // Auto-release model: insufficient input never blocks the report. We still
+  // surface photo quality, limitations, and missing inputs (they drive the
+  // internal release_mode and conservative wording in classifyReleaseMode /
+  // applyAutoReleaseRepair), but human_review_required is deprecated and pinned
+  // false — this product has no manual-review queue.
   return {
     photo_quality: photoQuality,
     photo_limitations: photoLimitations,
     missing_inputs: unique(missingInputs),
-    human_review_required: humanReviewRequired,
-    human_review_reason: humanReviewReason,
+    human_review_required: false,
+    human_review_reason: '',
   };
 }
 
@@ -482,7 +473,7 @@ function buildWatchItems(findings = [], flags = []) {
 
 function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
   const primary = diagnosis.findings?.find((finding) => finding.name === diagnosis.primary_finding);
-  if (!primary) return 'Lawn diagnostic is complete. The report needs technician review before customer wording is finalized.';
+  if (!primary) return 'This lawn check is complete. The photos did not show enough detail to call out a specific pest or disease, so keep to your normal watering schedule and watch for any area that spreads, thins, or does not recover.';
   const name = primary.name;
   const addressed = treatmentRationale.some((row) => row.addresses_findings.includes(primary.finding_id));
   const treatmentLine = addressed
@@ -496,6 +487,110 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
     return `The photos show signs most consistent with ${name}. ${treatmentLine} We should confirm if the area spreads or the pattern changes.`;
   }
   return `The photos show ${name}. ${treatmentLine} Watch for improvement based on the expected response timeline.`;
+}
+
+// Safe wording used when inputs are too poor to defend any diagnosis. Names no
+// pest or disease; states what was checked and what to watch.
+const MINIMAL_SAFE_SUMMARY = 'This lawn check is complete. The photos provided did not show enough detail to call out a specific pest or disease, so we are not naming one from these images. The best next step is a quick on-site look; in the meantime, keep to your normal watering schedule and watch for any area that spreads, thins, or does not recover.';
+
+const NO_FINDING_KEY = normalizeKey('No major visible lawn stress signal');
+
+// Auto-release safety ladder. The report ALWAYS releases; this only classifies
+// how conservative the customer copy must be. Precedence (most → least
+// restrictive): minimal > conservative > label_limited > standard.
+//   - minimal:       no usable photos, or no defensible diagnosis.
+//   - conservative:  diagnosis is weak/uncertain (confidence < high, limited
+//                    photos, or an untreated finding). Symptom-first wording.
+//   - label_limited: diagnosis is sound but product-label/watering data is not
+//                    authoritative, or a compliance conflict exists. Exact
+//                    timing is omitted (also enforced independently by
+//                    buildWateringPlan, so this is belt-and-suspenders).
+//   - standard:      evidence and label data are sufficient.
+function classifyReleaseMode(contract = {}) {
+  const ia = contract.input_assessment || {};
+  const diag = contract.diagnosis || {};
+  const flags = contract.internal_quality_flags || [];
+  const recon = contract.reconciliation_flags || [];
+  const missing = ia.missing_inputs || [];
+
+  const noUsablePhotos = ia.photo_quality === 'poor' || missing.includes('lawn photos missing');
+  const noDefensibleDiagnosis = !diag.primary_finding
+    || normalizeKey(diag.primary_finding) === NO_FINDING_KEY
+    || confidenceRank(diag.confidence) <= 0;
+  if (noUsablePhotos || noDefensibleDiagnosis) return 'minimal';
+
+  const weakDiagnosis = confidenceRank(diag.confidence) < 3
+    || ia.photo_quality !== 'adequate'
+    || (ia.photo_limitations || []).length > 0
+    || recon.some((flag) => flag.type === 'untreated_condition' && flag.severity !== 'low');
+  if (weakDiagnosis) return 'conservative';
+
+  const labelGap = contract.watering?.post_application?.requires_label_review === true
+    || flags.some((flag) => ['product_label_review_required', 'watering_label_conflict', 'fertilizer_blackout_conflict'].includes(flag.type));
+  if (labelGap) return 'label_limited';
+
+  return 'standard';
+}
+
+// Downgrade any over-confident pest/disease/drought wording to suggestive form.
+// Safety net for LLM-authored copy; deterministic copy never says "confirmed".
+function stripConfirmedLanguage(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\s+(chinch|fungus|fungal|disease|large patch|gray leaf spot|drought|grub|insect)/gi,
+      (match, noun) => `suspected ${noun}`)
+    .replace(/\b(chinch|fungal|disease|grub|insect)\s+(?:is|are)\s+confirmed\b/gi, '$1 most consistent with the visible pattern')
+    .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
+}
+
+// Repair unsafe customer copy in place of blocking. Condition/flag-driven so
+// every applicable degradation is applied regardless of the summary mode label.
+function applyAutoReleaseRepair(contract = {}, mode = 'standard') {
+  const repaired = { ...contract };
+  const flags = contract.internal_quality_flags || [];
+  const repairs = [];
+
+  if (mode === 'minimal') {
+    repaired.customer_summary = MINIMAL_SAFE_SUMMARY;
+    repaired.watch_items = ['Watch for any area that spreads, thins, or does not recover, and we will take a closer look on the next visit.'];
+    repaired.repairs_applied = ['minimal_safe_summary'];
+    return repaired;
+  }
+
+  let summary = contract.customer_summary || '';
+
+  if (flags.some((flag) => flag.type === 'photo_confirmation_honesty')) {
+    const scrubbed = stripConfirmedLanguage(summary);
+    if (scrubbed !== summary) { summary = scrubbed; repairs.push('confirmed_language_downgraded'); }
+  }
+
+  const labelGap = contract.watering?.post_application?.requires_label_review === true
+    || flags.some((flag) => ['product_label_review_required', 'watering_label_conflict'].includes(flag.type));
+  if (labelGap && /\b\d+\s*(?:h\b|hours?|days?)/i.test(summary)) {
+    summary = summary.replace(/[^.]*\b\d+\s*(?:h\b|hours?|days?)[^.]*\.\s*/gi, '').trim();
+    summary = `${summary} Follow the post-service watering guidance from Waves before returning to your normal schedule.`.trim();
+    repairs.push('unauthoritative_timing_stripped');
+  }
+
+  if (flags.some((flag) => flag.type === 'fertilizer_blackout_conflict')) {
+    summary = summary.replace(/[^.]*\b(?:nitrogen|phosphorus|fertiliz\w*|feed\w*|\d+-\d+-\d+)\b[^.]*\.\s*/gi, '').trim();
+    summary = `${summary} During the current fertilizer blackout we hold nitrogen and phosphorus and focus only on allowed services.`.trim();
+    repairs.push('blackout_fertility_removed');
+  }
+
+  if (!summary || summary.trim().length < 40) {
+    summary = MINIMAL_SAFE_SUMMARY;
+    repairs.push('summary_fallback_minimal');
+  }
+
+  repaired.customer_summary = summary.replace(/\s{2,}/g, ' ').trim();
+  if (repairs.length) repaired.repairs_applied = repairs;
+  return repaired;
+}
+
+// Convenience: a full contract that diagnoses nothing, for the worst-input case.
+function buildMinimalSafeReport(input = {}) {
+  return applyAutoReleaseRepair(buildDiagnosticReportContract({ ...input, findings: [] }), 'minimal');
 }
 
 function buildDiagnosticReportContract(input = {}) {
@@ -519,10 +614,6 @@ function buildDiagnosticReportContract(input = {}) {
     watering,
     reconciliationFlags,
   });
-  const humanReviewRequired = inputAssessment.human_review_required
-    || internalQualityFlags.some((flag) => ['high', 'medium'].includes(flag.severity))
-    || reconciliationFlags.some((flag) => flag.type === 'untreated_condition' && flag.severity !== 'low');
-
   return {
     input_assessment: inputAssessment,
     diagnosis,
@@ -534,7 +625,10 @@ function buildDiagnosticReportContract(input = {}) {
     watch_items: buildWatchItems(findings, reconciliationFlags),
     customer_summary: buildCustomerSummary({ diagnosis, treatmentRationale }),
     internal_quality_flags: internalQualityFlags,
-    human_review_required: humanReviewRequired,
+    // Deprecated: this system auto-releases in one of four modes (see
+    // classifyReleaseMode) and never waits on manual review. Pinned false for
+    // backward compatibility with the stored report_contract shape.
+    human_review_required: false,
   };
 }
 
@@ -545,9 +639,13 @@ module.exports = {
   buildReconciliationFlags,
   buildTreatmentRationale,
   buildWateringPlan,
+  classifyReleaseMode,
+  applyAutoReleaseRepair,
+  buildMinimalSafeReport,
   fertilizerBlackoutConflicts,
   normalizeFindings,
   normalizeProductLabelConstraints,
   normalizeProducts,
   runQaSafetyCheck,
+  MINIMAL_SAFE_SUMMARY,
 };
