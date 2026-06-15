@@ -5,10 +5,14 @@ const {
 
 function makeKnex({ service = null, serviceResults = null, profile = null, hasTable = true } = {}) {
   let serviceResultIndex = 0;
+  const whereRawCalls = [];
   const knex = jest.fn((table) => {
     const chain = {
       where: jest.fn(() => chain),
-      whereRaw: jest.fn(() => chain),
+      whereRaw: jest.fn((sql, bindings) => {
+        whereRawCalls.push({ table, sql, bindings });
+        return chain;
+      }),
       first: jest.fn(async () => {
         if (table === 'services') {
           if (Array.isArray(serviceResults)) {
@@ -22,6 +26,7 @@ function makeKnex({ service = null, serviceResults = null, profile = null, hasTa
     };
     return chain;
   });
+  knex._whereRawCalls = whereRawCalls;
   knex.schema = {
     hasTable: jest.fn(async () => hasTable),
   };
@@ -157,6 +162,71 @@ describe('service completion profiles', () => {
       serviceKey: 'pest_rodent_quarterly',
       serviceName: 'Pest & Rodent Control',
       companions: [{ type: 'rodent_bait_station', delivery: 'internal_only' }],
+    });
+  });
+
+  test('normalizes spelled-out combined service suffix labels', async () => {
+    const knex = makeKnex({
+      serviceResults: [
+        null,
+        null,
+        {
+          service_key: 'pest_rodent_quarterly',
+          name: 'Pest & Rodent Control',
+          category: 'pest_control',
+          billing_type: 'recurring',
+        },
+      ],
+      profile: {
+        service_key: 'pest_rodent_quarterly',
+        service_name_snapshot: 'Pest & Rodent Control',
+        category: 'pest_control',
+        billing_type: 'recurring',
+        completion_mode: 'service_report',
+        project_type: null,
+        creates_service_record: true,
+        portal_visibility: 'customer_portal',
+        portal_attach_policy: 'active_portal_customer',
+        followup_policy: 'none',
+        active: true,
+        companion_types: [{ type: 'rodent_bait_station', delivery: 'internal_only' }],
+      },
+    });
+
+    const profile = await resolveCompletionProfileForScheduledService({
+      id: 'svc-1',
+      service_type: 'Pest and Rodent Control Service',
+    }, knex);
+
+    expect(profile).toMatchObject({
+      serviceKey: 'pest_rodent_quarterly',
+      serviceName: 'Pest & Rodent Control',
+      companions: [{ type: 'rodent_bait_station', delivery: 'internal_only' }],
+    });
+  });
+
+  test('does not use suffix-stripped labels for short-name matches', async () => {
+    const knex = makeKnex({ serviceResults: [null, null, null] });
+
+    const profile = await resolveCompletionProfileForScheduledService({
+      id: 'svc-1',
+      service_type: 'Lawn Care Service',
+    }, knex);
+
+    expect(profile).toMatchObject({
+      serviceKey: null,
+      serviceName: 'Lawn Care Service',
+      completionMode: 'service_report',
+    });
+    expect(knex._whereRawCalls).toContainEqual({
+      table: 'services',
+      sql: 'lower(short_name) = lower(?)',
+      bindings: ['Lawn Care Service'],
+    });
+    expect(knex._whereRawCalls).not.toContainEqual({
+      table: 'services',
+      sql: 'lower(short_name) = lower(?)',
+      bindings: ['Lawn Care'],
     });
   });
 });

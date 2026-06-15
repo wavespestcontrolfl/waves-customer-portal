@@ -5,8 +5,8 @@
  * That cutover matched "Pest & Rodent Control" / "Pest and Rodent Control".
  * The June 2026 rebooking import created the real prod rows with the
  * trailing "Service" suffix, so reminders displayed the combined label while
- * completion-profile resolution stayed generic because service_id remained
- * null.
+ * completion-profile resolution stayed generic because service_id was missing
+ * or pointed at a non-combined catalog row.
  */
 
 const MARKER_RE = / ?\[combined_suffix_link_action=[^\]]*\]/;
@@ -28,8 +28,8 @@ exports.up = async function up(knex) {
 
   const rows = await knex('scheduled_services')
     .whereRaw('lower(btrim(service_type)) in (?, ?)', MATCHES)
-    .whereNull('service_id')
-    .select('id', 'customer_id', 'internal_notes');
+    .where((q) => q.whereNull('service_id').orWhereNot('service_id', combined.id))
+    .select('id', 'customer_id', 'service_id', 'internal_notes');
   if (!rows.length) {
     console.log('[combined-suffix-link] no suffix-labeled rows needing a link');
     return;
@@ -41,12 +41,12 @@ exports.up = async function up(knex) {
       .where({ id: row.id })
       .update({
         service_id: combined.id,
-        internal_notes: withMarker(row.internal_notes, 'linked:-'),
+        internal_notes: withMarker(row.internal_notes, `linked:${row.service_id || '-'}`),
         updated_at: knex.fn.now(),
       });
   }
 
-  console.log(`[combined-suffix-link] linked ${rows.length} row(s) across ${customers.size} customer(s) to pest_rodent_quarterly`);
+  console.log(`[combined-suffix-link] linked ${rows.length} row(s) across ${customers.size} customer(s) to pest_rodent_quarterly (prior service_id recorded per row)`);
 };
 
 exports.down = async function down(knex) {
