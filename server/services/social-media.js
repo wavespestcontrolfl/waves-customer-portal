@@ -957,8 +957,18 @@ const SocialMediaService = {
     // still re-checks; this just avoids the wasted upload before it).
     const hasImageHosting = !!config.s3.accessKeyId && !!config.s3.secretAccessKey
       && !!config.s3.bucket && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    // Also require at least one publish target actually ready (creds / GBP
+    // locations); otherwise publishToAll skips/fails every platform and the
+    // uploaded card is orphaned. FB/IG are sync checks; only probe GBP (a
+    // DB/OAuth call) when neither is ready.
+    const fbReady = SOCIAL_FLAGS.facebookEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
+    const igReady = SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
+    let anyPlatformReady = fbReady || igReady;
+    if (!anyPlatformReady && SOCIAL_FLAGS.gbpEnabled) {
+      try { anyPlatformReady = (await gbpService.getConfiguredLocations()).length > 0; } catch { anyPlatformReady = false; }
+    }
     const cardsEligible = !SOCIAL_FLAGS.dryRun && SOCIAL_FLAGS.automationEnabled
-      && hasImageHosting && !(await isPausedByAdmin());
+      && hasImageHosting && anyPlatformReady && !(await isPausedByAdmin());
 
     // Advisory lock prevents overlapping cron runs / deploys from double-posting.
     // Uses transaction-scoped lock so acquire+release use the same connection.
