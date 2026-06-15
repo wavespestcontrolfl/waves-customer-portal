@@ -50,6 +50,27 @@ describe('German Roach Cleanout customer-facing estimate copy', () => {
     expect(isGermanRoachCleanoutOneTimeItem(standaloneCockroach)).toBe(false);
   });
 
+  test('Initial German Roach Knockdown first-visit add-on is NOT the cleanout', () => {
+    // A recurring pest plan auto-adds this knockdown line; it says "German
+    // Roach" but is not the standalone multi-visit cleanout.
+    expect(isGermanRoachCleanoutOneTimeItem({ service: 'pest_initial_roach', name: 'Initial German Roach Knockdown' })).toBe(false);
+    expect(isGermanRoachCleanoutOneTimeItem({ name: 'Initial German Roach Knockdown' })).toBe(false);
+  });
+
+  test('a recurring pest plan with an Initial German Roach Knockdown add-on keeps generic pest chips', () => {
+    const knockdown = { service: 'pest_initial_roach', name: 'Initial German Roach Knockdown', price: 150 };
+    const pestRecurring = { count: 1, visitsPerYear: 4, monthlyBase: 50 };
+    const prompts = buildEstimateAskPrompts(
+      [{ name: 'Pest Control', service: 'pest_control' }],
+      [knockdown],
+      pestRecurring,
+      false,
+    );
+    expect(prompts[0]).toBe('How do you handle ants?');
+    expect(prompts).not.toContain('How do you get rid of German roaches?');
+    expect(prompts).not.toContain('How long until the roaches are gone?');
+  });
+
   test('German Roach Cleanout shows specialty Ask Waves prompts, not generic billing-only', () => {
     const prompts = buildEstimateAskPrompts([], [germanRoachItem], null, false);
     expect(prompts).toEqual([

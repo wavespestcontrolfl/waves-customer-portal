@@ -1017,10 +1017,19 @@ function pestOneTimeBase(oneTimeItems) {
 // German Roach Cleanout is a multi-visit specialty program (priced one-time but
 // run over 2/3/4 visits). It gets its own customer copy + the Waves Guarantee,
 // and never the general-pest preference toggles.
+//
+// Match the standalone cleanout only — the canonical `german_roach` service
+// key, or a name that names the cleanout program ("roach … cleanout"). A bare
+// "german roach" mention is NOT enough: a recurring pest plan's first-visit
+// add-on (Initial German Roach Knockdown, service `pest_initial_roach`) also
+// says "German Roach" but is not the cleanout, and must not inherit cleanout
+// copy or specialty Ask Waves prompts.
 function isGermanRoachCleanoutOneTimeItem(it = {}) {
-  if (String(it.service || '').toLowerCase() === 'german_roach') return true;
+  const service = String(it.service || '').toLowerCase();
+  if (service === 'german_roach') return true;
+  if (service === 'pest_initial_roach') return false; // first-visit knockdown add-on, not the cleanout
   const raw = [it.name, it.label, it.displayName].filter(Boolean).join(' ').toLowerCase();
-  return raw.includes('german roach') || (raw.includes('roach') && raw.includes('cleanout'));
+  return raw.includes('roach') && raw.includes('cleanout');
 }
 
 function germanRoachVisitPhrase(visits) {
@@ -1066,7 +1075,7 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   const hasRodent = recurringList.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
   const hasPalm = recurringList.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
   const hasGermanRoach = oneTimeList.some(isGermanRoachCleanoutOneTimeItem)
-    || recurringList.some((s) => /german\s*roach/i.test(s?.name || s?.label || s?.service || ''));
+    || recurringList.some(isGermanRoachCleanoutOneTimeItem);
   const hasPestAny = !!pestRecurring || hasPestOneTime || hasGermanRoach;
   if (hasGermanRoach) {
     servicePrompts.push(...GERMAN_ROACH_ASK_CHIPS);

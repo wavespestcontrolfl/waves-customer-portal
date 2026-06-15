@@ -956,7 +956,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {
-    return { ...cached.result, metadata: { ...cached.result.metadata, cacheHit: true } };
+    // Re-apply the lead-time filter on read. The result was cached for 5 min
+    // but the bucket can straddle a lead-time boundary — a slot bookable when
+    // cached (e.g. 13:00 at 10:59 ET) can be inside the cutoff by the time it's
+    // served (11:01 ET). Re-filtering here keeps stale, no-longer-bookable
+    // same-day windows out without recomputing the whole pool.
+    const primary = filterPastSlotsForToday(cached.result.primary || [], { minimumLeadMinutes: opts.minimumLeadMinutes });
+    const expander = filterPastSlotsForToday(cached.result.expander || [], { minimumLeadMinutes: opts.minimumLeadMinutes });
+    return {
+      ...cached.result,
+      primary,
+      expander,
+      nearby: [...primary, ...expander].some((s) => s.routeOptimal),
+      metadata: { ...cached.result.metadata, cacheHit: true },
+    };
   }
 
   // A caller-supplied explicit window (specific date or AI-parsed range)
