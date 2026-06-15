@@ -132,10 +132,21 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, beforeDat
         }
       })
       .orderBy('service_date', 'desc')
-      .limit(limit)
-      .select('id', 'service_date', 'service_type');
+      // Fetch a few extra so the visibility filter below can still yield ~limit.
+      .limit(limit + 3)
+      .select('id', 'service_date', 'service_type', 'structured_notes');
     if (!rows.length) return [];
-    const ids = rows.map((r) => r.id);
+    // Exclude internal-only typed reports (structured_notes.typedReportDelivery
+    // present and != 'auto_send'). Those are suppressed on customer surfaces, so
+    // their findings must not feed customer-facing copy either.
+    const visibleRows = rows.filter((r) => {
+      let sn = r.structured_notes;
+      if (typeof sn === 'string') { try { sn = JSON.parse(sn); } catch { sn = null; } }
+      const mode = sn && typeof sn === 'object' ? sn.typedReportDelivery : null;
+      return !(mode && mode !== 'auto_send');
+    }).slice(0, limit);
+    if (!visibleRows.length) return [];
+    const ids = visibleRows.map((r) => r.id);
     const findings = await knex('service_findings')
       .whereIn('service_record_id', ids)
       .select('service_record_id', 'severity', 'title')
@@ -145,7 +156,7 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, beforeDat
       (acc[key] = acc[key] || []).push(f);
       return acc;
     }, {});
-    return rows.map((r) => ({
+    return visibleRows.map((r) => ({
       serviceDate: r.service_date,
       serviceType: r.service_type,
       findings: (byRecord[String(r.id)] || []).map((f) => ({ severity: cleanText(f.severity), title: cleanText(f.title) })),
@@ -246,6 +257,7 @@ async function buildReportCopyContext({
   customerId,
   serviceType,
   serviceLine,
+  suppressPressureTrend = false,
   products = [],
   productNames = [],
   serviceDate,
@@ -294,7 +306,10 @@ async function buildReportCopyContext({
   // Pest Pressure is hidden (feature off, showOnCustomerReport off, service line
   // not enabled, or one-time/specialty excluded), buildPestPressureCustomerView
   // returns null — and we must NOT surface a pressure trend in the copy either.
-  const pressureVisible = buildPestPressureCustomerView({
+  // Typed specialty completions (e.g. a roach cleanout) never render Pest
+  // Pressure on the real report even though their service_type can detect to the
+  // 'pest' line — the route flags those via suppressPressureTrend.
+  const pressureVisible = !suppressPressureTrend && buildPestPressureCustomerView({
     config: ppConfig,
     scoreRow: null,
     serviceRecord: { service_line: line, service_type: serviceType },

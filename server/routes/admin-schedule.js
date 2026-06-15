@@ -4371,10 +4371,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let groundingCustomerId = null;
     let groundingServiceType = serviceType;
     let groundingServiceDate = serviceDate;
+    let groundingSuppressPressure = false;
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id')
+        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id')
         .catch(() => null);
       if (svc && svc.customer_id) {
         const isAdmin = req.techRole === 'admin';
@@ -4391,6 +4392,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           // client builds serviceDate from new Date()). Fall back to the client
           // value only if the row has no scheduled_date.
           groundingServiceDate = svc.scheduled_date || serviceDate;
+          // Typed specialty completions (profile.findingsType set) hide Pest
+          // Pressure on the real report even though their type can detect to the
+          // pest line — suppress the pressure trend in the grounding to match.
+          const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+          groundingSuppressPressure = Boolean(completionProfile && completionProfile.findingsType);
         } else {
           logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
         }
@@ -4407,6 +4413,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         customerId: groundingCustomerId,
         serviceType: groundingServiceType,
         serviceLine: null, // derived from the server-side service type, not the body
+        suppressPressureTrend: groundingSuppressPressure,
         products: Array.isArray(products) ? products : [],
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
