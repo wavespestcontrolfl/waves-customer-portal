@@ -502,7 +502,14 @@ export default function TechHomePage() {
           border: `1px solid ${DARK.border}`, textAlign: 'center',
         }}>
           <p style={{ fontSize: 14, color: DARK.muted, margin: 0 }}>
-            {total === 0 ? 'No services scheduled today' : 'All services completed! 🎉'}
+            {/* Only celebrate when every stop actually completed — a route
+                that ended on a no-show/cancelled/skipped stop has no next
+                stop but isn't a clean sweep, so don't flash the 🎉. */}
+            {total === 0
+              ? 'No services scheduled today'
+              : completed === total
+                ? 'All services completed! 🎉'
+                : "That's all your stops for today."}
           </p>
         </div>
       )}

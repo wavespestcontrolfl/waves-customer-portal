@@ -1261,24 +1261,48 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
-    // No-show is only valid FROM an active visit state. The mobile detail
-    // sheet exposes "Mark as no-show" regardless of status, and the flip
-    // below uses the row's current status as fromStatus (so the atomic
-    // guard alone won't stop a terminal→no_show overwrite). Without this:
-    // tapping it on a completed/cancelled/skipped visit would overwrite
-    // that terminal status, append a history row, and clear the tech;
-    // tapping it again on an already-no_show visit would re-send the
-    // missed-visit SMS. Make already-no_show idempotent (no re-flip, no
-    // re-notify) and reject every other terminal source.
-    if (toStatus === 'no_show') {
-      if (svc.status === 'no_show') {
+    // A no-show is terminal. Once a row is no_show this route must not flip
+    // it anywhere: re-sending no_show is idempotent success; any other
+    // target (cancelled/completed/...) would erase the missed-visit state
+    // and fire a contradictory notice, because fromStatus is read fresh as
+    // no_show and transitionJobStatus's atomic guard would accept it.
+    if (svc.status === 'no_show') {
+      if (toStatus === 'no_show') {
         return res.json({ success: true, alreadyNoShow: true });
       }
+      return res.status(409).json({
+        error: 'This visit was already marked as a no-show. Refresh and try again.',
+        code: 'already_no_show',
+      });
+    }
+
+    // No-show is only valid FROM an active visit state, and only once the
+    // visit window has actually started. The mobile detail sheet exposes
+    // "Mark as no-show" on every same-day row, so without these guards an
+    // accidental tap on a later-today visit would terminalize it and text
+    // the customer "we missed you at {time}" before the appointment time
+    // had even arrived. (The day-of guard above rejects future dates; this
+    // covers same-day-before-window and non-active sources.)
+    if (toStatus === 'no_show') {
       const NO_SHOW_SOURCE_STATES = new Set(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
       if (!NO_SHOW_SOURCE_STATES.has(svc.status)) {
         return res.status(409).json({
           error: `Can't mark this visit as a no-show — it's already ${svc.status}. Refresh and try again.`,
           code: 'not_active_visit',
+        });
+      }
+      const nsDatePart = svc.scheduled_date instanceof Date
+        ? svc.scheduled_date.toISOString().slice(0, 10)
+        : String(svc.scheduled_date || '').slice(0, 10);
+      const nsTimePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+      // No date/window recorded → don't block (legacy rows). Otherwise the
+      // window-start instant (ET wall-clock → absolute) must be in the past.
+      const nsWindowReached = !/^\d{4}-\d{2}-\d{2}$/.test(nsDatePart) || !nsTimePart
+        || parseETDateTime(`${nsDatePart}T${nsTimePart}`).getTime() <= Date.now();
+      if (!nsWindowReached) {
+        return res.status(409).json({
+          error: "This visit's window hasn't started yet — you can mark it a no-show once the appointment time has passed.",
+          code: 'window_not_reached',
         });
       }
     }

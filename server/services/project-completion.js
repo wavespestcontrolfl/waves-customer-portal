@@ -72,7 +72,7 @@ async function hasActiveRecurringSchedule(customerId, knex = db) {
 
   const row = await knex('scheduled_services')
     .where({ customer_id: customerId })
-    .whereNotIn('status', ['cancelled', 'completed', 'skipped'])
+    .whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show'])
     .where(function recurringOnly() {
       if (cols.is_recurring) this.orWhere({ is_recurring: true });
       if (cols.recurring_parent_id) this.orWhereNotNull('recurring_parent_id');
