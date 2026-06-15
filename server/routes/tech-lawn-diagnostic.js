@@ -502,21 +502,36 @@ router.post('/:id/send', async (req, res, next) => {
       return res.status(422).json({ error: 'A contact name and an email or address are required to send a report.' });
     }
 
-    const token = row.report_token || crypto.randomBytes(16).toString('hex');
-    const expiresAt = row.report_expires_at || new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
+    const mintedToken = crypto.randomBytes(16).toString('hex');
+    const freshExpiry = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
 
-    await db('lawn_diagnostics').where({ id: row.id }).update({
-      mode: 'prospect',
-      status: 'sent',
-      contact_snapshot: JSON.stringify(contact),
-      address_snapshot: address ? JSON.stringify(address) : row.address_snapshot,
-      report_token: token,
-      report_expires_at: expiresAt,
-      last_sent_at: db.fn.now(),
-      updated_at: db.fn.now(),
+    // Atomic mint/refresh: COALESCE keeps an existing token (row lock serializes
+    // concurrent sends so both return the same live token), and expiry is only
+    // refreshed when missing or already past — so a resend never returns a link
+    // the public route would immediately 404. Return the stored values, not locals.
+    const [saved] = await db('lawn_diagnostics')
+      .where({ id: row.id })
+      .update({
+        mode: 'prospect',
+        status: 'sent',
+        contact_snapshot: JSON.stringify(contact),
+        address_snapshot: address ? JSON.stringify(address) : row.address_snapshot,
+        report_token: db.raw('COALESCE(report_token, ?)', [mintedToken]),
+        report_expires_at: db.raw(
+          'CASE WHEN report_expires_at IS NULL OR report_expires_at < now() THEN ? ELSE report_expires_at END',
+          [freshExpiry],
+        ),
+        last_sent_at: db.fn.now(),
+        updated_at: db.fn.now(),
+      })
+      .returning(['report_token', 'report_expires_at']);
+
+    return res.json({
+      success: true,
+      token: saved.report_token,
+      url: `/lawn-report/${saved.report_token}`,
+      expiresAt: saved.report_expires_at,
     });
-
-    return res.json({ success: true, token, url: `/lawn-report/${token}`, expiresAt });
   } catch (err) {
     return next(err);
   }
