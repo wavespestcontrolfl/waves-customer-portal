@@ -128,6 +128,24 @@ describe('tech lawn diagnostic analyze route', () => {
     });
   });
 
+  test('degrades to a minimal-safe report when vision fails and no findings supplied (no 502)', async () => {
+    mockAnalyzePhoto.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/tech/lawn-diagnostic/analyze`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech-1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos: [{ data: 'ZmFrZQ==', mimeType: 'image/jpeg' }] }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.findingsSource).toBe('minimal_fallback');
+      expect(body.releaseMode).toBe('minimal');
+      expect(body.reportContract.diagnosis.primary_finding).toBeNull();
+      expect(body.reportContract.human_review_required).toBe(false);
+    });
+  });
+
   test('rejects metadata-only photos when no diagnostic findings are supplied', async () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/tech/lawn-diagnostic/analyze`, {

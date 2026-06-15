@@ -305,17 +305,12 @@ router.post('/analyze', async (req, res, next) => {
     }
 
     const photoAnalysis = await analyzePhotos(photos);
-    if (photos.some((photo) => photo.data) && !photoAnalysis.aiAvailable && !suppliedFindings.length) {
-      return res.status(502).json({
-        success: false,
-        error: 'AI analysis failed for all photos. Add manual findings or retry with clearer photos.',
-      });
-    }
 
     const products = await enrichAppliedProducts(appliedProducts);
 
     // Findings priority: manual supplied > LLM diagnosis (PASS A) > deterministic
-    // vision fallback. Mechanical failure degrades to deterministic — never blocks.
+    // vision fallback > minimal-safe (total vision/LLM outage). Never blocks — a
+    // provider/key failure degrades to a minimal report, it does not 502.
     let findings;
     let findingsSource;
     let fallbackReason = null;
@@ -335,7 +330,7 @@ router.post('/analyze', async (req, res, next) => {
       if (llm.ok && llm.findings.length) {
         findings = llm.findings;
         findingsSource = 'llm';
-      } else {
+      } else if (photoAnalysis.composite) {
         findings = buildFindingsFromVision({
           composite: photoAnalysis.composite,
           adjustedScores: photoAnalysis.adjustedScores,
@@ -343,6 +338,12 @@ router.post('/analyze', async (req, res, next) => {
         });
         findingsSource = 'deterministic_fallback';
         fallbackReason = llm.reason || null;
+      } else {
+        // Total outage: no LLM and no vision scores to derive findings from.
+        // Degrade to a minimal-safe report (no diagnosis) rather than failing.
+        findings = [];
+        findingsSource = 'minimal_fallback';
+        fallbackReason = llm.reason || 'vision_unavailable';
       }
     }
 

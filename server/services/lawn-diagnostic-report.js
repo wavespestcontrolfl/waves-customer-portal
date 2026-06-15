@@ -246,11 +246,20 @@ function buildWateringPlan({ products = [], compliance = {} } = {}) {
   }
 
   const requiresLabelReview = hasLabelReviewGap || labelConflict;
-  const customerSequence = requiresLabelReview
-    ? 'Return to normal irrigation only after product-specific label directions are reviewed.'
-    : (maxHoldHours != null && assignedDays.length
-      ? `After the ${maxHoldHours}-hour hold, water only in the assigned ${joinList(assignedDays)} windows, and skip a cycle when rainfall covers the lawn.`
-      : restrictionSummary || 'Return to normal irrigation only after product-specific label directions are satisfied.');
+  let customerSequence;
+  if (requiresLabelReview) {
+    customerSequence = 'Return to normal irrigation only after product-specific label directions are reviewed.';
+  } else if (maxHoldHours != null && assignedDays.length) {
+    customerSequence = `After the ${maxHoldHours}-hour hold, water only in the assigned ${joinList(assignedDays)} windows, and skip a cycle when rainfall covers the lawn.`;
+  } else if (hasWaterIn) {
+    // A reviewed label that requires watering in must be stated before the
+    // assigned schedule, otherwise the customer is told to wait for watering days.
+    customerSequence = assignedDays.length
+      ? `Water in today's application as the reviewed product label directs, then return to your assigned ${joinList(assignedDays)} watering windows only.`
+      : 'Water in today\'s application as the reviewed product label directs, then return to your normal allowed watering schedule.';
+  } else {
+    customerSequence = restrictionSummary || 'Return to normal irrigation only after product-specific label directions are satisfied.';
+  }
 
   return {
     post_application: {

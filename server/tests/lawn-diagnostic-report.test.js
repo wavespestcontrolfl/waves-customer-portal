@@ -153,6 +153,26 @@ describe('lawn diagnostic report contract', () => {
     expect(watering.customer_sequence).not.toContain('48-hour hold');
   });
 
+  test('db-authoritative water-in label is stated before the assigned schedule', () => {
+    const watering = buildWateringPlan({
+      products: [{
+        product_id: 'P1',
+        product_name: 'Reviewed water-in product',
+        product_label_constraints: {
+          source: 'product_db',
+          post_app_irrigation: 'water in according to reviewed product label',
+          confidence: 'db_authoritative',
+          requires_label_review: false,
+        },
+      }],
+      compliance: { irrigation_compliance: { assigned_days: ['Wednesday', 'Saturday'] } },
+    });
+
+    expect(watering.post_application.requires_label_review).toBe(false);
+    expect(watering.customer_sequence).toMatch(/water in/i);
+    expect(watering.customer_sequence).toContain('Wednesday and Saturday');
+  });
+
   test('adequate photos with missing-view limitations auto-release conservative, never blocked', () => {
     const report = buildDiagnosticReportContract({
       photos: [{ quality: 'adequate', limitations: ['No close-up blade image'] }],
