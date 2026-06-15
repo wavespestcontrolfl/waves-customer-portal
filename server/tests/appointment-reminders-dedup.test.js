@@ -253,7 +253,7 @@ describe('appointment reminder reschedule windows', () => {
     return { reminder, updateReminder, finalReminderUpdate };
   }
 
-  test('silent reschedule inside the 24h window marks both due windows covered', async () => {
+  test('silent reschedule inside the 24h window leaves the day-before reminder pending', async () => {
     const { updateReminder } = mockRescheduleRecord();
 
     await AppointmentReminders.handleReschedule(
@@ -262,15 +262,17 @@ describe('appointment reminder reschedule windows', () => {
       { sendNotification: false },
     );
 
-    // Both windows are already due for the new time — leaving them unsent
-    // would make the next cron tick text the customer right after the admin
-    // chose "Don't send a notification".
+    // The 72h window is due for the new time and firing it now would just echo
+    // unchanged details, so it stays covered. The 24h window is deliberately
+    // left pending: a silent move (e.g. a dispatch-board reshuffle) must not
+    // strand the customer with no message at all — the next cron tick still
+    // sends the normal day-before reminder.
     expect(updateReminder.where).toHaveBeenCalledWith({ id: 'reminder-reschedule' });
     expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
       reminder_72h_sent: true,
       reminder_72h_sent_at: expect.any(Date),
-      reminder_24h_sent: true,
-      reminder_24h_sent_at: expect.any(Date),
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
     }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });

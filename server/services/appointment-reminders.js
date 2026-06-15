@@ -750,15 +750,18 @@ const AppointmentReminders = {
       // below, we mark any already-due reminder windows as sent so cron does
       // not immediately repeat the same appointment details.
       //
-      // When the notice is suppressed (admin chose "Don't send a
-      // notification"), windows already due for the NEW time must be marked
-      // covered here instead — otherwise the next 15-min cron tick sees an
-      // "unsent" due reminder and texts the customer minutes after the admin
-      // explicitly opted for silence. Future windows stay unsent either way,
-      // so reminders still follow the new appointment time.
+      // When the notice is suppressed (e.g. a dispatch-board move, which
+      // always passes sendNotification:false), we still let the day-before
+      // (24h) reminder fire — silent route reshuffles must not strand the
+      // customer with no message at all. Only the 72h window is marked
+      // covered here: if it is already due for the NEW time, firing it the
+      // instant after a silent move would just echo details the customer
+      // hasn't been told changed. The 24h reminder is left pending so the
+      // next cron tick still delivers the normal day-before reminder. Future
+      // windows stay unsent either way, so reminders follow the new time.
       const covered = sendNotification
         ? { alreadyInside72hWindow: false, alreadyInside24hWindow: false }
-        : reminderFlagsCoveredByNotice(newApptTime);
+        : { ...reminderFlagsCoveredByNotice(newApptTime), alreadyInside24hWindow: false };
       const rescheduleUpdate = {
         appointment_time: newApptTime,
         reminder_72h_sent: covered.alreadyInside72hWindow,
