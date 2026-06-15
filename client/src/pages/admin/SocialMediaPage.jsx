@@ -548,7 +548,10 @@ export default function SocialMediaPage() {
   );
 }
 
-const CAMPAIGN_CHANNELS = ["gbp", "facebook", "instagram", "linkedin"];
+// LinkedIn is intentionally omitted until the LinkedIn app/page access is
+// approved and publishToAll can actually post there — otherwise an admin could
+// select it, generate LinkedIn copy, and have the publish silently skip it.
+const CAMPAIGN_CHANNELS = ["gbp", "facebook", "instagram"];
 const CAMPAIGN_CITIES = ["Sarasota", "Bradenton", "Lakewood Ranch", "Parrish", "Venice", "Port Charlotte", "North Port"];
 const CAMPAIGN_SERVICES = ["termite", "lawn care", "mosquito", "general pest", "rodent", "tree and shrub"];
 const CAMPAIGN_ANGLES = ["what we are seeing", "signs to check", "myth/fact", "new Florida homeowner", "do not ignore this"];

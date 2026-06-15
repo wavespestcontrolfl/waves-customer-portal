@@ -93,6 +93,30 @@ async function checkFacebook() {
     const { res, data } = await fetchGraph(`/${pageId}?fields=id,name,instagram_business_account{id,username}`, token);
 
     if (res.ok && !data.error && data.id === pageId) {
+      const linkedIgId = data.instagram_business_account?.id || null;
+      const configuredIg = process.env.INSTAGRAM_ACCOUNT_ID;
+      // If an IG account is configured, the Page must actually link to THAT
+      // account — otherwise FB and IG posts would target different assets while
+      // the UI still reads "healthy".
+      if (configuredIg && linkedIgId !== configuredIg) {
+        const result = {
+          platform,
+          status: 'error',
+          lastError: linkedIgId
+            ? `Page's linked Instagram (${linkedIgId}) does not match INSTAGRAM_ACCOUNT_ID (${configuredIg})`
+            : `Page has no linked Instagram account, but INSTAGRAM_ACCOUNT_ID is set (${configuredIg})`,
+          expiresAt: null,
+          details: {
+            pageId: data.id,
+            pageName: data.name || null,
+            linkedInstagramAccountId: linkedIgId,
+            linkedInstagramUsername: data.instagram_business_account?.username || null,
+            checks: { pageResolved: true, pageMatchesConfig: true, instagramLinkMatches: false },
+          },
+        };
+        await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+        return result;
+      }
       const result = {
         platform,
         status: 'healthy',
@@ -101,11 +125,12 @@ async function checkFacebook() {
         details: {
           pageId: data.id,
           pageName: data.name || null,
-          linkedInstagramAccountId: data.instagram_business_account?.id || null,
+          linkedInstagramAccountId: linkedIgId,
           linkedInstagramUsername: data.instagram_business_account?.username || null,
           checks: {
             pageResolved: true,
             pageMatchesConfig: true,
+            instagramLinkMatches: configuredIg ? true : null,
           },
         },
       };

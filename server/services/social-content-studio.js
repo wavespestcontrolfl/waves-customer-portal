@@ -453,7 +453,22 @@ async function getCampaignContext({ topic, city, service }) {
         .orderBy('publish_date', 'desc')
         .limit(8);
       query = applySearch(query, ['title', 'keyword', 'tag', 'city', 'meta_description'], [topic, city, service]);
-      context.content = await query;
+      const rows = await query;
+      // The OR search also matches city-only posts; context.content[0] feeds
+      // both a draft fact and the suggested link, so rank topic/service-
+      // relevant posts ahead of city-only ones (stable sort keeps recency
+      // within each tier) to avoid cross-service copy/links.
+      const intentKeywords = serviceIntentKeywords({ topic, service });
+      const matchesIntent = (row) => {
+        if (!intentKeywords.length) return false;
+        const text = [row.title, row.keyword, row.tag, row.meta_description]
+          .map((v) => String(v || '').toLowerCase()).join(' ');
+        return intentKeywords.some((kw) => text.includes(kw));
+      };
+      context.content = rows
+        .map((row, index) => ({ row, index, relevant: matchesIntent(row) }))
+        .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index))
+        .map((entry) => entry.row);
     } catch {
       context.content = [];
     }
@@ -989,7 +1004,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
   const startedAt = new Date();
   const effectiveMode = mode || AUTONOMOUS_FLAGS.mode;
 
-  if (!force && !AUTONOMOUS_FLAGS.enabled) {
+  // The studio-enable flag is the feature kill switch and is ALWAYS enforced —
+  // even an admin "Run Draft/Run Publish" (force:true). force only bypasses the
+  // cadence guard below, so a dark feature can't publish just because global
+  // social automation happens to be on.
+  if (!AUTONOMOUS_FLAGS.enabled) {
     await logAutonomousSkip('SOCIAL_AUTONOMOUS_STUDIO_ENABLED is not true');
     return { skipped: true, reason: 'SOCIAL_AUTONOMOUS_STUDIO_ENABLED is not true' };
   }

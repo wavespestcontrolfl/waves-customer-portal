@@ -88,6 +88,17 @@ describe('token health meta checks', () => {
     expect(global.fetch).not.toHaveBeenCalledWith(expect.stringContaining('/feed'));
   });
 
+  test('facebook health fails when the Page links a different Instagram account than configured', async () => {
+    process.env.INSTAGRAM_ACCOUNT_ID = '17800000000000000'; // page links 17841465266249854
+    const tokenHealth = require('../services/token-health');
+
+    const result = await tokenHealth.checkSingle('facebook');
+
+    expect(result.status).toBe('error');
+    expect(result.lastError).toMatch(/does not match INSTAGRAM_ACCOUNT_ID/);
+    expect(result.details.checks.instagramLinkMatches).toBe(false);
+  });
+
   test('instagram health requires content publishing access', async () => {
     const tokenHealth = require('../services/token-health');
 
