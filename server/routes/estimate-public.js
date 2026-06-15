@@ -9810,36 +9810,6 @@ function invalidateSendSnapshotPricingBundle(estData = {}) {
   return true;
 }
 
-// Non-lawn recurring (ongoing-plan) engine input service keys. Their presence
-// means a bundle is NOT lawn-only, so the lawn ladder doesn't apply.
-const ENGINE_NON_LAWN_RECURRING_KEYS = [
-  'pest', 'commercialPest', 'commercialLawn', 'treeShrub',
-  'palmInjection', 'palm', 'mosquito',
-  'termite', 'termiteBait', 'termite_bait', 'rodentBait',
-];
-function engineInputsAreLawnOnly(engineInputs = {}) {
-  const services = engineInputs?.services;
-  if (!services || typeof services !== 'object' || !services.lawn) return false;
-  return !ENGINE_NON_LAWN_RECURRING_KEYS.some((key) => services[key]);
-}
-
-// Lawn-only engine-input estimates sent before the 4/6/9/12 ladder shipped have
-// a single collapsed "Quarterly" snapshot. That snapshot's totals still match
-// the estimate, so buildPricingBundle would serve it and the customer would
-// never see the new tiers. Detect that stale shape so the snapshot is bypassed
-// and the engine path rebuilds the ladder. Restricted to genuinely lawn-only
-// engine inputs — a no-pest bundle that pairs lawn with mosquito/tree & shrub
-// keeps its frozen snapshot (lawnFrequenciesFromEngineResult would refuse the
-// mixed bundle, and rebuilding could reprice an already-sent estimate). No-op
-// for healthy multi-tier snapshots too.
-function snapshotMayHideLawnLadder(snapshotBundle = {}, estData = {}) {
-  const freqs = Array.isArray(snapshotBundle?.frequencies) ? snapshotBundle.frequencies : [];
-  if (freqs.length > 1) return false;
-  if (freqs.some((f) => lawnTierRuntimeMeta(f?.key))) return false;
-  const engineInputs = extractEngineInputs(estData);
-  return !!engineInputs && engineInputsAreLawnOnly(engineInputs);
-}
-
 function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
   const annual = Number(annualTotal);
   if (Number.isFinite(annual) && annual > 0) {
@@ -9894,7 +9864,6 @@ async function buildPricingBundle(estimate) {
     snapshotBundle
     && Array.isArray(snapshotBundle.frequencies)
     && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
-    && !snapshotMayHideLawnLadder(snapshotBundle, estData)
   ) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
@@ -10435,7 +10404,6 @@ module.exports.isMosquitoServiceName = isMosquitoServiceName;
 module.exports.isLawnServiceName = isLawnServiceName;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
-module.exports.snapshotMayHideLawnLadder = snapshotMayHideLawnLadder;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;

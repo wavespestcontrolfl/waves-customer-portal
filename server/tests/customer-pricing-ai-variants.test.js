@@ -37,8 +37,16 @@ describe('variantsForService — lawn_care', () => {
     expect(prem.map((o) => o.id)).toEqual(['lawn-premium']);
   });
 
-  test('explicit basic / 4-application / quarterly intent returns basic only', () => {
+  test('explicit basic / cadence-worded 4-application / quarterly intent returns basic only', () => {
     expect(variantsForService('lawn_care', 'just the basic lawn plan').map((o) => o.id)).toEqual(['lawn-basic']);
     expect(variantsForService('lawn_care', 'quarterly lawn service').map((o) => o.id)).toEqual(['lawn-basic']);
+    expect(variantsForService('lawn_care', 'lawn with 4 applications').map((o) => o.id)).toEqual(['lawn-basic']);
+  });
+
+  test('a stray digit (sq ft / address) does NOT collapse the quote to Basic', () => {
+    expect(variantsForService('lawn_care', 'price lawn for 4,000 sq ft').map((o) => o.id))
+      .toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
+    expect(variantsForService('lawn_care', 'lawn at 123 4th Ave').map((o) => o.id))
+      .toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
   });
 });

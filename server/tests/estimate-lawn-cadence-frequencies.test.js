@@ -1,7 +1,6 @@
 const {
   lawnFrequenciesFromResultStats,
   lawnFrequenciesFromEngineResult,
-  snapshotMayHideLawnLadder,
   applySelectedLawnTierToEstimateData,
   buildRenderFlags,
   sectionTierEligibleFromKeys,
@@ -228,40 +227,6 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       ],
     };
     expect(lawnFrequenciesFromEngineResult(bundle)).toEqual([]);
-  });
-});
-
-describe('snapshotMayHideLawnLadder — bypass stale pre-ladder lawn snapshots', () => {
-  const collapsedSnapshot = { frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 62 }] };
-  const lawnOnlyEstData = { engineInputs: { services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } } };
-
-  test('flags a single-Quarterly snapshot on a lawn-only engine-input estimate', () => {
-    expect(snapshotMayHideLawnLadder(collapsedSnapshot, lawnOnlyEstData)).toBe(true);
-  });
-
-  test('leaves healthy multi-tier lawn snapshots alone', () => {
-    const ladderSnapshot = { frequencies: [{ key: 'basic' }, { key: 'standard' }, { key: 'enhanced' }, { key: 'premium' }] };
-    expect(snapshotMayHideLawnLadder(ladderSnapshot, lawnOnlyEstData)).toBe(false);
-  });
-
-  test('does not touch snapshots that already carry a lawn-tier key', () => {
-    const singleTier = { frequencies: [{ key: 'enhanced', label: 'Every 6 weeks' }] };
-    expect(snapshotMayHideLawnLadder(singleTier, lawnOnlyEstData)).toBe(false);
-  });
-
-  test('does not touch pest or non-engine-input estimates', () => {
-    const pestEstData = { engineInputs: { services: { pest: { frequency: 'quarterly' }, lawn: {} } } };
-    expect(snapshotMayHideLawnLadder(collapsedSnapshot, pestEstData)).toBe(false);
-    expect(snapshotMayHideLawnLadder(collapsedSnapshot, { result: { results: {} } })).toBe(false);
-  });
-
-  test('does not bypass a mixed no-pest bundle (lawn + mosquito / tree & shrub)', () => {
-    // lawnFrequenciesFromEngineResult would refuse the mixed bundle, so bypassing
-    // a valid frozen snapshot here could reprice an already-sent estimate.
-    const lawnMosquito = { engineInputs: { services: { lawn: {}, mosquito: { tier: 'seasonal9' } } } };
-    const lawnTreeShrub = { engineInputs: { services: { lawn: {}, treeShrub: { tier: 'standard' } } } };
-    expect(snapshotMayHideLawnLadder(collapsedSnapshot, lawnMosquito)).toBe(false);
-    expect(snapshotMayHideLawnLadder(collapsedSnapshot, lawnTreeShrub)).toBe(false);
   });
 });
 
