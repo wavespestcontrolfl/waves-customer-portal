@@ -467,7 +467,13 @@ router.post('/', async (req, res, next) => {
     const aiAnalysis = body.aiAnalysis && typeof body.aiAnalysis === 'object' ? body.aiAnalysis : {};
     const overallScore = Number.isFinite(Number(body.overallScore)) ? Math.round(Number(body.overallScore)) : null;
     const aiConfidence = Number.isFinite(Number(body.aiConfidence)) ? Number(body.aiConfidence) : null;
-    const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(reportContract.customer_summary, 2000);
+
+    // Never trust a client-supplied contract verbatim — re-run the server-side
+    // guardrail (classify + repair) so the stored, later-published copy is always
+    // sanitized regardless of what the client computed.
+    const releaseMode = classifyReleaseMode(reportContract);
+    const sanitizedContract = applyAutoReleaseRepair(reportContract, releaseMode);
+    const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(sanitizedContract.customer_summary, 2000);
 
     const [row] = await db('lawn_diagnostics').insert({
       mode,
@@ -475,8 +481,8 @@ router.post('/', async (req, res, next) => {
       created_by_technician_id: req.technicianId || req.technician?.id || null,
       contact_snapshot: contact ? JSON.stringify(contact) : null,
       address_snapshot: address ? JSON.stringify(address) : null,
-      ai_analysis: JSON.stringify(aiAnalysis),
-      report_contract: JSON.stringify(reportContract),
+      ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode }),
+      report_contract: JSON.stringify(sanitizedContract),
       ai_confidence: aiConfidence,
       overall_score: overallScore,
       ai_summary: aiSummary,

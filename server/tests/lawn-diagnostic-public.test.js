@@ -113,6 +113,26 @@ describe('buildPublicLawnReport whitelisting', () => {
     const report = buildPublicLawnReport(sentDiagnostic());
     expect(Object.keys(report.findings[0]).sort()).toEqual(['confidence', 'customer_note', 'name', 'severity']);
   });
+
+  test('scrubs confirmed-language and brand names from published free text (egress defense)', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Chinch bug pressure',
+          confidence: 'moderate',
+          findings: [{ name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', customer_wording: 'We confirmed active chinch; we applied Talstar P.' }],
+        },
+        watering: {},
+        customer_summary: 'We confirmed chinch and treated with Talstar P at the labeled rate.',
+        watch_items: ['Reapply Talstar if it spreads.'],
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toMatch(/talstar/i);
+    expect(serialized).not.toMatch(/\bconfirmed\b/i);
+    expect(report.findings[0].customer_note.toLowerCase()).toContain('suspected');
+  });
 });
 
 describe('validateQuoteRequest', () => {

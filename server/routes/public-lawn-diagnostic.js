@@ -15,6 +15,7 @@ const router = express.Router();
 
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { scrubCustomerText } = require('../services/lawn-diagnostic-report');
 
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
 
@@ -65,12 +66,15 @@ function buildPublicLawnReport(diagnostic = {}) {
   const watering = contract.watering || {};
   const ongoing = watering.ongoing_irrigation || {};
 
+  // Every published free-text field is scrubbed at egress (defense in depth):
+  // even if a stale/buggy client stored unsanitized copy, no confirmed-pest claim
+  // or brand/active-ingredient name leaves the server.
   const findings = Array.isArray(diagnosis.findings)
     ? diagnosis.findings.map((finding) => ({
       name: finding.name || null,
       confidence: finding.confidence || null,
       severity: finding.severity || null,
-      customer_note: finding.customer_wording || null,
+      customer_note: scrubCustomerText(finding.customer_wording) || null,
     }))
     : [];
 
@@ -82,7 +86,7 @@ function buildPublicLawnReport(diagnostic = {}) {
     first_name: firstName,
     city: address.city || null,
     overall_status: overallStatusLabel(diagnostic.overall_score),
-    summary: contract.customer_summary || null,
+    summary: scrubCustomerText(contract.customer_summary) || null,
     primary_finding: diagnosis.primary_finding || null,
     confidence: diagnosis.confidence || null,
     findings,
@@ -91,8 +95,8 @@ function buildPublicLawnReport(diagnostic = {}) {
       restriction_summary: ongoing.restriction_summary_customer || null,
     },
     expectations: contract.expectations || {},
-    watch_items: Array.isArray(contract.watch_items) ? contract.watch_items : [],
-    seasonal_context: contract.seasonal_context || '',
+    watch_items: (Array.isArray(contract.watch_items) ? contract.watch_items : []).map(scrubCustomerText),
+    seasonal_context: scrubCustomerText(contract.seasonal_context || ''),
   };
 }
 

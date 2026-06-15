@@ -561,6 +561,20 @@ function stripConfirmedLanguage(text) {
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
 
+// Product/active-ingredient names that must never reach customer-facing copy.
+const CUSTOMER_TEXT_BRANDS = /\b(?:talstar|arena|celsius|sedgehammer|prodiamine|dimension|barricade|bifenthrin|fipronil|imidacloprid|acelepryn|chlorantraniliprole|tenacity|mesotrione)\b/gi;
+
+// Final egress sanitizer for any free-text published to a prospect. Defense in
+// depth at the public boundary: even if a stale/buggy client stored unsanitized
+// copy, no confirmed-pest claim or brand/active-ingredient name leaves the server.
+function scrubCustomerText(text) {
+  if (text == null) return text;
+  return stripConfirmedLanguage(String(text))
+    .replace(CUSTOMER_TEXT_BRANDS, 'the treatment product')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 // Repair unsafe customer copy in place of blocking. Condition/flag-driven so
 // every applicable degradation is applied regardless of the summary mode label.
 function applyAutoReleaseRepair(contract = {}, mode = 'standard') {
@@ -665,5 +679,6 @@ module.exports = {
   normalizeProductLabelConstraints,
   normalizeProducts,
   runQaSafetyCheck,
+  scrubCustomerText,
   MINIMAL_SAFE_SUMMARY,
 };
