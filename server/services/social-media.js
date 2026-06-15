@@ -55,6 +55,25 @@ const SOCIAL_FLAGS = {
   get dryRun() { return socialFlag('SOCIAL_DRY_RUN'); },
 };
 
+const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp'];
+
+function normalizePublishChannels(channels) {
+  if (!Array.isArray(channels) || channels.length === 0) return new Set(PUBLISH_PLATFORMS);
+  const selected = channels
+    .map((channel) => String(channel || '').trim().toLowerCase())
+    .filter((channel) => PUBLISH_PLATFORMS.includes(channel));
+  return new Set(selected.length ? selected : PUBLISH_PLATFORMS);
+}
+
+function normalizeGbpLocationIds(locationIds) {
+  if (!Array.isArray(locationIds) || locationIds.length === 0) return null;
+  const valid = new Set(WAVES_LOCATIONS.map((loc) => loc.id));
+  const selected = locationIds
+    .map((id) => String(id || '').trim())
+    .filter((id) => valid.has(id));
+  return selected.length ? new Set(selected) : null;
+}
+
 async function isPausedByAdmin() {
   try {
     const row = await db('system_settings').where('key', 'social_automation_paused').first();
@@ -549,6 +568,23 @@ async function postToFacebook(message, link, imageUrl) {
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
   if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
 
+  if (imageUrl) {
+    const caption = link ? `${message}\n\n${link}` : message;
+    const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/photos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: imageUrl, caption, access_token: token }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Facebook photo API ${res.status}: ${err}`);
+    }
+    const data = await res.json();
+    logger.info(`[social] Facebook photo post created: ${data.post_id || data.id}`);
+    return { platform: 'facebook', postId: data.post_id || data.id, success: true, imageUrl };
+  }
+
   const body = { message, access_token: token };
   if (link) body.link = link;
 
@@ -565,6 +601,30 @@ async function postToFacebook(message, link, imageUrl) {
   const data = await res.json();
   logger.info(`[social] Facebook post created: ${data.id}`);
   return { platform: 'facebook', postId: data.id, success: true };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForInstagramContainer(containerId, token) {
+  let lastStatus = null;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    await sleep(attempt === 0 ? 3000 : 5000);
+    const statusRes = await fetch(
+      `https://graph.facebook.com/v25.0/${containerId}?fields=status_code,status&access_token=${encodeURIComponent(token)}`
+    );
+    const status = await statusRes.json().catch(() => ({}));
+    if (!statusRes.ok) {
+      throw new Error(`Instagram status ${statusRes.status}: ${JSON.stringify(status)}`);
+    }
+    lastStatus = status;
+    if (status.status_code === 'FINISHED') return status;
+    if (status.status_code === 'ERROR') {
+      throw new Error(`Instagram media error: ${JSON.stringify(status)}`);
+    }
+  }
+  throw new Error(`Instagram media not ready: ${JSON.stringify(lastStatus)}`);
 }
 
 async function postToInstagram(caption, imageUrl) {
@@ -587,7 +647,11 @@ async function postToInstagram(caption, imageUrl) {
   }
   const container = await containerRes.json();
 
-  // Step 2: Publish
+  // Step 2: Wait for Meta to finish ingesting the image. Publishing
+  // immediately often returns code 9007: "Media ID is not available".
+  const containerStatus = await waitForInstagramContainer(container.id, token);
+
+  // Step 3: Publish
   const publishRes = await fetch(
     `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media_publish`,
     {
@@ -602,7 +666,7 @@ async function postToInstagram(caption, imageUrl) {
   }
   const data = await publishRes.json();
   logger.info(`[social] Instagram post published: ${data.id}`);
-  return { platform: 'instagram', postId: data.id, success: true };
+  return { platform: 'instagram', postId: data.id, success: true, mediaContainerId: container.id, mediaStatus: containerStatus.status_code };
 }
 
 async function postToLinkedIn(text, link, title, description, imageUrl) {
@@ -786,7 +850,7 @@ const SocialMediaService = {
   /**
    * Publish content to all configured platforms.
    */
-  async publishToAll({ title, description, link, guid, source, imageUrl, customContent }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, customContent, channels, gbpLocationIds }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -795,6 +859,8 @@ const SocialMediaService = {
     }
 
     const platformResults = [];
+    const requestedPlatforms = normalizePublishChannels(channels);
+    const requestedGbpLocations = normalizeGbpLocationIds(gbpLocationIds);
 
     // Only generate an AI image if a platform can actually consume it.
     // Both Instagram and GBP use generatedImageUrl, and both need the image
@@ -869,7 +935,7 @@ const SocialMediaService = {
         enabled: false,
         reason: 'Disabled',
       },
-    ];
+    ].filter((platform) => requestedPlatforms.has(platform.key));
 
     for (const p of platforms) {
       if (!p.enabled) {
@@ -894,7 +960,7 @@ const SocialMediaService = {
         }
 
         if (p.key === 'facebook') {
-          const r = await withRetry(() => postToFacebook(content, link), { label: 'facebook' });
+          const r = await withRetry(() => postToFacebook(content, link, generatedImageUrl), { label: 'facebook' });
           platformResults.push({ ...r, content });
         } else if (p.key === 'instagram') {
           const imgUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
@@ -912,11 +978,14 @@ const SocialMediaService = {
     }
 
     // Post to all 4 GBP locations
-    if (!SOCIAL_FLAGS.gbpEnabled) {
+    if (requestedPlatforms.has('gbp') && !SOCIAL_FLAGS.gbpEnabled) {
       platformResults.push({ platform: 'gbp', skipped: 'Disabled' });
     }
     // customContent.gbp may be a string (same copy for all locations) or an object keyed by location id
-    for (const loc of (SOCIAL_FLAGS.gbpEnabled ? WAVES_LOCATIONS : [])) {
+    const gbpLocations = requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+      ? WAVES_LOCATIONS.filter((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id))
+      : [];
+    for (const loc of gbpLocations) {
       try {
         const gbpCustom = customContent?.gbp;
         const gbpContent =

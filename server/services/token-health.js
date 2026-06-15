@@ -32,6 +32,21 @@ async function getStoredGbpRefreshToken(locationKey) {
   }
 }
 
+async function fetchGraph(path, token) {
+  const separator = path.includes('?') ? '&' : '?';
+  const res = await fetch(`https://graph.facebook.com/v25.0${path}${separator}access_token=${encodeURIComponent(token)}`);
+  const data = await res.json();
+  return { res, data };
+}
+
+function graphErrorStatus(errorCode) {
+  return (errorCode === 190 || errorCode === 463) ? 'expired' : 'error';
+}
+
+function graphErrorMessage(data, fallbackStatus) {
+  return data?.error?.message || `HTTP ${fallbackStatus}`;
+}
+
 // ── Helper: upsert result into token_credentials ──
 async function upsertResult({ platform, tokenType, status, lastError, expiresAt, envVarName }) {
   try {
@@ -63,26 +78,47 @@ async function checkFacebook() {
   const platform = 'facebook';
   const envVarName = 'FACEBOOK_ACCESS_TOKEN';
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
+  const pageId = process.env.FACEBOOK_PAGE_ID;
 
-  if (!token) {
-    const result = { platform, status: 'not_configured', lastError: 'FACEBOOK_ACCESS_TOKEN not set', expiresAt: null };
+  if (!token || !pageId) {
+    const missing = [];
+    if (!token) missing.push('FACEBOOK_ACCESS_TOKEN');
+    if (!pageId) missing.push('FACEBOOK_PAGE_ID');
+    const result = { platform, status: 'not_configured', lastError: `Missing: ${missing.join(', ')}`, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v25.0/me?access_token=${token}`);
-    const data = await res.json();
+    const { res, data } = await fetchGraph(`/${pageId}?fields=id,name,instagram_business_account{id,username}`, token);
 
-    if (res.ok && !data.error) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+    if (res.ok && !data.error && data.id === pageId) {
+      const result = {
+        platform,
+        status: 'healthy',
+        lastError: null,
+        expiresAt: null,
+        details: {
+          pageId: data.id,
+          pageName: data.name || null,
+          linkedInstagramAccountId: data.instagram_business_account?.id || null,
+          linkedInstagramUsername: data.instagram_business_account?.username || null,
+          checks: {
+            pageResolved: true,
+            pageMatchesConfig: true,
+          },
+        },
+      };
       await upsertResult({ ...result, tokenType: 'oauth', envVarName });
       return result;
     }
 
     const errorCode = data.error?.code;
-    const status = (errorCode === 190 || errorCode === 463) ? 'expired' : 'error';
-    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    const status = graphErrorStatus(errorCode);
+    const lastError = data.id && data.id !== pageId
+      ? `FACEBOOK_ACCESS_TOKEN resolved page ${data.id}, expected ${pageId}`
+      : graphErrorMessage(data, res.status);
+    const result = { platform, status, lastError, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   } catch (err) {
@@ -107,18 +143,41 @@ async function checkInstagram() {
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v25.0/${accountId}?access_token=${token}`);
-    const data = await res.json();
-
-    if (res.ok && !data.error) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+    const account = await fetchGraph(`/${accountId}?fields=id,username,name`, token);
+    if (!account.res.ok || account.data.error) {
+      const errorCode = account.data.error?.code;
+      const status = graphErrorStatus(errorCode);
+      const result = { platform, status, lastError: graphErrorMessage(account.data, account.res.status), expiresAt: null };
       await upsertResult({ ...result, tokenType: 'oauth', envVarName: 'INSTAGRAM_ACCOUNT_ID' });
       return result;
     }
 
-    const errorCode = data.error?.code;
-    const status = (errorCode === 190 || errorCode === 463) ? 'expired' : 'error';
-    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    const limit = await fetchGraph(`/${accountId}/content_publishing_limit`, token);
+    if (!limit.res.ok || limit.data.error) {
+      const errorCode = limit.data.error?.code;
+      const status = graphErrorStatus(errorCode);
+      const result = { platform, status, lastError: graphErrorMessage(limit.data, limit.res.status), expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName: 'INSTAGRAM_ACCOUNT_ID' });
+      return result;
+    }
+
+    const quotaUsage = Array.isArray(limit.data.data) ? limit.data.data[0]?.quota_usage : null;
+    const result = {
+      platform,
+      status: 'healthy',
+      lastError: null,
+      expiresAt: null,
+      details: {
+        accountId: account.data.id,
+        username: account.data.username || null,
+        name: account.data.name || null,
+        quotaUsage: quotaUsage ?? null,
+        checks: {
+          accountResolved: true,
+          contentPublishingAllowed: true,
+        },
+      },
+    };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName: 'INSTAGRAM_ACCOUNT_ID' });
     return result;
   } catch (err) {

@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const SocialMediaService = require('../services/social-media');
 const { SOCIAL_FLAGS, isPausedByAdmin, normalizeUrl } = require('../services/social-media');
+const SocialContentStudio = require('../services/social-content-studio');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -75,13 +76,120 @@ router.post('/preview', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /campaign-builder/context — source facts for local GBP/social campaigns
+router.get('/campaign-builder/context', async (req, res, next) => {
+  try {
+    const context = await SocialContentStudio.getCampaignContext({
+      topic: req.query.topic,
+      city: req.query.city,
+      service: req.query.service,
+    });
+    res.json(context);
+  } catch (err) { next(err); }
+});
+
+// POST /campaign-builder/preview — template-grade campaign drafts
+router.post('/campaign-builder/preview', async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.previewCampaign(req.body || {});
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /campaign-builder/save — save generated campaign as a social draft
+router.post('/campaign-builder/save', async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.saveCampaignDraft(req.body || {});
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// GET /autonomous/status — social content studio autonomous mode state
+router.get('/autonomous/status', async (req, res, next) => {
+  try {
+    const status = await SocialContentStudio.autonomousStatus();
+    res.json(status);
+  } catch (err) { next(err); }
+});
+
+// GET /autonomous/runs — audit trail for autonomous social studio attempts
+router.get('/autonomous/runs', async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.listAutonomousRuns({
+      limit: req.query.limit,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /autonomous/run — force or test an autonomous social run
+router.post('/autonomous/run', async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.runAutonomous({
+      force: req.body?.force === true,
+      mode: req.body?.mode,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /review-graphics — privacy-safe Google review graphic queue
+router.get('/review-graphics', async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.listReviewGraphicCandidates({
+      limit: req.query.limit,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /review-graphics — create or update a review graphic draft
+router.post('/review-graphics', async (req, res, next) => {
+  try {
+    const graphic = await SocialContentStudio.createReviewGraphic(req.body || {});
+    res.json({ success: true, graphic });
+  } catch (err) { next(err); }
+});
+
+// POST /review-graphics/:id/approve — mark a review graphic approved
+router.post('/review-graphics/:id/approve', async (req, res, next) => {
+  try {
+    const [graphic] = await db('review_graphics')
+      .where({ id: req.params.id })
+      .update({
+        status: 'approved',
+        approved_at: new Date(),
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!graphic) return res.status(404).json({ error: 'review graphic not found' });
+    res.json({ success: true, graphic });
+  } catch (err) { next(err); }
+});
+
+// GET /competitor-swipe — fastest-riser profiles and manual engagement captures
+router.get('/competitor-swipe', async (req, res, next) => {
+  try {
+    const result = await SocialContentStudio.listCompetitorSwipeFile();
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /competitor-swipe/posts — manual competitor post engagement capture
+router.post('/competitor-swipe/posts', async (req, res, next) => {
+  try {
+    const post = await SocialContentStudio.createCompetitorPost(req.body || {});
+    res.json({ success: true, post });
+  } catch (err) { next(err); }
+});
+
 // POST /publish — publish to all platforms
 router.post('/publish', async (req, res, next) => {
   try {
-    const { title, description, link, guid, imageUrl, customContent } = req.body;
+    const { title, description, link, guid, imageUrl, customContent, channels, gbpLocationIds } = req.body;
     if (!title) return res.status(400).json({ error: 'title required' });
     const result = await SocialMediaService.publishToAll({
-      title, description, link, guid, source: 'manual', imageUrl, customContent,
+      title, description, link, guid, source: 'manual', imageUrl, customContent, channels, gbpLocationIds,
     });
     res.json(result);
   } catch (err) { next(err); }
