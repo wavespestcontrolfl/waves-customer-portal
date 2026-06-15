@@ -137,12 +137,19 @@ async function checkFacebook() {
         const scopes = Array.isArray(dbg?.data?.scopes) ? dbg.data.scopes : [];
         const granular = Array.isArray(dbg?.data?.granular_scopes) ? dbg.data.granular_scopes : [];
         // FB expresses a granted permission in `scopes` (flat) and/or
-        // `granular_scopes` (per-resource); treat it as granted if it appears in
-        // either, so a granular-only grant is not mistaken for a missing one.
-        const granted = new Set([...scopes, ...granular.map((g) => g && g.scope).filter(Boolean)]);
-        // Only render a verdict when introspection actually returned scope data;
-        // otherwise leave capability unknown rather than false-flagging.
-        if (granted.size) canCreateContent = granted.has('pages_manage_posts');
+        // `granular_scopes` (per-resource). When a granular entry exists for
+        // pages_manage_posts its `target_ids` are authoritative: the permission
+        // applies only to those Pages (no target_ids = all Pages). A flat-only
+        // grant with no granular entry is a broad grant. Only render a verdict
+        // when introspection actually returned scope data — otherwise leave the
+        // capability unknown rather than false-flagging.
+        const granularPublish = granular.find((g) => g && g.scope === 'pages_manage_posts');
+        if (granularPublish) {
+          const targets = Array.isArray(granularPublish.target_ids) ? granularPublish.target_ids.map(String) : null;
+          canCreateContent = !targets || targets.includes(String(pageId));
+        } else if (scopes.length || granular.length) {
+          canCreateContent = scopes.includes('pages_manage_posts');
+        }
       } catch {
         // network/parse failure — leave capability unknown, never false-flag
       }

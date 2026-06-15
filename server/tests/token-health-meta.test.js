@@ -230,6 +230,46 @@ describe('token health meta checks', () => {
     expect(result.details.checks.canCreateContent).toBe(true);
   });
 
+  test('facebook health errors when pages_manage_posts is granted only for a different Page', async () => {
+    // granular_scopes.target_ids is authoritative — a publish grant for another
+    // Page must NOT mark the configured Page as publish-capable.
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              is_valid: true,
+              scopes: ['pages_show_list', 'pages_manage_posts'],
+              granular_scopes: [{ scope: 'pages_manage_posts', target_ids: ['999999999999999'] }],
+            },
+          }),
+        };
+      }
+      if (text.includes('/110336442031847?fields=')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: '110336442031847',
+            name: 'Waves Pest Control',
+            instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+
+    const result = await tokenHealth.checkSingle('facebook');
+
+    expect(result.status).toBe('error');
+    expect(result.lastError).toMatch(/pages_manage_posts/);
+    expect(result.details.checks.canCreateContent).toBe(false);
+  });
+
   test('facebook health stays healthy with unknown capability when scopes are unavailable', async () => {
     // Some token introspection responses omit `scopes` — never false-flag then.
     global.fetch = jest.fn(async (url) => {
