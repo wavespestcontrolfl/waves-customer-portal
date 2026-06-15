@@ -25,6 +25,26 @@ function truncate(value, max) {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 }
 
+// service_records.id is a UUID column; the report being generated may not exist
+// yet (we ground a pending completion), so use the nil UUID as a placeholder.
+// A literal like 'pending' makes buildPressureTrendContext's whereNot({id}) throw
+// "invalid input syntax for type uuid", which its .catch() then swallows —
+// silently dropping the pressure trend on every grounded report.
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+// Prior technician_notes are free-form and can carry tech-only secrets (gate /
+// lockbox / alarm codes). Mask digit runs that sit just after an access keyword
+// before any of that text reaches a customer-facing LLM. Conservative: only
+// keyword-adjacent numbers, so measurements/sqft/years are left intact.
+function redactCodes(value) {
+  const text = cleanText(value);
+  if (!text) return text;
+  return text.replace(
+    /\b(gate|lock\s?box|garage|door|alarm|key|access|entry|combo|combination|passcode|keypad|code|pin)\b[^.\n]{0,25}?(\d[\d\s-]{1,9}\d)/gi,
+    (match) => match.replace(/\d[\d\s-]{1,9}\d/, '[redacted]'),
+  );
+}
+
 function finiteOrNull(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -134,7 +154,7 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, knex, lim
     return rows.map((r) => ({
       serviceDate: r.service_date,
       serviceType: r.service_type,
-      notes: truncate(r.technician_notes, 600),
+      notes: truncate(redactCodes(r.technician_notes), 600),
       findings: (byRecord[String(r.id)] || []).map((f) => ({ severity: cleanText(f.severity), title: cleanText(f.title) })),
     }));
   } catch (err) {
@@ -174,8 +194,10 @@ async function loadPropertyContext(customerId, knex) {
     // carry entry codes; feeding them to a customer-facing LLM (alongside
     // untrusted visit notes) is not a safe boundary. Chemical sensitivity is
     // surfaced only as a redacted flag, never the free-text health detail.
+    // Pet count only — pet_details is free-form and can hold names or tech-only
+    // handling notes; a redacted count is enough for re-entry guidance.
     return {
-      pets: Number(prefs.pet_count) > 0 ? (cleanText(prefs.pet_details) || `${prefs.pet_count} pet(s) on site`) : null,
+      pets: Number(prefs.pet_count) > 0 ? String(prefs.pet_count) : null,
       chemicalSensitivity: prefs.chemical_sensitivities ? 'a household chemical sensitivity is on file' : null,
     };
   } catch (err) {
@@ -230,7 +252,7 @@ async function buildReportCopyContext({
       : Promise.resolve(null),
     customerId
       ? buildPressureTrendContext({
-        record: { id: 'pending', customer_id: customerId, service_type: serviceType, service_line: line, pressure_index: null },
+        record: { id: NIL_UUID, customer_id: customerId, service_type: serviceType, service_line: line, pressure_index: null },
         knex,
       }).catch(() => null)
       : Promise.resolve(null),

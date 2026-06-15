@@ -4382,7 +4382,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         if (isAdmin || isAssignedTech) {
           groundingCustomerId = svc.customer_id;
           groundingServiceType = serviceType || svc.service_type;
-          groundingServiceDate = serviceDate || svc.scheduled_date;
+          // The scheduled service is the source of truth for the date, so season
+          // and trailing-rainfall grounding match the visit, not "today" (the
+          // client builds serviceDate from new Date()). Fall back to the client
+          // value only if the row has no scheduled_date.
+          groundingServiceDate = svc.scheduled_date || serviceDate;
         } else {
           logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
         }
