@@ -289,19 +289,6 @@ function selectedFrequencyValue(estData = {}, selectedFrequency = '') {
 
 function frequencyMatchesSelection(frequency = {}, selectedValue = '') {
   if (!selectedValue) return false;
-  const requestedToken = normalizeSelectionToken(selectedValue);
-  const requestedFrequency = normalizeFrequencyKey(selectedValue);
-  const candidateValues = [
-    frequency.key,
-    frequency.frequencyKey,
-    frequency.billingFrequencyKey,
-    frequency.serviceTierKey,
-    frequency.tier,
-    frequency.label,
-  ];
-  if (candidateValues.some((value) => normalizeSelectionToken(value) === requestedToken)) return true;
-  if (requestedFrequency && candidateValues.some((value) => normalizeFrequencyKey(value) === requestedFrequency)) return true;
-
   const serviceCategory = serviceKeyFor({
     service: frequency.serviceCategory || frequency.service || frequency.serviceKey || frequency.category,
     label: frequency.label,
@@ -309,8 +296,23 @@ function frequencyMatchesSelection(frequency = {}, selectedValue = '') {
   if (serviceCategory === 'lawn_care') {
     const requestedTierKey = lawnTierKeyForValue(selectedValue);
     const candidateTierKey = lawnTierKeyForRow(frequency);
-    return !!requestedTierKey && requestedTierKey === candidateTierKey;
+    if (requestedTierKey || candidateTierKey) {
+      return !!requestedTierKey && requestedTierKey === candidateTierKey;
+    }
   }
+
+  const requestedToken = normalizeSelectionToken(selectedValue);
+  const requestedFrequency = normalizeFrequencyKey(selectedValue);
+  const candidateValues = [
+    frequency.key,
+    frequency.frequencyKey,
+    ...(serviceCategory === 'lawn_care' ? [] : [frequency.billingFrequencyKey]),
+    frequency.serviceTierKey,
+    frequency.tier,
+    frequency.label,
+  ];
+  if (candidateValues.some((value) => normalizeSelectionToken(value) === requestedToken)) return true;
+  if (requestedFrequency && candidateValues.some((value) => normalizeFrequencyKey(value) === requestedFrequency)) return true;
   return false;
 }
 

@@ -229,7 +229,7 @@ describe('estimate slot weekend and expander behavior', () => {
   });
 
   test('estimate slot profile matches lawn tier keys from pricing snapshots', () => {
-    const profile = slotAvailabilityInternals.resolveEstimateSlotProfile({
+    const estimate = {
       service_interest: 'Lawn Care',
       monthly_total: 120,
       annual_total: 1440,
@@ -242,6 +242,7 @@ describe('estimate slot weekend and expander behavior', () => {
                 key: 'quarterly',
                 serviceCategory: 'lawn_care',
                 serviceTierKey: 'basic',
+                billingFrequencyKey: 'monthly',
                 monthly: 80,
                 annual: 960,
                 perServiceTreatments: [
@@ -252,6 +253,7 @@ describe('estimate slot weekend and expander behavior', () => {
                 key: 'monthly',
                 serviceCategory: 'lawn_care',
                 serviceTierKey: 'premium',
+                billingFrequencyKey: 'monthly',
                 monthly: 120,
                 annual: 1440,
                 perServiceTreatments: [
@@ -262,11 +264,19 @@ describe('estimate slot weekend and expander behavior', () => {
           },
         },
       },
-    }, { selectedFrequency: 'premium' });
+    };
+
+    const profile = slotAvailabilityInternals.resolveEstimateSlotProfile(estimate, { selectedFrequency: 'premium' });
 
     expect(profile.durationMinutes).toBe(45);
     expect(profile.serviceLabel).toBe('12x Lawn Care');
     expect(profile.services).toEqual([
+      expect.objectContaining({ service: 'lawn_care', visitsPerYear: 12 }),
+    ]);
+
+    const cadenceProfile = slotAvailabilityInternals.resolveEstimateSlotProfile(estimate, { selectedFrequency: 'monthly' });
+    expect(cadenceProfile.serviceLabel).toBe('12x Lawn Care');
+    expect(cadenceProfile.services).toEqual([
       expect.objectContaining({ service: 'lawn_care', visitsPerYear: 12 }),
     ]);
   });
