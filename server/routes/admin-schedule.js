@@ -525,7 +525,7 @@ function httpError(status, message) {
 }
 
 const ASSIGNMENT_SCOPES = new Set(['this_only', 'following', 'series']);
-const ASSIGNMENT_TERMINAL_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped'];
+const ASSIGNMENT_TERMINAL_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show'];
 
 function normalizeAssignmentScope(scope) {
   const normalized = scope || 'this_only';
@@ -3286,6 +3286,34 @@ router.put('/:id/status', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // A no-show is terminal. The V2 dispatch board routes row actions
+    // (Skip, etc.) through here, and the flip below reads fromStatus from
+    // the current row — so without this, a just-no-showed visit could be
+    // flipped to skipped/other, erasing the public state:'no_show'
+    // derivation and re-exposing the stale scheduled/en-route tracker.
+    // Mirror admin-dispatch: idempotent on no_show, 409 on any other target.
+    if (svc.status === 'no_show') {
+      if (toStatus === 'no_show') {
+        return res.json({ success: true, alreadyNoShow: true });
+      }
+      return res.status(409).json({
+        error: 'This visit was already marked as a no-show. Refresh and try again.',
+        code: 'already_no_show',
+      });
+    }
+
+    // Setting no_show belongs to the dispatch action (PUT /admin/dispatch/
+    // :id/status), which runs the source/window guards and the no-show side
+    // effects (customer SMS, tech-status clear, invoice void, missed-
+    // appointment log). Persisting it through this bare status route would
+    // create a partial no-show, so reject the target here.
+    if (toStatus === 'no_show') {
+      return res.status(409).json({
+        error: 'Mark a no-show from the appointment detail sheet, not this action.',
+        code: 'no_show_wrong_route',
+      });
+    }
 
     // Day-of lifecycle guard — same as admin-dispatch PUT /:serviceId/status.
     // en_route / on_site / completed only happen on (or after) the

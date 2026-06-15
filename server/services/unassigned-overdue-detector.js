@@ -92,7 +92,7 @@ async function runInner() {
         FROM scheduled_services s
         WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
           AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
-          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped')
+          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show')
           AND s.technician_id IS NULL
           AND s.window_start IS NOT NULL
       )

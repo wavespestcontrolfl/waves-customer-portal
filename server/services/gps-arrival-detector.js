@@ -270,7 +270,7 @@ function isEnRouteService(service) {
   if (!service) return false;
   if (service.cancelled_at || service.completed_at) return false;
   if (['on_property', 'complete', 'cancelled'].includes(service.track_state)) return false;
-  if (['on_site', 'completed', 'cancelled', 'skipped'].includes(service.status)) return false;
+  if (['on_site', 'completed', 'cancelled', 'skipped', 'no_show'].includes(service.status)) return false;
   return service.track_state === 'en_route' || service.status === 'en_route';
 }
 

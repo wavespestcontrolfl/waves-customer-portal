@@ -377,6 +377,7 @@ export default function DashboardPageV2() {
               total={today.total}
               remaining={today.remaining}
               cancelled={today.cancelled}
+              noShow={today.noShow}
             />
           ) : (
             <EmptyState>Loading…</EmptyState>

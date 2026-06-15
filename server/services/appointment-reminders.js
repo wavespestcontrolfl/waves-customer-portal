@@ -946,6 +946,103 @@ const AppointmentReminders = {
   },
 
   /**
+   * Handle a no-show — notify the customer that we missed them and invite
+   * them to get back on the schedule. Fired from the dispatch "Mark as
+   * no-show" action. Unlike handleCancellation this reads the appointment
+   * timing straight off scheduled_services (a no-show may not have an
+   * appointment_reminders row) so the notice still sends. Best-effort:
+   * landline/opt-out guards and template-missing all degrade to no send,
+   * never throw.
+   */
+  async handleNoShow(scheduledServiceId, options = {}) {
+    try {
+      // Supersede any reminder row for this visit so a deferred
+      // confirmation still queued for the same-day appointment can't fire
+      // after it's been no-showed — the deferred-confirmation path
+      // suppresses on cancelled/confirmation_sent. Runs regardless of the
+      // notify preference: the visit is terminal either way. Best-effort.
+      try {
+        await db('appointment_reminders')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .update({ cancelled: true, updated_at: new Date() });
+      } catch (e) {
+        logger.warn(`[appt-remind] no-show reminder supersede failed: ${e.message}`);
+      }
+
+      const sendNotification = options.sendNotification !== false;
+      if (!sendNotification) {
+        logger.info(`[appt-remind] No-show notice suppressed for ${scheduledServiceId}`);
+        return null;
+      }
+
+      const svc = await db('scheduled_services')
+        .where({ 'scheduled_services.id': scheduledServiceId })
+        .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .select(
+          'scheduled_services.customer_id',
+          'scheduled_services.scheduled_date',
+          'scheduled_services.window_start',
+          'technicians.name as tech_name',
+        )
+        .first();
+      if (!svc) {
+        logger.info(`[appt-remind] No-show: scheduled service ${scheduledServiceId} not found`);
+        return null;
+      }
+
+      const { customer } = await getCustomerAndTech(svc.customer_id, scheduledServiceId);
+      if (!customer) return null;
+
+      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => null);
+
+      // scheduled_date is a DATE, window_start a TIME — compose into the
+      // naive 'YYYY-MM-DDTHH:MM:SS' shape parseETDateTime expects so the
+      // displayed time lands in ET.
+      const datePart = svc.scheduled_date instanceof Date
+        ? svc.scheduled_date.toISOString().slice(0, 10)
+        : String(svc.scheduled_date || '').slice(0, 10);
+      const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+      const apptDate = (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+      const time = apptDate ? formatTime(apptDate) : 'your scheduled time';
+      const techFirst = (svc.tech_name ? String(svc.tech_name).trim().split(/\s+/)[0] : '') || 'the team';
+
+      // The status route only blocks FUTURE no-shows, so a back-dated visit
+      // can still be marked — "today" would then be wrong. Render "today"
+      // only for a same-day miss; otherwise name the actual day/date.
+      let when = 'today';
+      if (datePart && datePart !== etDateString()) {
+        const dayDate = apptDate || parseETDateTime(`${datePart}T00:00`);
+        when = `on ${formatDay(dayDate)}, ${formatDate(dayDate)}`;
+      }
+
+      await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const customerFirst = contact.name || customer?.first_name || 'there';
+        return renderTemplate('appointment_no_show', {
+          first_name: customerFirst,
+          tech_name: techFirst,
+          when,
+          time,
+        }, {
+          workflow: 'appointment_no_show',
+          entity_type: 'scheduled_service',
+          entity_id: scheduledServiceId,
+        });
+        // messageType keeps the no-show label for analytics; the messaging
+        // policy `purpose` reuses the registered transactional
+        // 'appointment_cancellation' profile (a no-show notice is the same
+        // class of "your appointment isn't happening — let's rebook" comms,
+        // and 'appointment_no_show' is not a registered MessagePurpose).
+      }, 'appointment_no_show', 'appointment_cancellation');
+      logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+
+      return { customer_id: svc.customer_id };
+    } catch (err) {
+      logger.error(`[appt-remind] handleNoShow failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  /**
    * Handle recurring appointment cancellation — mark all reminder records
    * cancelled, then send one series-level notice through the same guarded
    * contact path as single-appointment cancellation.

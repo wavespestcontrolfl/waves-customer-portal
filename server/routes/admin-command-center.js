@@ -22,7 +22,7 @@ const DEFAULTS = {
 };
 
 const PRE_ARRIVAL_JOB_STATUSES = new Set(['pending', 'confirmed', 'rescheduled', 'en_route']);
-const DONE_JOB_STATUSES = new Set(['completed', 'cancelled', 'canceled', 'skipped']);
+const DONE_JOB_STATUSES = new Set(['completed', 'cancelled', 'canceled', 'skipped', 'no_show']);
 const COMPLETED_JOB_STATUS = 'completed';
 const OPEN_ESTIMATE_STATUSES = ['sent', 'viewed', 'open'];
 const OPEN_LEAD_STATUSES = ['new', 'open', 'contacted', 'qualified'];

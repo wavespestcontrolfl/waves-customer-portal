@@ -1252,13 +1252,59 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // freed. Reject before the transition; cancelling or confirming a
     // future job stays allowed. To genuinely run a job early,
     // reschedule it to today first.
-    const DAY_OF_LIFECYCLE_STATUSES = new Set(['en_route', 'on_site', 'completed']);
+    const DAY_OF_LIFECYCLE_STATUSES = new Set(['en_route', 'on_site', 'completed', 'no_show']);
     if (DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
       && trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
       return res.status(409).json({
         error: `This job is scheduled for ${serviceDateOnly(svc.scheduled_date)} — it may have been rescheduled while this board was open. Refresh, or move it to today to run it early.`,
         code: 'future_scheduled_date',
       });
+    }
+
+    // A no-show is terminal. Once a row is no_show this route must not flip
+    // it anywhere: re-sending no_show is idempotent success; any other
+    // target (cancelled/completed/...) would erase the missed-visit state
+    // and fire a contradictory notice, because fromStatus is read fresh as
+    // no_show and transitionJobStatus's atomic guard would accept it.
+    if (svc.status === 'no_show') {
+      if (toStatus === 'no_show') {
+        return res.json({ success: true, alreadyNoShow: true });
+      }
+      return res.status(409).json({
+        error: 'This visit was already marked as a no-show. Refresh and try again.',
+        code: 'already_no_show',
+      });
+    }
+
+    // No-show is only valid FROM an active visit state, and only once the
+    // visit window has actually started. The mobile detail sheet exposes
+    // "Mark as no-show" on every same-day row, so without these guards an
+    // accidental tap on a later-today visit would terminalize it and text
+    // the customer "we missed you at {time}" before the appointment time
+    // had even arrived. (The day-of guard above rejects future dates; this
+    // covers same-day-before-window and non-active sources.)
+    if (toStatus === 'no_show') {
+      const NO_SHOW_SOURCE_STATES = new Set(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
+      if (!NO_SHOW_SOURCE_STATES.has(svc.status)) {
+        return res.status(409).json({
+          error: `Can't mark this visit as a no-show — it's already ${svc.status}. Refresh and try again.`,
+          code: 'not_active_visit',
+        });
+      }
+      const nsDatePart = svc.scheduled_date instanceof Date
+        ? svc.scheduled_date.toISOString().slice(0, 10)
+        : String(svc.scheduled_date || '').slice(0, 10);
+      const nsTimePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+      // No date/window recorded → don't block (legacy rows). Otherwise the
+      // window-start instant (ET wall-clock → absolute) must be in the past.
+      const nsWindowReached = !/^\d{4}-\d{2}-\d{2}$/.test(nsDatePart) || !nsTimePart
+        || parseETDateTime(`${nsDatePart}T${nsTimePart}`).getTime() <= Date.now();
+      if (!nsWindowReached) {
+        return res.status(409).json({
+          error: "This visit's window hasn't started yet — you can mark it a no-show once the appointment time has passed.",
+          code: 'window_not_reached',
+        });
+      }
     }
 
     if (toStatus === 'cancelled' && ['following', 'series'].includes(scope)) {
@@ -1508,6 +1554,61 @@ router.put('/:serviceId/status', async (req, res, next) => {
           error: e,
         });
       }
+    } else if (toStatus === 'no_show') {
+      // Free the tech on the dispatch roster. A no-show marked after the
+      // job already went en_route/on_site leaves tech_status.current_job_id
+      // pointing at it — completed/cancelled clear it via track-transitions
+      // (markComplete/cancel), but this path runs none of those. No-op if
+      // the tech has already moved on (clearTechCurrentJob matches on the
+      // current_job_id). Best-effort.
+      if (svc.technician_id) {
+        try {
+          const { clearTechCurrentJob } = require('../services/tech-status');
+          await clearTechCurrentJob({
+            tech_id: svc.technician_id,
+            current_job_id: svc.id,
+            status: 'idle',
+          });
+        } catch (e) { logger.error(`[admin-dispatch] no-show tech_status clear failed: ${e.message}`); }
+      }
+
+      // Void any still-open invoice pre-minted for this visit (the
+      // pre-completion / Charge-now path links via invoices.scheduled_service_id)
+      // so billing doesn't chase a service the customer was just told was
+      // missed. Same money-state-safe helper the cancellation branch uses
+      // (skips applied payments / live PaymentIntents); best-effort.
+      try {
+        const InvoiceService = require('../services/invoice');
+        await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
+      } catch (e) { logger.error(`[admin-dispatch] no-show invoice void sweep failed: ${e.message}`); }
+
+      // Notify the customer we missed them and invite a reschedule.
+      // Best-effort — a Twilio/template failure must not fail the
+      // status flip that already committed above.
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleNoShow(svc.id, {
+          sendNotification: notifyCustomer !== false,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
+
+      // Record the miss so manual no-shows accrue toward the
+      // two-no-shows-in-90-days "we've missed you" outreach task, same as
+      // the nightly auto-detection. The nightly sweep only scans
+      // pending/confirmed rows (scheduler.js missed-appointment check), so
+      // once this branch flips the row to no_show it would otherwise never
+      // count. Dedup on scheduled_service_id mirrors the sweep's
+      // alreadyFlagged guard so a visit the nightly job already logged
+      // (while it was still pending) isn't double-counted. Best-effort.
+      try {
+        const alreadyFlagged = await db('reschedule_log')
+          .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+          .first('id');
+        if (!alreadyFlagged) {
+          const missedAppointment = require('../services/workflows/missed-appointment');
+          await missedAppointment.onSkip(svc.id, 'manual_no_show');
+        }
+      } catch (e) { logger.error(`[admin-dispatch] no-show reschedule_log record failed: ${e.message}`); }
     }
 
     await db('activity_log').insert({
@@ -1791,6 +1892,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       return res.status(409).json({
         error: `This job is now scheduled for ${serviceDateOnly(svc.scheduled_date)} — it was rescheduled while this page was open. Refresh and try again.`,
         code: 'future_scheduled_date',
+      });
+    }
+
+    // No-show is terminal and non-completable. A completion/recap sheet
+    // opened before another dispatcher marked the visit no_show would
+    // otherwise mint completion artifacts (and text the customer) for a
+    // visit the status machine says was missed — fromStatus is read fresh
+    // here, so the transitionJobStatus atomic guard wouldn't catch it.
+    // The typed recap path enforces the same via pest-recap's
+    // NON_COMPLETABLE_STATUSES.
+    if (svc.status === 'no_show') {
+      return res.status(409).json({
+        error: 'This visit was marked as a no-show and can no longer be completed. Refresh and try again.',
+        code: 'service_no_show',
       });
     }
 

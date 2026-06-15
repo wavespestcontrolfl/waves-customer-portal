@@ -40,7 +40,7 @@ const COMPLETED_STATUS = 'completed';
 // rejected before any artifact is written — otherwise we'd emit a
 // "completed" service_records row, mark the tracker complete, and text the
 // customer for a visit the status machine says never happened (Codex P1).
-const NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped']);
+const NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
 
 // service_records.structured_notes is jsonb in prod but may surface as a
 // string depending on driver config — mirror admin-dispatch's tolerant parse.

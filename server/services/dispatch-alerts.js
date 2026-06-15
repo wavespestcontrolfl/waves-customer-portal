@@ -355,6 +355,7 @@ const OVERDUE_ALERT_AUTO_RESOLVE_STATUSES = new Set([
   'completed',
   'cancelled',
   'skipped',
+  'no_show',
 ]);
 
 // Alert types in the "overdue family" — both fire on a slipping
