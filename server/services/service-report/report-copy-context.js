@@ -1,7 +1,7 @@
 // Builds the enriched grounding context for the customer-facing "Generate AI
 // service report" copy (the WHAT WE DID / WHAT WE FOUND sections). The goal is to
 // hand the model real, visit-specific facts so the output stops reading like a
-// template: prior-visit copy to deliberately differ from, pest-pressure trend,
+// template: prior-visit findings (for continuity / recurring pests), pressure trend,
 // live weather, product re-entry/rainfast data, property/pet context, and SW
 // Florida seasonality.
 //
@@ -32,19 +32,6 @@ function truncate(value, max) {
 // silently dropping the pressure trend on every grounded report.
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
-// Prior technician_notes are free-form and can carry tech-only secrets (gate /
-// lockbox / alarm codes). Mask digit runs that sit just after an access keyword
-// before any of that text reaches a customer-facing LLM. Conservative: only
-// keyword-adjacent numbers, so measurements/sqft/years are left intact.
-function redactCodes(value) {
-  const text = cleanText(value);
-  if (!text) return text;
-  return text.replace(
-    /\b(gate|lock\s?box|garage|door|alarm|key|access|entry|combo|combination|passcode|keypad|code|pin)\b[^.\n]{0,25}?(\d[\d\s-]{1,9}\d)/gi,
-    (match) => match.replace(/\d[\d\s-]{1,9}\d/, '[redacted]'),
-  );
-}
-
 function finiteOrNull(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -68,39 +55,39 @@ const SWFL_SEASON_BY_MONTH = {
   12: 'Cool, dry season. Low insect pressure; rodents seek warmth indoors; turf dormant/slow.',
 };
 
-// 'YYYY-MM-DD' date-only strings parse as UTC midnight, which an ET formatter
-// renders as the PRIOR day. Anchor those at noon UTC so the calendar date never
-// shifts; pass through everything else.
-function parseServiceDate(value) {
-  if (value == null || value === '') return new Date();
-  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value));
-  if (ymd) return new Date(Date.UTC(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]), 12));
-  return new Date(value);
-}
-
-function formatShortDate(value) {
-  const d = parseServiceDate(value);
-  if (Number.isNaN(d.getTime())) return 'prior visit';
-  return d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-// Resolve a service date to an ET calendar 'YYYY-MM-DD'. fetchServiceWeekWeather
-// needs a Date or 'YYYY-MM-DD'; the client sends a long US date ("June 15, 2026")
-// which it would otherwise slice into an invalid range and silently drop rainfall
-// context. ET discipline (AGENTS.md): the server runs UTC, so anything carrying a
-// time component is projected onto the ET calendar day via etDateString; a bare
-// calendar string parses at local midnight and exposes its intended Y/M/D, and an
-// empty/unparseable value falls back to today in ET.
+// Resolve a service date to a calendar 'YYYY-MM-DD'. Inputs vary: the client sends
+// a long US date ("June 15, 2026"); scheduled_date / service_date come from pg
+// `date` columns, which node-pg returns as a JS Date at UTC midnight. ET
+// discipline (AGENTS.md), WITHOUT rolling a timezone-less date-only value back a
+// day:
+//   - a Date object (pg date) → read UTC parts (its intended calendar day)
+//   - a 'YYYY-MM-DD' string    → keep the literal calendar date
+//   - an ISO string WITH a time component → project onto the ET calendar day
+//   - a bare calendar string ("June 15, 2026") → local-midnight parse, local parts
+//   - empty / unparseable      → today in ET
 function pad2(n) { return String(n).padStart(2, '0'); }
 function toYmd(value) {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return etDateString();
+    return `${value.getUTCFullYear()}-${pad2(value.getUTCMonth() + 1)}-${pad2(value.getUTCDate())}`;
+  }
   const raw = String(value == null ? '' : value).trim();
-  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
-  if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
   if (!raw) return etDateString();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (dateOnly) return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`;
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return etDateString();
-  if (/[T:]/.test(raw)) return etDateString(d);
+  if (/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}/.test(raw)) return etDateString(d);
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+// Short display date for a prior visit, derived from the normalized calendar day
+// (noon UTC, formatted in UTC) so pg `date` values don't render as the prior day.
+function formatShortDate(value) {
+  const ymd = toYmd(value);
+  const d = new Date(`${ymd}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return 'prior visit';
+  return d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function etMonth(serviceDate) {
@@ -122,10 +109,12 @@ async function loadCustomer(customerId, knex) {
   }
 }
 
-// Last N completed visits on the same service line, with their findings. The
-// technician_notes carry the previously generated report copy — feeding it back
-// lets the model see what it already said and deliberately vary, and surfaces
-// recurring pests across visits.
+// Last N completed visits on the same service line, summarized by their structured
+// findings only. Raw technician_notes are deliberately NOT loaded: they are
+// free-form and can carry tech-only secrets (gate / lockbox codes, handling notes)
+// that must not reach a customer-facing LLM. Findings (title + severity) are
+// authored as findings and give the model enough to spot recurring pests and note
+// change across visits.
 async function loadPriorVisits({ customerId, serviceLine, serviceType, knex, limit = 2 }) {
   if (!customerId) return [];
   try {
@@ -139,7 +128,7 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, knex, lim
       })
       .orderBy('service_date', 'desc')
       .limit(limit)
-      .select('id', 'service_date', 'service_type', 'technician_notes');
+      .select('id', 'service_date', 'service_type');
     if (!rows.length) return [];
     const ids = rows.map((r) => r.id);
     const findings = await knex('service_findings')
@@ -154,7 +143,6 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, knex, lim
     return rows.map((r) => ({
       serviceDate: r.service_date,
       serviceType: r.service_type,
-      notes: truncate(redactCodes(r.technician_notes), 600),
       findings: (byRecord[String(r.id)] || []).map((f) => ({ severity: cleanText(f.severity), title: cleanText(f.title) })),
     }));
   } catch (err) {
@@ -289,13 +277,16 @@ async function buildReportCopyContext({
   // point is really the last completed visit). Present it honestly as history
   // through the last visit — never as "this visit's" reading — and don't reuse the
   // helper's customerSummary, which is phrased as if the latest point were today.
-  // direction is only 'down'/'flat'/'up' when there are >=2 prior visits.
+  // direction is only 'down'/'flat'/'up' when there are >=2 prior visits. The
+  // helper only loads a short recent window, so its percentChange is vs the oldest
+  // row in that window, NOT the customer's true first visit — don't cite a percent
+  // or "first visit" baseline that the data can't support; describe the direction.
   let pressureLine = null;
   if (pressureTrend && ['down', 'flat', 'up'].includes(pressureTrend.direction)) {
     const cur = pressureTrend.current?.pressureIndex;
     const reading = typeof cur === 'number' ? ` Most recent reading ~${cur.toFixed(1)} on a 0–5 scale (lower is better).` : '';
     if (pressureTrend.direction === 'down') {
-      pressureLine = `Across recent visits, pest pressure has trended down${pressureTrend.percentChange != null ? ` (about ${pressureTrend.percentChange}% below the first visit)` : ''}.${reading}`;
+      pressureLine = `Across recent visits, pest pressure has trended down.${reading}`;
     } else if (pressureTrend.direction === 'flat') {
       pressureLine = `Pest pressure has held steady across recent visits.${reading}`;
     } else {
@@ -304,11 +295,16 @@ async function buildReportCopyContext({
     sections.push(`PEST PRESSURE (history through the last completed visit — NOT a reading for this visit): ${pressureLine}`);
   }
 
-  const condLine = conditionsLine(conditions);
+  // fetchApplicationConditions returns LIVE conditions, so only label them
+  // "at service" when the report is generated on the service date itself.
+  // Generated later, current temp/wind/rain would be miscited as the visit's;
+  // the trailing rainfall is windowed on the service date and stays valid.
+  const isRealTime = toYmd(serviceDate) === etDateString();
+  const condLine = isRealTime ? conditionsLine(conditions) : null;
   if (condLine || weekWeather?.rainInches != null) {
     const wx = [
       condLine ? `At service: ${condLine}.` : null,
-      weekWeather?.rainInches != null ? `Trailing 7-day rainfall: ${weekWeather.rainInches}".` : null,
+      weekWeather?.rainInches != null ? `Rainfall in the 7 days ending on the service date: ${weekWeather.rainInches}".` : null,
     ].filter(Boolean).join(' ');
     if (wx) sections.push(`WEATHER: ${wx}`);
   }
@@ -335,13 +331,17 @@ async function buildReportCopyContext({
   }
 
   if (priorVisits.length) {
-    const lines = priorVisits.map((v, i) => {
-      const when = v.serviceDate ? formatShortDate(v.serviceDate) : 'prior visit';
-      const found = v.findings.length ? ` Findings: ${v.findings.map((f) => `${f.title}${f.severity ? ` (${f.severity})` : ''}`).join('; ')}.` : '';
-      const copy = v.notes ? ` Report copy: "${v.notes}"` : '';
-      return `${i === 0 ? 'Most recent' : 'Earlier'} (${when}, ${cleanText(v.serviceType) || 'service'}):${found}${copy}`;
-    });
-    sections.push(`PRIOR VISITS (do NOT repeat this wording — vary it, and note what has CHANGED since):\n${lines.join('\n')}`);
+    const withFindings = priorVisits.filter((v) => v.findings.length);
+    if (withFindings.length) {
+      const lines = withFindings.map((v, i) => {
+        const when = v.serviceDate ? formatShortDate(v.serviceDate) : 'a prior visit';
+        const found = v.findings.map((f) => `${f.title}${f.severity ? ` (${f.severity})` : ''}`).join('; ');
+        return `${i === 0 ? 'Most recent' : 'Earlier'} (${when}, ${cleanText(v.serviceType) || 'service'}): ${found}.`;
+      });
+      sections.push(`PRIOR VISIT FINDINGS (reflect continuity; if a pest recurs, note it honestly — don't imply a recurring issue is brand new):\n${lines.join('\n')}`);
+    } else {
+      sections.push(`PRIOR VISITS: ${priorVisits.length} prior completed visit(s) on record, no flagged findings — an established customer, so reflect continuity rather than writing as a first-time visit.`);
+    }
   }
 
   const contextText = sections.length
