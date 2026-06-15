@@ -946,7 +946,7 @@ function MobileSheet({
               placeholder="Ask anything…"
               style={{
                 width: "100%",
-                padding: "14px 56px 14px 16px",
+                padding: "14px 96px 14px 16px",
                 boxSizing: "border-box",
                 background: "#FAFAFA",
                 border: "1px solid #E4E4E7",

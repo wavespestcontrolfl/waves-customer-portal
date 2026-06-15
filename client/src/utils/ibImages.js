@@ -34,12 +34,16 @@ export async function fileToImagePart(file) {
 }
 
 // Convert several Files, skipping non-images. Caps at MAX_ATTACHMENTS total
-// when `existingCount` is supplied.
+// when `existingCount` is supplied. Uses allSettled so one undecodable file
+// (e.g. HEIC or a corrupt image) doesn't drop the whole selection — the
+// images that decode still attach.
 export async function filesToImageParts(files, existingCount = 0) {
   const list = Array.from(files || []).filter(isImageFile);
   const room = Math.max(0, MAX_ATTACHMENTS - existingCount);
-  const parts = await Promise.all(list.slice(0, room).map(fileToImagePart));
-  return parts;
+  const results = await Promise.allSettled(list.slice(0, room).map(fileToImagePart));
+  return results
+    .filter((r) => r.status === 'fulfilled')
+    .map((r) => r.value);
 }
 
 function downscaleToJpeg(file) {

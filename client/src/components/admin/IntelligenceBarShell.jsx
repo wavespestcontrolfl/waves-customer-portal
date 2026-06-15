@@ -272,9 +272,15 @@ export default function IntelligenceBarShell({
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
+          disabled={loading}
           title="Attach a photo"
           aria-label="Attach a photo"
-          className="h-9 w-9 flex items-center justify-center text-ink-secondary border-hairline border-zinc-200 rounded-sm hover:bg-zinc-50 hover:text-ink-primary u-focus-ring"
+          className={cn(
+            "h-9 w-9 flex items-center justify-center text-ink-secondary border-hairline border-zinc-200 rounded-sm u-focus-ring",
+            loading
+              ? "opacity-40 cursor-not-allowed"
+              : "hover:bg-zinc-50 hover:text-ink-primary",
+          )}
         >
           <AttachIcon />
         </button>

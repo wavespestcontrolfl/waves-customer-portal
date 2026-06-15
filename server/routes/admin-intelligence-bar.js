@@ -109,17 +109,33 @@ function isNonAdminDashboardRequest(req) {
 // returned conversationHistory (a text marker stands in for them) so multi-turn
 // payloads don't balloon and image bytes never land in query telemetry.
 const MAX_QUERY_IMAGES = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // Anthropic per-image decoded-size cap
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
+function isValidBase64(data) {
+  return typeof data === 'string'
+    && data.length > 0
+    && data.length % 4 === 0
+    && BASE64_RE.test(data);
+}
+
+// Validate attachments server-side — never trust the client downscaler. Drop
+// anything with an unsupported media type, non-base64 data, or a decoded size
+// over the provider's per-image cap, so a stale/malformed/direct-API payload
+// can't burn an AI request on a guaranteed provider error. Unsupported types
+// are dropped, never relabeled.
 function sanitizeQueryImages(images) {
   if (!Array.isArray(images)) return [];
-  return images
-    .slice(0, MAX_QUERY_IMAGES)
-    .filter((img) => img && typeof img.data === 'string' && img.data.length > 0)
-    .map((img) => ({
-      mediaType: ALLOWED_IMAGE_MEDIA_TYPES.has(img.mediaType) ? img.mediaType : 'image/jpeg',
-      data: img.data,
-    }));
+  const out = [];
+  for (const img of images) {
+    if (out.length >= MAX_QUERY_IMAGES) break;
+    if (!img || !ALLOWED_IMAGE_MEDIA_TYPES.has(img.mediaType)) continue;
+    if (!isValidBase64(img.data)) continue;
+    if (Math.floor((img.data.length * 3) / 4) > MAX_IMAGE_BYTES) continue;
+    out.push({ mediaType: img.mediaType, data: img.data });
+  }
+  return out;
 }
 
 // Build the current-turn user message. Plain string when no images so the
@@ -983,14 +999,20 @@ For create_customer and the route-optimization writes: the first call returns a 
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;
-    // prompt/response are additionally redacted when a PII-bearing tool ran —
-    // those prompts carry typed customer contact details and the responses
-    // echo SMS bodies.
+    // prompt/response are additionally redacted when a PII-bearing tool ran
+    // (prompts carry typed customer contact details, responses echo SMS
+    // bodies) OR when the turn had image attachments — an image-only OCR-style
+    // question (a paper invoice/note photo) can make Claude echo a customer's
+    // name/address/phone with no tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
+    const redactPii = usedPiiTool || images.length > 0;
+    const redactNote = usedPiiTool
+      ? '[redacted — PII-bearing tools used]'
+      : '[redacted — image attachment may contain PII]';
     try {
       await db('intelligence_bar_queries').insert({
-        prompt: usedPiiTool ? '[redacted — PII-bearing tools used]' : prompt,
-        response: usedPiiTool ? '[redacted — PII-bearing tools used]' : finalResponse.substring(0, 5000),
+        prompt: redactPii ? redactNote : prompt,
+        response: redactPii ? redactNote : finalResponse.substring(0, 5000),
         tool_calls: JSON.stringify(persistedToolCalls),
         created_at: new Date(),
       });
