@@ -1087,15 +1087,11 @@ const SocialMediaService = {
     const instagramCanConsume =
       requestedPlatforms.has('instagram')
       && SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
-    // Decide whether to generate the shared image. Skip on a dry run (nothing
-    // posts, so it'd just burn credits) and when an image already exists or
-    // hosting is unconfigured — establish that cheaply before any DB work.
-    // noAiImage: callers that supply an on-brand card (autonomous studio + blog
-    // shares) opt OUT of the AI image generator. It produces irrelevant literal
-    // images (e.g. a stone "fairy ring" for a fairy-ring FUNGUS post), so an
-    // autonomous post uses the brand card or goes text-only — never an AI image.
+    // Decide whether an image is NEEDED (a requested platform can consume one).
+    // Skip on a dry run, when one already exists, or when hosting is
+    // unconfigured. HOW we satisfy the need depends on noAiImage (below).
     let shouldGenerateImage = false;
-    if (!noAiImage && !generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
+    if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
       // Instagram can't already consume) and must have at least one location
@@ -1117,17 +1113,27 @@ const SocialMediaService = {
       }
     }
     if (shouldGenerateImage) {
-      try {
-        const img = await generateImage(title);
-        if (img && img.base64) {
-          // Upload to S3 to get a public URL (required by Instagram)
-          const filename = `post-${Date.now()}.jpg`;
-          const s3Url = await uploadImageToS3(img.base64, filename);
-          if (s3Url) {
-            generatedImageUrl = s3Url;
+      if (noAiImage) {
+        // Autonomous callers (RSS cron blog shares, studio campaigns, scheduled
+        // blog/newsletter shares) NEVER use the AI image generator — it produces
+        // irrelevant literal images (a stone "fairy ring" for a fairy-ring
+        // FUNGUS post). Render the on-brand card instead; text-only if it can't.
+        const eyebrow = source === 'newsletter' ? 'Waves newsletter' : 'From the Waves blog';
+        const cardUrl = await renderBrandCardUrl({ variant: 'blog', title, excerpt: description, cta: 'Learn more', eyebrow }, 'square');
+        if (cardUrl) generatedImageUrl = cardUrl;
+      } else {
+        try {
+          const img = await generateImage(title);
+          if (img && img.base64) {
+            // Upload to S3 to get a public URL (required by Instagram)
+            const filename = `post-${Date.now()}.jpg`;
+            const s3Url = await uploadImageToS3(img.base64, filename);
+            if (s3Url) {
+              generatedImageUrl = s3Url;
+            }
           }
-        }
-      } catch { /* non-critical */ }
+        } catch { /* non-critical */ }
+      }
     }
 
     // Generate content for each platform and post
