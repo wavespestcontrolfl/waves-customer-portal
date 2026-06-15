@@ -704,7 +704,7 @@ function AutonomousStudioPanel({ showToast, onRan }) {
         </div>
         {latest && (
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-            Last run: {latest.status} · {latest.topic || "no topic"} · {new Date(latest.started_at).toLocaleString()}
+            Last run: {latest.status} · {latest.topic || "no topic"} · {formatRunDate(latest.started_at)}
           </div>
         )}
       </div>
@@ -740,7 +740,9 @@ function formatRunDate(value) {
   if (!value) return "No timestamp";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "No timestamp";
-  return date.toLocaleString();
+  // Portal time is Eastern everywhere — pin the zone so run timestamps don't
+  // render in the viewer's local timezone (AGENTS.md America/New_York rule).
+  return date.toLocaleString("en-US", { timeZone: "America/New_York" });
 }
 
 function platformResultColor(result) {
