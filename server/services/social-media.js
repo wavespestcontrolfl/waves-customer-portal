@@ -589,8 +589,10 @@ async function generateCampaignDrafts({ topic, facts, cta, city, service, channe
       if (platform === 'gbp') {
         text = String(text || '').replace(/\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g, '').replace(/\s{2,}/g, ' ').trim();
       }
-      const limit = PLATFORM_LENGTH_LIMITS[platform] || 1500;
-      if (text && text.length <= limit) out[platform] = text;
+      // Run the SAME guard callers apply (pricing claims, safety overclaims,
+      // hallucinated phone numbers, length). Omit invalid AI output so the
+      // caller keeps its safe template draft instead of failing preview later.
+      if (text && validateContent(text, platform).valid) out[platform] = text;
     } catch { /* omit this channel — caller keeps its template draft */ }
   }));
   return out;
