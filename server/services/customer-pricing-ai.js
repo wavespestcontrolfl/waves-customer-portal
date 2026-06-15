@@ -190,10 +190,10 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     return generic ? all.slice(0, 1) : all;
   }
   if (serviceKey === 'lawn_care') {
+    // 'basic' (lawnFreq 4) is now a sold tier and prices distinctly as the
+    // 4-application plan, so it is offered alongside Standard/Enhanced/Premium.
     const all = [
-      // 'basic' (lawnFreq 4) is a deprecated tier, hidden everywhere customer-facing.
-      // It is intentionally NOT offered here: emitting it produced a "Basic lawn care"
-      // quote option whose pricing fell back to Enhanced (label/price mismatch).
+      { id: 'lawn-basic', serviceKey, label: 'Basic lawn care', tier: 'basic', lawnFreq: 4, cadence: '4 visits/year' },
       { id: 'lawn-standard', serviceKey, label: 'Standard lawn care', tier: 'standard', lawnFreq: 6, cadence: '6 visits/year' },
       { id: 'lawn-enhanced', serviceKey, label: 'Enhanced lawn care', tier: 'enhanced', lawnFreq: 9, cadence: '9 visits/year' },
       { id: 'lawn-premium', serviceKey, label: 'Premium lawn care', tier: 'premium', lawnFreq: 12, cadence: '12 visits/year' },

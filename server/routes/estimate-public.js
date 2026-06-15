@@ -8574,9 +8574,17 @@ const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhance
 function lawnFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];
+  return lawnFrequenciesFromRows(rows, estData);
+}
+
+// Shared core: turn lawn cost-floor tier rows into the customer-facing cadence
+// ladder. Fed by stored result.results.lawn (v1 path) and by the live engine
+// lawn line item tiers (engine-invocation path) so both surfaces present the
+// same 4/6/9/12 application options instead of one collapsed entry.
+function lawnFrequenciesFromRows(rows = [], estData = {}) {
   const seen = new Set();
   const rawManualDiscount = normalizeManualDiscountSummary(estData);
-  return rows
+  return (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
       if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
@@ -8647,6 +8655,44 @@ function lawnFrequenciesFromResultStats(estData = {}) {
       const order = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
+}
+
+// Recurring (ongoing-plan) service keys, used to decide whether an engine
+// result is lawn-only. One-time follow-ups are excluded so they don't block
+// the lawn cadence ladder.
+const RECURRING_SERVICE_KEYS = new Set([
+  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito',
+  'termite_bait', 'palm_injection', 'rodent_bait', 'rodent',
+]);
+
+// Engine-invocation lawn-only equivalent of lawnFrequenciesFromResultStats.
+// Server-authoritative / IB estimates store engineInputs (not a precomputed
+// result.results.lawn), so the no-pest pricing branch reads the lawn line
+// item's tier ladder off a live generateEstimate() result. Only fires when
+// lawn_care is the sole recurring line — mixed bundles keep pricing lawn
+// inside the pest cadence. Returns [] for any non-lawn-only result so the
+// caller falls back to the single-frequency view.
+function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
+  const lineItems = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
+  const recurringServices = new Set(
+    lineItems
+      .map((li) => recurringServiceKey(li))
+      .filter((key) => RECURRING_SERVICE_KEYS.has(key)),
+  );
+  if (recurringServices.size !== 1 || !recurringServices.has('lawn_care')) return [];
+  const lawnLine = lineItems.find((li) => recurringServiceKey(li) === 'lawn_care');
+  const tiers = Array.isArray(lawnLine?.tiers) ? lawnLine.tiers : [];
+  const rows = tiers.map((t) => ({
+    name: t.label,
+    tier: t.tier,
+    mo: finiteNumberOrNull(t.monthly),
+    ann: finiteNumberOrNull(t.annual),
+    pa: finiteNumberOrNull(t.perApp),
+    v: finiteNumberOrNull(t.visits ?? t.freq),
+    recommended: t.recommended === true,
+    selected: t.tier === lawnLine.tier,
+  }));
+  return lawnFrequenciesFromRows(rows, estData);
 }
 
 function mosquitoTierKey(row = {}) {
@@ -9908,12 +9954,21 @@ async function buildPricingBundle(estimate) {
       }
     }
   } else {
-    // No pest in the estimate — slider is meaningless. Single entry
-    // using the single engine call at whatever was stored.
+    // No pest in the estimate — the pest cadence slider is meaningless. Run
+    // the engine once at whatever was stored.
     try {
       const engineResult = generateEstimate(engineInputs);
       anchorEngineResult = engineResult;
-      frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
+      // Lawn-only estimates expose the 4/6/9/12 application ladder
+      // (Basic/Standard/Enhanced/Premium) off the live lawn line item, mirroring
+      // the v1 result.results.lawn path. Mixed bundles and other single-service
+      // estimates keep the existing single-entry view.
+      const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
+      if (lawnFreqs.length) {
+        frequencies.push(...lawnFreqs);
+      } else {
+        frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
+      }
     } catch (err) {
       logger.error(`[estimate-data] engine failed (no-pest path): ${err.message}`);
     }
@@ -10285,6 +10340,7 @@ module.exports.isTreeShrubServiceName = isTreeShrubServiceName;
 module.exports.isMosquitoServiceName = isMosquitoServiceName;
 module.exports.isLawnServiceName = isLawnServiceName;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
+module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;

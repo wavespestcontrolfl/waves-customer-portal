@@ -1,5 +1,6 @@
 const {
   lawnFrequenciesFromResultStats,
+  lawnFrequenciesFromEngineResult,
   applySelectedLawnTierToEstimateData,
   buildRenderFlags,
   sectionTierEligibleFromKeys,
@@ -103,6 +104,51 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     const std = lawnFrequenciesFromResultStats(lawnEstData()).find((f) => f.key === 'standard');
     expect(std.included.map((i) => i.key)).toEqual(['lawn_care_standard', 'lawn_care_treatments']);
     expect(std.included[0].detail).toBe('6 visits per year');
+  });
+});
+
+describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder', () => {
+  // Server-authoritative / IB estimates store engineInputs, not a precomputed
+  // result.results.lawn. The lawn line item the engine emits carries its tier
+  // ladder (4/6/9/12), which must expand into the same cadence options instead
+  // of collapsing into one Quarterly entry.
+  function lawnLineItem() {
+    return {
+      service: 'lawn_care',
+      tier: 'enhanced',
+      tiers: [
+        { tier: 'basic', label: '4 Applications', monthly: 35, annual: 420, perApp: 105, visits: 4, freq: 4, recommended: false },
+        { tier: 'standard', label: '6 Applications', monthly: 45, annual: 540, perApp: 90, visits: 6, freq: 6, recommended: false },
+        { tier: 'enhanced', label: '9 Applications', monthly: 62.25, annual: 747, perApp: 83, visits: 9, freq: 9, recommended: true },
+        { tier: 'premium', label: '12 Applications', monthly: 84, annual: 1008, perApp: 84, visits: 12, freq: 12, recommended: false },
+      ],
+    };
+  }
+
+  test('expands the lawn line item tiers into all four cadences, in order', () => {
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [lawnLineItem()] });
+    expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear, f.monthly])).toEqual([
+      ['basic', 'Quarterly', 4, 35],
+      ['standard', 'Bi-monthly', 6, 45],
+      ['enhanced', 'Every 6 weeks', 9, 62.25],
+      ['premium', 'Monthly', 12, 84],
+    ]);
+    expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(true);
+  });
+
+  test('returns [] for mixed bundles so lawn keeps pricing inside the pest cadence', () => {
+    const mixed = {
+      lineItems: [
+        { service: 'pest_control', perApp: 40 },
+        lawnLineItem(),
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(mixed)).toEqual([]);
+  });
+
+  test('returns [] when there is no lawn line item', () => {
+    expect(lawnFrequenciesFromEngineResult({ lineItems: [{ service: 'mosquito', tiers: [] }] })).toEqual([]);
+    expect(lawnFrequenciesFromEngineResult({})).toEqual([]);
   });
 });
 
