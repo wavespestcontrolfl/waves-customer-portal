@@ -120,6 +120,36 @@ describe('estimate slot weekend and expander behavior', () => {
       .toBe(0);
   });
 
+  test('past windows on today are dropped while future dates and bookable times stay', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET
+    const slots = [
+      { slotId: 'today-10', date: '2026-05-26', windowStart: '10:00', routeOptimal: false }, // past
+      { slotId: 'today-11', date: '2026-05-26', windowStart: '11:00', routeOptimal: false }, // inside 120m lead
+      { slotId: 'today-14', date: '2026-05-26', windowStart: '14:00', routeOptimal: false }, // bookable
+      { slotId: 'tomorrow-9', date: '2026-05-27', windowStart: '09:00', routeOptimal: false }, // future date
+    ];
+
+    const kept = slotAvailabilityInternals
+      .filterPastSlotsForToday(slots, { now, minimumLeadMinutes: 120 })
+      .map((slot) => slot.slotId);
+
+    expect(kept).toEqual(['today-14', 'tomorrow-9']);
+  });
+
+  test('past-slot filter also trims a route-optimal window that has already passed today', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET
+    const slots = [
+      { slotId: 'today-route-10', date: '2026-05-26', windowStart: '10:00', routeOptimal: true, nearbyJob: { detourMinutes: 2 } },
+      { slotId: 'today-route-15', date: '2026-05-26', windowStart: '15:00', routeOptimal: true, nearbyJob: { detourMinutes: 2 } },
+    ];
+
+    const kept = slotAvailabilityInternals
+      .filterPastSlotsForToday(slots, { now, minimumLeadMinutes: 120 })
+      .map((slot) => slot.slotId);
+
+    expect(kept).toEqual(['today-route-15']);
+  });
+
   test('asap slot cap preserves later windows when many techs are active', () => {
     const techs = Array.from({ length: 30 }, (_, idx) => ({ id: `tech-${idx + 1}`, name: `Tech ${idx + 1}` }));
     const slots = slotAvailabilityInternals.buildAsapCapacitySlotsForTechs({

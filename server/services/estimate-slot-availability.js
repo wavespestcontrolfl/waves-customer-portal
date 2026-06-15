@@ -848,6 +848,23 @@ function filterTimeOfDay(slots, timeOfDay) {
   });
 }
 
+// Drop any candidate on today's Eastern date whose displayed window starts
+// before the earliest bookable minute (now + lead time). buildAsapCapacitySlots
+// already honors this when it generates ASAP windows, but route-aware slots
+// from find-time and windows reassigned by spreadWindowsAcrossDay can still
+// land in the past — e.g. a 10 AM route window that is still shown at 11 AM.
+// Filtering here, just before the final customer-facing selection, covers
+// every slot source consistently.
+function filterPastSlotsForToday(slots, { now = new Date(), minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes } = {}) {
+  return (Array.isArray(slots) ? slots : []).filter((s) => {
+    const earliest = earliestBookableMinuteForDate(s.date, now, minimumLeadMinutes);
+    if (earliest <= 0) return true; // future date — nothing to trim
+    const startMin = timeToMinutes(s.windowStart);
+    if (startMin == null) return true;
+    return startMin >= earliest;
+  });
+}
+
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
@@ -941,7 +958,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
     const spread = spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes);
     const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
-    const selected = selectCustomerFacingSlots(filterTimeOfDay(filtered, opts.timeOfDay), TARGET_TOTAL);
+    const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const fallback = {
       primary,
@@ -1002,7 +1020,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // slots; that can land them on an existing booking, so re-filter once
   // more before choosing the final customer-facing list.
   const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
-  const selected = selectCustomerFacingSlots(filterTimeOfDay(filtered, opts.timeOfDay), TARGET_TOTAL);
+  // Trim any window that has already passed (or is inside the booking lead
+  // time) on today's date — covers route-aware and spread-reassigned slots
+  // that buildAsapCapacitySlots' own guard never saw.
+  const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
+  const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
   const result = {
@@ -1177,6 +1199,7 @@ module.exports = {
     earliestBookableMinuteForDate,
     enumerateETDateStrings,
     etDateRange,
+    filterPastSlotsForToday,
     splitSlotResults,
     selectCustomerFacingSlots,
     diversifyByDay,

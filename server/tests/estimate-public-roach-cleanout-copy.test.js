@@ -3,6 +3,7 @@ const {
   detectPestOneTime,
   isGermanRoachCleanoutOneTimeItem,
   germanRoachVisitPhrase,
+  buildEstimateAskPrompts,
 } = require('../routes/estimate-public');
 
 describe('German Roach Cleanout customer-facing estimate copy', () => {
@@ -47,6 +48,32 @@ describe('German Roach Cleanout customer-facing estimate copy', () => {
     expect(isGermanRoachCleanoutOneTimeItem({ name: 'Roach Cleanout' })).toBe(true);
     expect(isGermanRoachCleanoutOneTimeItem(generalOneTimePest)).toBe(false);
     expect(isGermanRoachCleanoutOneTimeItem(standaloneCockroach)).toBe(false);
+  });
+
+  test('German Roach Cleanout shows specialty Ask Waves prompts, not generic billing-only', () => {
+    const prompts = buildEstimateAskPrompts([], [germanRoachItem], null, false);
+    expect(prompts).toEqual([
+      'How do you get rid of German roaches?',
+      'How many visits will I need?',
+      'Are pets and kids safe?',
+      'When am I charged?',
+    ]);
+    // German-roach prompts replace the generic ant chip.
+    expect(prompts).not.toContain('How do you handle ants?');
+  });
+
+  test('German Roach detected by name (no service key) still gets specialty prompts', () => {
+    const prompts = buildEstimateAskPrompts([], [{ name: 'German Roach Cleanout — 3 Visit Program', price: 450 }], null, false);
+    expect(prompts.slice(0, 2)).toEqual([
+      'How do you get rid of German roaches?',
+      'How many visits will I need?',
+    ]);
+  });
+
+  test('a general pest estimate (no German roach) still gets the generic ant chip', () => {
+    const prompts = buildEstimateAskPrompts([], [generalOneTimePest], null, true);
+    expect(prompts[0]).toBe('How do you handle ants?');
+    expect(prompts).not.toContain('How do you get rid of German roaches?');
   });
 
   test('visit phrase reflects the tiered program visit count', () => {
