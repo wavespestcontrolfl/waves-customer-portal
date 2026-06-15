@@ -197,14 +197,14 @@ const PEST = {
 // ============================================================
 // LAWN CARE — 4 Tracks (St. Augustine merged, Bermuda, Zoysia, Bahia)
 // ============================================================
-// Tiers: basic(4x) is hidden/manager-only; standard(6x), enhanced(9x), premium(12x) are sold.
+// Tiers: basic(4x), standard(6x), enhanced(9x), premium(12x) are sold.
 const LAWN_TIERS = {
-  basic:    { freq: 4,  index: 0, label: '4 Applications', hidden: true },
+  basic:    { freq: 4,  index: 0, label: '4 Applications' },
   standard: { freq: 6,  index: 1, label: '6 Applications' },
   enhanced: { freq: 9,  index: 2, label: '9 Applications' },
   premium:  { freq: 12, index: 3, label: '12 Applications' },
 };
-const LAWN_SOLD_TIERS = ['standard', 'enhanced', 'premium'];
+const LAWN_SOLD_TIERS = ['basic', 'standard', 'enhanced', 'premium'];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.45,
   targetListMargin: null,
