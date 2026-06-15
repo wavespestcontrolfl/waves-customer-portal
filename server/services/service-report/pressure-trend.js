@@ -142,6 +142,7 @@ async function buildPressureTrendContext({
   record,
   currentPressureIndexOverride,
   limit = 4,
+  beforeDate,
   knex = db,
 } = {}) {
   if (!record?.id || !record.customer_id) return undefined;
@@ -150,6 +151,9 @@ async function buildPressureTrendContext({
     .select('id', 'started_at', 'ended_at', 'service_date', 'created_at', 'pressure_index')
     .where({ customer_id: record.customer_id, status: 'completed' })
     .whereNot({ id: record.id })
+    // Optional: restrict the trend to visits strictly before a given service date,
+    // so a backfilled/late report doesn't fold in later visits. Default: no bound.
+    .modify((q) => { if (beforeDate) q.where('service_date', '<', beforeDate); })
     .whereNotNull('pressure_index')
     .where(function sameServiceLine() {
       this.where({ service_line: serviceLine })

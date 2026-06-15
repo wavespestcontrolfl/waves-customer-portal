@@ -115,11 +115,14 @@ async function loadCustomer(customerId, knex) {
 // that must not reach a customer-facing LLM. Findings (title + severity) are
 // authored as findings and give the model enough to spot recurring pests and note
 // change across visits.
-async function loadPriorVisits({ customerId, serviceLine, serviceType, knex, limit = 2 }) {
+async function loadPriorVisits({ customerId, serviceLine, serviceType, beforeDate, knex, limit = 2 }) {
   if (!customerId) return [];
   try {
     const rows = await knex('service_records')
       .where({ customer_id: customerId, status: 'completed' })
+      // Only visits strictly before this service date — a backfilled/late report
+      // must not be grounded on findings from visits that happened after it.
+      .modify((q) => { if (beforeDate) q.where('service_date', '<', beforeDate); })
       .where(function sameLine() {
         if (serviceLine) {
           this.where({ service_line: serviceLine })
@@ -178,8 +181,11 @@ async function loadProductSafety(products, knex) {
   try {
     const rows = await knex('products_catalog')
       .where(function matchCatalog() {
+        // Prefer ids; only fall back to free-form names when NO ids were supplied,
+        // so a stale/duplicate name can't pull facts for an unselected product.
         if (ids.length) this.whereIn('id', ids);
-        if (names.length) this.orWhereIn('name', names);
+        else if (names.length) this.whereIn('name', names);
+        else this.whereRaw('1 = 0');
       })
       .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number',
         'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'approved_for_service_report');
@@ -249,6 +255,9 @@ async function buildReportCopyContext({
   const productList = (Array.isArray(products) && products.length)
     ? products
     : (Array.isArray(productNames) ? productNames : []).map((name) => ({ name }));
+  // Single normalized ET calendar date for this service — reused for history
+  // bounds, the weather window, and the real-time check.
+  const serviceYmd = toYmd(serviceDate);
 
   const customer = await loadCustomer(customerId, knex);
   const lat = finiteOrNull(customer?.latitude);
@@ -256,18 +265,19 @@ async function buildReportCopyContext({
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
   const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend] = await Promise.all([
-    loadPriorVisits({ customerId, serviceLine: line, serviceType, knex }),
+    loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
     (lat != null && lng != null)
       ? fetchApplicationConditions({ latitude: lat, longitude: lng }).catch(() => null)
       : Promise.resolve(null),
     (lat != null && lng != null)
-      ? fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: toYmd(serviceDate) }).catch(() => null)
+      ? fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: serviceYmd }).catch(() => null)
       : Promise.resolve(null),
     customerId
       ? buildPressureTrendContext({
         record: { id: NIL_UUID, customer_id: customerId, service_type: serviceType, service_line: line, pressure_index: null },
+        beforeDate: serviceYmd,
         knex,
       }).catch(() => null)
       : Promise.resolve(null),
@@ -326,7 +336,7 @@ async function buildReportCopyContext({
   // "at service" when the report is generated on the service date itself.
   // Generated later, current temp/wind/rain would be miscited as the visit's;
   // the trailing rainfall is windowed on the service date and stays valid.
-  const isRealTime = toYmd(serviceDate) === etDateString();
+  const isRealTime = serviceYmd === etDateString();
   const condLine = isRealTime ? conditionsLine(conditions) : null;
   if (condLine || weekWeather?.rainInches != null) {
     const wx = [
@@ -367,7 +377,7 @@ async function buildReportCopyContext({
       });
       sections.push(`PRIOR VISIT FINDINGS (reflect continuity; if a pest recurs, note it honestly — don't imply a recurring issue is brand new):\n${lines.join('\n')}`);
     } else {
-      sections.push(`PRIOR VISITS: ${priorVisits.length} prior completed visit(s) on record, no flagged findings — an established customer, so reflect continuity rather than writing as a first-time visit.`);
+      sections.push('PRIOR VISITS: this is an established customer with recent prior service (no flagged findings in the recent visits sampled) — reflect continuity rather than writing as a first-time visit. Do not state a specific number of past visits.');
     }
   }
 

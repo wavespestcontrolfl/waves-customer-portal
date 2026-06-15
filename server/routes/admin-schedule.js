@@ -4220,7 +4220,7 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
 - **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (improvement, a recurring pest, a resolved issue). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
-- **Pest pressure trend**: if it shows real movement, reflect it ("pressure is down since your first visit") instead of a vague statement.
+- **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
 - **Product safety / re-entry**: when label REI / rainfast data is given, ground re-entry and rainfast guidance in it. Never invent a number that isn't there.
 - **Season**: set expectations that fit the SW Florida season — don't promise off-season behavior.
