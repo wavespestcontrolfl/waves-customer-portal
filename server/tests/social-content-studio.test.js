@@ -178,4 +178,12 @@ describe('social content studio', () => {
     expect(run.channels).toEqual(expect.arrayContaining(['gbp', 'facebook']));
     expect(run.platformResults[0]).toMatchObject({ platform: 'facebook', dryRun: true });
   });
+
+  test('normalizePublishMode fails closed: invalid mode → draft, blank → default', () => {
+    expect(Studio.normalizePublishMode('publish')).toBe('publish');
+    expect(Studio.normalizePublishMode('Draft ')).toBe('draft');           // trim + lowercase
+    expect(Studio.normalizePublishMode('blast', 'publish')).toBe('draft');  // typo → fail closed
+    expect(Studio.normalizePublishMode('', 'publish')).toBe('publish');     // blank → default
+    expect(Studio.normalizePublishMode(undefined, 'draft')).toBe('draft');  // unset → fallback
+  });
 });

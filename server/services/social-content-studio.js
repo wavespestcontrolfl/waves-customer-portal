@@ -314,13 +314,21 @@ function numberEnv(key, defaultValue) {
   return Number.isFinite(value) && value > 0 ? value : defaultValue;
 }
 
+// Resolve an autonomous publish mode. Unset/blank → fallbackWhenUnset (the
+// documented default). A set-but-invalid value fails CLOSED to 'draft' so a
+// typo never silently routes into live publishing.
+function normalizePublishMode(value, fallbackWhenUnset = 'publish') {
+  if (value == null || String(value).trim() === '') return fallbackWhenUnset;
+  const mode = String(value).trim().toLowerCase();
+  return mode === 'publish' || mode === 'draft' ? mode : 'draft';
+}
+
 const AUTONOMOUS_FLAGS = {
   get enabled() { return boolEnv('SOCIAL_AUTONOMOUS_STUDIO_ENABLED', false); },
   get includeReviews() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_REVIEWS', true); },
   get intervalHours() { return numberEnv('SOCIAL_AUTONOMOUS_INTERVAL_HOURS', 24); },
   get mode() {
-    const mode = String(process.env.SOCIAL_AUTONOMOUS_MODE || 'publish').toLowerCase();
-    return ['publish', 'draft'].includes(mode) ? mode : 'publish';
+    return normalizePublishMode(process.env.SOCIAL_AUTONOMOUS_MODE, 'publish');
   },
   get channels() {
     const raw = String(process.env.SOCIAL_AUTONOMOUS_CHANNELS || 'gbp,facebook,instagram');
@@ -1002,7 +1010,10 @@ async function runAutonomous(opts = {}) {
 
 async function runAutonomousLocked({ force = false, mode } = {}) {
   const startedAt = new Date();
-  const effectiveMode = mode || AUTONOMOUS_FLAGS.mode;
+  // Omitted → env default; an explicit but invalid mode fails closed to draft.
+  const effectiveMode = mode == null || String(mode).trim() === ''
+    ? AUTONOMOUS_FLAGS.mode
+    : normalizePublishMode(mode, AUTONOMOUS_FLAGS.mode);
 
   // The studio-enable flag is the feature kill switch and is ALWAYS enforced —
   // even an admin "Run Draft/Run Publish" (force:true). force only bypasses the
@@ -1240,6 +1251,14 @@ async function createReviewGraphic(input) {
   if (!(await hasTable('review_graphics'))) throw new Error('review_graphics table is not available');
   const review = await db('google_reviews').where({ id: input.googleReviewId }).first();
   if (!review) throw new Error('Google review not found');
+  // The card/copy is labeled a 5-star Google review, so enforce the same
+  // eligibility the list endpoint uses — a caller can't render a misleading
+  // graphic from a lower-rated, blank, or stats-sentinel review.
+  if (Number(review.star_rating) !== 5
+    || !String(review.review_text || '').trim()
+    || review.reviewer_name === '_stats') {
+    throw new Error('Review is not eligible for a 5-star graphic (requires star_rating=5 and non-empty review text)');
+  }
   const candidate = buildReviewGraphicCandidate(review, input);
   const imageUrl = cleanText(input.imageUrl, 1000) || await renderReviewGraphicImageUrl(candidate);
   const row = {
@@ -1402,6 +1421,7 @@ module.exports = {
   buildCampaignDrafts,
   buildReviewCardInput,
   buildReviewGraphicCandidate,
+  normalizePublishMode,
   createCompetitorPost,
   createReviewGraphic,
   engagementScore,
