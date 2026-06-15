@@ -968,16 +968,25 @@ const AppointmentReminders = {
         ? svc.scheduled_date.toISOString().slice(0, 10)
         : String(svc.scheduled_date || '').slice(0, 10);
       const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
-      const time = (datePart && timePart)
-        ? formatTime(parseETDateTime(`${datePart}T${timePart}`))
-        : 'your scheduled time';
+      const apptDate = (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+      const time = apptDate ? formatTime(apptDate) : 'your scheduled time';
       const techFirst = (svc.tech_name ? String(svc.tech_name).trim().split(/\s+/)[0] : '') || 'the team';
+
+      // The status route only blocks FUTURE no-shows, so a back-dated visit
+      // can still be marked — "today" would then be wrong. Render "today"
+      // only for a same-day miss; otherwise name the actual day/date.
+      let when = 'today';
+      if (datePart && datePart !== etDateString()) {
+        const dayDate = apptDate || parseETDateTime(`${datePart}T00:00`);
+        when = `on ${formatDay(dayDate)}, ${formatDate(dayDate)}`;
+      }
 
       await safeSendAppointment(customer, prefs || {}, async (contact) => {
         const customerFirst = contact.name || customer?.first_name || 'there';
         return renderTemplate('appointment_no_show', {
           first_name: customerFirst,
           tech_name: techFirst,
+          when,
           time,
         }, {
           workflow: 'appointment_no_show',

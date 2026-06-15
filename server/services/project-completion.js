@@ -10,7 +10,7 @@ const { projectReportPathForProject } = require('./project-report-links');
 const { createAlertOnce } = require('./dispatch-alerts');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
-const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped']);
+const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
 
 function normalizeDateOnly(value) {
   if (!value) return null;

@@ -7,8 +7,12 @@
  * appointment's scheduled start. Mirrors the seed pattern used for the
  * reschedule/cancel templates (20260506000007).
  */
+// {when} renders as "today" for a same-day no-show or "on Monday, June 15"
+// for a back-dated one (the status route only blocks FUTURE jobs, so older
+// missed visits can still be marked) — composed in
+// appointment-reminders.js#handleNoShow so the copy is never inaccurate.
 const NO_SHOW_BODY =
-  "Hi {first_name}, it's {tech_name} from Waves Pest Control. We missed you for your service today at {time}. "
+  "Hi {first_name}, it's {tech_name} from Waves Pest Control. We missed you for your service {when} at {time}. "
   + "If you'd like to get back on the schedule, just reply to this message or give us a call and we'll find a new time.";
 
 const TEMPLATE = {
@@ -16,7 +20,7 @@ const TEMPLATE = {
   name: 'Appointment No-Show',
   category: 'service',
   body: NO_SHOW_BODY,
-  variables: JSON.stringify(['first_name', 'tech_name', 'time']),
+  variables: JSON.stringify(['first_name', 'tech_name', 'when', 'time']),
   sort_order: 8,
 };
 
