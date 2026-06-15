@@ -198,7 +198,7 @@ describe('appointment reminder reschedule windows', () => {
     jest.useRealTimers();
   });
 
-  function mockRescheduleRecord({ customer, sendResult } = {}) {
+  function mockRescheduleRecord({ customer, sendResult, reminderOverrides } = {}) {
     const reminder = {
       id: 'reminder-reschedule',
       scheduled_service_id: 'svc-reschedule',
@@ -207,6 +207,7 @@ describe('appointment reminder reschedule windows', () => {
       service_type: 'Pest Control',
       reminder_72h_sent: true,
       reminder_24h_sent: true,
+      ...reminderOverrides,
     };
     const lookupReminder = chain({
       first: jest.fn().mockResolvedValue(reminder),
@@ -253,7 +254,7 @@ describe('appointment reminder reschedule windows', () => {
     return { reminder, updateReminder, finalReminderUpdate };
   }
 
-  test('silent reschedule inside the 24h window marks both due windows covered', async () => {
+  test('silent reschedule inside the 24h window leaves the day-before reminder pending', async () => {
     const { updateReminder } = mockRescheduleRecord();
 
     await AppointmentReminders.handleReschedule(
@@ -262,15 +263,85 @@ describe('appointment reminder reschedule windows', () => {
       { sendNotification: false },
     );
 
-    // Both windows are already due for the new time — leaving them unsent
-    // would make the next cron tick text the customer right after the admin
-    // chose "Don't send a notification".
+    // The 72h window is due for the new time and firing it now would just echo
+    // unchanged details, so it stays covered. The 24h window is deliberately
+    // left pending: a silent move (e.g. a dispatch-board reshuffle) must not
+    // strand the customer with no message at all — the next cron tick still
+    // sends the normal day-before reminder.
     expect(updateReminder.where).toHaveBeenCalledWith({ id: 'reminder-reschedule' });
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: expect.any(Date),
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('reschedule that notifies (coverDueWindows) covers the due 24h window so cron cannot race the notice', async () => {
+    const { updateReminder } = mockRescheduleRecord();
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00',
+      { sendNotification: false, coverDueWindows: true },
+    );
+
+    // The dispatch route sends its own reschedule SMS after this sync and only
+    // then marks the windows covered. coverDueWindows keeps the due 24h flag
+    // covered now so the 15-min cron can't fire a duplicate reminder in the gap.
     expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
       reminder_72h_sent: true,
       reminder_72h_sent_at: expect.any(Date),
       reminder_24h_sent: true,
       reminder_24h_sent_at: expect.any(Date),
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('same-start edit that notifies still covers a not-yet-sent due window', async () => {
+    // Same start (2026-05-12T14:00Z = 10:00 AM ET — but inside the 24h window
+    // relative to fixedNow via the move below) with the 24h reminder NOT yet
+    // sent. A notifying same-start edit must cover the due window so the cron
+    // can't fire in the gap before the route's SMS + markRescheduleNoticeSent.
+    const { updateReminder } = mockRescheduleRecord({
+      reminderOverrides: {
+        appointment_time: new Date('2026-05-07T13:00:00.000Z'), // 9:00 AM ET tomorrow
+        reminder_72h_sent: false,
+        reminder_24h_sent: false,
+      },
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00', // same start as the record above
+      { sendNotification: false, coverDueWindows: true },
+    );
+
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: expect.any(Date),
+      reminder_24h_sent: true,
+      reminder_24h_sent_at: expect.any(Date),
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('resize that keeps the same start time preserves already-sent reminder flags', async () => {
+    const { updateReminder } = mockRescheduleRecord();
+
+    // Same start (2026-05-12T14:00Z = 10:00 AM ET) as the existing record —
+    // a duration-only resize. The already-sent flags must be preserved so the
+    // cron does not re-send a duplicate reminder.
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-12T10:00',
+      { sendNotification: false },
+    );
+
+    expect(updateReminder.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_24h_sent: true,
     }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
