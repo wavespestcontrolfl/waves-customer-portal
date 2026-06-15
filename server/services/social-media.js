@@ -1031,6 +1031,7 @@ const SocialMediaService = {
             source: 'rss',
             imageUrl,
             gbpImageUrl,
+            noAiImage: true, // use the brand card or text-only — never a literal AI image
           });
           results.push({ item: item.title, ...result });
         } catch (err) {
@@ -1047,7 +1048,7 @@ const SocialMediaService = {
   /**
    * Publish content to all configured platforms.
    */
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds, noAiImage = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1086,8 +1087,12 @@ const SocialMediaService = {
     // Decide whether to generate the shared image. Skip on a dry run (nothing
     // posts, so it'd just burn credits) and when an image already exists or
     // hosting is unconfigured — establish that cheaply before any DB work.
+    // noAiImage: callers that supply an on-brand card (autonomous studio + blog
+    // shares) opt OUT of the AI image generator. It produces irrelevant literal
+    // images (e.g. a stone "fairy ring" for a fairy-ring FUNGUS post), so an
+    // autonomous post uses the brand card or goes text-only — never an AI image.
     let shouldGenerateImage = false;
-    if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
+    if (!noAiImage && !generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
       // Instagram can't already consume) and must have at least one location
