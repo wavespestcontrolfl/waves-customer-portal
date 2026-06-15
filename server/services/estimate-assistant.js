@@ -122,6 +122,7 @@ function serviceRowsFromEstimateData(estData = {}) {
   const recurring = result.recurring || estData.recurring || {};
   const services = Array.isArray(recurring.services) ? recurring.services : [];
   return services.map((service) => ({
+    service: cleanText(service.service || service.key) || null,
     label: normalizeServiceName(service.displayName || service.label || service.name || service.service),
     cadence: cleanText(service.frequencyLabel || service.cadence || service.frequency),
     detail: cleanText(service.detail || service.description),
@@ -197,6 +198,7 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
     const current = byLabel.get(label) || { label };
     byLabel.set(label, {
       ...current,
+      service: current.service || cleanText(service.service || service.key) || null,
       label,
       cadence: current.cadence || serviceCadence,
       detail: current.detail || cleanText(service.detail),
@@ -215,6 +217,7 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
       : null;
     byLabel.set(label, {
       ...current,
+      service: current.service || cleanText(service.service || service.key) || null,
       perApplication,
       visitsPerYear: Number(service.visitsPerYear),
     });
@@ -263,6 +266,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}) {
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
       return {
+        service: cleanText(item.service || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
@@ -308,6 +312,7 @@ function oneTimeRowsFromEstimateData(estData = {}) {
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
       return {
+        service: cleanText(item.service || item.key) || null,
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
@@ -649,20 +654,27 @@ function summarizeSupportContext(context = {}, question = '') {
     .join(' ');
 }
 
-// True when the estimate itself is a German Roach Cleanout (service key or a
-// "german roach" / "roach … cleanout" label). The question text alone can't
-// distinguish German Roach Cleanout from a native/palmetto cockroach or
-// general pest service, so German-roach copy must be gated on this.
+function isGermanRoachCleanoutContextRow(row = {}) {
+  const service = cleanText(row.service || row.key).toLowerCase();
+  if (service === 'german_roach') return true;
+  if (service === 'pest_initial_roach') return false;
+  const text = cleanText([row.label, row.detail, row.summary].filter(Boolean).join(' '))
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return /\broach(?:es)?\b/.test(text) && /\bclean\s*out\b|\bcleanout\b/.test(text);
+}
+
+// True when the estimate itself is a German Roach Cleanout (canonical service
+// key or a cleanout-specific label). The question text alone can't distinguish
+// German Roach Cleanout from a native/palmetto cockroach or a recurring pest
+// plan with an Initial German Roach Knockdown add-on, so German-roach cleanout
+// copy must be gated on this exact service context.
 function estimateMentionsGermanRoach(context = {}) {
   const rows = [
     ...(Array.isArray(context.services) ? context.services : []),
     ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
   ];
-  return rows.some((row) => {
-    if (String(row.service || '').toLowerCase() === 'german_roach') return true;
-    const text = `${row.label || ''} ${row.detail || ''} ${row.summary || ''}`.toLowerCase();
-    return text.includes('german roach') || (text.includes('roach') && text.includes('cleanout'));
-  });
+  return rows.some(isGermanRoachCleanoutContextRow);
 }
 
 function treatmentApproachForQuestion(question = '', context = {}) {

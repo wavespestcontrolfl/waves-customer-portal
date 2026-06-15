@@ -1,4 +1,7 @@
-const { answerEstimateQuestionFallback } = require('../services/estimate-assistant');
+const {
+  answerEstimateQuestionFallback,
+  buildEstimateAssistantContext,
+} = require('../services/estimate-assistant');
 
 describe('Ask Waves fallback — German roach questions', () => {
   const context = {
@@ -37,6 +40,65 @@ describe('Ask Waves fallback — German roach questions', () => {
     // The German-roach-specific multi-visit / breeding-cycle copy must not leak
     // onto a native cockroach or general pest estimate.
     expect(answer.toLowerCase()).not.toContain('german roach');
+    expect(answer.toLowerCase()).not.toContain('breeding cycle');
+    expect(answer.toLowerCase()).not.toContain('number of visits');
+  });
+
+  test('the german_roach service key still gets the cleanout answer even with sparse labels', () => {
+    const serviceKeyContext = {
+      serviceMode: 'one_time',
+      services: [
+        { service: 'german_roach', label: 'Pest Control', detail: '3 visit program' },
+      ],
+    };
+    const answer = answerEstimateQuestionFallback('How do you treat roaches?', serviceKeyContext);
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('multi-visit');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('context builder preserves the german_roach service key for sparse one-time rows', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 450 },
+      pricingBundle: {
+        anchorOneTimePrice: 450,
+        oneTimeBreakdown: {
+          total: 450,
+          items: [{ service: 'german_roach', amount: 450, detail: '3 visit program' }],
+        },
+      },
+      serviceMode: 'one_time',
+    });
+    expect(context.services[0]).toEqual(expect.objectContaining({
+      service: 'german_roach',
+      label: 'german_roach',
+    }));
+    const answer = answerEstimateQuestionFallback('How do you treat roaches?', context);
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('Initial German Roach Knockdown does NOT get cleanout fallback copy', () => {
+    const knockdownContext = {
+      serviceMode: 'recurring',
+      services: [
+        { service: 'pest_control', label: 'Pest Control', summary: 'Pest Control - quarterly' },
+      ],
+      oneTime: {
+        items: [
+          {
+            service: 'pest_initial_roach',
+            label: 'Initial German Roach Knockdown',
+            detail: '$119',
+            summary: 'Initial German Roach Knockdown - $119',
+          },
+        ],
+      },
+    };
+    const answer = answerEstimateQuestionFallback('How long until the roaches are gone?', knockdownContext);
+    expect(answer.toLowerCase()).toContain('cockroach');
+    expect(answer.toLowerCase()).not.toContain('german roaches');
+    expect(answer.toLowerCase()).not.toContain('multi-visit');
     expect(answer.toLowerCase()).not.toContain('breeding cycle');
     expect(answer.toLowerCase()).not.toContain('number of visits');
   });
