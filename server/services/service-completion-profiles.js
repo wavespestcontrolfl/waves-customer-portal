@@ -186,16 +186,26 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
 
   const serviceType = String(scheduledService.service_type || scheduledService.serviceType || '').trim();
   if (!serviceType) return null;
+  const suffixlessServiceType = serviceType.replace(/\s+service$/i, '').trim();
+  const serviceTypeCandidates = suffixlessServiceType && suffixlessServiceType.toLowerCase() !== serviceType.toLowerCase()
+    ? [serviceType, suffixlessServiceType]
+    : [serviceType];
 
-  const exact = await knex('services')
-    .whereRaw('lower(name) = lower(?)', [serviceType])
-    .first('service_key', 'name', 'category', 'billing_type');
-  if (exact) return exact;
+  for (const candidate of serviceTypeCandidates) {
+    const exact = await knex('services')
+      .whereRaw('lower(name) = lower(?)', [candidate])
+      .first('service_key', 'name', 'category', 'billing_type');
+    if (exact) return exact;
+  }
 
-  return knex('services')
-    .whereRaw('lower(short_name) = lower(?)', [serviceType])
-    .first('service_key', 'name', 'category', 'billing_type')
-    .catch(() => null);
+  for (const candidate of serviceTypeCandidates) {
+    const shortName = await knex('services')
+      .whereRaw('lower(short_name) = lower(?)', [candidate])
+      .first('service_key', 'name', 'category', 'billing_type')
+      .catch(() => null);
+    if (shortName) return shortName;
+  }
+  return null;
 }
 
 async function profileByServiceKey(serviceKey, knex = db) {
