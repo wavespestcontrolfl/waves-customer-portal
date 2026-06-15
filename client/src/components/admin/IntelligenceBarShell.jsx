@@ -124,6 +124,26 @@ export function renderMarkdown(text) {
   return elements;
 }
 
+export function AttachIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+}
+
 export function QuickChip({ label, onClick, title, promoted = false }) {
   return (
     <button
@@ -187,6 +207,9 @@ export default function IntelligenceBarShell({
     recentPrompts,
     favorites,
     toggleFavorite,
+    attachments,
+    addAttachments,
+    removeAttachment,
     submit,
     clear,
     handleKeyDown,
@@ -198,6 +221,7 @@ export default function IntelligenceBarShell({
   });
 
   const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
   const isError = response && response.startsWith("Error:");
   const resolvedHeader =
     typeof headerSlot === "function"
@@ -245,6 +269,26 @@ export default function IntelligenceBarShell({
             )}
           </div>{" "}
         </div>
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          title="Attach a photo"
+          aria-label="Attach a photo"
+          className="h-9 w-9 flex items-center justify-center text-ink-secondary border-hairline border-zinc-200 rounded-sm hover:bg-zinc-50 hover:text-ink-primary u-focus-ring"
+        >
+          <AttachIcon />
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            addAttachments(e.target.files);
+            e.target.value = "";
+          }}
+        />
         {resolvedHeader}
         {(response || conversationHistory.length > 0) && (
           <button
@@ -255,6 +299,32 @@ export default function IntelligenceBarShell({
           </button>
         )}
       </div>
+      {/* Attached photos */}
+      {attachments.length > 0 && (
+        <div className="px-4 pb-3 flex flex-wrap gap-2">
+          {attachments.map((a, i) => (
+            <div
+              key={i}
+              className="relative w-14 h-14 rounded-sm overflow-hidden border-hairline border-zinc-200"
+            >
+              <img
+                src={a.previewUrl}
+                alt={a.name}
+                className="w-full h-full object-cover"
+              />
+              <button
+                type="button"
+                onClick={() => removeAttachment(i)}
+                title="Remove"
+                aria-label={`Remove ${a.name}`}
+                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-10 leading-none border-hairline border-zinc-200"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {/* Pinned favorites */}
       {expanded && !response && !loading && favorites.length > 0 && (
         <div className="px-4 pb-3">

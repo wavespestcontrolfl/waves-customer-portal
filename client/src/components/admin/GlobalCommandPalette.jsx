@@ -23,6 +23,7 @@ import { useLocation } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
+import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
@@ -259,9 +260,11 @@ function GlobalCommandPalette(_props, ref) {
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
+  const [attachments, setAttachments] = useState([]);
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
   const location = useLocation();
   const isMobile = useIsMobile(768);
 
@@ -316,6 +319,7 @@ function GlobalCommandPalette(_props, ref) {
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
+    setAttachments([]);
   }, [context]);
 
   const submit = useCallback(
@@ -336,6 +340,9 @@ function GlobalCommandPalette(_props, ref) {
             conversationHistory,
             context,
             pageData: { route: location.pathname },
+            ...(attachments.length
+              ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
+              : {}),
           }),
         });
         setResponse(data.response);
@@ -346,9 +353,23 @@ function GlobalCommandPalette(_props, ref) {
       }
       setLoading(false);
       setPrompt("");
+      setAttachments([]);
     },
-    [prompt, loading, conversationHistory, context, location.pathname],
+    [prompt, loading, conversationHistory, context, location.pathname, attachments],
   );
+
+  const addAttachments = useCallback(
+    async (files) => {
+      const parts = await filesToImageParts(files, attachments.length);
+      if (parts.length)
+        setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+    },
+    [attachments.length],
+  );
+
+  const removeAttachment = useCallback((index) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  }, []);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -365,6 +386,7 @@ function GlobalCommandPalette(_props, ref) {
     setResponse(null);
     setPendingActions([]);
     setPrompt("");
+    setAttachments([]);
   };
 
   // Merge each dictation transcript chunk into the input, space-separated.
@@ -419,6 +441,9 @@ function GlobalCommandPalette(_props, ref) {
         clear={clear}
         accentColor={accentColor}
         appendTranscript={appendTranscript}
+        attachments={attachments}
+        addAttachments={addAttachments}
+        removeAttachment={removeAttachment}
       />
     );
   }
@@ -507,6 +532,13 @@ function GlobalCommandPalette(_props, ref) {
               }}
             >
               {!loading && (
+                <AttachButton
+                  onClick={() => fileInputRef.current?.click()}
+                  color={D.muted}
+                  size={30}
+                />
+              )}
+              {!loading && (
                 <DictationButton
                   onAppend={appendTranscript}
                   title="Dictate your question"
@@ -577,6 +609,24 @@ function GlobalCommandPalette(_props, ref) {
             {contextLabel}
           </div>{" "}
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => {
+            addAttachments(e.target.files);
+            e.target.value = "";
+          }}
+        />
+        {attachments.length > 0 && (
+          <AttachmentStrip
+            attachments={attachments}
+            onRemove={removeAttachment}
+            border={D.border}
+          />
+        )}
         {!response && !loading && quickActions.length > 0 && (
           <div
             style={{
@@ -774,7 +824,11 @@ function MobileSheet({
   clear,
   accentColor,
   appendTranscript,
+  attachments,
+  addAttachments,
+  removeAttachment,
 }) {
+  const fileInputRef = useRef(null);
   return (
     <>
       {/* Backdrop */}
@@ -912,9 +966,15 @@ function MobileSheet({
                   transform: "translateY(-50%)",
                   display: "flex",
                   alignItems: "center",
+                  gap: 4,
                 }}
               >
                 {" "}
+                <AttachButton
+                  onClick={() => fileInputRef.current?.click()}
+                  color="#A1A1AA"
+                  size={38}
+                />{" "}
                 <DictationButton
                   onAppend={appendTranscript}
                   title="Tap to talk"
@@ -924,6 +984,25 @@ function MobileSheet({
               </div>
             )}{" "}
           </div>{" "}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              addAttachments(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          {attachments.length > 0 && (
+            <AttachmentStrip
+              attachments={attachments}
+              onRemove={removeAttachment}
+              border="#E4E4E7"
+              padded={false}
+            />
+          )}{" "}
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             {" "}
             <button
@@ -1070,6 +1149,107 @@ function MobileSheet({
         @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
       `}</style>{" "}
     </>
+  );
+}
+
+// Attach (photo) control — square icon button sized to match DictationButton.
+function AttachButton({ onClick, color, size = 30 }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Attach a photo"
+      aria-label="Attach a photo"
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 8,
+        border: "none",
+        background: "transparent",
+        color,
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 0,
+      }}
+    >
+      <svg
+        width={Math.round(size * 0.5)}
+        height={Math.round(size * 0.5)}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <path d="M21 15l-5-5L5 21" />
+      </svg>
+    </button>
+  );
+}
+
+// Thumbnail strip for attached photos, with per-item remove.
+function AttachmentStrip({ attachments, onRemove, border, padded = true }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8,
+        padding: padded ? "10px 18px" : "10px 0 0",
+      }}
+    >
+      {attachments.map((a, i) => (
+        <div
+          key={i}
+          style={{
+            position: "relative",
+            width: 52,
+            height: 52,
+            borderRadius: 8,
+            overflow: "hidden",
+            border: `1px solid ${border}`,
+          }}
+        >
+          <img
+            src={a.previewUrl}
+            alt={a.name}
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
+          <button
+            type="button"
+            onClick={() => onRemove(i)}
+            title="Remove"
+            aria-label={`Remove ${a.name}`}
+            style={{
+              position: "absolute",
+              top: 2,
+              right: 2,
+              width: 16,
+              height: 16,
+              borderRadius: "50%",
+              border: "none",
+              background: "rgba(255,255,255,0.92)",
+              color: "#18181B",
+              fontSize: 11,
+              lineHeight: 1,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 

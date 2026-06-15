@@ -103,6 +103,39 @@ function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
 }
 
+// Photo attachments (vision). The operator/tech can attach images to a query —
+// a screenshot of a portal page, a pest/insect to ID, a property condition.
+// Images apply to the turn they're sent on; they are NOT persisted into the
+// returned conversationHistory (a text marker stands in for them) so multi-turn
+// payloads don't balloon and image bytes never land in query telemetry.
+const MAX_QUERY_IMAGES = 4;
+const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+
+function sanitizeQueryImages(images) {
+  if (!Array.isArray(images)) return [];
+  return images
+    .slice(0, MAX_QUERY_IMAGES)
+    .filter((img) => img && typeof img.data === 'string' && img.data.length > 0)
+    .map((img) => ({
+      mediaType: ALLOWED_IMAGE_MEDIA_TYPES.has(img.mediaType) ? img.mediaType : 'image/jpeg',
+      data: img.data,
+    }));
+}
+
+// Build the current-turn user message. Plain string when no images so the
+// common path is unchanged; an [image, …, text] block array when images are
+// attached (Anthropic vision format).
+function buildUserMessageContent(prompt, images) {
+  if (!images.length) return prompt;
+  return [
+    ...images.map((img) => ({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.data },
+    })),
+    { type: 'text', text: prompt },
+  ];
+}
+
 // UI-backed write confirmation (issue #1568). Dark until the Railway env
 // flips it on; read per-request so it can be toggled without a restart.
 function uiConfirmEnabled() {
@@ -736,6 +769,10 @@ RULES:
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
+IMAGE ATTACHMENTS:
+- The operator can attach photos to a question (a screenshot of a portal page, an insect/pest to identify, a property or lawn condition, a paper invoice or note). When images are present, read them and ground your answer in what they show.
+- Combine the image with your tools when useful — e.g. an attached photo of a customer's lawn alongside their service history.
+
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
 - You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
@@ -757,6 +794,7 @@ The current date is ${etDateString()}.`;
 router.post('/query', async (req, res, next) => {
   try {
     const { prompt, conversationHistory = [], context, pageData } = req.body;
+    const images = sanitizeQueryImages(req.body.images);
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -812,10 +850,11 @@ For create_customer and the route-optimization writes: the first call returns a 
     // For tech context, use a simpler model to reduce latency in the field
     const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
 
-    // Build messages array (support multi-turn conversation)
+    // Build messages array (support multi-turn conversation). Attached photos
+    // ride on the current user turn as vision blocks.
     const messages = [
       ...conversationHistory.slice(-10),
-      { role: 'user', content: prompt },
+      { role: 'user', content: buildUserMessageContent(prompt, images) },
     ];
 
     let currentMessages = messages;
@@ -968,10 +1007,17 @@ For create_customer and the route-optimization writes: the first call returns a 
       // ONLY channel the confirmation ids travel on — the client must keep
       // them in component state, never in conversationHistory.
       ...(uiConfirmEnabled() ? { pendingActions: pendingProposals } : {}),
-      // Return conversation history for multi-turn
+      // Return conversation history for multi-turn. Attached images are not
+      // round-tripped (a text marker stands in) — keeps follow-up payloads
+      // small and image bytes out of the stored history.
       conversationHistory: [
         ...conversationHistory.slice(-8),
-        { role: 'user', content: prompt },
+        {
+          role: 'user',
+          content: images.length
+            ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+            : prompt,
+        },
         { role: 'assistant', content: finalResponse },
       ],
     });
