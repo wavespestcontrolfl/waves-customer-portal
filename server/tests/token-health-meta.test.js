@@ -99,44 +99,34 @@ describe('token health meta checks', () => {
     expect(result.details.checks.instagramLinkMatches).toBe(false);
   });
 
-  test('facebook health errors when the Page token lacks content-creation rights', async () => {
-    // Page resolves + IG links correctly, but tasks omits CREATE_CONTENT.
+  test('facebook health never requests the invalid `tasks` field on the Page node', async () => {
+    // Regression: `tasks` is not a field on a Page node (only on /me/accounts),
+    // so requesting it makes the WHOLE Graph call fail with `(#100) Tried
+    // accessing nonexisting field (tasks)`. This mock mirrors that real-world
+    // behavior — if the check ever asks for `tasks` again, the request errors
+    // and the platform false-flags as unhealthy.
     global.fetch = jest.fn(async (url) => {
       const text = String(url);
       if (text.includes('/110336442031847?fields=')) {
+        if (text.includes('tasks')) {
+          return {
+            ok: false,
+            status: 400,
+            json: async () => ({
+              error: {
+                message: '(#100) Tried accessing nonexisting field (tasks) on node type (Page)',
+                type: 'OAuthException',
+                code: 100,
+              },
+            }),
+          };
+        }
         return {
           ok: true,
           status: 200,
           json: async () => ({
             id: '110336442031847',
             name: 'Waves Pest Control',
-            tasks: ['ANALYZE', 'MODERATE'], // no CREATE_CONTENT
-            instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
-          }),
-        };
-      }
-      throw new Error(`Unexpected fetch URL: ${text}`);
-    });
-    const tokenHealth = require('../services/token-health');
-
-    const result = await tokenHealth.checkSingle('facebook');
-
-    expect(result.status).toBe('error');
-    expect(result.lastError).toMatch(/content-creation/i);
-    expect(result.details.checks.canCreateContent).toBe(false);
-  });
-
-  test('facebook health stays healthy when tasks include CREATE_CONTENT', async () => {
-    global.fetch = jest.fn(async (url) => {
-      const text = String(url);
-      if (text.includes('/110336442031847?fields=')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            id: '110336442031847',
-            name: 'Waves Pest Control',
-            tasks: ['ANALYZE', 'CREATE_CONTENT', 'MANAGE'],
             instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
           }),
         };
@@ -148,7 +138,8 @@ describe('token health meta checks', () => {
     const result = await tokenHealth.checkSingle('facebook');
 
     expect(result.status).toBe('healthy');
-    expect(result.details.checks.canCreateContent).toBe(true);
+    expect(result.lastError).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalledWith(expect.stringContaining('tasks'));
   });
 
   test('instagram health requires content publishing access', async () => {

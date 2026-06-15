@@ -90,7 +90,7 @@ async function checkFacebook() {
   }
 
   try {
-    const { res, data } = await fetchGraph(`/${pageId}?fields=id,name,tasks,instagram_business_account{id,username}`, token);
+    const { res, data } = await fetchGraph(`/${pageId}?fields=id,name,instagram_business_account{id,username}`, token);
 
     if (res.ok && !data.error && data.id === pageId) {
       const linkedIgId = data.instagram_business_account?.id || null;
@@ -117,31 +117,15 @@ async function checkFacebook() {
         await upsertResult({ ...result, tokenType: 'oauth', envVarName });
         return result;
       }
-      // A token can READ the Page yet lack content-creation rights, in which
-      // case every postToFacebook (/photos, /feed) fails while the strip shows
-      // green. The Page node's `tasks` includes 'CREATE_CONTENT' when the token
-      // can publish. Only treat an EXPLICIT absence as an error — if `tasks`
-      // isn't returned (some token types omit it), leave the capability unknown
-      // rather than false-flagging a working token.
-      const tasks = Array.isArray(data.tasks) ? data.tasks : null;
-      const canCreateContent = tasks ? tasks.includes('CREATE_CONTENT') : null;
-      if (canCreateContent === false) {
-        const result = {
-          platform,
-          status: 'error',
-          lastError: 'Facebook token can read the Page but lacks content-creation rights (no CREATE_CONTENT task / pages_manage_posts) — Page posts will fail',
-          expiresAt: null,
-          details: {
-            pageId: data.id,
-            pageName: data.name || null,
-            linkedInstagramAccountId: linkedIgId,
-            linkedInstagramUsername: data.instagram_business_account?.username || null,
-            checks: { pageResolved: true, pageMatchesConfig: true, instagramLinkMatches: configuredIg ? true : null, canCreateContent: false },
-          },
-        };
-        await upsertResult({ ...result, tokenType: 'oauth', envVarName });
-        return result;
-      }
+      // NOTE: we used to also request `tasks` on the Page node to detect tokens
+      // that can read but not publish (CREATE_CONTENT). But `tasks` is NOT a
+      // valid field on a Page node — it only exists on the `/me/accounts` edge.
+      // Requesting it makes the ENTIRE Graph call fail with
+      // `(#100) Tried accessing nonexisting field (tasks) on node type (Page)`,
+      // which tripped the error branch below and false-flagged a perfectly
+      // working token as unhealthy. Content-creation capability is left unknown
+      // here rather than re-introducing that false alarm; an actual failed post
+      // surfaces via the per-platform posting-failure alert instead.
       const result = {
         platform,
         status: 'healthy',
@@ -156,7 +140,6 @@ async function checkFacebook() {
             pageResolved: true,
             pageMatchesConfig: true,
             instagramLinkMatches: configuredIg ? true : null,
-            canCreateContent,
           },
         },
       };
