@@ -1535,6 +1535,24 @@ router.put('/:serviceId/status', async (req, res, next) => {
           sendNotification: notifyCustomer !== false,
         });
       } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
+
+      // Record the miss so manual no-shows accrue toward the
+      // two-no-shows-in-90-days "we've missed you" outreach task, same as
+      // the nightly auto-detection. The nightly sweep only scans
+      // pending/confirmed rows (scheduler.js missed-appointment check), so
+      // once this branch flips the row to no_show it would otherwise never
+      // count. Dedup on scheduled_service_id mirrors the sweep's
+      // alreadyFlagged guard so a visit the nightly job already logged
+      // (while it was still pending) isn't double-counted. Best-effort.
+      try {
+        const alreadyFlagged = await db('reschedule_log')
+          .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+          .first('id');
+        if (!alreadyFlagged) {
+          const missedAppointment = require('../services/workflows/missed-appointment');
+          await missedAppointment.onSkip(svc.id, 'manual_no_show');
+        }
+      } catch (e) { logger.error(`[admin-dispatch] no-show reschedule_log record failed: ${e.message}`); }
     }
 
     await db('activity_log').insert({
