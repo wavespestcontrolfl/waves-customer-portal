@@ -32,6 +32,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const gbpService = require('./google-business');
 const { WAVES_LOCATIONS } = require('../config/locations');
+const { runExclusive } = require('../utils/cron-lock');
 
 const GRAPH = 'https://graph.facebook.com/v25.0';
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
@@ -257,10 +258,13 @@ async function tiktokStoreTokens(record) {
     .merge({ value: JSON.stringify(record), category: 'integrations', updated_at: now });
 }
 
-async function tiktokAccessToken() {
+// The actual refresh+persist. Only ever invoked inside the advisory lock
+// (see tiktokAccessToken). Re-reads the stored token first so a worker that
+// lost the race uses the freshly-stored token instead of spending — and
+// rotating — the refresh token a second time.
+async function refreshTikTokTokenLocked() {
   const stored = await tiktokStoredTokens();
   const now = Date.now();
-  // Reuse the cached access token until ~1 min before it expires.
   if (stored.access_token && stored.access_expires_at && Date.parse(stored.access_expires_at) - 60_000 > now) {
     return stored.access_token;
   }
@@ -295,6 +299,26 @@ async function tiktokAccessToken() {
     updated_at: new Date(nowMs).toISOString(),
   });
   return data.access_token;
+}
+
+// Returns a usable TikTok access token, or null. This runs on the public,
+// unauthenticated feed path, so the rotating refresh token must never be
+// spent by racing requests: the refresh+persist runs ONLY under a Postgres
+// advisory lock and fails closed. At most one worker refreshes across the
+// fleet; a worker that can't take the lock uses the currently-stored token
+// or skips TikTok for this cycle rather than rotate the token itself.
+async function tiktokAccessToken() {
+  const stored = await tiktokStoredTokens();
+  const now = Date.now();
+  if (stored.access_token && stored.access_expires_at && Date.parse(stored.access_expires_at) - 60_000 > now) {
+    return stored.access_token; // read-only fast path — no write
+  }
+  const result = await runExclusive('tiktok-token-refresh', refreshTikTokTokenLocked);
+  if (result && typeof result === 'object' && result.skipped) {
+    const s = await tiktokStoredTokens();
+    return s.access_token && s.access_expires_at && Date.parse(s.access_expires_at) > Date.now() ? s.access_token : null;
+  }
+  return result; // access token string, or null
 }
 
 async function fetchTikTok() {
