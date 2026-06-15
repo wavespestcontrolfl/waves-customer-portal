@@ -9,6 +9,17 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 
+const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime']);
+
+function isOneTimeBookingSource(source) {
+  return ONE_TIME_BOOKING_SOURCES.has(String(source || '').toLowerCase());
+}
+
+function cleanBookingServiceLabel(value) {
+  const label = String(value || '').trim().replace(/\s+/g, ' ');
+  return label ? label.slice(0, 120) : null;
+}
+
 // Shared geocoder (same approach as admin-schedule-find-time.js)
 async function geocodeAddress(address) {
   const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
@@ -684,6 +695,7 @@ router.post('/confirm', async (req, res, next) => {
       slot_date, slot_start, slot_end,
       technician_id,
       service_type,
+      quoted_service_label,
       duration_minutes,
       recurring_pattern,
       customer_notes,
@@ -820,7 +832,8 @@ router.post('/confirm', async (req, res, next) => {
       c.toLowerCase() === (customer.city || '').toLowerCase()
     )) || null;
 
-    const resolvedServiceType = service_type
+    const resolvedServiceType = cleanBookingServiceLabel(quoted_service_label)
+      || cleanBookingServiceLabel(service_type)
       || estimate?.services?.[0]
       || estimate?.service_type
       || 'General Pest Control';
@@ -977,7 +990,7 @@ router.post('/confirm', async (req, res, next) => {
 
     let followUpRows = [];
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
-    const isOneTimeEstimateBooking = String(source || '').toLowerCase() === 'estimate-accept';
+    const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
     const shouldSeedQuarterlyPestFollowUps =
       !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
@@ -1142,3 +1155,7 @@ router.get('/status/:code', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._internals = {
+  isOneTimeBookingSource,
+  cleanBookingServiceLabel,
+};

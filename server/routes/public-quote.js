@@ -819,11 +819,25 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
 
     let bookingUrl = null;
-    if (!quoteRequired && !isOneTimeOnly) {
+    let bookingServiceLabel = null;
+    if (!quoteRequired) {
       try {
-        const wantsPest = !!services?.pest;
-        const bookingServiceId = wantsPest ? 'pest_control' : 'lawn_care';
-        const longBookingUrl = `${PORTAL_BASE_URL}/book?service=${bookingServiceId}&source=quote-wizard`;
+        let bookingServiceId;
+        if (isOneTimeOnly) {
+          const { bookingServiceFor } = require('./estimate-public');
+          const bookingService = bookingServiceFor(serviceInterest);
+          bookingServiceId = bookingService.id;
+          bookingServiceLabel = serviceInterest || bookingService.label;
+        } else {
+          const wantsPest = !!services?.pest;
+          const wantsLawn = !!services?.lawn;
+          bookingServiceId = wantsPest ? 'pest_control' : 'lawn_care';
+          bookingServiceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
+        }
+        const bookingSource = isOneTimeOnly ? 'quote-wizard-onetime' : 'quote-wizard';
+        const bookingParams = new URLSearchParams({ service: bookingServiceId, source: bookingSource });
+        if (isOneTimeOnly && bookingServiceLabel) bookingParams.set('service_label', bookingServiceLabel);
+        const longBookingUrl = `${PORTAL_BASE_URL}/book?${bookingParams.toString()}`;
         bookingUrl = await shortenOrPassthrough(longBookingUrl, {
           kind: 'booking', entityType: 'leads', entityId: lead.id,
         });
@@ -839,9 +853,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         : `$${Math.round(monthly)}/mo`;
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
-      : isOneTimeOnly
-        ? `Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} to schedule this one-time service.`
-        : 'You can book online now, or reply here if anything needs to be adjusted first.';
+      : 'You can book online now, or reply here if anything needs to be adjusted first.';
 
     await sendQuoteRequestEmail({
       lead,
@@ -862,14 +874,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // {service_label}") belongs to the estimate-acceptance moment; at the
     // quote moment nothing is booked yet, so leads were thanked for a
     // booking that doesn't exist (owner report, 2026-06-12).
-    if (normalizedPhone && !quoteRequired && !isOneTimeOnly) {
+    if (normalizedPhone && !quoteRequired && bookingUrl) {
       try {
-        const wantsPest = !!services?.pest;
-        const wantsLawn = !!services?.lawn;
-        const serviceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
         const customerBody = await renderTemplate(
           'quote_wizard_booking_invite',
-          { first_name: contactFirstName, service_label: serviceLabel, booking_url: bookingUrl },
+          { first_name: contactFirstName, service_label: bookingServiceLabel || serviceInterest, booking_url: bookingUrl },
           {
             workflow: 'public_quote',
             entity_type: 'lead',
@@ -899,44 +908,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           }
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
-    }
-
-    // One-time service SMS: price + call-to-schedule (no self-booking URL).
-    if (normalizedPhone && !quoteRequired && isOneTimeOnly) {
-      try {
-        const customerBody = await renderTemplate(
-          'estimate_onetime_followup',
-          { first_name: contactFirstName, service_label: serviceInterest, total: Math.round(oneTimeTotal), phone: WAVES_SUPPORT_PHONE_DISPLAY },
-          {
-            workflow: 'public_quote',
-            entity_type: 'lead',
-            entity_id: lead.id,
-          },
-        );
-        if (!customerBody) {
-          logger.warn(`[public-quote] estimate_onetime_followup template missing/disabled; one-time SMS skipped for lead ${lead.id}`);
-        } else {
-          const smsResult = await sendCustomerMessage({
-            to: normalizedPhone,
-            body: customerBody,
-            channel: 'sms',
-            audience: 'lead',
-            purpose: 'conversational',
-            leadId: lead.id,
-            identityTrustLevel: 'phone_provided_unverified',
-            entryPoint: 'public_quote_onetime_sms',
-            metadata: {
-              original_message_type: 'estimate_onetime_followup',
-              mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
-            },
-          });
-          if (!smsResult.sent) {
-            logger.warn(`[public-quote] One-time SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-          } else {
-            logger.info(`[public-quote] One-time SMS sent for lead ${lead.id}`);
-          }
-        }
-      } catch (e) { logger.error(`[public-quote] One-time SMS failed: ${e.message}`); }
     }
 
     // Newsletter enrollment — gated on explicit opt-in checkbox from the quote

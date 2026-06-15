@@ -17,10 +17,13 @@ const SERVICES = [
   { id: 'rodent', label: 'Rodent Control', duration: 60, icon: 'mouse', desc: 'Exclusion + monitoring stations' },
 ];
 
+const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime']);
+
 export default function PublicBookingPage() {
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';
+  const quotedServiceLabel = (searchParams.get('service_label') || '').trim().slice(0, 120);
   const initialService = SERVICES.find(s => s.id === serviceParam) || SERVICES[0];
   const isEmbedded = window !== window.parent;
 
@@ -166,7 +169,7 @@ export default function PublicBookingPage() {
     } catch { /* best-effort */ }
   }, [address, applyCustomer]);
 
-  const isQuarterlyRecurringBooking = service.id === 'pest_control' && source !== 'estimate-accept';
+  const isQuarterlyRecurringBooking = service.id === 'pest_control' && !ONE_TIME_BOOKING_SOURCES.has(source);
 
   const handleConfirm = async () => {
     setLoading(true);
@@ -181,7 +184,8 @@ export default function PublicBookingPage() {
           slot_start: selectedSlot.start_time,
           slot_end: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id,
-          service_type: service.label,
+          service_type: quotedServiceLabel || service.label,
+          quoted_service_label: quotedServiceLabel || null,
           duration_minutes: service.duration,
           recurring_pattern: isQuarterlyRecurringBooking ? 'quarterly' : null,
           customer_notes: notes,

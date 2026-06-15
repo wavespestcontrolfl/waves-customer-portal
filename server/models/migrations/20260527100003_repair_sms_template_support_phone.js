@@ -7,7 +7,6 @@ const PHONE_TEMPLATE_KEYS = [
   'autopay_retry_failed',
   'autopay_retry_final_failed',
   'referral_invite',
-  'auto_renewal_30_60_day_notice',
   'seasonal_alert',
   'estimate_auto_renewed',
 ];

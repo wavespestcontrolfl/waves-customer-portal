@@ -118,7 +118,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c',
     tags: ['new lead'],
-    smsTemplateKey: 'auto_new_lead',
     enabled: true,
   },
   service_renewal: {

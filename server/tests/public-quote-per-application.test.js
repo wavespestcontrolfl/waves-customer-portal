@@ -124,6 +124,16 @@ describe('booking SMS template wiring', () => {
     expect(routeSource).not.toContain("'estimate_accepted_onetime'");
   });
 
+  test('one-time quote SMS uses the regular booking invite path', () => {
+    const retiredTemplateKey = ['estimate', 'onetime', 'followup'].join('_');
+    expect(routeSource).not.toContain(retiredTemplateKey);
+    expect(routeSource).toContain('if (normalizedPhone && !quoteRequired && bookingUrl)');
+    expect(routeSource).toContain('bookingServiceFor(serviceInterest)');
+    expect(routeSource).toContain("'quote-wizard-onetime'");
+    expect(routeSource).toContain("bookingParams.set('service_label', bookingServiceLabel)");
+    expect(routeSource).toContain('bookingServiceLabel = serviceInterest || bookingService.label');
+  });
+
   test('migration seeds the new template with the booking_url variable', () => {
     const migration = require('../models/migrations/20260612000001_quote_wizard_booking_invite_sms.js');
     expect(typeof migration.up).toBe('function');
@@ -135,5 +145,29 @@ describe('booking SMS template wiring', () => {
     expect(source).toContain('quote_wizard_booking_invite');
     expect(source).toContain('{booking_url}');
     expect(source).not.toContain('Thanks for booking');
+  });
+});
+
+describe('one-time quote booking source', () => {
+  test('quote-wizard one-time links are treated as non-recurring booking sources', () => {
+    const bookingRoute = require('../routes/booking');
+
+    expect(bookingRoute._internals.isOneTimeBookingSource('estimate-accept')).toBe(true);
+    expect(bookingRoute._internals.isOneTimeBookingSource('quote-wizard-onetime')).toBe(true);
+    expect(bookingRoute._internals.isOneTimeBookingSource('quote-wizard')).toBe(false);
+    expect(bookingRoute._internals.cleanBookingServiceLabel('  Wasp   & Hornet Control  ')).toBe('Wasp & Hornet Control');
+  });
+
+  test('public booking page posts the quoted one-time service label when present', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(
+      path.join(__dirname, '../../client/src/pages/PublicBookingPage.jsx'),
+      'utf8'
+    );
+
+    expect(source).toContain("searchParams.get('service_label')");
+    expect(source).toContain('service_type: quotedServiceLabel || service.label');
+    expect(source).toContain('quoted_service_label: quotedServiceLabel || null');
   });
 });

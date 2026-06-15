@@ -15,8 +15,8 @@ describe('sms-guard outbound validation', () => {
 
   test('allows other autopay notices without the blocked pre-charge wording', () => {
     const result = validateOutbound(
-      'Hello Linda, your Waves auto-pay authorization has been cancelled as of May 29. Your saved payment method will not be used for future automatic charges.',
-      { messageType: 'autopay_authorization_cancelled', now: new Date('2026-05-29T12:00:00-04:00') },
+      'Hello Linda! Your payment of $129 still did not go through. We will try again in a few days, or you can update your card here: portal.wavespestcontrol.com.',
+      { messageType: 'autopay_retry_failed', now: new Date('2026-05-29T12:00:00-04:00') },
     );
 
     expect(result).toEqual({ ok: true });

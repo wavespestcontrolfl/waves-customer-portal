@@ -1,10 +1,4 @@
-const TEMPLATE_KEYS = [
-  'lead_service_pest',
-  'lead_service_lawn',
-  'lead_service_one_time',
-  'lead_address_needed',
-  'lead_safe_ack',
-];
+const TEMPLATE_KEYS = [];
 
 exports.up = async function(knex) {
   const exists = await knex.schema.hasTable('sms_templates');
