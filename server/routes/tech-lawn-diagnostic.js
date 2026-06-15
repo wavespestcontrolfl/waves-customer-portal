@@ -461,7 +461,12 @@ router.post('/', async (req, res, next) => {
   try {
     const body = req.body || {};
     const findings = asArray(body.findings || body.diagnosis?.findings || body.reportContract?.diagnosis?.findings);
-    if (!findings.length) return res.status(400).json({ error: 'diagnostic findings are required' });
+    // Empty findings are allowed — the contract rebuild yields a minimal, no-diagnosis
+    // report (the no-block path). Require at least photos or findings so we don't
+    // persist an empty row.
+    if (!findings.length && !asArray(body.photos).length) {
+      return res.status(400).json({ error: 'photos or diagnostic findings are required' });
+    }
 
     const mode = DIAGNOSTIC_MODES.includes(body.mode) ? body.mode : 'internal';
     const contact = normalizeContact(body.contact);

@@ -126,7 +126,10 @@ function buildPublicLawnReport(diagnostic = {}) {
       insects: scrubCustomerText(expectations.insects) || null,
       turf_recovery: scrubCustomerText(expectations.turf_recovery) || null,
     },
-    watch_items: (Array.isArray(contract.watch_items) ? contract.watch_items : []).slice(0, 12).map(scrubCustomerText),
+    // Server-generated from scrubbed finding names — NOT contract.watch_items,
+    // which is built from finding.confirmation_step (internal tech/QA text).
+    watch_items: findings.map((f) => f.name).filter(Boolean).slice(0, 6)
+      .map((name) => `We'll keep an eye on ${name.toLowerCase()} and how it responds.`),
     seasonal_context: scrubCustomerText(contract.seasonal_context || ''),
   };
 }

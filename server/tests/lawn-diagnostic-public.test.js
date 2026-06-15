@@ -160,6 +160,24 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(JSON.stringify(report)).not.toContain('secret_internal_note');
     expect(JSON.stringify(report)).not.toContain('TECH ONLY');
   });
+
+  test('watch_items are server-generated and never expose confirmation steps', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Chinch bug pressure',
+          confidence: 'moderate',
+          findings: [{ name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', confirmation_step: 'Float test or cut-and-pull test required to confirm active chinch pressure.' }],
+        },
+        watering: {},
+        watch_items: ['Chinch bug pressure: Float test or cut-and-pull test required to confirm active chinch pressure.'],
+        customer_summary: 'ok',
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    expect(JSON.stringify(report)).not.toMatch(/float test|cut-and-pull|confirm active/i);
+    expect(report.watch_items).toEqual(["We'll keep an eye on chinch bug pressure and how it responds."]);
+  });
 });
 
 describe('validateQuoteRequest', () => {

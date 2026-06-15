@@ -86,7 +86,9 @@ export default function TechLawnDiagnosticPage() {
 
   const step = analysis ? 'review' : 'capture';
   const findings = analysis?.diagnosis?.findings || [];
-  const canActOnReport = findings.length > 0;
+  // Gate on having an analyzed report, NOT on findings — a minimal (no-diagnosis)
+  // report is still a valid, sendable service summary (the no-block path).
+  const canActOnReport = !!analysis;
 
   const addPhotos = async (fileList) => {
     setError('');
@@ -309,7 +311,7 @@ export default function TechLawnDiagnosticPage() {
             </button>
             <button onClick={reset} disabled={!!busy} style={btn('transparent', D.muted, !!busy)}>Start over</button>
           </div>
-          {!canActOnReport ? <p style={{ color: D.muted, fontSize: 12, marginTop: 10 }}>Saving and sending need at least one diagnostic finding.</p> : null}
+          {analysis && !findings.length ? <p style={{ color: D.muted, fontSize: 12, marginTop: 10 }}>No specific diagnosis from these photos — you can still send a calm service-summary report.</p> : null}
         </>
       )}
     </div>
