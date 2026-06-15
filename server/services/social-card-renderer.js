@@ -249,10 +249,46 @@ function renderReviewSvg(input = {}, logoDataUri = null) {
   `;
 }
 
+// Blog-share card: brand frame with a "From the blog" eyebrow, the post title as
+// the headline, an excerpt, and a read-more CTA. Used when autonomous blog posts
+// are shared to social so they match the studio's branding (vs a generic image).
+function renderBlogSvg(input = {}, logoDataUri = null) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const city = cleanText(input.city || input.location, 60);
+  const title = cleanText(input.title || input.topic, 160) || 'New on the Waves blog';
+  const service = cleanText(input.service, 70);
+  const excerpt = cleanText(input.excerpt || input.detail || input.description, 360)
+    || 'A new guide from the Waves team on keeping Southwest Florida homes and lawns protected.';
+  const cta = cleanText(input.cta || 'Read the full guide', 40);
+
+  const { svg: frame, box } = chrome({ W, H, city, service, logoDataUri });
+  const availW = box.padR - box.padL;
+  const titleSize = title.length > 38 ? Math.round(W * 0.054) : Math.round(W * 0.064);
+  const titleLines = wrapText(title, fitChars(availW, titleSize, 0.60), H >= 1000 ? 4 : 3);
+  const eyebrowY = box.panelY + 128;
+  const titleY = eyebrowY + 50 + Math.round(titleSize * 0.92);
+  const detailSize = Math.round(W * 0.03);
+  const detailLines = wrapText(excerpt, fitChars(availW, detailSize, 0.52), H >= 1000 ? 4 : 3);
+  const detailY = titleY + (titleLines.length * titleSize * 1.06) + 58;
+  const ctaY = box.panelY + box.panelH - 150;
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${eyebrow('From the Waves blog', box.padL, eyebrowY, COLORS.blueDark)}
+      ${textBlock(titleLines, { x: box.padL, y: titleY, size: titleSize, weight: 800, fill: COLORS.blueDeeper, family: FONTS.display, lineHeight: 1.06 })}
+      <line x1="${box.padL}" y1="${detailY - 42}" x2="${box.padR - 180}" y2="${detailY - 42}" stroke="${COLORS.blueLight}" stroke-width="4"/>
+      ${textBlock(detailLines, { x: box.padL, y: detailY, size: detailSize, weight: 500, fill: COLORS.textBody, family: FONTS.body, lineHeight: 1.34 })}
+      ${ctaButton(cta, box.padL, ctaY)}
+      ${waveMotif(box.padR - 60, ctaY + 30, W / 1080)}
+    </svg>
+  `;
+}
+
 function renderSocialCardSvg(input = {}, logoDataUri = null) {
-  return input.variant === 'review'
-    ? renderReviewSvg(input, logoDataUri)
-    : renderCampaignSvg(input, logoDataUri);
+  if (input.variant === 'review') return renderReviewSvg(input, logoDataUri);
+  if (input.variant === 'blog') return renderBlogSvg(input, logoDataUri);
+  return renderCampaignSvg(input, logoDataUri);
 }
 
 // Load + downscale the brand logo once, cached. librsvg renders <image> data

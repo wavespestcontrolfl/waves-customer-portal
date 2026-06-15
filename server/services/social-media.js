@@ -668,6 +668,23 @@ async function uploadImageToS3(base64Data, filename) {
   }
 }
 
+// Render a deterministic brand card (SVG -> JPEG) and host it on S3/CDN, so
+// autonomous posts (incl. blog shares) carry the on-brand card instead of a
+// generic AI image. Returns null on any failure (no S3/CDN, render error) so
+// the caller falls back to its normal image path.
+async function renderBrandCardUrl(cardInput, platform) {
+  try {
+    const SocialCardRenderer = require('./social-card-renderer');
+    const base64 = await SocialCardRenderer.renderSocialCardJpegBase64(cardInput, { platform });
+    const seed = SocialCardRenderer.filenameSlug(`${cardInput.variant || 'card'}-${cardInput.title || cardInput.topic || 'waves'}`);
+    const suffix = platform && platform !== 'square' ? `-${platform}` : '';
+    return await uploadImageToS3(base64, `${seed}${suffix}-${Date.now()}.jpg`);
+  } catch (err) {
+    logger.warn(`[social] brand card render failed: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Platform Posting ──
 
 async function postToFacebook(message, link, imageUrl) {
@@ -836,11 +853,16 @@ async function postToGBP(locationId, summary, link, imageUrl) {
   if (!loc?.googleLocationResourceName) throw new Error(`No GBP resource for ${locationId}`);
 
   try {
+    // GBP posts link out via a CTA button (URLs in the body aren't clickable),
+    // and the copy is generated WITHOUT a URL on purpose — so always attach a
+    // "Learn more" button. Prefer the post's own link (blog URL / suggested
+    // page); fall back to the site so a GBP post is never published linkless.
+    const ctaUrl = (typeof link === 'string' && link.trim()) ? link.trim() : 'https://www.wavespestcontrol.com';
     const result = await gbpService.createPost(
       loc.googleLocationResourceName,
       {
         summary,
-        callToAction: link ? { actionType: 'LEARN_MORE', url: link } : undefined,
+        callToAction: { actionType: 'LEARN_MORE', url: ctaUrl },
         mediaUrl: imageUrl || undefined,
       },
       locationId
@@ -854,6 +876,21 @@ async function postToGBP(locationId, summary, link, imageUrl) {
 }
 
 // ── RSS Feed Polling ──
+// RSS title/description arrive XML-escaped (&amp;, &apos;, &#8217;, …). Decode
+// them so the values aren't double-escaped when painted into the SVG card or fed
+// to the caption model (otherwise the post shows literal "&apos;").
+function decodeEntities(value) {
+  return String(value || '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch { return _; } })
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch { return _; } })
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&'); // amp last so "&amp;lt;" decodes to "&lt;", not "<"
+}
+
 async function fetchRSSFeed(feedUrl) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
@@ -877,9 +914,12 @@ async function fetchRSSFeed(feedUrl) {
       return m ? m[1].trim() : '';
     };
     items.push({
-      title: get('title'),
+      // Decode entities FIRST, then strip tags: a description with encoded HTML
+      // (&lt;p&gt;…&lt;/p&gt;) would otherwise decode into literal <p> tag text
+      // after the strip already ran. Then collapse whitespace and truncate.
+      title: decodeEntities(get('title')).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim(),
       link: get('link'),
-      description: get('description').replace(/<[^>]+>/g, '').substring(0, 500),
+      description: decodeEntities(get('description')).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().substring(0, 500),
       pubDate: get('pubDate'),
       guid: get('guid') || get('link'),
     });
@@ -909,6 +949,27 @@ const SocialMediaService = {
 
     const items = await fetchRSSFeed(feedUrl);
     if (!items.length) return { processed: 0, results: [] };
+
+    // Only render+upload brand cards when the run will actually publish AND the
+    // image can be hosted — otherwise a manual /check-rss while paused/disabled,
+    // or an env without S3+CDN, would create orphan S3 objects per item with no
+    // post. Mirrors publishToAll's own dry-run/pause/hosting gates (publishToAll
+    // still re-checks; this just avoids the wasted upload before it).
+    const hasImageHosting = !!config.s3.accessKeyId && !!config.s3.secretAccessKey
+      && !!config.s3.bucket && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    // Also require at least one publish target actually ready (creds / GBP
+    // locations); otherwise publishToAll skips/fails every platform and the
+    // uploaded card is orphaned. FB/IG are sync checks; only probe GBP (a
+    // DB/OAuth call) when neither is ready.
+    const fbReady = SOCIAL_FLAGS.facebookEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
+    const igReady = SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
+    const metaReady = fbReady || igReady; // FB/IG consume the 1:1 card
+    let gbpReady = false;                 // GBP consumes the 4:3 card
+    if (SOCIAL_FLAGS.gbpEnabled) {
+      try { gbpReady = (await gbpService.getConfiguredLocations()).length > 0; } catch { gbpReady = false; }
+    }
+    const cardsEligible = !SOCIAL_FLAGS.dryRun && SOCIAL_FLAGS.automationEnabled
+      && hasImageHosting && (metaReady || gbpReady) && !(await isPausedByAdmin());
 
     // Advisory lock prevents overlapping cron runs / deploys from double-posting.
     // Uses transaction-scoped lock so acquire+release use the same connection.
@@ -943,12 +1004,33 @@ const SocialMediaService = {
         if (existing) continue;
 
         try {
+          // Share the blog post with the on-brand card (title + excerpt + read-
+          // more CTA), matching the studio's branding instead of a generic AI
+          // image. 1:1 for FB/IG, 4:3 for GBP. Only when the run will publish
+          // and the image can be hosted (cardsEligible) — otherwise skip and let
+          // publishToAll fall back to its normal image path with no orphan
+          // uploads.
+          let imageUrl = null;
+          let gbpImageUrl = null;
+          if (cardsEligible) {
+            const card = { variant: 'blog', title: item.title, excerpt: item.description, cta: 'Read the full guide' };
+            // Render ONLY the size a ready platform will consume: 1:1 for FB/IG,
+            // 4:3 for GBP — so a single-platform deployment doesn't upload an
+            // unused variant.
+            if (metaReady) imageUrl = await renderBrandCardUrl(card, 'square');
+            if (gbpReady) gbpImageUrl = await renderBrandCardUrl(card, 'gbp');
+            // GBP-only: reuse the 4:3 as the base image so publishToAll sees a
+            // non-null image and doesn't generate an orphan AI one.
+            if (!imageUrl && gbpImageUrl) imageUrl = gbpImageUrl;
+          }
           const result = await this.publishToAll({
             title: item.title,
             description: item.description,
             link: normalizedUrl,
             guid: normalizedGuid,
             source: 'rss',
+            imageUrl,
+            gbpImageUrl,
           });
           results.push({ item: item.title, ...result });
         } catch (err) {
