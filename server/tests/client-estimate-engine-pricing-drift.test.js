@@ -3,6 +3,7 @@ const path = require('path');
 const esbuild = require('esbuild');
 
 const { priceGermanRoach, priceTopDressing, priceDethatching } = require('../services/pricing-engine/service-pricing');
+const { ONE_TIME } = require('../services/pricing-engine/constants');
 
 const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
 const legacyAdminEstimatePagePath = path.resolve(__dirname, '../../client/src/pages/admin/EstimatePage.jsx');
@@ -352,6 +353,55 @@ describe('deprecated client estimator pricing drift guards', () => {
       name: 'One-Time Pest Control',
       price: 257,
     }));
+  });
+
+  test('one-time mosquito mirrors the server SW-FL reprice band, not the retired 2x band', () => {
+    // Server-authoritative band: server/services/pricing-engine/constants.js
+    // ONE_TIME.mosquito (repriced 2026-06). The deprecated client fallback must
+    // quote the same band + over-acre increment so the previewed price matches
+    // what the server will actually charge.
+    expect([
+      ONE_TIME.mosquito.SMALL,
+      ONE_TIME.mosquito.STANDARD,
+      ONE_TIME.mosquito.LARGE,
+      ONE_TIME.mosquito.XL,
+      ONE_TIME.mosquito.ESTATE,
+      ONE_TIME.mosquito.ACRE_CLASS,
+    ]).toEqual([99, 129, 159, 199, 239, 269]);
+    expect(ONE_TIME.mosquito.overAcreIncrementPrice).toBe(40);
+
+    // Buckets must mirror the server ladder (server/services/pricing-engine
+    // service-pricing.js getOneTimeMosquitoAreaBucket).
+    expect(source).toContain('let p = 99;');
+    expect(source).toContain('if (treatableSqFt > 43560) p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;');
+    expect(source).toContain('else if (treatableSqFt > 32000) p = 269;');
+    expect(source).toContain('else if (treatableSqFt > 24000) p = 239;');
+    expect(source).toContain('else if (treatableSqFt > 16000) p = 199;');
+    expect(source).toContain('else if (treatableSqFt > 11000) p = 159;');
+    expect(source).toContain('else if (treatableSqFt > 7500) p = 129;');
+    // Retired 2x-market band must be gone.
+    expect(source).not.toContain('let p = 225;');
+    expect(source).not.toContain('p = 475');
+    expect(source).not.toContain('p = 425');
+    expect(source).not.toContain('p = 385');
+
+    // Behavioral check: a small lot lands in the SMALL bucket and stacks the
+    // same $75 station / $15 dunk add-ons as the server.
+    const estimate = calculateEstimate({
+      homeSqFt: 1400,
+      stories: 1,
+      lotSqFt: 7000,
+      propertyType: 'single_family',
+      svcOnetimeMosquito: true,
+      mosquitoStationCount: 2,
+      mosquitoDunkCount: 1,
+      urgency: 'NONE',
+      isAfterHours: false,
+      isRecurringCustomer: false,
+    });
+    const line = estimate.oneTime.items.find((item) => item.name === 'OT Mosquito');
+    expect(line).toBeDefined();
+    expect(line.price).toBe(ONE_TIME.mosquito.SMALL + 2 * 75 + 1 * 15);
   });
 
   test('admin customer preview adds preserved pest specialty rows to one-time pest choice', () => {
