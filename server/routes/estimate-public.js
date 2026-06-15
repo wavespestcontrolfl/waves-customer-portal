@@ -8665,6 +8665,22 @@ const RECURRING_SERVICE_KEYS = new Set([
   'termite_bait', 'palm_injection', 'rodent_bait', 'rodent',
 ]);
 
+// One-time line items carry an explicit `one_time_*` service key. They must be
+// dropped before recurring-service detection — recurringServiceKey would alias
+// one_time_pest → pest_control, one_time_mosquito → mosquito, etc.
+function isOneTimeEngineLineItem(li = {}) {
+  return /^one[_-]?time/.test(String(li?.service || '').toLowerCase());
+}
+
+// Apply a flat (WaveGuard) discount factor to a pre-discount tier value,
+// keeping cents. factor === 1 (no membership discount) returns the value as-is.
+function applyLawnTierDiscount(value, factor) {
+  const n = finiteNumberOrNull(value);
+  if (n == null) return null;
+  if (!(factor < 1)) return n;
+  return Math.round(n * factor * 100) / 100;
+}
+
 // Engine-invocation lawn-only equivalent of lawnFrequenciesFromResultStats.
 // Server-authoritative / IB estimates store engineInputs (not a precomputed
 // result.results.lawn), so the no-pest pricing branch reads the lawn line
@@ -8673,7 +8689,8 @@ const RECURRING_SERVICE_KEYS = new Set([
 // inside the pest cadence. Returns [] for any non-lawn-only result so the
 // caller falls back to the single-frequency view.
 function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
-  const lineItems = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
+  const lineItems = (Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [])
+    .filter((li) => li && !isOneTimeEngineLineItem(li));
   const recurringServices = new Set(
     lineItems
       .map((li) => recurringServiceKey(li))
@@ -8682,16 +8699,47 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
   if (recurringServices.size !== 1 || !recurringServices.has('lawn_care')) return [];
   const lawnLine = lineItems.find((li) => recurringServiceKey(li) === 'lawn_care');
   const tiers = Array.isArray(lawnLine?.tiers) ? lawnLine.tiers : [];
-  const rows = tiers.map((t) => ({
-    name: t.label,
-    tier: t.tier,
-    mo: finiteNumberOrNull(t.monthly),
-    ann: finiteNumberOrNull(t.annual),
-    pa: finiteNumberOrNull(t.perApp),
-    v: finiteNumberOrNull(t.visits ?? t.freq),
-    recommended: t.recommended === true,
-    selected: t.tier === lawnLine.tier,
-  }));
+
+  // The per-tier monthly/annual/per-app values are pre-discount market prices,
+  // but generateEstimate applies the WaveGuard membership % to the lawn line for
+  // existing customers (priorQualifyingServices lifts the combined tier). The
+  // accept handler bills selectedFrequency.monthly/annual directly, so each tier
+  // must carry the same discounted price the line total reflects.
+  const beforeAnnual = finiteNumberOrNull(lawnLine?.annualBeforeDiscount);
+  const afterAnnual = finiteNumberOrNull(lawnLine?.annualAfterDiscount);
+  const discountFactor = (beforeAnnual && beforeAnnual > 0 && afterAnnual != null)
+    ? afterAnnual / beforeAnnual
+    : 1;
+
+  // After acceptance the chosen tier is persisted in customerSelection (the
+  // engine inputs are NOT restamped), so honor it when marking the selected row;
+  // otherwise fall back to the engine's resolved tier.
+  const selection = estData?.customerSelection || estData?.result?.customerSelection || {};
+  const selectedKey = String(selection.serviceTierKey || selection.serviceTier || '').trim().toLowerCase();
+  const selectedTierKey = ['basic', 'standard', 'enhanced', 'premium'].includes(selectedKey)
+    ? selectedKey
+    : lawnLine.tier;
+
+  const rows = tiers.map((t) => {
+    const annual = applyLawnTierDiscount(t.annual, discountFactor);
+    const visits = finiteNumberOrNull(t.visits ?? t.freq);
+    const monthly = annual != null
+      ? Math.round((annual / 12) * 100) / 100
+      : applyLawnTierDiscount(t.monthly, discountFactor);
+    const perApp = (annual != null && visits)
+      ? Math.round((annual / visits) * 100) / 100
+      : applyLawnTierDiscount(t.perApp, discountFactor);
+    return {
+      name: t.label,
+      tier: t.tier,
+      mo: monthly,
+      ann: annual,
+      pa: perApp,
+      v: visits,
+      recommended: t.recommended === true,
+      selected: t.tier === selectedTierKey,
+    };
+  });
   return lawnFrequenciesFromRows(rows, estData);
 }
 

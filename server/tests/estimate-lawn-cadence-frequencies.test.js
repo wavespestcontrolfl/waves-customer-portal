@@ -150,6 +150,46 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(lawnFrequenciesFromEngineResult({ lineItems: [{ service: 'mosquito', tiers: [] }] })).toEqual([]);
     expect(lawnFrequenciesFromEngineResult({})).toEqual([]);
   });
+
+  test('still expands the ladder when a one-time add-on rides alongside recurring lawn', () => {
+    // one_time_pest aliases to pest_control via recurringServiceKey — it must be
+    // dropped before the lawn-only check so the ladder is not suppressed.
+    const withOneTime = {
+      lineItems: [
+        lawnLineItem(),
+        { service: 'one_time_pest', perApp: 250 },
+        { service: 'one_time_mosquito', perApp: 120 },
+      ],
+    };
+    expect(lawnFrequenciesFromEngineResult(withOneTime).map((f) => f.key))
+      .toEqual(['basic', 'standard', 'enhanced', 'premium']);
+  });
+
+  test('carries the WaveGuard membership discount into every tier price', () => {
+    // Existing-customer reprice: the engine discounted the lawn line 15%
+    // (annualBeforeDiscount → annualAfterDiscount). Each tier must reflect that,
+    // since accept bills selectedFrequency.monthly/annual directly.
+    const discounted = lawnLineItem();
+    discounted.annualBeforeDiscount = 747; // enhanced gross annual
+    discounted.annualAfterDiscount = 634.95; // 15% off
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [discounted] });
+    const enhanced = freqs.find((f) => f.key === 'enhanced');
+    expect(enhanced.annual).toBe(634.95); // 747 * 0.85
+    expect(enhanced.monthly).toBe(52.91); // 634.95 / 12
+    const basic = freqs.find((f) => f.key === 'basic');
+    expect(basic.monthly).toBe(29.75); // 420 gross * 0.85 / 12
+  });
+
+  test('honors the accepted tier from customerSelection over the engine default', () => {
+    // Stored as Enhanced but accepted as Basic: the re-rendered ladder must mark
+    // Basic selected, not the engine's resolved Enhanced tier.
+    const freqs = lawnFrequenciesFromEngineResult(
+      { lineItems: [lawnLineItem()] },
+      { customerSelection: { serviceTierKey: 'basic' } },
+    );
+    expect(freqs.find((f) => f.selected)).toMatchObject({ key: 'basic' });
+    expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(false);
+  });
 });
 
 describe('applySelectedLawnTierToEstimateData — accept re-stamps the picked cadence', () => {
