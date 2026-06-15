@@ -359,7 +359,12 @@ const AUTONOMOUS_FLAGS = {
     return normalizePublishMode(process.env.SOCIAL_AUTONOMOUS_MODE, 'publish');
   },
   get channels() {
-    const raw = String(process.env.SOCIAL_AUTONOMOUS_CHANNELS || 'gbp,facebook,instagram');
+    // Only an UNSET env var defaults; a blank/whitespace value passes through so
+    // it normalizes to [] (fail closed). Blanking SOCIAL_AUTONOMOUS_CHANNELS to
+    // stop output must actually stop it, not fall back to every platform.
+    const raw = process.env.SOCIAL_AUTONOMOUS_CHANNELS == null
+      ? 'gbp,facebook,instagram'
+      : String(process.env.SOCIAL_AUTONOMOUS_CHANNELS);
     const selected = raw.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
     return normalizeChannels(selected);
   },

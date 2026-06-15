@@ -202,6 +202,21 @@ describe('social content studio', () => {
     expect(Studio.normalizeChannels('facebook')).toEqual([]);         // non-array → none
   });
 
+  test('AUTONOMOUS_FLAGS.channels: unset → defaults, blank → none (fail closed)', () => {
+    const orig = process.env.SOCIAL_AUTONOMOUS_CHANNELS;
+    try {
+      delete process.env.SOCIAL_AUTONOMOUS_CHANNELS;
+      expect(Studio.AUTONOMOUS_FLAGS.channels.slice().sort()).toEqual(['facebook', 'gbp', 'instagram']);
+      process.env.SOCIAL_AUTONOMOUS_CHANNELS = '   ';        // blanked to stop output
+      expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual([]);
+      process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'gbp, facebook';
+      expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual(['gbp', 'facebook']);
+    } finally {
+      if (orig === undefined) delete process.env.SOCIAL_AUTONOMOUS_CHANNELS;
+      else process.env.SOCIAL_AUTONOMOUS_CHANNELS = orig;
+    }
+  });
+
   test('httpUrlOrNull accepts only http(s) absolute URLs', () => {
     expect(Studio.httpUrlOrNull('https://example.com/post/123')).toBe('https://example.com/post/123');
     expect(Studio.httpUrlOrNull('http://example.com')).toBe('http://example.com');
