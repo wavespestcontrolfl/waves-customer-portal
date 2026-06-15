@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -308,6 +309,82 @@ router.post('/prospects/verify', async (req, res, next) => {
       .then((r) => logger.info(`[link-verifier] manual run: ${JSON.stringify(r)}`))
       .catch((e) => logger.error(`[link-verifier] manual run failed: ${e.message}`));
     res.json({ started: true });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// OUTREACH — approval-gated editorial outreach send (Backlink Manager M3b)
+// =========================================================================
+
+// GET /api/admin/backlink-agent/prospects/outreach/pending — drafts awaiting approval
+router.get('/prospects/outreach/pending', async (req, res, next) => {
+  try {
+    const items = await db('seo_link_prospects')
+      .where({ outreach_status: 'drafted', status: 'prospect' })
+      .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
+      .orderBy('updated_at', 'desc');
+    const Outreach = require('../services/seo/link-prospect-outreach');
+    const sentToday = await Outreach.dailySendCount();
+    res.json({
+      items,
+      gateOn: isEnabled('linkProspectOutreach'),
+      rateLimit: { sentToday, cap: Outreach.dailyCap() },
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/prospects/:id/outreach/draft — save/update a draft
+router.post('/prospects/:id/outreach/draft', async (req, res, next) => {
+  try {
+    const { to, subject, body } = req.body || {};
+    const Outreach = require('../services/seo/link-prospect-outreach');
+    const result = await Outreach.saveDraft({
+      prospectId: req.params.id, to, subject, body, owner: req.technician?.name || 'admin',
+    });
+    if (!result.ok) {
+      const status = { not_found: 404, send_in_flight: 409, not_actionable: 409, needs_reconcile: 409 }[result.code] || 400;
+      return res.status(status).json(result);
+    }
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/prospects/:id/outreach/send — approve + send.
+// The authenticated operator call IS the approval click (design §9). Sends only
+// when the lane gate is on; rate-limited + idempotent (see link-prospect-outreach).
+// requireAdmin: sending from the PRIMARY Waves inbox is admin-only — techs may draft
+// (compose) but not approve+send.
+router.post('/prospects/:id/outreach/send', requireAdmin, async (req, res, next) => {
+  try {
+    const Outreach = require('../services/seo/link-prospect-outreach');
+    const result = await Outreach.sendOutreach({
+      prospectId: req.params.id, approvedBy: req.technician?.name || 'admin',
+    });
+    if (!result.ok) {
+      const status = {
+        not_found: 404, gate_off: 403, gmail_not_connected: 503, rate_limited: 429,
+        already_sent: 409, not_actionable: 409, send_failed: 502, finalize_failed: 500,
+      }[result.code] || 400;
+      return res.status(status).json(result);
+    }
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/prospects/:id/outreach/reconcile — resolve a
+// send_error (ambiguous Gmail failure) deliberately: { outcome: 'sent' | 'requeue' }.
+// requireAdmin: it records/clears a primary-inbox send, same privilege as send.
+router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, next) => {
+  try {
+    const Outreach = require('../services/seo/link-prospect-outreach');
+    const result = await Outreach.reconcileSendError({
+      prospectId: req.params.id, outcome: req.body?.outcome, approvedBy: req.technician?.name || 'admin',
+    });
+    if (!result.ok) {
+      const status = { not_found: 404, not_reconcilable: 409, send_in_flight: 409 }[result.code] || 400;
+      return res.status(status).json(result);
+    }
+    res.json(result);
   } catch (err) { next(err); }
 });
 
