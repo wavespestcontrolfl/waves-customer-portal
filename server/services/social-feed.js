@@ -50,12 +50,31 @@ const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
 const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
 const TIKTOK_VIDEO_FIELDS = 'id,title,video_description,cover_image_url,share_url,embed_link,create_time,duration';
 
+const SOURCE_TIMEOUT_MS = 8000; // per-source hard cap so a hung upstream can't wedge the feed
+
 let CACHE = { payload: null, expires: 0 };
 let INFLIGHT = null;
 let YT_CHANNEL_ID = null; // resolved lazily from handle if not set via env
 
 function token() {
   return process.env.FACEBOOK_ACCESS_TOKEN || null;
+}
+
+// Abort a fetch after SOURCE_TIMEOUT_MS so a slow socket releases.
+function timeoutSignal(ms = SOURCE_TIMEOUT_MS) {
+  return AbortSignal.timeout(ms);
+}
+
+// Backstop for sources whose internal fetches we don't control (GBP goes
+// through gbpService): reject the whole source if it overruns, so build()
+// and INFLIGHT never stay pending.
+function withTimeout(promise, label, ms = SOURCE_TIMEOUT_MS) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
 function clip(text) {
@@ -68,7 +87,7 @@ async function graphGet(path, params = {}) {
   const url = new URL(`${GRAPH}/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set('access_token', token());
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), { signal: timeoutSignal() });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = body?.error?.message || `HTTP ${res.status}`;
@@ -166,6 +185,7 @@ async function resolveYouTubeChannelId() {
   try {
     const res = await fetch(`https://www.youtube.com/${handle}`, {
       headers: { 'Accept-Language': 'en-US,en;q=0.9' },
+      signal: timeoutSignal(),
     });
     if (!res.ok) return null;
     const html = await res.text();
@@ -201,7 +221,7 @@ function parseYouTubeRss(xml) {
 async function fetchYouTube() {
   const channelId = await resolveYouTubeChannelId();
   if (!channelId) return { status: 'skipped', posts: [] };
-  const res = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`);
+  const res = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { signal: timeoutSignal() });
   if (!res.ok) throw new Error(`RSS HTTP ${res.status}`);
   const xml = await res.text();
   return { status: 'ok', posts: parseYouTubeRss(xml) };
@@ -257,6 +277,7 @@ async function tiktokAccessToken() {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cache-Control': 'no-cache' },
     body: body.toString(),
+    signal: timeoutSignal(),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error || !data.access_token) {
@@ -285,6 +306,7 @@ async function fetchTikTok() {
     method: 'POST',
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ max_count: TIKTOK_LIMIT }),
+    signal: timeoutSignal(),
   });
   const data = await res.json().catch(() => ({}));
   // TikTok wraps the status in data.error; code 'ok' means success.
@@ -320,7 +342,7 @@ async function build() {
     ['tiktok', fetchTikTok],
   ];
 
-  const results = await Promise.allSettled(runners.map(([, fn]) => fn()));
+  const results = await Promise.allSettled(runners.map(([key, fn]) => withTimeout(fn(), key)));
   results.forEach((r, i) => {
     const key = runners[i][0];
     if (r.status === 'fulfilled') {
