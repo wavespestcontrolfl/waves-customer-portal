@@ -151,22 +151,47 @@ async function loadPriorVisits({ customerId, serviceLine, serviceType, knex, lim
   }
 }
 
-// Re-entry / rainfast / active-ingredient data for the products applied today,
-// matched by catalog name. Drives concrete, label-accurate safety lines.
-async function loadProductSafety(productNames, knex) {
-  const names = [...new Set((productNames || []).map(cleanText).filter(Boolean))];
-  if (!names.length) return [];
+// Mirror of report-data.js's customer-facing gate (approvedReportProductFacts):
+// only catalog rows flagged approved_for_service_report may drive customer copy,
+// and a pesticide must carry a real EPA reg number. Kept local so this module
+// stays self-contained — see server/services/service-report/report-data.js.
+function catalogApprovedForReport(row) {
+  if (!row || !row.approved_for_service_report) return false;
+  const category = String(row.product_type || row.category || '').toLowerCase();
+  const isPesticide = String(row.product_type || '') === 'pesticide'
+    || /(herbicide|insecticide|fungicide|pgr|growth)/.test(category);
+  if (isPesticide) {
+    const epa = String(row.epa_reg_number || '').trim();
+    if (!epa || /^(n\/a|not epa|not epa-registered fertilizer|none)$/i.test(epa)) return false;
+  }
+  return true;
+}
+
+// Re-entry / rainfast / active-ingredient data for the products applied today.
+// Matched by catalog id (preferred) or name, and filtered to APPROVED,
+// label-verified rows only — unapproved catalog rows must not drive customer copy.
+async function loadProductSafety(products, knex) {
+  const list = Array.isArray(products) ? products : [];
+  const ids = [...new Set(list.map((p) => p && p.productId).filter(Boolean))];
+  const names = [...new Set(list.map((p) => cleanText(p && p.name)).filter(Boolean))];
+  if (!ids.length && !names.length) return [];
   try {
     const rows = await knex('products_catalog')
-      .whereIn('name', names)
-      .select('name', 'active_ingredient', 'epa_reg_number', 'rei_hours', 'rainfast_minutes', 'reentry_text');
-    return rows.map((r) => ({
-      name: cleanText(r.name),
-      activeIngredient: cleanText(r.active_ingredient) || null,
-      reiHours: finiteOrNull(r.rei_hours),
-      rainfastMinutes: finiteOrNull(r.rainfast_minutes),
-      reentryText: truncate(r.reentry_text, 200) || null,
-    }));
+      .where(function matchCatalog() {
+        if (ids.length) this.whereIn('id', ids);
+        if (names.length) this.orWhereIn('name', names);
+      })
+      .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number',
+        'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'approved_for_service_report');
+    return rows
+      .filter(catalogApprovedForReport)
+      .map((r) => ({
+        name: cleanText(r.name),
+        activeIngredient: cleanText(r.active_ingredient) || null,
+        reiHours: finiteOrNull(r.rei_hours),
+        rainfastMinutes: finiteOrNull(r.rainfast_minutes),
+        reentryText: truncate(r.reentry_summary || r.reentry_text, 200) || null,
+      }));
   } catch (err) {
     logger.warn(`[report-copy-context] product-safety load failed: ${err.message}`);
     return [];
@@ -219,9 +244,11 @@ async function buildReportCopyContext({
   knex = db,
 } = {}) {
   const line = serviceLine || detectServiceLine(serviceType) || null;
-  const names = (Array.isArray(products) && products.length)
-    ? products.map((p) => p.name).filter(Boolean)
-    : productNames;
+  // Product list for the catalog lookup: prefer the structured products (carry
+  // productId + name); fall back to bare names parsed from the products string.
+  const productList = (Array.isArray(products) && products.length)
+    ? products
+    : (Array.isArray(productNames) ? productNames : []).map((name) => ({ name }));
 
   const customer = await loadCustomer(customerId, knex);
   const lat = finiteOrNull(customer?.latitude);
@@ -230,7 +257,7 @@ async function buildReportCopyContext({
   // Fan out the independent loads concurrently; each is individually fail-soft.
   const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend] = await Promise.all([
     loadPriorVisits({ customerId, serviceLine: line, serviceType, knex }),
-    loadProductSafety(names, knex),
+    loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
     (lat != null && lng != null)
       ? fetchApplicationConditions({ latitude: lat, longitude: lng }).catch(() => null)

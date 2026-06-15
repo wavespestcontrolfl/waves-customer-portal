@@ -7675,6 +7675,7 @@ export function CompletionPanel({
       serviceType: service.serviceType,
       serviceLine: service.serviceLine || service.service_line || undefined,
       products: selectedProducts.map((p) => ({
+        productId: p.productId || null,
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
