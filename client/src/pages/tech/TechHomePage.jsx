@@ -302,12 +302,12 @@ export default function TechHomePage() {
   const completed = myServices.filter((s) => s.status === 'completed').length;
   const total = myServices.length;
   // "Next Stop" = first non-terminal service in the day's route.
-  // Skipping past completed/skipped/cancelled means a tech with an
-  // earlier skipped job sees the actual upcoming pending one, not
-  // the dead row. on_site / en_route still show — they ARE the
-  // current focus, the En Route CTA is disabled there because the
+  // Skipping past completed/skipped/cancelled/no_show means a tech with
+  // an earlier dead job (skipped or no-showed) sees the actual upcoming
+  // pending one, not the dead row. on_site / en_route still show — they
+  // ARE the current focus, the En Route CTA is disabled there because the
   // server's PRE_EN_ROUTE gate rejects those.
-  const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled']);
+  const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
   const nextStop = myServices.find((s) => !TERMINAL_STATUSES.has(s.status));
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
