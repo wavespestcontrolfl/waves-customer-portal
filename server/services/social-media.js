@@ -963,12 +963,13 @@ const SocialMediaService = {
     // DB/OAuth call) when neither is ready.
     const fbReady = SOCIAL_FLAGS.facebookEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
     const igReady = SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!INSTAGRAM_ACCOUNT_ID;
-    let anyPlatformReady = fbReady || igReady;
-    if (!anyPlatformReady && SOCIAL_FLAGS.gbpEnabled) {
-      try { anyPlatformReady = (await gbpService.getConfiguredLocations()).length > 0; } catch { anyPlatformReady = false; }
+    const metaReady = fbReady || igReady; // FB/IG consume the 1:1 card
+    let gbpReady = false;                 // GBP consumes the 4:3 card
+    if (SOCIAL_FLAGS.gbpEnabled) {
+      try { gbpReady = (await gbpService.getConfiguredLocations()).length > 0; } catch { gbpReady = false; }
     }
     const cardsEligible = !SOCIAL_FLAGS.dryRun && SOCIAL_FLAGS.automationEnabled
-      && hasImageHosting && anyPlatformReady && !(await isPausedByAdmin());
+      && hasImageHosting && (metaReady || gbpReady) && !(await isPausedByAdmin());
 
     // Advisory lock prevents overlapping cron runs / deploys from double-posting.
     // Uses transaction-scoped lock so acquire+release use the same connection.
@@ -1013,8 +1014,14 @@ const SocialMediaService = {
           let gbpImageUrl = null;
           if (cardsEligible) {
             const card = { variant: 'blog', title: item.title, excerpt: item.description, cta: 'Read the full guide' };
-            imageUrl = await renderBrandCardUrl(card, 'square');
-            gbpImageUrl = imageUrl ? await renderBrandCardUrl(card, 'gbp') : null;
+            // Render ONLY the size a ready platform will consume: 1:1 for FB/IG,
+            // 4:3 for GBP — so a single-platform deployment doesn't upload an
+            // unused variant.
+            if (metaReady) imageUrl = await renderBrandCardUrl(card, 'square');
+            if (gbpReady) gbpImageUrl = await renderBrandCardUrl(card, 'gbp');
+            // GBP-only: reuse the 4:3 as the base image so publishToAll sees a
+            // non-null image and doesn't generate an orphan AI one.
+            if (!imageUrl && gbpImageUrl) imageUrl = gbpImageUrl;
           }
           const result = await this.publishToAll({
             title: item.title,
