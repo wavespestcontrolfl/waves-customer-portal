@@ -912,6 +912,76 @@ const AppointmentReminders = {
   },
 
   /**
+   * Handle a no-show — notify the customer that we missed them and invite
+   * them to get back on the schedule. Fired from the dispatch "Mark as
+   * no-show" action. Unlike handleCancellation this reads the appointment
+   * timing straight off scheduled_services (a no-show may not have an
+   * appointment_reminders row) so the notice still sends. Best-effort:
+   * landline/opt-out guards and template-missing all degrade to no send,
+   * never throw.
+   */
+  async handleNoShow(scheduledServiceId, options = {}) {
+    try {
+      const sendNotification = options.sendNotification !== false;
+      if (!sendNotification) {
+        logger.info(`[appt-remind] No-show notice suppressed for ${scheduledServiceId}`);
+        return null;
+      }
+
+      const svc = await db('scheduled_services')
+        .where({ 'scheduled_services.id': scheduledServiceId })
+        .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .select(
+          'scheduled_services.customer_id',
+          'scheduled_services.scheduled_date',
+          'scheduled_services.window_start',
+          'technicians.name as tech_name',
+        )
+        .first();
+      if (!svc) {
+        logger.info(`[appt-remind] No-show: scheduled service ${scheduledServiceId} not found`);
+        return null;
+      }
+
+      const { customer } = await getCustomerAndTech(svc.customer_id, scheduledServiceId);
+      if (!customer) return null;
+
+      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => null);
+
+      // scheduled_date is a DATE, window_start a TIME — compose into the
+      // naive 'YYYY-MM-DDTHH:MM:SS' shape parseETDateTime expects so the
+      // displayed time lands in ET.
+      const datePart = svc.scheduled_date instanceof Date
+        ? svc.scheduled_date.toISOString().slice(0, 10)
+        : String(svc.scheduled_date || '').slice(0, 10);
+      const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+      const time = (datePart && timePart)
+        ? formatTime(parseETDateTime(`${datePart}T${timePart}`))
+        : 'your scheduled time';
+      const techFirst = (svc.tech_name ? String(svc.tech_name).trim().split(/\s+/)[0] : '') || 'the team';
+
+      await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const customerFirst = contact.name || customer?.first_name || 'there';
+        return renderTemplate('appointment_no_show', {
+          first_name: customerFirst,
+          tech_name: techFirst,
+          time,
+        }, {
+          workflow: 'appointment_no_show',
+          entity_type: 'scheduled_service',
+          entity_id: scheduledServiceId,
+        });
+      }, 'appointment_no_show', 'appointment_no_show');
+      logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+
+      return { customer_id: svc.customer_id };
+    } catch (err) {
+      logger.error(`[appt-remind] handleNoShow failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  /**
    * Handle recurring appointment cancellation — mark all reminder records
    * cancelled, then send one series-level notice through the same guarded
    * contact path as single-appointment cancellation.

@@ -281,6 +281,7 @@ router.get('/:token', async (req, res, next) => {
         's.window_start',
         's.window_end',
         's.service_type',
+        's.status',
         's.track_state',
         's.en_route_at',
         's.arrived_at',
@@ -323,8 +324,14 @@ router.get('/:token', async (req, res, next) => {
       ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url)
       : null;
 
+    // A no-show is an operational-status flip (admin-dispatch) that does
+    // not move the track_state ENUM, so derive the customer-facing state
+    // from status when it's 'no_show'. Everything else maps 1:1 from the
+    // canonical track_state machine.
+    const customerState = row.status === 'no_show' ? 'no_show' : row.track_state;
+
     const response = {
-      state: row.track_state,
+      state: customerState,
       tech: row.technician_id
         ? {
             firstName: firstNameOf(row.tech_name),

@@ -1508,6 +1508,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
           error: e,
         });
       }
+    } else if (toStatus === 'no_show') {
+      // Notify the customer we missed them and invite a reschedule.
+      // Best-effort — a Twilio/template failure must not fail the
+      // status flip that already committed above.
+      try {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        await AppointmentReminders.handleNoShow(svc.id, {
+          sendNotification: notifyCustomer !== false,
+        });
+      } catch (e) { logger.error(`[admin-dispatch] no-show notice handling failed: ${e.message}`); }
     }
 
     await db('activity_log').insert({
