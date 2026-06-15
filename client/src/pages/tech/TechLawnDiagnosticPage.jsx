@@ -135,9 +135,20 @@ export default function TechLawnDiagnosticPage() {
 
   const ensurePersisted = async (mode) => {
     if (diagnosticId) return diagnosticId;
+    // Send the same inputs the analyze step used so the server rebuilds the SAME
+    // contract. Without photo metadata the persist route sees zero photos and
+    // classifies the report 'minimal', wiping the diagnosis the tech just saw.
     const data = await techRequest('/tech/lawn-diagnostic', {
       method: 'POST',
-      body: JSON.stringify({ mode, findings, contact: cleanContact(), address: cleanAddress() }),
+      body: JSON.stringify({
+        mode,
+        findings,
+        photos: photos.map((p) => ({ photo_id: p.id })),
+        appliedProducts: [],
+        compliance: {},
+        contact: cleanContact(),
+        address: cleanAddress(),
+      }),
     });
     setDiagnosticId(data.id);
     return data.id;
