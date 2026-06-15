@@ -55,6 +55,9 @@ export function useIntelligenceBar({
 
   const buildPageDataRef = useRef(buildPageData);
   const onAfterSubmitRef = useRef(onAfterSubmit);
+  // Bumped on submit/clear so an in-flight image conversion can tell its batch
+  // was invalidated and not reattach a stale photo.
+  const attachGenRef = useRef(0);
   useEffect(() => { buildPageDataRef.current = buildPageData; }, [buildPageData]);
   useEffect(() => { onAfterSubmitRef.current = onAfterSubmit; }, [onAfterSubmit]);
 
@@ -77,8 +80,13 @@ export function useIntelligenceBar({
   }, [context]);
 
   const addAttachments = useCallback(async (files) => {
+    const gen = attachGenRef.current;
     const parts = await filesToImageParts(files, attachments.length);
-    if (parts.length) setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+    // A submit/clear during conversion invalidates this batch — otherwise a
+    // photo that finished decoding after submit would reattach and ride the
+    // next, unrelated prompt.
+    if (!parts.length || attachGenRef.current !== gen) return;
+    setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
   }, [attachments.length]);
 
   const removeAttachment = useCallback((index) => {
@@ -89,6 +97,7 @@ export function useIntelligenceBar({
     const q = (text ?? prompt).trim();
     if (!q || loading) return;
 
+    attachGenRef.current += 1;
     setLoading(true);
     setExpanded(true);
     setResponse(null);
@@ -129,6 +138,7 @@ export function useIntelligenceBar({
   }, [prompt, loading, conversationHistory, context, attachments]);
 
   const clear = useCallback(() => {
+    attachGenRef.current += 1;
     setConversationHistory([]);
     setResponse(null);
     setStructuredData(null);

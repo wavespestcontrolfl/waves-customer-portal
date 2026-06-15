@@ -265,6 +265,9 @@ function GlobalCommandPalette(_props, ref) {
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+  // Bumped on submit/clear/context-change so a late image conversion can tell
+  // its batch was invalidated and not reattach a stale photo.
+  const attachGenRef = useRef(0);
   const location = useLocation();
   const isMobile = useIsMobile(768);
 
@@ -316,6 +319,7 @@ function GlobalCommandPalette(_props, ref) {
 
   // Clear conversation when context changes
   useEffect(() => {
+    attachGenRef.current += 1;
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
@@ -326,6 +330,7 @@ function GlobalCommandPalette(_props, ref) {
     async (text) => {
       const q = (text || prompt).trim();
       if (!q || loading) return;
+      attachGenRef.current += 1;
       setLoading(true);
       setResponse(null);
       setPendingActions([]);
@@ -360,9 +365,11 @@ function GlobalCommandPalette(_props, ref) {
 
   const addAttachments = useCallback(
     async (files) => {
+      const gen = attachGenRef.current;
       const parts = await filesToImageParts(files, attachments.length);
-      if (parts.length)
-        setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+      // A submit/clear/context-change during conversion invalidates this batch.
+      if (!parts.length || attachGenRef.current !== gen) return;
+      setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
     },
     [attachments.length],
   );
@@ -382,6 +389,7 @@ function GlobalCommandPalette(_props, ref) {
   };
 
   const clear = () => {
+    attachGenRef.current += 1;
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);

@@ -112,6 +112,10 @@ const MAX_QUERY_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // Anthropic per-image decoded-size cap
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+// Marker left on a user turn's stored history text when images were attached.
+// It both informs the model an image was shown earlier AND lets later turns
+// detect image-derived (potentially PII) context still in the window.
+const IMAGE_HISTORY_MARKER = '[Operator attached ';
 
 function isValidBase64(data) {
   return typeof data === 'string'
@@ -136,6 +140,17 @@ function sanitizeQueryImages(images) {
     out.push({ mediaType: img.mediaType, data: img.data });
   }
   return out;
+}
+
+// An image-backed turn still in the conversation window taints follow-ups:
+// the assistant's prior OCR/image-derived answer is replayed to the model, so
+// "repeat the name from that invoice" can surface PII on a turn that itself
+// carries no images. Detected via the history marker so it ages out exactly
+// when the image-derived context falls out of the window.
+function historyHasImageTurn(history) {
+  return Array.isArray(history) && history.some(
+    (m) => m && m.role === 'user' && typeof m.content === 'string' && m.content.includes(IMAGE_HISTORY_MARKER),
+  );
 }
 
 // Build the current-turn user message. Plain string when no images so the
@@ -1001,11 +1016,14 @@ For create_customer and the route-optimization writes: the first call returns a 
     // Log the query for analytics. tool_calls stores names + field keys only;
     // prompt/response are additionally redacted when a PII-bearing tool ran
     // (prompts carry typed customer contact details, responses echo SMS
-    // bodies) OR when the turn had image attachments — an image-only OCR-style
-    // question (a paper invoice/note photo) can make Claude echo a customer's
-    // name/address/phone with no tool call at all.
+    // bodies) OR when the conversation is image-tainted — the current turn has
+    // attachments, or an earlier image turn is still in the window and its
+    // OCR-derived answer can be echoed by a follow-up that carries no images
+    // itself. Either way Claude can surface a customer's name/address/phone
+    // with no tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
-    const redactPii = usedPiiTool || images.length > 0;
+    const imageTainted = images.length > 0 || historyHasImageTurn(conversationHistory);
+    const redactPii = usedPiiTool || imageTainted;
     const redactNote = usedPiiTool
       ? '[redacted — PII-bearing tools used]'
       : '[redacted — image attachment may contain PII]';
@@ -1037,7 +1055,7 @@ For create_customer and the route-optimization writes: the first call returns a 
         {
           role: 'user',
           content: images.length
-            ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+            ? `${prompt}\n${IMAGE_HISTORY_MARKER}${images.length} image${images.length > 1 ? 's' : ''}]`
             : prompt,
         },
         { role: 'assistant', content: finalResponse },

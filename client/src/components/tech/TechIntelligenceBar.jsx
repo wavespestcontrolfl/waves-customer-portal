@@ -47,12 +47,18 @@ export default function TechIntelligenceBar() {
   const [expanded, setExpanded] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const fileInputRef = useRef(null);
+  // Bumped on submit/clear so a late image conversion can tell its batch was
+  // invalidated and not reattach a stale photo.
+  const attachGenRef = useRef(0);
 
   const techName = getAdminDisplayName('Tech');
 
   const addAttachments = useCallback(async (files) => {
+    const gen = attachGenRef.current;
     const parts = await filesToImageParts(files, attachments.length);
-    if (parts.length) setAttachments(prev => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+    // A submit/clear during conversion invalidates this batch.
+    if (!parts.length || attachGenRef.current !== gen) return;
+    setAttachments(prev => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
   }, [attachments.length]);
 
   const removeAttachment = useCallback((index) => {
@@ -75,6 +81,7 @@ export default function TechIntelligenceBar() {
   const submit = useCallback(async (text) => {
     const q = (text || prompt).trim();
     if (!q || loading) return;
+    attachGenRef.current += 1;
     setLoading(true); setExpanded(true); setResponse(null);
 
     try {
@@ -101,7 +108,7 @@ export default function TechIntelligenceBar() {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
   };
 
-  const clear = () => { setConversationHistory([]); setResponse(null); setExpanded(false); setAttachments([]); };
+  const clear = () => { attachGenRef.current += 1; setConversationHistory([]); setResponse(null); setExpanded(false); setAttachments([]); };
 
   return (
     <div style={{
