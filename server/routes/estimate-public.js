@@ -1039,6 +1039,11 @@ const GERMAN_ROACH_ASK_CHIPS = [
   'How long until the roaches are gone?',
 ];
 
+// Generic pest_control service chips the German-roach specialty replaces. The
+// universal billing chips in SERVICE_COPY.pest_control.askChips ("When am I
+// charged?", "What happens after approval?") are kept.
+const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat inside?'];
+
 // Service-aware "Ask Waves" quick-question chips: up to 2 estimate-specific
 // service prompts, a safety chip for any chemical service, then universal
 // billing chips — capped at 4 so the prompt row stays scannable.
@@ -9566,11 +9571,15 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   const oneTimeBreakdownItems = contractPayload.oneTimeBreakdown?.items || [];
   const baseAskChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], oneTimeBreakdownItems)]);
   // German Roach Cleanout classifies as generic pest_control, so mergeAskChips
-  // would only surface the ant/billing chips. Prepend the roach specialty
-  // prompts (deduped, capped at 6) so React-rendered estimates match the
-  // server-rendered page.
+  // would surface the generic ant/treat-inside chips. Lead with the roach
+  // specialty prompts and drop those generic pest service chips — keeping the
+  // billing chips and any other category's chips — so the React path matches
+  // the server-rendered page (deduped, capped at 6).
   const askChips = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
-    ? Array.from(new Set([...GERMAN_ROACH_ASK_CHIPS, ...baseAskChips])).slice(0, 6)
+    ? Array.from(new Set([
+        ...GERMAN_ROACH_ASK_CHIPS,
+        ...baseAskChips.filter((chip) => !GENERIC_PEST_SERVICE_CHIPS.includes(chip)),
+      ])).slice(0, 6)
     : baseAskChips;
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
   return {

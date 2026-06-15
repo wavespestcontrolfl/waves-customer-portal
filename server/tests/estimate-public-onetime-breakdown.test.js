@@ -1295,14 +1295,15 @@ describe('public estimate one-time breakdown', () => {
       waveguard_tier: 'Bronze',
     });
 
-    // German roach classifies as generic pest_control; without the specialty
-    // prepend the React path would only show the ant/billing chips. The React
-    // surface shows up to 6 chips, so the roach prompts lead and the generic
-    // pest chips may follow.
+    // German roach classifies as generic pest_control; the roach prompts lead
+    // and the generic pest service chips are dropped (billing chips kept), so
+    // the React path matches the server-rendered page.
     expect(payload.askChips.slice(0, 2)).toEqual([
       'How do you get rid of German roaches?',
       'How long until the roaches are gone?',
     ]);
+    expect(payload.askChips).not.toContain('How do you handle ants?');
+    expect(payload.askChips).not.toContain('Can you treat inside?');
     expect(payload.askChips.length).toBeLessThanOrEqual(6);
   });
 

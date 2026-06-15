@@ -24,4 +24,20 @@ describe('Ask Waves fallback — German roach questions', () => {
     expect(answer.toLowerCase()).toContain('roach');
     expect(answer.toLowerCase()).toContain('breeding cycle');
   });
+
+  test('a non-German cockroach estimate does NOT get German-roach multi-visit copy', () => {
+    const nativeRoachContext = {
+      serviceMode: 'one_time',
+      services: [
+        { label: 'Native Cockroach Treatment', detail: 'one-time', summary: 'Native Cockroach Treatment — one-time' },
+      ],
+    };
+    const answer = answerEstimateQuestionFallback('How do you treat cockroaches?', nativeRoachContext);
+    expect(answer.toLowerCase()).toContain('cockroach');
+    // The German-roach-specific multi-visit / breeding-cycle copy must not leak
+    // onto a native cockroach or general pest estimate.
+    expect(answer.toLowerCase()).not.toContain('german roach');
+    expect(answer.toLowerCase()).not.toContain('breeding cycle');
+    expect(answer.toLowerCase()).not.toContain('number of visits');
+  });
 });

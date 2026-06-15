@@ -649,10 +649,29 @@ function summarizeSupportContext(context = {}, question = '') {
     .join(' ');
 }
 
-function treatmentApproachForQuestion(question = '') {
+// True when the estimate itself is a German Roach Cleanout (service key or a
+// "german roach" / "roach … cleanout" label). The question text alone can't
+// distinguish German Roach Cleanout from a native/palmetto cockroach or
+// general pest service, so German-roach copy must be gated on this.
+function estimateMentionsGermanRoach(context = {}) {
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.some((row) => {
+    if (String(row.service || '').toLowerCase() === 'german_roach') return true;
+    const text = `${row.label || ''} ${row.detail || ''} ${row.summary || ''}`.toLowerCase();
+    return text.includes('german roach') || (text.includes('roach') && text.includes('cleanout'));
+  });
+}
+
+function treatmentApproachForQuestion(question = '', context = {}) {
   const q = cleanText(question).toLowerCase();
   if (/\b(roach|roaches|cockroach|cockroaches)\b/.test(q)) {
-    return 'For German roaches, the cleanout runs as a multi-visit program — each visit targets the live population and the next generation to break the breeding cycle, with prep guidance so the treatment holds. The number of visits is shown on this estimate.';
+    if (estimateMentionsGermanRoach(context)) {
+      return 'For German roaches, the cleanout runs as a multi-visit program — each visit targets the live population and the next generation to break the breeding cycle, with prep guidance so the treatment holds. The number of visits is shown on this estimate.';
+    }
+    return 'For cockroaches, treatment targets harborage areas, entry points, and food and moisture sources, with follow-up based on the activity found at your property.';
   }
   if (/\bant|ants\b/.test(q)) {
     return 'For ants, the goal is to reduce exterior entry pressure, treat trails and nesting zones when found, and support interior activity when it is included or needed.';
@@ -745,11 +764,11 @@ function answerEstimateQuestionFallback(question, context = {}) {
     const labelCopy = 'Your technician will follow the product label directions for every application.';
     if (activeIngredients.length) {
       return [
-        `${treatmentApproachForQuestion(question)} Active ingredients/classes in the admin catalog for this service type include ${activeIngredients.join(', ')}.`,
+        `${treatmentApproachForQuestion(question, context)} Active ingredients/classes in the admin catalog for this service type include ${activeIngredients.join(', ')}.`,
         `${labelCopy} If you have pets, kids, sensitivities, or want the exact product for your home that day, call or text Waves at ${phone}.`,
       ].filter(Boolean).join(' ');
     }
-    return `${treatmentApproachForQuestion(question)} ${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
+    return `${treatmentApproachForQuestion(question, context)} ${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
   }
 
   if (/\b(lawn|turf|weed|fungus|grass|fertil)\b/.test(q)) {
@@ -758,7 +777,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
     return lawn
       ? [
           `For lawn care, this estimate shows ${lawn.summary}.`,
-          treatmentApproachForQuestion(question),
+          treatmentApproachForQuestion(question, context),
           activeIngredients.length ? `Relevant active ingredients/classes in the admin catalog include ${activeIngredients.join(', ')}.` : '',
         ].filter(Boolean).join(' ')
       : `I do not see lawn care on this estimate. Call or text Waves at ${phone} if you want it added.`;
@@ -770,7 +789,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
     return pest
       ? [
           `For pest control, this estimate shows ${pest.summary}.`,
-          treatmentApproachForQuestion(question),
+          treatmentApproachForQuestion(question, context),
           activeIngredients.length ? `Relevant active ingredients/classes in the admin catalog include ${activeIngredients.join(', ')}.` : '',
         ].filter(Boolean).join(' ')
       : `I do not see pest control on this estimate. Call or text Waves at ${phone} if you want it added.`;
