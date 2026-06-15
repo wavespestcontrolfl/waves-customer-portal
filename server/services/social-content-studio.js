@@ -340,6 +340,12 @@ function normalizePublishMode(value, fallbackWhenUnset = 'publish') {
 
 const AUTONOMOUS_FLAGS = {
   get enabled() { return boolEnv('SOCIAL_AUTONOMOUS_STUDIO_ENABLED', false); },
+  // Distinct opt-in for the HOURLY scheduler. `enabled` turns the Studio on for
+  // manual admin use (and gates writes via requireStudioEnabled); `cronEnabled`
+  // is the SEPARATE consent to also run automatic publishing on a schedule.
+  // Both must be true for the cron to fire, so enabling the Studio for manual
+  // use never silently starts autonomous posting.
+  get cronEnabled() { return boolEnv('SOCIAL_AUTONOMOUS_CRON_ENABLED', false); },
   get includeReviews() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_REVIEWS', true); },
   get intervalHours() { return numberEnv('SOCIAL_AUTONOMOUS_INTERVAL_HOURS', 24); },
   get mode() {
@@ -361,19 +367,21 @@ async function latestAutonomousRun() {
     .first();
 }
 
-// Cadence/claim guard source: like latestAutonomousRun but ALSO counts in-flight
-// 'started' rows. A run inserts its 'started' claim before publishing, so if the
-// process dies after Meta/GBP accepts a post but before the run is marked
-// complete, the leftover 'started' row still blocks the next tick from
-// re-publishing a duplicate (with a fresh source_guid). A crash *before*
-// publishing only costs one interval of autonomous posting — the safe trade vs.
-// double-posting. (The advisory lock covers genuinely-concurrent runs; this
-// covers a crashed run whose lock was already released.)
+// Cadence/claim guard source: the most recent ATTEMPT, not just a successful
+// run. Includes 'started' (in-flight: a run inserts its claim before publishing,
+// so a crash after Meta/GBP accepts but before the run is marked complete still
+// blocks the next tick from a duplicate with a fresh source_guid) AND 'failed'
+// (a total publish failure still counts as an attempt — otherwise the hourly
+// cron would ignore SOCIAL_AUTONOMOUS_INTERVAL_HOURS during a persistent outage
+// and re-render/re-upload cards and hammer Meta/GBP every hour). Excludes
+// 'skipped' (no attempt was made — a cadence/kill-switch/pause skip must not
+// reset the clock). The advisory lock covers genuinely-concurrent runs; this
+// covers crashed/failed runs whose lock was already released.
 async function latestAutonomousClaim() {
   if (!(await hasTable('social_content_studio_runs'))) return null;
   return db('social_content_studio_runs')
     .where({ run_type: 'autonomous' })
-    .whereIn('status', ['published', 'draft_created', 'dry_run', 'started'])
+    .whereIn('status', ['published', 'draft_created', 'dry_run', 'started', 'failed'])
     .orderBy('started_at', 'desc')
     .first();
 }
@@ -1200,8 +1208,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // Now that the post actually published, record + approve the review graphic,
     // which consumes the review from the candidate queue. A dry run
     // (publishResult.success === false) or a total publish failure leaves the
-    // review available for a future run. Reuse the already-rendered card URL.
-    if (isReviewRun && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+    // review available for a future run. Also require imageUrl: if the card
+    // failed to render (no CDN/S3 or a sharp/S3 error) the post may still have
+    // gone out as text, but consuming the review with a null-image graphic would
+    // drop it from the candidate queue forever and it could never be rendered.
+    if (isReviewRun && !SOCIAL_FLAGS.dryRun && publishResult.success && imageUrl) {
       await createReviewGraphic({
         googleReviewId: plan.reviewGraphic.googleReviewId,
         privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',

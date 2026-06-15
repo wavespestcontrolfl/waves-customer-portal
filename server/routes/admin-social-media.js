@@ -138,7 +138,7 @@ router.get('/autonomous/runs', async (req, res, next) => {
 });
 
 // POST /autonomous/run — force or test an autonomous social run
-router.post('/autonomous/run', async (req, res, next) => {
+router.post('/autonomous/run', requireStudioEnabled, async (req, res, next) => {
   try {
     const result = await SocialContentStudio.runAutonomous({
       force: req.body?.force === true,

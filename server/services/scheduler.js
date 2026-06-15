@@ -1817,8 +1817,12 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('20 * * * *', async () => {
     const SocialContentStudio = require('./social-content-studio');
-    if (!SocialContentStudio.AUTONOMOUS_FLAGS.enabled) {
-      return; // silently skip — SOCIAL_AUTONOMOUS_STUDIO_ENABLED not set
+    const flags = SocialContentStudio.AUTONOMOUS_FLAGS;
+    // Requires BOTH the studio kill switch AND the distinct cron opt-in, so
+    // enabling the Studio for manual admin use does not by itself start hourly
+    // automatic publishing.
+    if (!flags.enabled || !flags.cronEnabled) {
+      return; // silently skip — studio off, or autonomous cron not opted in
     }
     try {
       const result = await SocialContentStudio.runAutonomous({ force: false });

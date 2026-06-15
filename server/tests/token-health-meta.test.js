@@ -99,6 +99,58 @@ describe('token health meta checks', () => {
     expect(result.details.checks.instagramLinkMatches).toBe(false);
   });
 
+  test('facebook health errors when the Page token lacks content-creation rights', async () => {
+    // Page resolves + IG links correctly, but tasks omits CREATE_CONTENT.
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/110336442031847?fields=')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: '110336442031847',
+            name: 'Waves Pest Control',
+            tasks: ['ANALYZE', 'MODERATE'], // no CREATE_CONTENT
+            instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+
+    const result = await tokenHealth.checkSingle('facebook');
+
+    expect(result.status).toBe('error');
+    expect(result.lastError).toMatch(/content-creation/i);
+    expect(result.details.checks.canCreateContent).toBe(false);
+  });
+
+  test('facebook health stays healthy when tasks include CREATE_CONTENT', async () => {
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/110336442031847?fields=')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: '110336442031847',
+            name: 'Waves Pest Control',
+            tasks: ['ANALYZE', 'CREATE_CONTENT', 'MANAGE'],
+            instagram_business_account: { id: '17841465266249854', username: 'wavespestcontrol' },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+
+    const result = await tokenHealth.checkSingle('facebook');
+
+    expect(result.status).toBe('healthy');
+    expect(result.details.checks.canCreateContent).toBe(true);
+  });
+
   test('instagram health requires content publishing access', async () => {
     const tokenHealth = require('../services/token-health');
 
