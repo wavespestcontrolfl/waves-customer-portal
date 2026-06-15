@@ -201,13 +201,14 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
       { id: 'lawn-basic', serviceKey, label: 'Basic lawn care', tier: 'basic', lawnFreq: 4, cadence: '4 visits/year' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');
-    // Tie the bare digit in tier-intent matches to cadence wording so a stray
-    // number (e.g. "4,000 sq ft", "123 4th Ave") doesn't collapse the quote to a
-    // single tier.
-    if (/premium|monthly|\b12\s*(?:applications?|apps?|visits?|treatments?)\b/i.test(prompt)) {
+    // Tier-intent narrowing uses the tier name or application-count wording only.
+    // Bare cadence words ("quarterly"/"monthly") are NOT matched: in a prompt
+    // like "I have quarterly pest and want lawn care" the cadence refers to the
+    // existing pest plan, so matching it would wrongly hide the other lawn tiers.
+    if (/\bpremium\b|\b12\s*(?:applications?|apps?|visits?|treatments?)\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-premium');
     }
-    if (/\bbasic\b|quarterly|\b4\s*(?:applications?|apps?|visits?|treatments?)\b/i.test(prompt)) {
+    if (/\bbasic\b|\b4\s*(?:applications?|apps?|visits?|treatments?)\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-basic');
     }
     return all;

@@ -32,21 +32,28 @@ describe('variantsForService — lawn_care', () => {
     expect(generic.map((o) => o.id)).toEqual(['lawn-enhanced']);
   });
 
-  test('premium/monthly/12 intent returns premium only', () => {
-    const prem = variantsForService('lawn_care', 'I want premium monthly 12 visits');
-    expect(prem.map((o) => o.id)).toEqual(['lawn-premium']);
+  test('premium tier-name / 12-application intent returns premium only', () => {
+    expect(variantsForService('lawn_care', 'I want the premium lawn plan').map((o) => o.id)).toEqual(['lawn-premium']);
+    expect(variantsForService('lawn_care', 'lawn with 12 applications').map((o) => o.id)).toEqual(['lawn-premium']);
   });
 
-  test('explicit basic / cadence-worded 4-application / quarterly intent returns basic only', () => {
+  test('explicit basic tier-name / 4-application intent returns basic only', () => {
     expect(variantsForService('lawn_care', 'just the basic lawn plan').map((o) => o.id)).toEqual(['lawn-basic']);
-    expect(variantsForService('lawn_care', 'quarterly lawn service').map((o) => o.id)).toEqual(['lawn-basic']);
     expect(variantsForService('lawn_care', 'lawn with 4 applications').map((o) => o.id)).toEqual(['lawn-basic']);
   });
 
-  test('a stray digit (sq ft / address) does NOT collapse the quote to Basic', () => {
+  test('a stray digit (sq ft / address) does NOT collapse the quote to a single tier', () => {
     expect(variantsForService('lawn_care', 'price lawn for 4,000 sq ft').map((o) => o.id))
       .toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
     expect(variantsForService('lawn_care', 'lawn at 123 4th Ave').map((o) => o.id))
+      .toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
+  });
+
+  test('a bare cadence word referring to an existing service does NOT narrow the lawn tiers', () => {
+    // "quarterly"/"monthly" here describe the existing pest plan, not the lawn add-on.
+    expect(variantsForService('lawn_care', 'I have quarterly pest and want to add lawn care').map((o) => o.id))
+      .toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
+    expect(variantsForService('lawn_care', 'I have monthly pest, add lawn care').map((o) => o.id))
       .toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
   });
 });
