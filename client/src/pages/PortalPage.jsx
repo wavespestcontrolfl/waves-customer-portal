@@ -2882,14 +2882,26 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </section>
       )}
 
-      {propertyPrefs.length > 1 && (
+      {propertyPrefs.length > 0 && (
         <section style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
-            <div style={sectionTitle}>Property Notifications</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Notifications by property</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-              Choose which service texts each property receives.
-            </div>
+            {propertyPrefs.length > 1 ? (
+              <>
+                <div style={sectionTitle}>Property Notifications</div>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Notifications by property</div>
+                <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
+                  Choose which service texts each property receives.
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={sectionTitle}>Contacts</div>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>On-location contacts</div>
+                <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
+                  Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.
+                </div>
+              </>
+            )}
           </div>
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
             {propertyPrefs.map((property) => {
@@ -2904,6 +2916,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               ];
               const contacts = displayContacts(property);
               const contactLockKey = `${property.id}:contact`;
+              const multiProperty = propertyPrefs.length > 1;
               return (
                 <div key={property.id} style={{
                   border: '1px solid #E7E2D7',
@@ -2916,7 +2929,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{label}</div>
                       <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{address || 'No address on file'}</div>
                     </div>
-                    {property.id === customer.id && (
+                    {property.id === customer.id && multiProperty && (
                       <span style={{
                         fontSize: 10, fontWeight: 850, color: B.wavesBlue,
                         background: '#fff', border: `1px solid ${B.wavesBlue}22`,
@@ -2924,38 +2937,44 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       }}>Current</span>
                     )}
                   </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(86px, 1fr))', gap: 8 }}>
-                    {options.map((option) => {
-                      const on = property.preferences?.[option.key] !== false;
-                      const lockKey = `${property.id}:${option.key}`;
-                      return (
-                        <button
-                          key={option.key}
-                          type="button"
-                          disabled={!!prefsLocked[lockKey]}
-                          onClick={() => handlePropertyPrefToggle(property.id, option.key)}
-                          style={{
-                            border: `1px solid ${on ? B.wavesBlue : '#D8D0C0'}`,
-                            borderRadius: 8,
-                            padding: '9px 6px',
-                            background: on ? '#fff' : B.white,
-                            color: on ? B.blueDeeper : muted,
-                            fontSize: 14,
-                            fontWeight: 850,
-                            cursor: prefsLocked[lockKey] ? 'wait' : 'pointer',
-                            opacity: prefsLocked[lockKey] ? 0.6 : 1,
-                          }}
-                        >
-                          {option.label}
-                          <div style={{ fontSize: 12, marginTop: 2, color: on ? B.green : muted }}>{on ? 'On' : 'Off'}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
-                    <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 8 }}>
-                      On-location contacts{contacts.length > 1 ? ` (${contacts.length} of ${MAX_PROPERTY_CONTACTS})` : ''}
+                  {multiProperty && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(86px, 1fr))', gap: 8 }}>
+                      {options.map((option) => {
+                        const on = property.preferences?.[option.key] !== false;
+                        const lockKey = `${property.id}:${option.key}`;
+                        return (
+                          <button
+                            key={option.key}
+                            type="button"
+                            disabled={!!prefsLocked[lockKey]}
+                            onClick={() => handlePropertyPrefToggle(property.id, option.key)}
+                            style={{
+                              border: `1px solid ${on ? B.wavesBlue : '#D8D0C0'}`,
+                              borderRadius: 8,
+                              padding: '9px 6px',
+                              background: on ? '#fff' : B.white,
+                              color: on ? B.blueDeeper : muted,
+                              fontSize: 14,
+                              fontWeight: 850,
+                              cursor: prefsLocked[lockKey] ? 'wait' : 'pointer',
+                              opacity: prefsLocked[lockKey] ? 0.6 : 1,
+                            }}
+                          >
+                            {option.label}
+                            <div style={{ fontSize: 12, marginTop: 2, color: on ? B.green : muted }}>{on ? 'On' : 'Off'}</div>
+                          </button>
+                        );
+                      })}
                     </div>
+                  )}
+                  <div style={multiProperty
+                    ? { marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }
+                    : undefined}>
+                    {(multiProperty || contacts.length > 1) && (
+                      <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 8 }}>
+                        On-location contacts{contacts.length > 1 ? ` (${contacts.length} of ${MAX_PROPERTY_CONTACTS})` : ''}
+                      </div>
+                    )}
                     {contacts.map((contact, idx) => (
                       <div key={idx} style={{ marginBottom: 10 }}>
                         {contacts.length > 1 && (
@@ -3020,7 +3039,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     )}
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4 }}>
-                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). Turn on “Me too” to send those texts to you as well.
+                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Me too” to send those texts to you as well.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"
