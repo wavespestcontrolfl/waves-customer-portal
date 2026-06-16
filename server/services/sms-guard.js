@@ -15,14 +15,30 @@
  * customer when they ship. When a message is rejected, the caller logs +
  * alerts Virginia instead of silently dropping the SMS.
  *
- * `options.messageType === 'internal_alert'` bypasses the month check
- * because admin-facing alerts often reference past months intentionally.
+ * The stale-month check is bypassed when the body is human-authored or
+ * admin-facing, where a month name is intentional rather than a stale
+ * template render:
+ *   - `options.messageType === 'internal_alert'` — admin-facing alerts often
+ *     reference past months.
+ *   - `options.humanAuthored === true` — an operator typed the body by hand
+ *     in the Communications composer, e.g. "Adam visited back in April."
+ *     This is an explicit caller flag, NOT the legacy `manual` messageType:
+ *     `manual` is overloaded (automated senders such as reschedule-sms.js
+ *     reuse it for rendered templates), so it can't distinguish hand-written
+ *     text from a template render. Human-authored sends are still covered by
+ *     the unsubstituted-variable and broken-render checks; AI-drafted sends
+ *     are intentionally NOT exempt — an LLM is the likely source of a
+ *     hallucinated stale month.
  */
 
 const MONTHS = [
   'january', 'february', 'march', 'april', 'may', 'june',
   'july', 'august', 'september', 'october', 'november', 'december',
 ];
+
+// Message types that are admin-facing rather than customer template renders,
+// where a past month name is intentional.
+const STALE_MONTH_EXEMPT_TYPES = new Set(['internal_alert']);
 
 // Unsubstituted Mustache-style variables like `{first_name}`, `{date}`.
 // Narrow pattern — only flag short lowercase-snake tokens so we don't false-
@@ -107,7 +123,10 @@ function validateOutbound(body, options = {}) {
     return { ok: false, reason: blockedPattern };
   }
 
-  if (options.messageType !== 'internal_alert') {
+  const monthCheckExempt =
+    options.humanAuthored === true ||
+    STALE_MONTH_EXEMPT_TYPES.has(options.messageType);
+  if (!monthCheckExempt) {
     const stale = findStaleMonth(body, options.now);
     if (stale) {
       return { ok: false, reason: `stale-month:${stale}` };

@@ -329,6 +329,14 @@ router.post('/sms', async (req, res, next) => {
     }
 
     const sendStartedAt = new Date();
+    // Human-authored only when the operator typed the body, not when an
+    // unedited AI suggestion is being sent through. The stale-month guard
+    // exemption rides on this; an unchanged agent draft stays month-checked
+    // (an LLM is the likely source of a hallucinated stale month). Same
+    // normalized comparison used below to mark the decision as sent-as-is.
+    const bodyIsUnchangedAgentDraft =
+      !!verifiedAgentDraft &&
+      normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
     const result = await sendCustomerMessage({
       to,
       body: cleanBody,
@@ -352,6 +360,13 @@ router.post('/sms', async (req, res, next) => {
         mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
         allowMediaUrls: cleanMediaUrls.length > 0,
         media,
+        // Operator hand-typed (or edited) this body in the Comms composer —
+        // exempt it from the stale-month guard so an intentional reference to
+        // a past visit ("Adam visited back in April") isn't rejected as a
+        // stale template render. NOT set for an unchanged AI draft. Scoped to
+        // this human-compose route, never inferred from messageType.
+        // See services/sms-guard.js.
+        humanAuthored: !bodyIsUnchangedAgentDraft,
       },
     });
     // The reservation has done its job — the real provider row now exists (on
@@ -1232,6 +1247,15 @@ router.post('/schedule-sms', async (req, res, next) => {
       }
     }
 
+    // Operator hand-composed this scheduled SMS unless an unchanged AI draft
+    // is being queued through. Persisted as provenance so the dispatch cron
+    // can exempt the deferred send from the stale-month guard, same as the
+    // immediate manual send. An unchanged agent draft stays month-checked.
+    const scheduledBodyIsUnchangedAgentDraft =
+      !!scheduledAgentDecision?.suggested_message &&
+      normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(scheduledAgentDecision.suggested_message);
+    const scheduledHumanAuthored = !scheduledBodyIsUnchangedAgentDraft;
+
     // Queue + park in ONE transaction: the used decision AND every other
     // pending house-voice suggestion on this thread move to 'scheduled', so
     // nothing stays actionable in the composer while the queued reply
@@ -1277,12 +1301,11 @@ router.post('/schedule-sms', async (req, res, next) => {
           { phoneLast10: normalizePhoneLast10(to), excludeDecisionId: scheduledAgentDecision?.id }, trx
         );
 
-        const metadata = (usedDecisionId || parkedIds.length)
-          ? JSON.stringify({
-            agent_decision_id: usedDecisionId || undefined,
-            parked_decision_ids: parkedIds.length ? parkedIds : undefined,
-          })
-          : null;
+        const metaObj = {};
+        if (usedDecisionId) metaObj.agent_decision_id = usedDecisionId;
+        if (parkedIds.length) metaObj.parked_decision_ids = parkedIds;
+        if (scheduledHumanAuthored) metaObj.human_authored = true;
+        const metadata = Object.keys(metaObj).length ? JSON.stringify(metaObj) : null;
 
         const [inserted] = await trx('sms_log')
           .insert({

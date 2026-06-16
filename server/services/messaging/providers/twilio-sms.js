@@ -113,6 +113,12 @@ async function sendViaTwilio(input) {
       mediaUrls: providerMediaUrls(input),
       media: input.metadata && input.metadata.media,
       customerLocationId: input.metadata && input.metadata.customerLocationId,
+      // Operator hand-typed the body (Comms composer) — exempt from the
+      // stale-month guard, which targets automated template renders. Set only
+      // by the manual-compose route, never inferred from messageType (which is
+      // overloaded across automated senders that reuse 'manual'). See
+      // services/sms-guard.js.
+      humanAuthored: !!(input.metadata && input.metadata.humanAuthored === true),
       agentDecisionId: input.metadata && input.metadata.agentDecisionId,
       parkedDecisionIds: input.metadata && input.metadata.parkedDecisionIds,
       scheduledSmsLogId: input.metadata && input.metadata.scheduled_sms_log_id,
