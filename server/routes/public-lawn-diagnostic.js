@@ -144,8 +144,10 @@ function buildPublicLawnReport(diagnostic = {}) {
     || null;
 
   return {
-    first_name: typeof firstName === 'string' ? firstName.slice(0, 80) : null,
-    city: typeof address.city === 'string' ? address.city.slice(0, 80) : null,
+    // Snapshots are only trimmed at capture, so scrub at egress too — a malformed
+    // client could stash a street line / phone / note in first_name or city.
+    first_name: typeof firstName === 'string' ? (scrubCustomerText(firstName.slice(0, 80)) || null) : null,
+    city: typeof address.city === 'string' ? (scrubCustomerText(address.city.slice(0, 80)) || null) : null,
     overall_status: overallStatusLabel(diagnostic.overall_score),
     // Confidence-gated: a low/unknown report never names a cause in the hero summary.
     summary: safeCustomerSummary(contract.customer_summary, diagnosis.confidence),

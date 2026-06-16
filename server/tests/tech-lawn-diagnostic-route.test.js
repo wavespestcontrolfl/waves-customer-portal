@@ -23,6 +23,13 @@ jest.mock('../middleware/admin-auth', () => ({
     ['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'Staff access required' })
   ),
 }));
+// Force the deterministic fallback in /analyze tests regardless of ANTHROPIC_API_KEY,
+// so pre-push/CI never depends on the live model returning specific findings.
+jest.mock('../services/lawn-diagnostic-prompt', () => ({
+  runDiagnosis: jest.fn().mockResolvedValue({ ok: false, reason: 'no_api' }),
+  runNarrative: jest.fn().mockResolvedValue({ ok: false, reason: 'no_api' }),
+  PROMPT_VERSION: 'lawn-diagnostic-test',
+}));
 jest.mock('../services/lawn-assessment', () => ({
   analyzePhoto: (...args) => mockAnalyzePhoto(...args),
   mapToDisplayScores: (composite) => ({
