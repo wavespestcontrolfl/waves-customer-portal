@@ -437,22 +437,32 @@ router.post('/sms', async (req, res) => {
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
     const shouldNotifyKnownInbound = numberConfig.type === 'location' || isTrackingLeadInbound;
 
-    // In-app + push notification for inbound SMS from known customers
+    // In-app + push notification for inbound SMS from known customers.
+    // knownInboundNotified records whether this modern bell/push actually
+    // landed — when it did, the legacy owner-SMS forward below is suppressed
+    // so a single inbound message can't raise two admin notifications.
+    let knownInboundNotified = false;
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
-        await triggerNotification('sms_reply', {
+        const stats = await triggerNotification('sms_reply', {
           fromName: `${customer.first_name} ${customer.last_name}`,
           fromPhone: From,
           message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
           threadId: customer.id,
         });
+        knownInboundNotified = Boolean(stats && !stats.error &&
+          (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
       } catch (e) { logger.error(`[notifications] sms_reply trigger failed: ${e.message}`); }
     }
 
     // Notify Adam of regular inbound SMS. Domain/van tracking leads use the
-    // admin notification dispatcher above instead of owner SMS.
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    // admin notification dispatcher above instead of owner SMS. Skip this
+    // legacy owner forward when the sms_reply bell/push above already fired
+    // (known customers) — for owner phones it is redirected to the SAME admin
+    // notification, so sending both raised a duplicate. Unknown senders have no
+    // customer match (sms_reply never fires), so they still get this alert.
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !knownInboundNotified && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length
