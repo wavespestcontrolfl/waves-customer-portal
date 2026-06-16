@@ -84,9 +84,27 @@ function buildDedupeKey({ invoiceId, paymentIntentId, phase, methodCategory, err
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
+// Client-side Stripe.js form-validation errors (incomplete/invalid card number,
+// CVC, or expiry) are typing-in-progress events, not payment failures — Stripe.js
+// blocks them in the browser before anything ever reaches Stripe (no PaymentIntent
+// confirm, no charge, no decline). They must never raise a "bill payment error"
+// admin alert, or they drown out the real failures (declines, network errors,
+// the ACH tender-switch case) that genuinely need attention.
+function isClientFormValidationError(input = {}) {
+  if (normalizePhase(input.source || 'server') !== 'client') return false;
+  const stripeType = cleanString(input.metadata?.stripe_type).toLowerCase();
+  if (stripeType === 'validation_error') return true;
+  const code = cleanString(input.code || input.error?.code).toLowerCase();
+  return /^incomplete_/.test(code);
+}
+
 async function alertBillPaymentError(input = {}) {
   const invoice = input.invoice || {};
   if (!invoice.id) return { notified: false, skipped: true, reason: 'missing_invoice' };
+
+  if (isClientFormValidationError(input)) {
+    return { notified: false, skipped: true, reason: 'client_validation_error' };
+  }
 
   const phase = normalizePhase(input.phase);
   const methodCategory = normalizeMethod(input.methodCategory || invoice.payment_method || 'unknown');
@@ -173,6 +191,7 @@ module.exports = {
   alertBillPaymentError,
   __private: {
     buildDedupeKey,
+    isClientFormValidationError,
     normalizeErrorMessage,
     normalizePhase,
     normalizeMethod,
