@@ -24,7 +24,7 @@ describe('variantsForService — lawn_care', () => {
     const basic = all.find((o) => o.id === 'lawn-basic');
     expect(basic.tier).toBe('basic');
     expect(basic.lawnFreq).toBe(4);
-    expect(basic.label).toBe('Basic lawn care');
+    expect(basic.label).toBe('Lawn care — 4x applications/yr');
   });
 
   test('generic request returns the enhanced default only', () => {

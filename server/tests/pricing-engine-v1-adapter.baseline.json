@@ -14,22 +14,22 @@
         {
           "mo": 35,
           "recommended": false,
-          "name": "4 Applications"
+          "name": "4x applications/yr"
         },
         {
           "mo": 45,
           "recommended": false,
-          "name": "6 Applications"
+          "name": "6x applications/yr"
         },
         {
           "mo": 66.75,
           "recommended": true,
-          "name": "9 Applications"
+          "name": "9x applications/yr"
         },
         {
           "mo": 84,
           "recommended": false,
-          "name": "12 Applications"
+          "name": "12x applications/yr"
         }
       ],
       "pestTiers": [
@@ -82,22 +82,22 @@
         {
           "mo": 35.67,
           "recommended": false,
-          "name": "4 Applications"
+          "name": "4x applications/yr"
         },
         {
           "mo": 48,
           "recommended": false,
-          "name": "6 Applications"
+          "name": "6x applications/yr"
         },
         {
           "mo": 74.25,
           "recommended": false,
-          "name": "9 Applications"
+          "name": "9x applications/yr"
         },
         {
           "mo": 94,
           "recommended": true,
-          "name": "12 Applications"
+          "name": "12x applications/yr"
         }
       ],
       "pestTiers": [
@@ -505,22 +505,22 @@
         {
           "mo": 40,
           "recommended": false,
-          "name": "4 Applications"
+          "name": "4x applications/yr"
         },
         {
           "mo": 50,
           "recommended": false,
-          "name": "6 Applications"
+          "name": "6x applications/yr"
         },
         {
           "mo": 67.5,
           "recommended": true,
-          "name": "9 Applications"
+          "name": "9x applications/yr"
         },
         {
           "mo": 87,
           "recommended": false,
-          "name": "12 Applications"
+          "name": "12x applications/yr"
         }
       ],
       "pestTiers": [
@@ -584,22 +584,22 @@
         {
           "mo": 30,
           "recommended": false,
-          "name": "4 Applications"
+          "name": "4x applications/yr"
         },
         {
           "mo": 40,
           "recommended": false,
-          "name": "6 Applications"
+          "name": "6x applications/yr"
         },
         {
           "mo": 55,
           "recommended": true,
-          "name": "9 Applications"
+          "name": "9x applications/yr"
         },
         {
           "mo": 78,
           "recommended": false,
-          "name": "12 Applications"
+          "name": "12x applications/yr"
         }
       ],
       "pestTiers": [

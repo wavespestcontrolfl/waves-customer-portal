@@ -195,10 +195,10 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     // Standard stays first so the portal panel (which auto-selects options[0])
     // keeps defaulting to the 6-application plan, not the new 4-application one.
     const all = [
-      { id: 'lawn-standard', serviceKey, label: 'Standard lawn care', tier: 'standard', lawnFreq: 6, cadence: '6 visits/year' },
-      { id: 'lawn-enhanced', serviceKey, label: 'Enhanced lawn care', tier: 'enhanced', lawnFreq: 9, cadence: '9 visits/year' },
-      { id: 'lawn-premium', serviceKey, label: 'Premium lawn care', tier: 'premium', lawnFreq: 12, cadence: '12 visits/year' },
-      { id: 'lawn-basic', serviceKey, label: 'Basic lawn care', tier: 'basic', lawnFreq: 4, cadence: '4 visits/year' },
+      { id: 'lawn-standard', serviceKey, label: 'Lawn care — 6x applications/yr', tier: 'standard', lawnFreq: 6, cadence: '6 applications/yr' },
+      { id: 'lawn-enhanced', serviceKey, label: 'Lawn care — 9x applications/yr', tier: 'enhanced', lawnFreq: 9, cadence: '9 applications/yr' },
+      { id: 'lawn-premium', serviceKey, label: 'Lawn care — 12x applications/yr', tier: 'premium', lawnFreq: 12, cadence: '12 applications/yr' },
+      { id: 'lawn-basic', serviceKey, label: 'Lawn care — 4x applications/yr', tier: 'basic', lawnFreq: 4, cadence: '4 applications/yr' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');
     // Tier-intent narrowing uses the tier name or application-count wording only.

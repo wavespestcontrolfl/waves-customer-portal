@@ -1649,10 +1649,10 @@ describe('public estimate one-time breakdown', () => {
       result: {
         results: {
           lawn: [
-            { tier: 'basic', label: '4 Applications', v: 4, mo: 80, ann: 960, pa: 240, recommended: true },
-            { tier: 'standard', label: '6 Applications', v: 6, mo: 90, ann: 1080, pa: 180 },
-            { tier: 'enhanced', label: '9 Applications', v: 9, mo: 105, ann: 1260, pa: 140 },
-            { tier: 'premium', label: '12 Applications', v: 12, mo: 120, ann: 1440, pa: 120 },
+            { tier: 'basic', label: '4x applications/yr', v: 4, mo: 80, ann: 960, pa: 240, recommended: true },
+            { tier: 'standard', label: '6x applications/yr', v: 6, mo: 90, ann: 1080, pa: 180 },
+            { tier: 'enhanced', label: '9x applications/yr', v: 9, mo: 105, ann: 1260, pa: 140 },
+            { tier: 'premium', label: '12x applications/yr', v: 12, mo: 120, ann: 1440, pa: 120 },
           ],
         },
         recurring: {

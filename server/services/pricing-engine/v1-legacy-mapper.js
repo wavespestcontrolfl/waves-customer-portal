@@ -404,7 +404,7 @@ function mapV1ToLegacyShape(v1Result) {
   if (lawnLI) {
     R.lawn = (lawnLI.tiers || []).map(t => ({
       pa: t.perApp, v: t.visits, ann: t.annual, mo: t.monthly,
-      name: t.label || `${t.visits} Applications`,
+      name: t.label || `${t.visits}x applications/yr`,
       recommended: !!t.recommended, dimmed: !t.recommended,
       hasLandscape: t.visits >= 12,
       pricingSource: t.pricingSource,
