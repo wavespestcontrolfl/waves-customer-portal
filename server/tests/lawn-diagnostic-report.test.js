@@ -495,6 +495,22 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(out).not.toMatch(/https?:\/\//);
   });
 
+  test('customer_summary reduces a raw/injected finding name to an allowlisted label', () => {
+    // A stale/compromised client can store an arbitrary finding.name. The deterministic
+    // summary must publish only the allowlisted condition label, never the raw text.
+    const chinch = buildDiagnosticReportContract({
+      findings: [{ finding_id: 'F1', name: 'Chinch — call me at evil@x.com 941-555-1234', confidence: 'moderate', severity: 'moderate', urgency: 'monitor' }],
+    });
+    expect(chinch.customer_summary).not.toMatch(/evil@x\.com|941.?555.?1234/);
+    expect(chinch.customer_summary.toLowerCase()).toContain('chinch');
+
+    const weed = buildDiagnosticReportContract({
+      findings: [{ finding_id: 'F1', name: 'Visible weed pressure http://evil.test BUYNOW', confidence: 'low', severity: 'mild', urgency: 'monitor' }],
+    });
+    expect(weed.customer_summary).not.toMatch(/evil\.test|BUYNOW/);
+    expect(weed.customer_summary).toMatch(/weed pressure/);
+  });
+
   test('confirmed-language repair covers non-chinch photo-only disease/drought, not just chinch', () => {
     const base = reportWith({
       findings: [{ finding_id: 'F1', name: 'Possible large patch disease', confidence: 'low', severity: 'moderate', urgency: 'monitor' }],

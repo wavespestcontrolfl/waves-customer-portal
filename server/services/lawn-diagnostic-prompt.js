@@ -25,6 +25,10 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
+// Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
+// BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
+// the published customer_summary (the output is scrubbed again at the public route).
+const { safeConditionLabel, scrubCustomerText } = require('./lawn-diagnostic-report');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -300,24 +304,24 @@ async function runDiagnosis(context = {}) {
 function buildNarrativeContext(contract = {}) {
   const diag = contract.diagnosis || {};
   return JSON.stringify({
-    primary_finding: diag.primary_finding || null,
+    primary_finding: diag.primary_finding ? safeConditionLabel(diag.primary_finding) : null,
     confidence: diag.confidence || 'unknown',
     findings: (diag.findings || []).map((finding) => ({
-      name: finding.name,
+      name: safeConditionLabel(finding.name),
       confidence: finding.confidence,
       severity: finding.severity,
-      customer_wording: finding.customer_wording || null,
+      customer_wording: finding.customer_wording ? scrubCustomerText(finding.customer_wording) : null,
     })),
     customer_visible_flags: (contract.reconciliation_flags || [])
       .filter((flag) => flag.customer_visible)
-      .map((flag) => ({ type: flag.type, customer_wording: flag.customer_wording })),
+      .map((flag) => ({ type: flag.type, customer_wording: scrubCustomerText(flag.customer_wording) })),
     treatment: (contract.treatment_rationale || []).map((row) => ({
       application_class: row.application_class,
       addresses_findings: row.addresses_findings,
     })),
     watering_customer_sequence: contract.watering?.customer_sequence || null,
     expectations: contract.expectations || {},
-    seasonal_context: contract.seasonal_context || '',
+    seasonal_context: scrubCustomerText(contract.seasonal_context || ''),
   }, null, 2);
 }
 

@@ -15,7 +15,7 @@ const router = express.Router();
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { scrubCustomerText } = require('../services/lawn-diagnostic-report');
+const { scrubCustomerText, safeConditionLabel } = require('../services/lawn-diagnostic-report');
 const { etParts } = require('../utils/datetime-et');
 
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
@@ -75,36 +75,9 @@ function safeFindingNote(name, confidence) {
     : `We saw signs consistent with ${lower}.`;
 }
 
-// Stored finding.name / primary_finding are client/LLM free text. Never republish
-// them verbatim — map to a fixed, allowlisted customer-facing condition label so no
-// email/phone/product/tech-note can ride out on a finding name, and the derived
-// customer_note / watch_items stay safe. Falls back to a generic monitored-condition
-// label when nothing matches.
-const CONDITION_LABELS = [
-  [/chinch/, 'chinch bug activity'],
-  [/(army\s?worm|sod\s?webworm|caterpillar|\bworm)/, 'caterpillar activity'],
-  [/grub/, 'grub activity'],
-  [/(large patch|brown patch)/, 'large patch (fungal) activity'],
-  [/(gray|grey)\s?leaf/, 'gray leaf spot'],
-  [/dollar spot/, 'dollar spot'],
-  [/(fungus|fungal|disease|leaf spot|mold|mildew)/, 'fungal activity'],
-  [/(nutsedge|sedge|crabgrass|dollarweed|clover|spurge|\bweed)/, 'weed pressure'],
-  [/(overwater|too much water|excess(ive)?\s+(water|moisture)|soggy|saturat)/, 'overwatering signal'],
-  [/(drought|\bdry\b|water stress|wilt|under\s?water)/, 'drought stress'],
-  [/(thin|bare|sparse|patchy)/, 'thinning turf'],
-  [/(chlorosis|iron|nitrogen|nutrient|yellow)/, 'color and nutrient stress'],
-  [/(no (major|significant|visible)|healthy|looks good|no .*signal)/, 'no major visible stress'],
-  [/(color|discolor|stress|decline)/, 'color stress'],
-];
-
-function safeConditionLabel(rawName) {
-  const lower = String(scrubCustomerText(rawName || '') || '').toLowerCase();
-  if (!lower) return null;
-  for (const [pattern, label] of CONDITION_LABELS) {
-    if (pattern.test(lower)) return label;
-  }
-  return 'a lawn condition we are monitoring';
-}
+// safeConditionLabel (the allowlist that maps any stored finding name → a fixed
+// customer-facing condition label) is imported from lawn-diagnostic-report so the
+// public egress and the customer-summary builders share ONE source of truth.
 
 // SWFL seasonal note is SERVER-GENERATED from a fixed source keyed on the report's
 // creation month — never the client-supplied contract.seasonal_context free text,
