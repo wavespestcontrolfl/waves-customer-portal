@@ -580,6 +580,23 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
   return `The photos show ${name}. ${treatmentLine} Watch for improvement based on the expected response timeline.`;
 }
 
+// Cause terms that must never appear in a low/unknown-confidence customer summary.
+const SUMMARY_CAUSE_RE = /\b(chinch|large patch|brown patch|gr[ae]y leaf|dollar spot|rhizoctonia|take[-\s]?all|fungus|fungal|grub|armyworm|sod\s?webworm|nutsedge|crabgrass|dollarweed|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
+const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
+
+// Public hero summary egress: scrub, then for a low/unknown-confidence report replace
+// any summary that still NAMES a cause (stale stored contract, or a narrative pass that
+// inferred a pest) with a generic symptom-only line. Applies the v0.4 naming gate to
+// the FIRST customer-facing text, not just the findings/labels.
+function safeCustomerSummary(summary, confidence) {
+  const scrubbed = scrubCustomerText(summary);
+  if (!scrubbed) return null;
+  if (confidenceRank(confidence) < CONFIDENCE_ORDER.moderate && SUMMARY_CAUSE_RE.test(scrubbed)) {
+    return GENERIC_LOW_CONFIDENCE_SUMMARY;
+  }
+  return scrubbed;
+}
+
 // Safe wording used when inputs are too poor to defend any diagnosis. Names no
 // pest or disease; states what was checked and what to watch.
 const MINIMAL_SAFE_SUMMARY = 'This lawn check is complete. The photos provided did not show enough detail to call out a specific pest or disease, so we are not naming one from these images. The best next step is a quick on-site look; in the meantime, keep to your normal watering schedule and watch for any area that spreads, thins, or does not recover.';
@@ -782,5 +799,6 @@ module.exports = {
   runQaSafetyCheck,
   scrubCustomerText,
   safeConditionLabel,
+  safeCustomerSummary,
   MINIMAL_SAFE_SUMMARY,
 };

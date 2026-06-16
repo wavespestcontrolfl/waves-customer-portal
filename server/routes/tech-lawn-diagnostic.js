@@ -154,7 +154,10 @@ function buildFindingsFromVision({ composite = {}, adjustedScores = {}, divergen
     findings.push({
       finding_id: `F${findings.length + 1}`,
       name: 'Possible fungal activity',
-      confidence,
+      // Photo-only disease never clears the v0.4 naming gate (needs a blade/margin
+      // close-up), so cap this deterministic-fallback finding at low confidence —
+      // the egress label then downgrades it to a generic symptom.
+      confidence: 'low',
       severity: composite.fungal_activity === 'severe' ? 'severe' : composite.fungal_activity === 'moderate' ? 'moderate' : 'mild',
       urgency: composite.fungal_activity === 'severe' ? 'follow_up' : 'monitor',
       observed_evidence: evidence,

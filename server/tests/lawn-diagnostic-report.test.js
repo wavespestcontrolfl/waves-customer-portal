@@ -7,6 +7,7 @@ const {
   buildMinimalSafeReport,
   scrubCustomerText,
   safeConditionLabel,
+  safeCustomerSummary,
   MINIMAL_SAFE_SUMMARY,
 } = require('../services/lawn-diagnostic-report');
 
@@ -541,6 +542,15 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeConditionLabel('Chinch bug pressure', 'moderate')).toBe('chinch bug activity');
     // a generic symptom label is not a "cause", so it is never downgraded
     expect(safeConditionLabel('Visible weed pressure', 'low')).toBe('weed pressure');
+  });
+
+  test('safeCustomerSummary replaces a cause-naming summary below moderate confidence', () => {
+    const named = 'The pattern is most consistent with chinch pressure, which can look like drought.';
+    expect(safeCustomerSummary(named, 'low').toLowerCase()).not.toContain('chinch');
+    expect(safeCustomerSummary(named, 'unknown').toLowerCase()).not.toContain('chinch');
+    // moderate+ may name the cause; a symptom-only low summary is left alone
+    expect(safeCustomerSummary(named, 'moderate')).toContain('chinch');
+    expect(safeCustomerSummary('An area is worth keeping an eye on.', 'low')).toMatch(/keeping an eye/);
   });
 
   test('watering restriction copy is built from structured days, never the raw client string', () => {

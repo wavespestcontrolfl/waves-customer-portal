@@ -116,7 +116,7 @@ describe('buildPublicLawnReport whitelisting', () => {
           findings: [{ name: 'Chinch bug pressure', confidence: 'low', severity: 'moderate' }],
         },
         watering: {},
-        customer_summary: 'ok',
+        customer_summary: 'The pattern is most consistent with chinch pressure at the sunny edge.',
       }),
     });
     const report = buildPublicLawnReport(diag);
@@ -124,6 +124,8 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(serialized.toLowerCase()).not.toContain('chinch');
     expect(report.findings[0].name).toBe('general lawn stress');
     expect(report.primary_finding).toBe('general lawn stress');
+    // hero summary is gated too — no cause name survives at low confidence
+    expect(report.summary.toLowerCase()).not.toContain('chinch');
   });
 
   test('seasonal_context is server-generated from the creation month, never client text', () => {

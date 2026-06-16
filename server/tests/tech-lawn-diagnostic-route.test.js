@@ -45,10 +45,12 @@ const {
   enrichAppliedProducts,
   labelConstraintsFromCatalog,
   deriveOverallScore,
+  buildFindingsFromVision,
   normalizeContact,
   hasSendableContact,
   contactName,
 } = techLawnDiagnosticRouter._test;
+const { safeConditionLabel } = require('../services/lawn-diagnostic-report');
 
 function appServer() {
   const app = express();
@@ -259,6 +261,18 @@ describe('tech lawn diagnostic analyze route', () => {
     expect(deriveOverallScore({ diagnosis: { findings: [] } }, 100)).toBeNull();
     expect(deriveOverallScore({ diagnosis: { findings: [], severity: 'moderate' } })).toBeNull();
     expect(deriveOverallScore({ diagnosis: { findings: [{ severity: 'severe' }] } }, 100)).toBeLessThanOrEqual(39);
+  });
+
+  test('vision-fallback fungal finding is capped at low confidence so egress downgrades it', () => {
+    const findings = buildFindingsFromVision({
+      composite: { fungal_activity: 'moderate', observations: 'patchy browning' },
+      adjustedScores: { weed_suppression: 90, turf_density: 90, color_health: 90 },
+      divergenceFlags: [],
+    });
+    const fungal = findings.find((f) => f.name === 'Possible fungal activity');
+    expect(fungal.confidence).toBe('low');
+    // egress label then downgrades the named disease to a generic symptom
+    expect(safeConditionLabel(fungal.name, fungal.confidence)).toBe('general lawn stress');
   });
 
   test('catalog enrichment keeps DB compliance fields authoritative', async () => {

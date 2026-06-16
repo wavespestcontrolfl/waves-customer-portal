@@ -15,7 +15,7 @@ const router = express.Router();
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { scrubCustomerText, safeConditionLabel } = require('../services/lawn-diagnostic-report');
+const { scrubCustomerText, safeConditionLabel, safeCustomerSummary } = require('../services/lawn-diagnostic-report');
 const { etParts } = require('../utils/datetime-et');
 
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
@@ -147,7 +147,8 @@ function buildPublicLawnReport(diagnostic = {}) {
     first_name: typeof firstName === 'string' ? firstName.slice(0, 80) : null,
     city: typeof address.city === 'string' ? address.city.slice(0, 80) : null,
     overall_status: overallStatusLabel(diagnostic.overall_score),
-    summary: scrubCustomerText(contract.customer_summary) || null,
+    // Confidence-gated: a low/unknown report never names a cause in the hero summary.
+    summary: safeCustomerSummary(contract.customer_summary, diagnosis.confidence),
     // Allowlisted, confidence-gated label, never the raw stored primary_finding.
     primary_finding: diagnosis.primary_finding ? safeConditionLabel(diagnosis.primary_finding, diagnosis.confidence) : null,
     confidence: clampEnum(diagnosis.confidence, CONFIDENCE_VALUES),
