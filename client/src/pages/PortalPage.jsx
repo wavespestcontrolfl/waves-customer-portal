@@ -4118,23 +4118,33 @@ function PasswordField({ value, onChange, placeholder, label }) {
   );
 }
 
-function PillSelector({ options, value, onChange }) {
+function PillSelector({ options, value, onChange, multiple = false }) {
+  const selected = multiple ? (Array.isArray(value) ? value : (value ? [value] : [])) : value;
+  const isActive = (v) => (multiple ? selected.includes(v) : selected === v);
+  const handleClick = (v) => {
+    if (!multiple) return onChange(v);
+    const next = selected.includes(v) ? selected.filter(x => x !== v) : [...selected, v];
+    onChange(next);
+  };
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-      {options.map(o => (
-        <button key={o.value} type="button" onClick={() => onChange(o.value)} aria-pressed={value === o.value} style={{
-          ...PORTAL_BUTTON_BASE,
-          minHeight: 36,
-          padding: '8px 12px',
-          fontSize: 14,
-          borderRadius: 8,
-          letterSpacing: 0,
-          boxShadow: 'none',
-          background: value === o.value ? '#F8FCFE' : '#fff',
-          color: value === o.value ? B.blueDeeper : '#6B7280',
-          border: `1px solid ${value === o.value ? B.wavesBlue : '#D8D0C0'}`,
-        }}>{o.label}</button>
-      ))}
+      {options.map(o => {
+        const active = isActive(o.value);
+        return (
+          <button key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
+            ...PORTAL_BUTTON_BASE,
+            minHeight: 36,
+            padding: '8px 12px',
+            fontSize: 14,
+            borderRadius: 8,
+            letterSpacing: 0,
+            boxShadow: 'none',
+            background: active ? '#F8FCFE' : '#fff',
+            color: active ? B.blueDeeper : '#6B7280',
+            border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
+          }}>{o.label}</button>
+        );
+      })}
     </div>
   );
 }
@@ -4873,7 +4883,7 @@ function PropertyTab({ customer }) {
               {textInput('irrigationControllerLocation', 'e.g., Left side of garage, gray box', 'Controller Location')}
               <div>
                 <label style={labelStyle}>Number of Zones</label>
-                <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={20} label="Irrigation zones" />
+                <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={100} label="Irrigation zones" />
               </div>
               {hasLawnCare && irrigationInchesInput()}
             </div>
@@ -4912,7 +4922,10 @@ function PropertyTab({ customer }) {
               <div>
                 <label style={labelStyle}>System Type</label>
                 <PillSelector
-                  value={prefs.irrigationSystemType}
+                  multiple
+                  value={Array.isArray(prefs.irrigationSystemType)
+                    ? prefs.irrigationSystemType
+                    : (prefs.irrigationSystemType ? [prefs.irrigationSystemType] : [])}
                   onChange={v => updateField('irrigationSystemType', v)}
                   options={[
                     { value: 'spray', label: 'In-ground Spray' },
@@ -4920,6 +4933,9 @@ function PropertyTab({ customer }) {
                     { value: 'rotor', label: 'Rotor' },
                   ]}
                 />
+                <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+                  Select all that apply — many properties mix spray, drip, and rotor zones.
+                </div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E7E2D7', borderRadius: 8, background: subtle }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Rain sensor</div>
