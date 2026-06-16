@@ -9808,8 +9808,10 @@ export function CompletionPanel({
                 {generating ? "Generating…" : "Generate AI report"}
               </button>
             )}
-            {/* Service photos */}
-            {!quickComplete && (
+            {/* Service photos — lawn visits capture turf photos in the Lawn
+                Assessment block above, which flow into the report gallery, so
+                this redundant second upload is hidden for lawn. */}
+            {!quickComplete && !isLawn && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
                 <input
@@ -11901,8 +11903,10 @@ export function CompletionPanel({
                 : "Generate AI Service Report"}
             </button>
           )}
-          {/* Photo Upload — hidden in quick complete */}
-          {!quickComplete && (
+          {/* Photo Upload — hidden in quick complete. Lawn visits capture turf
+              photos in the Lawn Assessment block above (which flow into the
+              report gallery), so this redundant second upload is hidden. */}
+          {!quickComplete && !isLawn && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Service Photos</label>{" "}
