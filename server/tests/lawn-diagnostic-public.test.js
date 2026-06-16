@@ -107,6 +107,25 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(report.findings[0].customer_note).toBe('We saw signs consistent with chinch bug activity.');
   });
 
+  test('a low-confidence finding never publishes a named cause (naming gate at egress)', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Chinch bug pressure',
+          confidence: 'low',
+          findings: [{ name: 'Chinch bug pressure', confidence: 'low', severity: 'moderate' }],
+        },
+        watering: {},
+        customer_summary: 'ok',
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    const serialized = JSON.stringify(report);
+    expect(serialized.toLowerCase()).not.toContain('chinch');
+    expect(report.findings[0].name).toBe('general lawn stress');
+    expect(report.primary_finding).toBe('general lawn stress');
+  });
+
   test('seasonal_context is server-generated from the creation month, never client text', () => {
     const report = buildPublicLawnReport(sentDiagnostic());
     // Client supplied 'Peak season'; egress replaces it with a fixed SWFL note.

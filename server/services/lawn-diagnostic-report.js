@@ -514,24 +514,44 @@ const CONDITION_LABELS = [
   [/(drought|\bdry\b|water stress|wilt|under\s?water)/, 'drought stress'],
   [/(thin|bare|sparse|patchy)/, 'thinning turf'],
   [/(chlorosis|iron|nitrogen|nutrient|yellow)/, 'color and nutrient stress'],
-  [/(\bhealthy\b|looks good|looks healthy|dense|uniform)/, 'no major visible stress'],
+  [/(\bhealthy\b|looks good|looks healthy)/, 'no major visible stress'],
   [/(color|discolor|stress|decline)/, 'color stress'],
 ];
 
-// Negated / clean findings ("No visible disease", "No major stress signal",
-// "Unhealthy" excluded) must resolve to the no-stress label BEFORE the positive cause
-// matchers — otherwise a clean finding flips into an active problem on the public
-// report. Anchored on a standalone "no" so "unhealthy" / "nutrient" don't trip it.
-const NEGATED_FINDING = /\bno\b[^.]*\b(major|significant|visible|notable|obvious|stress|signal|sign|issue|problem|disease|weed|fungus|fungal|pest|insect|chinch|grub)\b|^\s*(none|clear)\b/;
+// Labels that NAME a specific pest/disease/species/deficiency. Under the v0.4 naming
+// gate these may only be published for moderate+ findings; below that they downgrade
+// to a generic symptom so no low/unknown finding publishes a cause.
+const CAUSE_LABELS = new Set([
+  'chinch bug activity', 'caterpillar activity', 'grub activity',
+  'large patch (fungal) activity', 'gray leaf spot', 'dollar spot', 'fungal activity',
+]);
+const GENERIC_STRESS_LABEL = 'general lawn stress';
 
-function safeConditionLabel(rawName) {
+// A finding is "clean" only when it LEADS with a negation / health phrase. This catches
+// "No visible disease" / "Healthy, dense turf" without misreading a positive finding
+// that carries a negated differential ("Possible fungal disease; no weed pressure").
+const LEADING_NEGATION = /^\s*(no|none|not|clear|healthy|looks good|looks healthy|nothing)\b/;
+
+// Map any stored finding name (client/LLM free text) to a fixed, allowlisted
+// customer-facing condition label, gated by confidence. Single source of truth for the
+// public egress route, the customer-summary builder, AND the narrative context — so no
+// raw finding name, and no low/unknown cause name, ever reaches customer copy or the
+// narrative LLM. Pass the finding's confidence at every customer-facing call site.
+function safeConditionLabel(rawName, confidence) {
   const lower = String(rawName || '').toLowerCase();
   if (!lower) return null;
-  if (NEGATED_FINDING.test(lower)) return 'no major visible stress';
-  for (const [pattern, label] of CONDITION_LABELS) {
-    if (pattern.test(lower)) return label;
+  let label = 'a lawn condition we are monitoring';
+  if (LEADING_NEGATION.test(lower)) {
+    label = 'no major visible stress';
+  } else {
+    for (const [pattern, mapped] of CONDITION_LABELS) {
+      if (pattern.test(lower)) { label = mapped; break; }
+    }
   }
-  return 'a lawn condition we are monitoring';
+  if (confidence !== undefined && CAUSE_LABELS.has(label) && confidenceRank(confidence) < CONFIDENCE_ORDER.moderate) {
+    return GENERIC_STRESS_LABEL;
+  }
+  return label;
 }
 
 function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
@@ -547,8 +567,9 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
   if (confidence < CONFIDENCE_ORDER.moderate) {
     return `The photos show an area of the lawn worth keeping an eye on. ${treatmentLine} We'd confirm with a closer look if it spreads, thins, or does not recover.`;
   }
-  // Allowlisted label, never the raw stored name — this string is published.
-  const name = safeConditionLabel(primary.name) || 'a lawn condition we are monitoring';
+  // Allowlisted label, never the raw stored name — this string is published. (Reached
+  // only at moderate+; low/unknown returned the symptom-only line above.)
+  const name = safeConditionLabel(primary.name, primary.confidence) || 'a lawn condition we are monitoring';
   const lower = name.toLowerCase();
   if (lower.includes('chinch') && confidence < CONFIDENCE_ORDER.high) {
     return `The pattern is most consistent with chinch pressure, which can look very similar to drought stress. ${treatmentLine} If the patch continues expanding, re-check the margin.`;

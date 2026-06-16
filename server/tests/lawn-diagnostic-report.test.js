@@ -530,6 +530,17 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeConditionLabel('No major visible lawn stress signal')).toBe('no major visible stress');
     expect(safeConditionLabel('Unhealthy turf — severe decline')).not.toBe('no major visible stress');
     expect(safeConditionLabel('Chinch bug pressure')).toBe('chinch bug activity');
+    // A positive finding with a negated differential is NOT clean.
+    expect(safeConditionLabel('Possible fungal disease; no weed pressure')).toBe('fungal activity');
+  });
+
+  test('safeConditionLabel downgrades a named cause to a generic symptom below moderate confidence', () => {
+    expect(safeConditionLabel('Chinch bug pressure', 'low')).toBe('general lawn stress');
+    expect(safeConditionLabel('Large patch disease', 'unknown')).toBe('general lawn stress');
+    // moderate+ may name the cause
+    expect(safeConditionLabel('Chinch bug pressure', 'moderate')).toBe('chinch bug activity');
+    // a generic symptom label is not a "cause", so it is never downgraded
+    expect(safeConditionLabel('Visible weed pressure', 'low')).toBe('weed pressure');
   });
 
   test('watering restriction copy is built from structured days, never the raw client string', () => {

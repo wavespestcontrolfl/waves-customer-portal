@@ -304,14 +304,14 @@ async function runDiagnosis(context = {}) {
 function buildNarrativeContext(contract = {}) {
   const diag = contract.diagnosis || {};
   return JSON.stringify({
-    primary_finding: diag.primary_finding ? safeConditionLabel(diag.primary_finding) : null,
+    primary_finding: diag.primary_finding ? safeConditionLabel(diag.primary_finding, diag.confidence) : null,
     confidence: diag.confidence || 'unknown',
-    // Only allowlisted labels + structured fields reach the model — never raw
-    // finding/flag free text (scrub can't catch arbitrary injected prose). finding_id
-    // lets the model align treatment.addresses_findings without seeing raw wording.
+    // Only allowlisted, confidence-gated labels + structured fields reach the model —
+    // never raw finding/flag free text, and never a named cause for a low/unknown
+    // finding. finding_id lets the model align treatment.addresses_findings.
     findings: (diag.findings || []).map((finding) => ({
       finding_id: finding.finding_id || null,
-      name: safeConditionLabel(finding.name),
+      name: safeConditionLabel(finding.name, finding.confidence),
       confidence: finding.confidence,
       severity: finding.severity,
     })),

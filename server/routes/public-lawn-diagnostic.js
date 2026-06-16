@@ -125,8 +125,9 @@ function buildPublicLawnReport(diagnostic = {}) {
   // no raw AI text, brand/active-ingredient name, or confirmed-pest claim escapes.
   const findings = Array.isArray(diagnosis.findings)
     ? diagnosis.findings.slice(0, 12).map((finding) => {
-      // Allowlisted label, never the raw stored name (client/LLM free text).
-      const name = safeConditionLabel(finding.name);
+      // Allowlisted, confidence-gated label — never the raw stored name, and never a
+      // named cause for a low/unknown finding.
+      const name = safeConditionLabel(finding.name, finding.confidence);
       const confidence = clampEnum(finding.confidence, CONFIDENCE_VALUES);
       return {
         name,
@@ -147,8 +148,8 @@ function buildPublicLawnReport(diagnostic = {}) {
     city: typeof address.city === 'string' ? address.city.slice(0, 80) : null,
     overall_status: overallStatusLabel(diagnostic.overall_score),
     summary: scrubCustomerText(contract.customer_summary) || null,
-    // Allowlisted label, never the raw stored primary_finding.
-    primary_finding: diagnosis.primary_finding ? safeConditionLabel(diagnosis.primary_finding) : null,
+    // Allowlisted, confidence-gated label, never the raw stored primary_finding.
+    primary_finding: diagnosis.primary_finding ? safeConditionLabel(diagnosis.primary_finding, diagnosis.confidence) : null,
     confidence: clampEnum(diagnosis.confidence, CONFIDENCE_VALUES),
     findings,
     watering: {
@@ -163,7 +164,7 @@ function buildPublicLawnReport(diagnostic = {}) {
     },
     // Server-generated from scrubbed finding names — NOT contract.watch_items,
     // which is built from finding.confirmation_step (internal tech/QA text).
-    watch_items: findings.map((f) => f.name).filter(Boolean).slice(0, 6)
+    watch_items: [...new Set(findings.map((f) => f.name).filter(Boolean))].slice(0, 6)
       .map((name) => `We'll keep an eye on ${name.toLowerCase()} and how it responds.`),
     // Server-generated from the report's creation month — never client free text.
     seasonal_context: serverSeasonalNote(diagnostic.created_at),
