@@ -1,13 +1,16 @@
 /**
- * Lawn Diagnostic — LLM diagnosis + narrative prompts (v0.3).
+ * Lawn Diagnostic — LLM diagnosis + narrative prompts (v0.4).
  *
  * Two focused passes that wrap the deterministic contract in
  * `lawn-diagnostic-report.js`:
  *
  *   PASS A — runDiagnosis(): photos + vision scores + product/compliance context
- *            → structured findings with HONEST, evidence-based confidence.
+ *            → structured findings with HONEST, evidence-based confidence. A cause
+ *            is NAMED only when its minimum-evidence signature is visible; otherwise
+ *            the finding is the SYMPTOM at low/unknown confidence (the "naming gate").
  *   PASS B — runNarrative(): the reconciled contract → a calm, specific,
- *            confidence-matched customer_summary ("write it last").
+ *            confidence-matched customer_summary ("write it last"). The summary may
+ *            never upgrade a low/unknown symptom into a named pest/disease.
  *
  * Neither pass blocks. On any failure the caller falls back to the deterministic
  * `buildFindingsFromVision` / `buildCustomerSummary`. The model never invents
@@ -26,35 +29,43 @@ const MODELS = require('../config/models');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const PROMPT_VERSION = 'lawn-diagnostic-v0.3';
+const PROMPT_VERSION = 'lawn-diagnostic-v0.4';
 const MAX_PROMPT_IMAGES = 5;
 
 // ── Curated SWFL St. Augustine reference (selection menu, not free-write) ──────
 const CURATED_REFERENCE = `## CURATED REFERENCE — SW Florida, primarily St. Augustine turf
 
-Name a condition only when its required visible signature is present. Otherwise
-describe the symptom and lower confidence.
+NAMING GATE (hard): use a cause's NAME only when its "Required:" signature below is
+visible in the photos (or a technician field test confirms it). If the required
+signature is absent, the finding name is the SYMPTOM ("browning", "thinning",
+"yellowing", "weed pressure") and confidence is capped at low — unknown if even the
+symptom is unclear. "Required:" is the MINIMUM evidence to name that cause.
 
 - Chinch bugs: irregular, expanding yellow→brown patches in full sun / along hot
   edges (driveways, sidewalks) that do NOT green up with water. Look-alike:
-  drought stress. Photo-only chinch is never "confirmed" — confidence caps at
-  moderate; confirmation is a float test or cut-and-pull test (~20+ per sq ft).
+  drought stress. Required: an in-sun/edge expanding patch that fails to green up
+  with water AND a blade/crown close-up. Photo-only chinch is never "confirmed" —
+  confidence caps at moderate; confirmation is a float or cut-and-pull test (~20+/sq ft).
 - Large patch (Rhizoctonia): roughly circular patches with yellow/orange margins,
-  cooler wet weather. Look-alike: TARR, drought. Needs a close-up of the patch
-  margin to exceed low confidence.
+  cooler wet weather. Look-alike: TARR, drought. Required: a close-up of the patch
+  margin showing the ring — without it, use "patch-pattern thinning" at low confidence.
 - Gray leaf spot: small lesions on blades, after rain or heavy nitrogen, warm
-  humid weather. Needs a blade close-up.
+  humid weather. Required: a blade close-up showing the lesions — without it, do
+  not name it.
 - Color/yellowing — match the pattern before naming a cause: iron shows as
   interveinal yellowing on NEW growth (sandy soil / high pH lockout); nitrogen is
-  uniform yellowing on OLDER growth; magnesium shows on leaf margins. Do not call
-  a "deficiency" without the matching pattern.
+  uniform yellowing on OLDER growth; magnesium shows on leaf margins. Required: the
+  matching pattern is visible — without a clear pattern, say "color stress", never a
+  named "deficiency".
 - Weeds: name a specific weed (dollarweed, sedge/nutsedge, crabgrass) only when
-  its morphology is visible; otherwise say "weed pressure".
+  its morphology is visible. Required: identifiable weed morphology — otherwise
+  "weed pressure".
 - Drought / irrigation stress: blue-gray cast, folding blades, footprinting,
-  uniform thinning in dry zones. Distinguish from chinch (water response) and
-  shade (consistent low light).
+  uniform thinning in dry zones. Required: the dry-stress signature in a plausibly
+  dry zone — distinguish from chinch (no water response) and shade (consistent low light).
 - Thatch / shade / scalping: thatch = spongy mat; shade = thinning under canopy;
-  scalping = uniform tan after a low mow. These are cultural, not pest/disease.
+  scalping = uniform tan after a low mow. Cultural, not pest/disease — name only
+  with the stated visible cue present.
 
 ## RESULT TIMING (use ranges, never exact day counts beyond these)
 - Weeds: visible response ~10-14 days, may need follow-up by weed type.
@@ -99,7 +110,9 @@ const FALSE_PRECISION_RULE = `## FALSE-PRECISION (hard)
 - No timelines outside the curated ranges; always a range, never a single day.
 - No product-specific watering/mowing/rainfast/reentry numbers unless the injected
   label data is db_authoritative; otherwise use general guidance.
-- No brand/active-ingredient names or FRAC/IRAC/HRAC codes in customer-facing text.`;
+- No brand/active-ingredient names or FRAC/IRAC/HRAC codes in customer-facing text.
+- No naming a cause the evidence does not support: a low/unknown finding is a
+  symptom, never a named pest, disease, weed species, or deficiency, in ANY output.`;
 
 // ── PASS A: diagnosis system prompt ───────────────────────────────────────────
 const DIAGNOSIS_SYSTEM_PROMPT = `# ROLE
@@ -123,9 +136,15 @@ negative_evidence, confirmation_step, customer_wording.
 - high: multiple corroborating visible signals AND a field test / technician
   verification, OR a pathognomonic pattern. Only level cleared for definitive wording.
 - moderate: a clear visible pattern consistent with one primary cause, but a
-  credible differential remains; requires at least one close-up and one context shot.
-- low: suggestive only — single angle, poor light, or a strong competing cause.
-- unknown: cannot name it; describe the symptom only.
+  credible differential remains; requires the cause's Required signature (curated
+  reference) plus at least one close-up and one context shot.
+- low: suggestive only — single angle, poor light, a strong competing cause, or the
+  cause's Required signature is not visible (name = symptom at this level).
+- unknown: cannot name even the symptom; describe what little is visible only.
+NAME GATE: assign a cause NAME (chinch, large patch, gray leaf spot, a named weed, a
+specific deficiency) ONLY when that cause's Required signature is met; otherwise the
+finding name is the SYMPTOM and confidence is low/unknown. Do not let season, weather,
+or a vision score alone promote a symptom to a named cause.
 HARD CAP: photo-only chinch, disease, or drought never exceeds moderate unless a
 confirmation result is present.
 
@@ -185,6 +204,10 @@ ${AUTO_RELEASE_RULE}
   preventive, frame it as preventive — never imply a confirmed problem.
 - Confidence-honest: below "high" use "most consistent with" / "signs consistent
   with" / "treated as suspected"; only "high" may be definitive.
+- Naming discipline: only name a specific cause (pest, disease, weed species,
+  deficiency) when that finding's confidence is moderate or high. For low/unknown
+  findings, describe the symptom and lean on the finding's own customer_wording —
+  never upgrade a symptom into a named cause in the summary.
 - Calm, specific, actionable. No fear-selling, no overpromising (no "eliminate",
   "guaranteed", "100%", "pest-free").
 - Realism check before finalizing: would a skeptical homeowner standing on the lawn
