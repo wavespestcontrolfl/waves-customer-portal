@@ -44,7 +44,13 @@ const prefsSchema = Joi.object({
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
   irrigationScheduleNotes: longText,
   wateringDays: Joi.array().items(Joi.string().max(20)).max(7),
-  irrigationSystemType: shortText,
+  // Customers can have multiple sprinkler types on one property. Accept an
+  // array (current client) or a legacy scalar string for backward compat;
+  // the route normalizes to an array before storage.
+  irrigationSystemType: Joi.alternatives().try(
+    Joi.array().items(Joi.string().max(30)).max(3),
+    Joi.string().max(30).allow('')
+  ).allow(null),
   rainSensor: Joi.boolean(),
   irrigationIssues: longText,
   hoaName: shortText,
@@ -158,7 +164,7 @@ router.get('/preferences', async (req, res, next) => {
           blackoutStart: null, blackoutEnd: null,
           irrigationSystem: false, irrigationControllerLocation: '', irrigationZones: null,
           irrigationInchesPerWeek: null,
-          irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: '',
+          irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
           rainSensor: false, irrigationIssues: '',
           hoaName: '', hoaRestrictions: '', hoaCompany: '', hoaPhone: '', hoaEmail: '',
           hoaLawnHeight: '', hoaSignageRules: '', hoaTimingRestrictions: '',
@@ -172,7 +178,7 @@ router.get('/preferences', async (req, res, next) => {
     // Convert snake_case DB columns to camelCase for frontend
     const { id, customer_id, created_at, ...fields } = prefs;
     // Parse JSON fields
-    const JSON_COLS = ['watering_days', 'pets_structured'];
+    const JSON_COLS = ['watering_days', 'pets_structured', 'irrigation_system_type'];
     for (const jc of JSON_COLS) {
       if (fields[jc] && typeof fields[jc] === 'string') {
         try {
@@ -214,8 +220,14 @@ router.put('/preferences', async (req, res, next) => {
       delete updates.irrigation_inches_per_week;
     }
 
+    // Normalize irrigation system type to an array (accepts legacy scalar)
+    if ('irrigation_system_type' in updates) {
+      const v = updates.irrigation_system_type;
+      updates.irrigation_system_type = Array.isArray(v) ? v : (v ? [v] : []);
+    }
+
     // Stringify JSON fields for DB storage
-    const JSON_FIELDS = ['watering_days', 'pets_structured'];
+    const JSON_FIELDS = ['watering_days', 'pets_structured', 'irrigation_system_type'];
     for (const jf of JSON_FIELDS) {
       if (jf in updates && typeof updates[jf] !== 'string') {
         updates[jf] = JSON.stringify(updates[jf]);
