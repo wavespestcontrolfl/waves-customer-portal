@@ -120,6 +120,91 @@ describe('estimate slot weekend and expander behavior', () => {
       .toBe(0);
   });
 
+  test('past windows on today are dropped while future dates and bookable times stay', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET
+    const slots = [
+      { slotId: 'today-10', date: '2026-05-26', windowStart: '10:00', routeOptimal: false }, // past
+      { slotId: 'today-11', date: '2026-05-26', windowStart: '11:00', routeOptimal: false }, // inside 120m lead
+      { slotId: 'today-14', date: '2026-05-26', windowStart: '14:00', routeOptimal: false }, // bookable
+      { slotId: 'tomorrow-9', date: '2026-05-27', windowStart: '09:00', routeOptimal: false }, // future date
+    ];
+
+    const kept = slotAvailabilityInternals
+      .filterPastSlotsForToday(slots, { now, minimumLeadMinutes: 120 })
+      .map((slot) => slot.slotId);
+
+    expect(kept).toEqual(['today-14', 'tomorrow-9']);
+  });
+
+  test('spreading re-packs today\'s ASAP capacity onto bookable windows instead of past ones', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET → earliest bookable 13:01 → 14:00 first
+    const todayStr = '2026-05-26';
+    // Synthetic open-capacity slots collapsed to early windows.
+    const slots = ['09:00', '10:00', '11:00'].map((win, i) => ({
+      slotId: `today-${i}`, date: todayStr, windowStart: win, windowEnd: slotAvailabilityInternals.addMinutesToHHMM(win, 60),
+      routeOptimal: false, capacityType: 'asap_open', techId: `tech-${i}`,
+    }));
+
+    const spread = slotAvailabilityInternals.spreadWindowsAcrossDay(slots, 60, { now, minimumLeadMinutes: 120 });
+
+    // Re-packed onto bookable windows, none stamped before the lead-time cutoff…
+    spread.forEach((s) => expect(['14:00', '15:00', '16:00']).toContain(s.windowStart));
+    // …so all genuine same-day capacity survives the past-slot filter.
+    expect(slotAvailabilityInternals.filterPastSlotsForToday(spread, { now, minimumLeadMinutes: 120 })).toHaveLength(3);
+  });
+
+  test('spreading leaves route-derived find-time slots at their feasible time (dropped if inside lead)', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET → earliest bookable 13:01
+    const todayStr = '2026-05-26';
+    const slots = [
+      // Route-derived (no capacityType): find-time proved these exact times feasible.
+      { slotId: 'route-derived-1030', date: todayStr, windowStart: '10:30', windowEnd: '11:30', routeOptimal: false, techId: 'tech-1' },
+      { slotId: 'route-derived-1500', date: todayStr, windowStart: '15:00', windowEnd: '16:00', routeOptimal: false, techId: 'tech-2' },
+    ];
+
+    const spread = slotAvailabilityInternals.spreadWindowsAcrossDay(slots, 60, { now, minimumLeadMinutes: 120 });
+
+    // Times are preserved exactly — never retimed to an unvalidated window.
+    expect(spread.map((s) => s.windowStart)).toEqual(['10:30', '15:00']);
+    // The inside-lead 10:30 is dropped; the feasible 15:00 survives.
+    expect(slotAvailabilityInternals.filterPastSlotsForToday(spread, { now, minimumLeadMinutes: 120 }).map((s) => s.slotId))
+      .toEqual(['route-derived-1500']);
+  });
+
+  test('spreading does not collide ASAP capacity with a preserved route slot window', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET → bookable windows 14:00/15:00/16:00
+    const todayStr = '2026-05-26';
+    // A route slot already occupies 14:00 for tech-1; the pre-spread dedupe has
+    // removed the exact 14:00 ASAP row for tech-1, leaving its 15:00/16:00 rows.
+    const slots = [
+      { slotId: 'route-1400-tech1', date: todayStr, windowStart: '14:00', windowEnd: '15:00', routeOptimal: true, nearbyJob: { detourMinutes: 3 }, techId: 'tech-1' },
+      { slotId: `${todayStr}_15-00_tech-1`, date: todayStr, windowStart: '15:00', windowEnd: '16:00', routeOptimal: false, capacityType: 'asap_open', techId: 'tech-1' },
+      { slotId: `${todayStr}_16-00_tech-1`, date: todayStr, windowStart: '16:00', windowEnd: '17:00', routeOptimal: false, capacityType: 'asap_open', techId: 'tech-1' },
+    ];
+
+    const spread = slotAvailabilityInternals.spreadWindowsAcrossDay(slots, 60, { now, minimumLeadMinutes: 120 });
+    const ids = spread.map((s) => s.slotId);
+
+    // No duplicate slotIds, and the route slot's 14:00 window is not re-used by ASAP.
+    expect(new Set(ids).size).toBe(ids.length);
+    const tech1Windows = spread.filter((s) => s.techId === 'tech-1').map((s) => s.windowStart).sort();
+    expect(tech1Windows).toEqual(['14:00', '15:00', '16:00']);
+  });
+
+  test('past-slot filter also trims a route-optimal window that has already passed today', () => {
+    const now = new Date('2026-05-26T15:01:00Z'); // 11:01 AM ET
+    const slots = [
+      { slotId: 'today-route-10', date: '2026-05-26', windowStart: '10:00', routeOptimal: true, nearbyJob: { detourMinutes: 2 } },
+      { slotId: 'today-route-15', date: '2026-05-26', windowStart: '15:00', routeOptimal: true, nearbyJob: { detourMinutes: 2 } },
+    ];
+
+    const kept = slotAvailabilityInternals
+      .filterPastSlotsForToday(slots, { now, minimumLeadMinutes: 120 })
+      .map((slot) => slot.slotId);
+
+    expect(kept).toEqual(['today-route-15']);
+  });
+
   test('asap slot cap preserves later windows when many techs are active', () => {
     const techs = Array.from({ length: 30 }, (_, idx) => ({ id: `tech-${idx + 1}`, name: `Tech ${idx + 1}` }));
     const slots = slotAvailabilityInternals.buildAsapCapacitySlotsForTechs({
@@ -145,6 +230,7 @@ describe('estimate slot weekend and expander behavior', () => {
       windowStart: '09:00',
       windowEnd: '10:00',
       routeOptimal: false,
+      capacityType: 'asap_open',
       techId: `tech-${idx}`,
     }));
     const routeSlot = {

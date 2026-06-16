@@ -1017,16 +1017,90 @@ function pestOneTimeBase(oneTimeItems) {
 // German Roach Cleanout is a multi-visit specialty program (priced one-time but
 // run over 2/3/4 visits). It gets its own customer copy + the Waves Guarantee,
 // and never the general-pest preference toggles.
+//
+// Match the standalone cleanout only — the canonical `german_roach` service
+// key, or a name that names the cleanout program ("roach … cleanout"). A bare
+// "german roach" mention is NOT enough: a recurring pest plan's first-visit
+// add-on (Initial German Roach Knockdown, service `pest_initial_roach`) also
+// says "German Roach" but is not the cleanout, and must not inherit cleanout
+// copy or specialty Ask Waves prompts.
 function isGermanRoachCleanoutOneTimeItem(it = {}) {
-  if (String(it.service || '').toLowerCase() === 'german_roach') return true;
+  const service = String(it.service || '').toLowerCase();
+  if (service === 'german_roach') return true;
+  if (service === 'pest_initial_roach') return false; // first-visit knockdown add-on, not the cleanout
   const raw = [it.name, it.label, it.displayName].filter(Boolean).join(' ').toLowerCase();
-  return raw.includes('german roach') || (raw.includes('roach') && raw.includes('cleanout'));
+  return raw.includes('roach') && raw.includes('cleanout');
 }
 
 function germanRoachVisitPhrase(visits) {
   const n = Number(visits) || 0;
   const words = { 1: 'One visit', 2: 'Two visits', 3: 'Three visits', 4: 'Four visits' };
   return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
+}
+
+// German-roach specialty Ask Waves prompts. Both carry the "roach" keyword so
+// the Ask Waves fallback routes them to the pest/roach answer branch (the
+// multi-visit cleanout copy), not the generic scheduling or catch-all reply.
+// Shared so the server-rendered page (buildEstimateAskPrompts) and the React
+// data contract (attachPublicPricingContract) surface identical chips.
+const GERMAN_ROACH_ASK_CHIPS = [
+  'How do you get rid of German roaches?',
+  'How long until the roaches are gone?',
+];
+
+// Generic pest_control service chips the German-roach specialty replaces. The
+// universal billing chips in SERVICE_COPY.pest_control.askChips ("When am I
+// charged?", "What happens after approval?") are kept.
+const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat inside?'];
+
+// Safety quick-question shown for any chemical service. Shared so the React
+// data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
+const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+
+// Service-aware "Ask Waves" quick-question chips: up to 2 estimate-specific
+// service prompts, a safety chip for any chemical service, then universal
+// billing chips — capped at 4 so the prompt row stays scannable.
+//
+// German Roach Cleanout is a one-time specialty that detectPestOneTime
+// deliberately excludes (it never trips hasPestOneTime), so it's detected on
+// its own here. Without this, a German-roach estimate falls back to the
+// generic billing-only chips with no specialty prompts.
+function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurring = null, hasPestOneTime = false) {
+  const recurringList = Array.isArray(recurring) ? recurring : [];
+  const oneTimeList = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const servicePrompts = [];
+  const hasLawn = recurringList.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
+  const hasMosquito = recurringList.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''))
+    || oneTimeList.some((item) => serviceCategoryForOneTimeItem(item) === 'mosquito');
+  const hasTermite = recurringList.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''))
+    || oneTimeList.some((item) => /termite/i.test(item?.service || item?.label || item?.name || '')
+      || ['termite_bait', 'termite_trenching', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(item)));
+  const hasTreeShrub = recurringList.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
+  const hasRodent = recurringList.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
+  const hasPalm = recurringList.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
+  const hasGermanRoach = oneTimeList.some(isGermanRoachCleanoutOneTimeItem)
+    || recurringList.some(isGermanRoachCleanoutOneTimeItem);
+  const hasPestAny = !!pestRecurring || hasPestOneTime || hasGermanRoach;
+  if (hasGermanRoach) {
+    servicePrompts.push(...GERMAN_ROACH_ASK_CHIPS);
+  } else if (hasPestAny) {
+    servicePrompts.push('How do you handle ants?');
+  }
+  if (hasLawn) servicePrompts.push('How does your lawn assessment tech work?');
+  if (hasMosquito) servicePrompts.push('How long does it last?');
+  if (hasTermite) servicePrompts.push('How does the bait work?');
+  if (hasTreeShrub) servicePrompts.push('Which trees get treated?');
+  if (hasRodent) servicePrompts.push('Where do bait stations go?');
+  if (hasPalm) servicePrompts.push('Why injections vs. spray?');
+
+  const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm;
+  const prompts = servicePrompts.slice(0, 2);
+  if (hasChemicalService) prompts.push(SAFETY_ASK_CHIP);
+  for (const prompt of ['When am I charged?', 'What happens after approval?']) {
+    if (prompts.length >= 4) break;
+    prompts.push(prompt);
+  }
+  return prompts;
 }
 
 // Minimum monthly price for a recurring pest plan at the given cadence,
@@ -3440,38 +3514,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>` : ''}
   </section>` : '';
   const membershipBlockHtml = renderMembershipBlockHtml(membership);
-  // Service-aware quick-question chips: 2 estimate-specific service prompts,
-  // a safety chip for any chemical service, then 1 universal billing chip —
-  // capped at 4 so the prompt row stays scannable.
-  const askPrompts = (() => {
-    const servicePrompts = [];
-    const hasLawn = recurring.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
-    const hasMosquito = recurring.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''))
-      || oneTimeItems.some((item) => serviceCategoryForOneTimeItem(item) === 'mosquito');
-    const hasTermite = recurring.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''))
-      || oneTimeItems.some((item) => /termite/i.test(item?.service || item?.label || item?.name || '')
-        || ['termite_bait', 'termite_trenching', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(item)));
-    const hasTreeShrub = recurring.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
-    const hasRodent = recurring.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
-    const hasPalm = recurring.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
-    const hasPestAny = !!pestRecurring || hasPestOneTime;
-    if (hasPestAny) servicePrompts.push('How do you handle ants?');
-    if (hasLawn) servicePrompts.push('How does your lawn assessment tech work?');
-    if (hasMosquito) servicePrompts.push('How long does it last?');
-    if (hasTermite) servicePrompts.push('How does the bait work?');
-    if (hasTreeShrub) servicePrompts.push('Which trees get treated?');
-    if (hasRodent) servicePrompts.push('Where do bait stations go?');
-    if (hasPalm) servicePrompts.push('Why injections vs. spray?');
-
-    const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm;
-    const prompts = servicePrompts.slice(0, 2);
-    if (hasChemicalService) prompts.push('Are pets and kids safe?');
-    for (const prompt of ['When am I charged?', 'What happens after approval?']) {
-      if (prompts.length >= 4) break;
-      prompts.push(prompt);
-    }
-    return prompts;
-  })();
+  const askPrompts = buildEstimateAskPrompts(recurring, oneTimeItems, pestRecurring, hasPestOneTime);
   const estimateAskEnabled = isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
@@ -9644,7 +9687,21 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   const serviceCategories = services.map((section) => (
     section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)
   ));
-  const askChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], contractPayload.oneTimeBreakdown?.items || [])]);
+  const oneTimeBreakdownItems = contractPayload.oneTimeBreakdown?.items || [];
+  const baseAskChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], oneTimeBreakdownItems)]);
+  // German Roach Cleanout classifies as generic pest_control, so mergeAskChips
+  // would surface the generic ant/treat-inside chips. Lead with the roach
+  // specialty prompts, keep the safety chip (it's a chemical service), and drop
+  // those generic pest service chips — keeping the billing chips and any other
+  // category's chips — so the React path matches the server-rendered page
+  // (deduped, capped at 6).
+  const askChips = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
+    ? Array.from(new Set([
+        ...GERMAN_ROACH_ASK_CHIPS,
+        SAFETY_ASK_CHIP,
+        ...baseAskChips.filter((chip) => !GENERIC_PEST_SERVICE_CHIPS.includes(chip)),
+      ])).slice(0, 6)
+    : baseAskChips;
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
   return {
     ...contractPayload,
@@ -10356,6 +10413,7 @@ module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.detectPestOneTime = detectPestOneTime;
 module.exports.isGermanRoachCleanoutOneTimeItem = isGermanRoachCleanoutOneTimeItem;
 module.exports.germanRoachVisitPhrase = germanRoachVisitPhrase;
+module.exports.buildEstimateAskPrompts = buildEstimateAskPrompts;
 module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmount;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;

@@ -1,0 +1,174 @@
+const {
+  answerEstimateQuestionFallback,
+  buildEstimateAssistantContext,
+} = require('../services/estimate-assistant');
+
+describe('Ask Waves fallback — German roach questions', () => {
+  const context = {
+    serviceMode: 'one_time',
+    services: [
+      { label: 'German Roach Cleanout', detail: '3 visit program', summary: 'German Roach Cleanout — 3 visit program' },
+    ],
+  };
+
+  test('"How long until the roaches are gone?" gets the multi-visit roach answer, not a scheduling reply', () => {
+    const answer = answerEstimateQuestionFallback('How long until the roaches are gone?', context);
+    expect(answer.toLowerCase()).toContain('roach');
+    expect(answer.toLowerCase()).toContain('multi-visit');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+    // Must not fall through to the generic scheduling answer.
+    expect(answer).not.toContain('Pick one of the available times');
+    // Nor the catch-all.
+    expect(answer).not.toContain('I can answer questions about this estimate');
+  });
+
+  test('"How do you get rid of German roaches?" gets the roach treatment answer', () => {
+    const answer = answerEstimateQuestionFallback('How do you get rid of German roaches?', context);
+    expect(answer.toLowerCase()).toContain('roach');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('a non-German cockroach estimate does NOT get German-roach multi-visit copy', () => {
+    const nativeRoachContext = {
+      serviceMode: 'one_time',
+      services: [
+        { label: 'Native Cockroach Treatment', detail: 'one-time', summary: 'Native Cockroach Treatment — one-time' },
+      ],
+    };
+    const answer = answerEstimateQuestionFallback('How do you treat cockroaches?', nativeRoachContext);
+    expect(answer.toLowerCase()).toContain('cockroach');
+    // The German-roach-specific multi-visit / breeding-cycle copy must not leak
+    // onto a native cockroach or general pest estimate.
+    expect(answer.toLowerCase()).not.toContain('german roach');
+    expect(answer.toLowerCase()).not.toContain('breeding cycle');
+    expect(answer.toLowerCase()).not.toContain('number of visits');
+  });
+
+  test('the german_roach service key still gets the cleanout answer even with sparse labels', () => {
+    const serviceKeyContext = {
+      serviceMode: 'one_time',
+      services: [
+        { service: 'german_roach', label: 'Pest Control', detail: '3 visit program' },
+      ],
+    };
+    const answer = answerEstimateQuestionFallback('How do you treat roaches?', serviceKeyContext);
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('multi-visit');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('context builder preserves the german_roach service key for sparse one-time rows', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 450 },
+      pricingBundle: {
+        anchorOneTimePrice: 450,
+        oneTimeBreakdown: {
+          total: 450,
+          items: [{ service: 'german_roach', amount: 450, detail: '3 visit program' }],
+        },
+      },
+      serviceMode: 'one_time',
+    });
+    expect(context.services[0]).toEqual(expect.objectContaining({
+      service: 'german_roach',
+      label: 'german_roach',
+    }));
+    const answer = answerEstimateQuestionFallback('How do you treat roaches?', context);
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('Initial German Roach Knockdown does NOT get cleanout fallback copy', () => {
+    const knockdownContext = {
+      serviceMode: 'recurring',
+      services: [
+        { service: 'pest_control', label: 'Pest Control', summary: 'Pest Control - quarterly' },
+      ],
+      oneTime: {
+        items: [
+          {
+            service: 'pest_initial_roach',
+            label: 'Initial German Roach Knockdown',
+            detail: '$119',
+            summary: 'Initial German Roach Knockdown - $119',
+          },
+        ],
+      },
+    };
+    const answer = answerEstimateQuestionFallback('How long until the roaches are gone?', knockdownContext);
+    expect(answer.toLowerCase()).toContain('cockroach');
+    expect(answer.toLowerCase()).not.toContain('german roaches');
+    expect(answer.toLowerCase()).not.toContain('multi-visit');
+    expect(answer.toLowerCase()).not.toContain('breeding cycle');
+    expect(answer.toLowerCase()).not.toContain('number of visits');
+  });
+
+  test('a recurring estimate with a one-time German Roach Cleanout answers the roach question (not "I do not see pest control")', () => {
+    const lawnPlusCleanoutContext = {
+      serviceMode: 'recurring',
+      services: [
+        { service: 'lawn_care', label: 'Lawn Care', summary: 'Lawn Care - quarterly' },
+      ],
+      oneTime: {
+        items: [
+          { service: 'german_roach', label: 'German Roach Cleanout', detail: '3 visit program', summary: 'German Roach Cleanout - 3 visit program' },
+        ],
+      },
+    };
+    const answer = answerEstimateQuestionFallback('How do you get rid of German roaches?', lawnPlusCleanoutContext);
+    expect(answer.toLowerCase()).not.toContain('i do not see pest control');
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('context builder exposes separately billed German Roach Cleanout rows in recurring mode', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 100,
+        annual_total: 1200,
+        onetime_total: 450,
+        show_one_time_option: false,
+      },
+      estData: {
+        result: {
+          recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 100 }] },
+        },
+      },
+      pricingBundle: {
+        anchorOneTimePrice: 450,
+        oneTimeBreakdown: {
+          total: 450,
+          items: [{ service: 'german_roach', label: 'German Roach Cleanout', amount: 450, detail: '3 visit program' }],
+        },
+        frequencies: [{ key: 'monthly', label: 'Monthly', monthly: 100, annual: 1200 }],
+      },
+      serviceMode: 'recurring',
+    });
+
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.oneTime?.items).toContainEqual(expect.objectContaining({
+      service: 'german_roach',
+      label: 'German Roach Cleanout',
+    }));
+
+    const answer = answerEstimateQuestionFallback('How do you get rid of German roaches?', context);
+    expect(answer.toLowerCase()).not.toContain('i do not see pest control');
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
+  test('a non-roach Initial Pest Cleanout does NOT get treated as a German Roach Cleanout', () => {
+    const pestCleanoutContext = {
+      serviceMode: 'one_time',
+      services: [
+        { service: 'pest_initial_cleanout', label: 'Initial Pest Cleanout', detail: 'one-time', summary: 'Initial Pest Cleanout - one-time' },
+      ],
+    };
+    const answer = answerEstimateQuestionFallback('How do you treat roaches?', pestCleanoutContext);
+    // "cleanout" present but no roach → must not surface German-roach cleanout copy.
+    expect(answer.toLowerCase()).not.toContain('german roaches');
+    expect(answer.toLowerCase()).not.toContain('breeding cycle');
+  });
+});

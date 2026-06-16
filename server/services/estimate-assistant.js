@@ -122,6 +122,7 @@ function serviceRowsFromEstimateData(estData = {}) {
   const recurring = result.recurring || estData.recurring || {};
   const services = Array.isArray(recurring.services) ? recurring.services : [];
   return services.map((service) => ({
+    service: cleanText(service.service || service.key) || null,
     label: normalizeServiceName(service.displayName || service.label || service.name || service.service),
     cadence: cleanText(service.frequencyLabel || service.cadence || service.frequency),
     detail: cleanText(service.detail || service.description),
@@ -197,6 +198,7 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
     const current = byLabel.get(label) || { label };
     byLabel.set(label, {
       ...current,
+      service: current.service || cleanText(service.service || service.key) || null,
       label,
       cadence: current.cadence || serviceCadence,
       detail: current.detail || cleanText(service.detail),
@@ -215,6 +217,7 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
       : null;
     byLabel.set(label, {
       ...current,
+      service: current.service || cleanText(service.service || service.key) || null,
       perApplication,
       visitsPerYear: Number(service.visitsPerYear),
     });
@@ -263,6 +266,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}) {
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
       return {
+        service: cleanText(item.service || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
@@ -308,6 +312,7 @@ function oneTimeRowsFromEstimateData(estData = {}) {
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
       return {
+        service: cleanText(item.service || item.key) || null,
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
@@ -535,6 +540,11 @@ function buildEstimateAssistantContext({
   const firstName = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0]
     || cleanText(estimate.customerFirstName);
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
+  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(isGermanRoachCleanoutContextRow);
+  const exposeOneTimeContext = !quoteRequired
+    && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
+    && (hasOneTimeValue || oneTimeServices.length > 0);
+  const oneTimeContextAmount = Number.isFinite(oneTimeTotal) && oneTimeTotal > 0 ? oneTimeTotal : null;
   const invoiceMode = truthy(estimate.bill_by_invoice) || truthy(estimate.billByInvoice);
   const normalBillingAmountText = billingAmount ? `${fmtMoney(billingAmount)} / ${billingPeriod}` : null;
   const oneTimeBillingAmount = Number.isFinite(oneTimeTotal) && oneTimeTotal > 0 ? oneTimeTotal : null;
@@ -586,9 +596,9 @@ function buildEstimateAssistantContext({
     recurringServices: recurringServices.map(rowWithSummary),
     setupFee,
     firstVisitFees,
-    oneTime: !quoteRequired && oneTimeAvailable && Number.isFinite(oneTimeTotal) && oneTimeTotal > 0 ? {
-      amount: oneTimeTotal,
-      amountText: fmtMoney(oneTimeTotal),
+    oneTime: exposeOneTimeContext ? {
+      amount: oneTimeContextAmount,
+      amountText: oneTimeContextAmount ? fmtMoney(oneTimeContextAmount) : null,
       items: oneTimeServices.map(rowWithSummary),
     } : null,
     guarantees: {
@@ -649,8 +659,40 @@ function summarizeSupportContext(context = {}, question = '') {
     .join(' ');
 }
 
-function treatmentApproachForQuestion(question = '') {
+function isGermanRoachCleanoutContextRow(row = {}) {
+  const service = cleanText(row.service || row.key).toLowerCase();
+  if (service === 'german_roach') return true;
+  if (service === 'pest_initial_roach') return false;
+  const text = cleanText([row.label, row.detail, row.summary].filter(Boolean).join(' '))
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  // Both clauses must hold: the row must mention roaches AND be a cleanout.
+  // `\bclean\s*out\b` matches "cleanout" and "clean out" in one pattern, so the
+  // roach `&&` gate can't be bypassed by a non-roach cleanout row.
+  return /\broach(?:es)?\b/.test(text) && /\bclean\s*out\b/.test(text);
+}
+
+// True when the estimate itself is a German Roach Cleanout (canonical service
+// key or a cleanout-specific label). The question text alone can't distinguish
+// German Roach Cleanout from a native/palmetto cockroach or a recurring pest
+// plan with an Initial German Roach Knockdown add-on, so German-roach cleanout
+// copy must be gated on this exact service context.
+function estimateMentionsGermanRoach(context = {}) {
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.some(isGermanRoachCleanoutContextRow);
+}
+
+function treatmentApproachForQuestion(question = '', context = {}) {
   const q = cleanText(question).toLowerCase();
+  if (/\b(roach|roaches|cockroach|cockroaches)\b/.test(q)) {
+    if (estimateMentionsGermanRoach(context)) {
+      return 'For German roaches, the cleanout runs as a multi-visit program — each visit targets the live population and the next generation to break the breeding cycle, with prep guidance so the treatment holds. The number of visits is shown on this estimate.';
+    }
+    return 'For cockroaches, treatment targets harborage areas, entry points, and food and moisture sources, with follow-up based on the activity found at your property.';
+  }
   if (/\bant|ants\b/.test(q)) {
     return 'For ants, the goal is to reduce exterior entry pressure, treat trails and nesting zones when found, and support interior activity when it is included or needed.';
   }
@@ -670,8 +712,15 @@ function treatmentApproachForQuestion(question = '') {
 }
 
 function findService(context = {}, pattern) {
-  return (Array.isArray(context.services) ? context.services : [])
-    .find((row) => pattern.test(`${row.label} ${row.detail} ${row.summary}`));
+  // Search both the recurring service list and one-time items. In recurring
+  // mode context.services holds only the recurring rows, so a separately-billed
+  // one-time line (e.g. a German Roach Cleanout alongside a lawn plan) would be
+  // missed and the fallback would wrongly say "I do not see pest control".
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.find((row) => pattern.test(`${row.label || ''} ${row.detail || ''} ${row.summary || ''}`));
 }
 
 function listFirstVisitFees(context = {}) {
@@ -742,11 +791,11 @@ function answerEstimateQuestionFallback(question, context = {}) {
     const labelCopy = 'Your technician will follow the product label directions for every application.';
     if (activeIngredients.length) {
       return [
-        `${treatmentApproachForQuestion(question)} Active ingredients/classes in the admin catalog for this service type include ${activeIngredients.join(', ')}.`,
+        `${treatmentApproachForQuestion(question, context)} Active ingredients/classes in the admin catalog for this service type include ${activeIngredients.join(', ')}.`,
         `${labelCopy} If you have pets, kids, sensitivities, or want the exact product for your home that day, call or text Waves at ${phone}.`,
       ].filter(Boolean).join(' ');
     }
-    return `${treatmentApproachForQuestion(question)} ${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
+    return `${treatmentApproachForQuestion(question, context)} ${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
   }
 
   if (/\b(lawn|turf|weed|fungus|grass|fertil)\b/.test(q)) {
@@ -755,19 +804,19 @@ function answerEstimateQuestionFallback(question, context = {}) {
     return lawn
       ? [
           `For lawn care, this estimate shows ${lawn.summary}.`,
-          treatmentApproachForQuestion(question),
+          treatmentApproachForQuestion(question, context),
           activeIngredients.length ? `Relevant active ingredients/classes in the admin catalog include ${activeIngredients.join(', ')}.` : '',
         ].filter(Boolean).join(' ')
       : `I do not see lawn care on this estimate. Call or text Waves at ${phone} if you want it added.`;
   }
 
-  if (/\b(pest|bug|roach|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
+  if (/\b(pest|bug|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
     const pest = findService(context, /pest|roach|ant|spider|perimeter/i);
     const activeIngredients = activeIngredientsFromSupport(context, question);
     return pest
       ? [
           `For pest control, this estimate shows ${pest.summary}.`,
-          treatmentApproachForQuestion(question),
+          treatmentApproachForQuestion(question, context),
           activeIngredients.length ? `Relevant active ingredients/classes in the admin catalog include ${activeIngredients.join(', ')}.` : '',
         ].filter(Boolean).join(' ')
       : `I do not see pest control on this estimate. Call or text Waves at ${phone} if you want it added.`;
@@ -849,7 +898,7 @@ async function answerEstimateQuestion({
     };
   }
 
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
       && supportRows(context).length) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
