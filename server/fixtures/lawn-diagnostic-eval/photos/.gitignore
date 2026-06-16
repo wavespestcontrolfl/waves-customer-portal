@@ -1,0 +1,3 @@
+# Real lawn photos are eval fixtures, not source — never commit them.
+*
+!.gitignore
