@@ -106,6 +106,53 @@ describe('account and membership email sender', () => {
     }));
   });
 
+  test('skips account.updated when the recipient made the change themselves', async () => {
+    // No db queues are set: a self-initiated edit must short-circuit before
+    // any DB work or template send.
+    const result = await AccountMembershipEmail.sendAccountUpdated({
+      customerId: 'cust-1',
+      actorCustomerId: 'cust-1',
+      changedItems: [{
+        key: 'serviceReminder72h',
+        label: '72-Hour Appointment Reminder',
+        oldValue: 'On',
+        newValue: 'Off',
+      }],
+      changeSummary: 'Your 72-Hour Appointment Reminder was set to Off.',
+      accountSection: 'Notification preferences',
+    });
+
+    expect(result).toMatchObject({ skipped: true, reason: 'self_initiated' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('still sends account.updated when a different actor made the change', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+
+    const result = await AccountMembershipEmail.sendAccountUpdated({
+      customerId: 'cust-1',
+      recipientCustomerId: 'cust-1',
+      actorCustomerId: 'staff-9',
+      changedItems: [{
+        key: 'serviceReminder72h',
+        label: '72-Hour Appointment Reminder',
+        oldValue: 'On',
+        newValue: 'Off',
+      }],
+      changeSummary: 'Your 72-Hour Appointment Reminder was set to Off.',
+      accountSection: 'Notification preferences',
+    });
+
+    expect(result).not.toMatchObject({ skipped: true });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'account.updated',
+      to: 'taylor@example.com',
+    }));
+  });
+
   test('sends portal request received confirmation with request id idempotency', async () => {
     setDbQueues({
       customers: [chain({ first: customer() })],

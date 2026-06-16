@@ -245,6 +245,7 @@ function itemSummary(items = []) {
 async function sendAccountUpdated({
   customerId,
   recipientCustomerId = customerId,
+  actorCustomerId,
   changedItems = [],
   changeSummary,
   accountSection = 'Account settings',
@@ -252,6 +253,19 @@ async function sendAccountUpdated({
   changedAt = new Date(),
   idempotencyKey,
 } = {}) {
+  // The account.updated template is a security-style "was this you?" notice.
+  // Skip it when the recipient is the same person who made the change — a
+  // routine self-service portal edit. Without this, one settings session fans
+  // out a separate "your settings were updated" email per saved field. The
+  // notice is still sent when a different actor (e.g. staff) changed the
+  // recipient's settings, or when the actor is unknown (fail toward notifying).
+  if (
+    actorCustomerId != null &&
+    recipientCustomerId != null &&
+    String(actorCustomerId) === String(recipientCustomerId)
+  ) {
+    return { ok: false, skipped: true, reason: 'self_initiated' };
+  }
   const summary = clean(changeSummary) || itemSummary(changedItems);
   if (!summary) return { ok: false, skipped: true, reason: 'no_changes' };
   const idHash = hashValue({

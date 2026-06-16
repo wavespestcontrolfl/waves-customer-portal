@@ -264,6 +264,7 @@ router.put('/preferences', async (req, res, next) => {
     if (emailItems.length) {
       void AccountMembershipEmail.sendAccountUpdated({
         customerId: req.customerId,
+        actorCustomerId: req.customerId,
         changedItems: emailItems,
         changeSummary: `${emailItems.length === 1 ? 'A property preference was' : 'Property preferences were'} updated for future service visits.`,
         accountSection: 'Property profile',
