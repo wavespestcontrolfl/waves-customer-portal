@@ -15,14 +15,25 @@
  * customer when they ship. When a message is rejected, the caller logs +
  * alerts Virginia instead of silently dropping the SMS.
  *
- * `options.messageType === 'internal_alert'` bypasses the month check
- * because admin-facing alerts often reference past months intentionally.
+ * Message types in STALE_MONTH_EXEMPT_TYPES bypass the month check:
+ *   - `internal_alert` — admin-facing alerts often reference past months.
+ *   - `manual` — operator-authored sends (Comms composer, estimate/retention
+ *     follow-ups) where a human deliberately typed the month, e.g. "Adam
+ *     visited back in April." The stale-month rule targets automated template
+ *     renders, not hand-written text; manual sends are still covered by the
+ *     unsubstituted-variable and broken-render checks. AI-drafted sends
+ *     (`ai_assistant`) are intentionally NOT exempt — an LLM is the likely
+ *     source of a hallucinated stale month.
  */
 
 const MONTHS = [
   'january', 'february', 'march', 'april', 'may', 'june',
   'july', 'august', 'september', 'october', 'november', 'december',
 ];
+
+// Message types whose bodies are human-authored or admin-facing, where a
+// month name is intentional rather than a stale template render.
+const STALE_MONTH_EXEMPT_TYPES = new Set(['internal_alert', 'manual']);
 
 // Unsubstituted Mustache-style variables like `{first_name}`, `{date}`.
 // Narrow pattern — only flag short lowercase-snake tokens so we don't false-
@@ -107,7 +118,7 @@ function validateOutbound(body, options = {}) {
     return { ok: false, reason: blockedPattern };
   }
 
-  if (options.messageType !== 'internal_alert') {
+  if (!STALE_MONTH_EXEMPT_TYPES.has(options.messageType)) {
     const stale = findStaleMonth(body, options.now);
     if (stale) {
       return { ok: false, reason: `stale-month:${stale}` };
