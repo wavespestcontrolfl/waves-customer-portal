@@ -47,8 +47,8 @@
  */
 
 import { useState, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
 import {
+  Bell,
   CheckCircle2,
   ChevronLeft,
   Copy,
@@ -56,10 +56,10 @@ import {
   Droplets,
   FileText,
   Link2,
+  Mail,
   MessageSquare,
   MoreHorizontal,
   PenLine,
-  Phone,
   RotateCcw,
   ShieldCheck,
   Trash2,
@@ -147,49 +147,39 @@ function fmtDate(d) {
   });
 }
 
-function dateInputValue(value) {
-  if (!value) return "";
-  const raw = String(value);
-  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function todayDateInput() {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 function fmtCurrency(v) {
   return "$" + parseFloat(v || 0).toFixed(2);
 }
-
-function formatAnnualPrepayStatusLabel(term = {}) {
-  const status = String(term.status || "").toLowerCase();
-  const invoiceStatus = String(term.prepayInvoiceStatus || "").toLowerCase();
-  if (status === "payment_pending") {
-    return invoiceStatus ? `Prepay pending · invoice ${invoiceStatus}` : "Prepay pending";
-  }
-  if (status === "active") return "Paid annual prepay";
-  if (status === "renewal_pending") return "Renewal pending";
-  if (status === "cancelled" || status === "canceled") return "Cancelled";
-  if (status === "refunded") return "Refunded";
-  return status ? status.replace(/_/g, " ") : "Annual prepay";
+function dateInputValue(value) {
+  if (!value) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value).slice(0, 10);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toISOString().slice(0, 10);
 }
-
-function annualPrepayStatusClass(term = {}) {
-  const status = String(term.status || "").toLowerCase();
-  if (status === "active") return "bg-emerald-50 text-emerald-700 border-emerald-200";
-  if (status === "renewal_pending" || status === "payment_pending") return "bg-amber-50 text-amber-700 border-amber-200";
-  if (["cancelled", "canceled", "refunded"].includes(status)) return "bg-zinc-100 text-zinc-600 border-zinc-200";
-  return "bg-zinc-50 text-zinc-700 border-zinc-200";
+function todayDateInput() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function addDaysInput(value, days) {
+  const d = new Date(`${dateInputValue(value) || todayDateInput()}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + Number(days || 0));
+  return d.toISOString().slice(0, 10);
+}
+function addMonthsInput(value, months) {
+  const text = dateInputValue(value) || todayDateInput();
+  const [year, month, day] = text.split("-").map(Number);
+  const monthIndex = month - 1 + Number(months || 0);
+  const targetYear = year + Math.floor(monthIndex / 12);
+  const targetMonthIndex = ((monthIndex % 12) + 12) % 12;
+  const targetMonth = targetMonthIndex + 1;
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth, 0, 12)).getUTCDate();
+  return `${targetYear}-${String(targetMonth).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
+}
+function defaultAnnualPrepayStart(activeTerm) {
+  const end = dateInputValue(activeTerm?.termEnd);
+  const today = todayDateInput();
+  return end && end >= today ? addDaysInput(end, 1) : today;
 }
 function getAdminRole() {
   try {
@@ -244,6 +234,181 @@ function inventoryAuditAmount(item) {
   if (!deducted) return "No deduction";
   const amount = item.deductedAmount ?? item.deducted_amount;
   return `${fmtNumber(amount, 4)} ${item.inventoryUnit || item.inventory_unit || item.unit || ""}`.trim();
+}
+
+const ANNUAL_PREPAY_CADENCE_OPTIONS = [
+  { value: "monthly", label: "Monthly", visits: 12 },
+  { value: "bimonthly", label: "Every 2 months", visits: 6 },
+  { value: "quarterly", label: "Quarterly", visits: 4 },
+  { value: "triannual", label: "Every 4 months", visits: 3 },
+  { value: "semiannual", label: "Semiannual", visits: 2 },
+  { value: "every_6_weeks", label: "Every 6 weeks", visits: 9 },
+  { value: "annual", label: "Annual", visits: 1 },
+];
+
+const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
+  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.value, String(option.visits)]),
+);
+
+function inferAnnualPrepayCadenceFromLabel(value) {
+  const text = String(value || "").toLowerCase();
+  if (/\bevery\s*6\s*weeks?\b|\b6\s*weeks\b|\b42\s*days\b/.test(text)) return "every_6_weeks";
+  if (/\bbi[-\s]?monthly\b|\bevery\s*2\s*months?\b/.test(text)) return "bimonthly";
+  if (/\bquarterly\b|\bevery\s*3\s*months?\b/.test(text)) return "quarterly";
+  if (/\btri[-\s]?annual\b|\bevery\s*4\s*months?\b/.test(text)) return "triannual";
+  if (/\bsemi[-\s]?annual\b|\bevery\s*6\s*months?\b/.test(text)) return "semiannual";
+  if (/\bmonthly\b/.test(text)) return "monthly";
+  if (/\bannual\b|\byearly\b|\bevery\s*12\s*months?\b/.test(text)) return "annual";
+  return null;
+}
+
+function annualPrepayCadencePrefix(cadence) {
+  const normalized = inferAnnualPrepayCadenceFromLabel(cadence) || String(cadence || "").toLowerCase();
+  if (normalized === "monthly") return "Monthly";
+  if (normalized === "bimonthly") return "Every 2 months";
+  if (normalized === "quarterly") return "Quarterly";
+  if (normalized === "triannual") return "Every 4 months";
+  if (normalized === "semiannual") return "Semiannual";
+  if (normalized === "every_6_weeks") return "Every 6 weeks";
+  if (normalized === "annual") return "Annual";
+  return null;
+}
+
+function normalizeAnnualPrepayLabelKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\b(every|monthly|bimonthly|bi-monthly|quarterly|triannual|semiannual|semi-annual|annual|yearly|six|weeks?|days?)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function annualPrepayLabelsMatch(left, right) {
+  const a = normalizeAnnualPrepayLabelKey(left);
+  const b = normalizeAnnualPrepayLabelKey(right);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function formatAnnualPrepayServiceLabel(baseLabel, cadence) {
+  const base = String(baseLabel || "").trim();
+  if (!base) return "";
+
+  const prefix = annualPrepayCadencePrefix(cadence);
+  if (!prefix) return base;
+
+  const existingCadence = inferAnnualPrepayCadenceFromLabel(base);
+  if (existingCadence === inferAnnualPrepayCadenceFromLabel(cadence)) return base;
+
+  const stripped = base
+    .replace(/^(monthly|bi[-\s]?monthly|quarterly|tri[-\s]?annual|semi[-\s]?annual|annual|yearly|every\s*6\s*weeks?)\s+/i, "")
+    .trim();
+  return `${prefix} ${stripped || base}`;
+}
+
+function inferAnnualPrepayServiceBase(customer, activeTerm = null, prepaidPlans = []) {
+  const activeLabel = activeTerm?.coverageServiceType || activeTerm?.planLabel || "";
+  if (activeLabel) return activeLabel.replace(/\s+Annual Prepay$/i, "").trim();
+
+  const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0
+    ? prepaidPlans.find((plan) => String(plan?.serviceType || "").trim())
+    : Array.isArray(customer?.prepaidPlans)
+      ? customer.prepaidPlans.find((plan) => String(plan?.serviceType || "").trim())
+      : null;
+  if (matchingPlan?.serviceType) return String(matchingPlan.serviceType).trim();
+
+  const serviceTypes = String(customer?.serviceTypes || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (serviceTypes.length > 0) return serviceTypes[0];
+
+  return "Pest Control";
+}
+
+function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPlans = [], annualPrepayTerms = []) {
+  const seen = new Set();
+  const options = [];
+  const push = (label, source = "saved") => {
+    const text = String(label || "").trim();
+    if (!text) return;
+    const key = normalizeAnnualPrepayLabelKey(text);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    options.push({ value: text, label: text, source });
+  };
+
+  push(activeTerm?.coverageServiceType, "active_term");
+  push(activeTerm?.planLabel?.replace(/\s+Annual Prepay$/i, ""), "active_term");
+
+  const activeService = annualPrepayTerms.find((term) => term?.status === "active" && term?.coverageServiceType);
+  push(activeService?.coverageServiceType, "active_term");
+
+  for (const plan of prepaidPlans || []) {
+    push(plan?.serviceType, "prepaid_plan");
+  }
+  for (const term of annualPrepayTerms || []) {
+    push(term?.coverageServiceType, "annual_term");
+    push(term?.planLabel?.replace(/\s+Annual Prepay$/i, ""), "annual_term");
+  }
+
+  for (const service of String(customer?.serviceTypes || "").split(",")) {
+    push(service, "customer_services");
+  }
+
+  if (!options.length) {
+    push("Pest Control", "fallback");
+  }
+
+  return options;
+}
+
+function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
+  const matchingActiveTerm = activeTerm && activeTerm.status === "active" && annualPrepayLabelsMatch(
+    activeTerm.coverageServiceType || activeTerm.planLabel || "",
+    serviceType,
+  )
+    ? activeTerm
+    : null;
+  if (matchingActiveTerm?.prepayAmount > 0) return Number(matchingActiveTerm.prepayAmount);
+
+  const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
+    ? customer.annualPrepayTerms.find((term) => {
+      const termLabel = term?.coverageServiceType || term?.planLabel || "";
+      return term?.status === "active" && annualPrepayLabelsMatch(termLabel, serviceType);
+    })
+    : null;
+  if (activeTermMatch?.prepayAmount > 0) return Number(activeTermMatch.prepayAmount);
+
+  const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0
+    ? prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+    : Array.isArray(customer?.prepaidPlans)
+      ? customer.prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
+      : null;
+  if (matchingPlan?.seriesTotal > 0) return Number(matchingPlan.seriesTotal);
+
+  const annualValue = Number(customer?.annualValue || 0);
+  if (annualValue > 0) return annualValue;
+
+  const monthlyRate = Number(customer?.monthlyRate || 0);
+  if (monthlyRate > 0) return monthlyRate * 12;
+
+  const cadence = String(coverageCadence || "").toLowerCase();
+  if (cadence === "every_6_weeks") return monthlyRate > 0 ? monthlyRate * 12 : 0;
+
+  return 0;
+}
+
+function inferAnnualPrepayInitialCadence(activeTerm = null, prepaidPlans = []) {
+  const activeCadence = String(activeTerm?.coverageCadence || "").trim();
+  if (activeCadence) return activeCadence;
+
+  const planPattern = String(prepaidPlans[0]?.recurringPattern || "").trim();
+  if (planPattern && planPattern !== "custom") {
+    return inferAnnualPrepayCadenceFromLabel(planPattern) || planPattern;
+  }
+
+  const planServiceLabel = String(prepaidPlans[0]?.serviceType || "").trim();
+  return inferAnnualPrepayCadenceFromLabel(planServiceLabel) || "quarterly";
 }
 
 const STAGE_LABELS = {
@@ -440,7 +605,7 @@ function StatCardV2({ label, value, alert }) {
 function sourceLabel(source) {
   const labels = {
     pay_page: "Payment page",
-    onboarding: "Onboarding",
+    onboarding: "Setup",
     portal_add_card: "Customer portal",
     admin_tap_to_pay: "Admin tap to pay",
     contract_signing: "Contract signing",
@@ -511,6 +676,53 @@ function contractStatusLabel(status) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function contractEventLabel(eventType) {
+  const labels = {
+    created: "Created",
+    created_from_document_template: "Created from template",
+    share_link_created: "Signing link",
+    email_sent: "Email sent",
+    sms_sent: "SMS sent",
+    reminder_sent: "Reminder sent",
+    delivery_failed: "Delivery failed",
+    viewed: "Viewed",
+    signed: "Signed",
+    cancelled: "Cancelled",
+    auto_renewal_notice_marked_sent: "Renewal notice",
+  };
+  return labels[eventType] || contractStatusLabel(eventType || "event");
+}
+
+function isContractExpired(contract) {
+  if (!contract?.shareTokenExpiresAt) return false;
+  if (["signed", "cancelled", "voided"].includes(contract.status)) return false;
+  return new Date(contract.shareTokenExpiresAt).getTime() < Date.now();
+}
+
+function contractDeliverySteps(contract) {
+  if (!contract) return [];
+  const steps = [
+    { key: "created", label: "Created", at: contract.createdAt, done: !!contract.createdAt },
+    { key: "sent", label: "Sent", at: contract.sharedAt, done: !!contract.sharedAt },
+    { key: "viewed", label: "Viewed", at: contract.viewedAt, done: !!contract.viewedAt },
+  ];
+  if (contract.status === "cancelled") {
+    steps.push({ key: "cancelled", label: "Cancelled", at: contract.cancelledAt, done: true });
+  } else if (contract.status === "signed") {
+    steps.push({ key: "signed", label: "Signed", at: contract.signedAt, done: true });
+  } else if (isContractExpired(contract)) {
+    steps.push({ key: "expired", label: "Expired", at: contract.shareTokenExpiresAt, done: true });
+  } else {
+    steps.push({ key: "open", label: "Open", at: contract.shareTokenExpiresAt, done: false });
+  }
+  return steps;
+}
+
+function canDeliverDocumentContract(contract) {
+  return contract?.contractType === "document_template" &&
+    !["signed", "cancelled", "voided"].includes(contract.status);
+}
+
 function ElectronicAuthorizationContractV2({
   customer,
   consents = [],
@@ -519,8 +731,11 @@ function ElectronicAuthorizationContractV2({
   onRefresh,
 }) {
   const latest = consents[0] || null;
-  const latestContract = contracts[0] || null;
-  const activeContract = contracts.find((contract) =>
+  const autopayContracts = contracts.filter((contract) =>
+    !contract.contractType || contract.contractType === "autopay_authorization",
+  );
+  const latestContract = autopayContracts[0] || null;
+  const activeContract = autopayContracts.find((contract) =>
     ["draft", "sent", "viewed"].includes(contract.status),
   );
   const displayedText =
@@ -573,10 +788,34 @@ function ElectronicAuthorizationContractV2({
   const [contractAction, setContractAction] = useState("");
   const [contractErr, setContractErr] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
+  const [contractDeliveryActionKey, setContractDeliveryActionKey] = useState("");
+  const [documentTemplates, setDocumentTemplates] = useState([]);
+  const [documentTemplatesLoading, setDocumentTemplatesLoading] = useState(false);
+  const [selectedDocumentTemplateKey, setSelectedDocumentTemplateKey] = useState("");
+  const [documentValues, setDocumentValues] = useState({
+    serviceName: customer.tier || customer.waveguard_tier || "Waves service",
+    agreementStartDate: "",
+    serviceDate: "",
+    inspectionDate: "",
+  });
+  const [documentAllowUnresolved, setDocumentAllowUnresolved] = useState(false);
+  const [documentSigningUrl, setDocumentSigningUrl] = useState("");
+  const [documentAction, setDocumentAction] = useState("");
+  const [documentErr, setDocumentErr] = useState("");
+  const [creatingDocument, setCreatingDocument] = useState(false);
+  const [auditContractId, setAuditContractId] = useState("");
+  const [auditContract, setAuditContract] = useState(null);
+  const [auditEvents, setAuditEvents] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditErr, setAuditErr] = useState("");
   const selectedPaymentMethodId =
     contractForm.paymentMethodId || defaultCard?.id || "";
   const selectedPaymentMethod =
     cards.find((card) => card.id === selectedPaymentMethodId) || defaultCard;
+  const selectedDocumentTemplate =
+    documentTemplates.find((template) => template.templateKey === selectedDocumentTemplateKey) ||
+    documentTemplates[0] ||
+    null;
   const methodForSummary =
     latestContract || latest || selectedPaymentMethod || defaultCard;
   const hasSignedAuthorization =
@@ -587,6 +826,30 @@ function ElectronicAuthorizationContractV2({
   const updateContractForm = (key, value) =>
     setContractForm((prev) => ({ ...prev, [key]: value }));
   const canCreateContract = !!selectedPaymentMethodId;
+  const canCreateDocument = !!selectedDocumentTemplate?.templateKey && !creatingDocument;
+
+  useEffect(() => {
+    let cancelled = false;
+    setDocumentTemplatesLoading(true);
+    adminFetch("/admin/document-templates?status=active&limit=100")
+      .then((result) => {
+        if (cancelled) return;
+        const templates = result.templates || [];
+        setDocumentTemplates(templates);
+        setSelectedDocumentTemplateKey((current) =>
+          current && templates.some((template) => template.templateKey === current)
+            ? current
+            : templates[0]?.templateKey || "",
+        );
+      })
+      .catch((err) => {
+        if (!cancelled) setDocumentErr(err.message || "Could not load document templates");
+      })
+      .finally(() => {
+        if (!cancelled) setDocumentTemplatesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const createContract = async () => {
     if (!canCreateContract || creatingContract) return;
@@ -702,6 +965,102 @@ function ElectronicAuthorizationContractV2({
       setContractAction("Signing link copied.");
     } catch {
       setContractAction("Signing link is ready.");
+    }
+  };
+
+  const deliverDocumentContract = async (contract, channel, action = "send") => {
+    if (!contract?.id || !canDeliverDocumentContract(contract)) return;
+    const actionKey = `${contract.id}:${channel}:${action}`;
+    setContractDeliveryActionKey(actionKey);
+    setContractErr("");
+    setContractAction("");
+    try {
+      const endpoint =
+        action === "reminder"
+          ? `/admin/contracts/${contract.id}/remind`
+          : `/admin/contracts/${contract.id}/send-${channel}`;
+      const result = await adminFetch(endpoint, {
+        method: "POST",
+        body: JSON.stringify(action === "reminder" ? { channel } : {}),
+      });
+      if (!result?.ok) {
+        throw new Error(result?.error || "Delivery failed");
+      }
+      const label = channel === "email" ? "Email" : "SMS";
+      setSigningUrl(result.signingUrl || result.contract?.signingUrl || "");
+      setDocumentSigningUrl(result.signingUrl || result.contract?.signingUrl || "");
+      setContractAction(
+        action === "reminder"
+          ? `${label} reminder sent with a fresh document link.`
+          : `${label} sent with a fresh document link.`,
+      );
+      await onRefresh?.();
+      if (auditContractId === contract.id) {
+        await loadContractAudit(contract);
+      }
+    } catch (err) {
+      setContractErr(err.message || "Could not deliver document request");
+    } finally {
+      setContractDeliveryActionKey("");
+    }
+  };
+
+  const updateDocumentValue = (key, value) =>
+    setDocumentValues((prev) => ({ ...prev, [key]: value }));
+
+  const createDocumentLink = async () => {
+    if (!canCreateDocument || !selectedDocumentTemplate?.templateKey) return;
+    setCreatingDocument(true);
+    setDocumentErr("");
+    setDocumentAction("");
+    setDocumentSigningUrl("");
+    try {
+      const result = await adminFetch(
+        `/admin/document-templates/${encodeURIComponent(selectedDocumentTemplate.templateKey)}/contracts`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            customerId: customer.id,
+            values: documentValues,
+            allowUnresolved: documentAllowUnresolved,
+          }),
+        },
+      );
+      setDocumentSigningUrl(result.signingUrl || result.contract?.signingUrl || "");
+      setDocumentAction("Document link created.");
+      await onRefresh?.();
+    } catch (err) {
+      setDocumentErr(err.message || "Could not create document link");
+    } finally {
+      setCreatingDocument(false);
+    }
+  };
+
+  const copyDocumentSigningUrl = async () => {
+    if (!documentSigningUrl) return;
+    try {
+      await navigator.clipboard?.writeText(documentSigningUrl);
+      setDocumentAction("Document link copied.");
+    } catch {
+      setDocumentAction("Document link is ready.");
+    }
+  };
+
+  const loadContractAudit = async (contract) => {
+    if (!contract?.id) return;
+    setAuditContractId(contract.id);
+    setAuditContract(contract);
+    setAuditEvents([]);
+    setAuditErr("");
+    setAuditLoading(true);
+    try {
+      const result = await adminFetch(`/admin/contracts/${contract.id}/events`);
+      setAuditContract(result.contract || contract);
+      setAuditEvents(result.events || result.contract?.events || []);
+    } catch (err) {
+      setAuditErr(err.message || "Could not load contract audit");
+    } finally {
+      setAuditLoading(false);
     }
   };
 
@@ -879,6 +1238,119 @@ function ElectronicAuthorizationContractV2({
           </div>{" "}
         </div>{" "}
       </div>{" "}
+      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          <div>
+            <div className="text-16 font-medium text-zinc-900">
+              Reusable Documents
+            </div>
+            <div className="text-12 text-ink-secondary mt-1">
+              Send service agreements, notices, prep forms, and WDO acknowledgements through the e-sign workflow.
+            </div>
+          </div>
+          <Button
+            size="sm"
+            onClick={createDocumentLink}
+            disabled={!canCreateDocument || documentTemplatesLoading}
+          >
+            <Link2 size={13} className="mr-1" />
+            {creatingDocument ? "Creating..." : "Create Link"}
+          </Button>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3 p-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">
+                Template
+              </div>
+              <select
+                value={selectedDocumentTemplateKey}
+                onChange={(e) => setSelectedDocumentTemplateKey(e.target.value)}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                disabled={documentTemplatesLoading}
+              >
+                {documentTemplates.length === 0 && (
+                  <option value="">No active templates</option>
+                )}
+                {documentTemplates.map((template) => (
+                  <option key={template.templateKey} value={template.templateKey}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">
+                Service name
+              </div>
+              <input
+                value={documentValues.serviceName}
+                onChange={(e) => updateDocumentValue("serviceName", e.target.value)}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              />
+            </label>
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">
+                Agreement start
+              </div>
+              <input
+                type="date"
+                value={documentValues.agreementStartDate}
+                onChange={(e) => updateDocumentValue("agreementStartDate", e.target.value)}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              />
+            </label>
+            <label className="block">
+              <div className="u-label text-ink-secondary mb-1">
+                Service / inspection date
+              </div>
+              <input
+                type="date"
+                value={documentValues.serviceDate || documentValues.inspectionDate}
+                onChange={(e) => {
+                  updateDocumentValue("serviceDate", e.target.value);
+                  updateDocumentValue("inspectionDate", e.target.value);
+                }}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              />
+            </label>
+            <label className="sm:col-span-2 inline-flex min-h-8 items-center gap-2 text-12 font-medium text-zinc-900">
+              <input
+                type="checkbox"
+                checked={documentAllowUnresolved}
+                onChange={(e) => setDocumentAllowUnresolved(e.target.checked)}
+                className="h-4 w-4 rounded-xs border-zinc-300 text-zinc-900 u-focus-ring"
+              />
+              Allow unresolved merge fields
+            </label>
+          </div>
+          <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
+            <div className="u-label text-ink-secondary mb-2">Document link</div>
+            <div className="text-12 text-ink-secondary leading-5">
+              {selectedDocumentTemplate
+                ? `${selectedDocumentTemplate.name} will be rendered with this customer's name, address, and the values entered here.`
+                : "Select an active template to create a document link."}
+            </div>
+            {documentSigningUrl && (
+              <div className="mt-3 space-y-2">
+                <div className="break-all text-12 text-zinc-900 leading-5">
+                  {documentSigningUrl}
+                </div>
+                <Button size="sm" variant="secondary" onClick={copyDocumentSigningUrl}>
+                  <Copy size={13} className="mr-1" />
+                  Copy
+                </Button>
+              </div>
+            )}
+            {documentAction && (
+              <div className="mt-2 text-11 text-zinc-900">{documentAction}</div>
+            )}
+            {documentErr && (
+              <div className="mt-2 text-11 text-alert-fg">{documentErr}</div>
+            )}
+          </div>
+        </div>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
         {" "}
         <Card>
@@ -1256,7 +1728,8 @@ function ElectronicAuthorizationContractV2({
                   <TH>Status</TH>
                   <TH>Created</TH>
                   <TH>Signed</TH>
-                  <TH>Method</TH>
+                  <TH>Document</TH>
+                  <TH>Delivery</TH>
                   <TH>Actions</TH>{" "}
                 </TR>{" "}
               </THead>{" "}
@@ -1274,10 +1747,76 @@ function ElectronicAuthorizationContractV2({
                     <TD className="u-nums">
                       {contract.signedAt ? fmtDate(contract.signedAt) : "—"}
                     </TD>{" "}
-                    <TD>{paymentMethodLabel(contract)}</TD>{" "}
+                    <TD>
+                      {contract.contractType === "document_template"
+                        ? contract.title || contract.documentTemplateKey || "Document"
+                        : paymentMethodLabel(contract)}
+                    </TD>{" "}
+                    <TD>
+                      <div className="flex flex-wrap gap-1">
+                        {contractDeliverySteps(contract).map((step) => (
+                          <span
+                            key={step.key}
+                            className={cn(
+                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                              step.done
+                                ? "bg-zinc-900 border-zinc-900 text-white"
+                                : "bg-zinc-50 border-zinc-200 text-ink-secondary",
+                            )}
+                            title={step.at ? fmtDate(step.at) : ""}
+                          >
+                            {step.label}
+                          </span>
+                        ))}
+                      </div>
+                    </TD>{" "}
                     <TD>
                       {" "}
                       <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => loadContractAudit(contract)}
+                          disabled={auditLoading && auditContractId === contract.id}
+                        >
+                          {" "}
+                          <FileText size={13} className="mr-1" />
+                          Audit
+                        </Button>
+                        {canDeliverDocumentContract(contract) && (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "email")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <Mail size={13} className="mr-1" />
+                              Email
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "sms")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <MessageSquare size={13} className="mr-1" />
+                              SMS
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "email", "reminder")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <Bell size={13} className="mr-1" />
+                              Remind
+                            </Button>
+                          </>
+                        )}
                         {!["signed", "cancelled", "voided"].includes(
                           contract.status,
                         ) && (
@@ -1327,6 +1866,81 @@ function ElectronicAuthorizationContractV2({
         ) : (
           <div className="mb-5 text-13 text-ink-secondary">
             No contract records created yet.
+          </div>
+        )}
+        {auditContractId && (
+          <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white p-4">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <SectionTitle>
+                  Delivery Audit
+                </SectionTitle>
+                <div className="text-12 text-ink-secondary">
+                  {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setAuditContractId("");
+                  setAuditContract(null);
+                  setAuditEvents([]);
+                  setAuditErr("");
+                }}
+              >
+                Close
+              </Button>
+            </div>
+            {auditErr && (
+              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
+                {auditErr}
+              </div>
+            )}
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {contractDeliverySteps(auditContract || contracts.find((contract) => contract.id === auditContractId)).map((step) => (
+                <span
+                  key={step.key}
+                  className={cn(
+                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                    step.done
+                      ? "bg-zinc-900 border-zinc-900 text-white"
+                      : "bg-zinc-50 border-zinc-200 text-ink-secondary",
+                  )}
+                >
+                  {step.label}
+                  {step.at ? <span className="u-nums ml-1 opacity-80">{fmtDate(step.at)}</span> : null}
+                </span>
+              ))}
+            </div>
+            <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
+              {auditEvents.map((event) => (
+                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
+                  <div className="text-12 font-medium text-zinc-900">
+                    {contractEventLabel(event.eventType)}
+                  </div>
+                  <div className="min-w-0 text-12 text-ink-secondary">
+                    {event.actorType || "system"}
+                    {event.ip ? ` · ${event.ip}` : ""}
+                    {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
+                    {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
+                  </div>
+                  <div className="u-nums text-11 text-ink-secondary md:text-right">
+                    {fmtDate(event.createdAt)}
+                  </div>
+                </div>
+              ))}
+              {!auditLoading && auditEvents.length === 0 && (
+                <div className="px-3 py-4 text-12 text-ink-secondary">
+                  No audit events recorded for this contract.
+                </div>
+              )}
+              {auditLoading && (
+                <div className="px-3 py-4 text-12 text-ink-secondary">
+                  Loading audit events...
+                </div>
+              )}
+            </div>
           </div>
         )}
         <SectionTitle>Authorization History ({consents.length})</SectionTitle>
@@ -1745,6 +2359,619 @@ function AdminAutopayPanelV2({
   );
 }
 
+function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
+  return (
+    <Card className="mb-5">
+      <CardBody className="p-4">
+        <div className="flex justify-between items-start gap-3 flex-wrap">
+          <div>
+            <div className="u-label text-ink-secondary mb-1">Annual prepay</div>
+            {activeTerm ? (
+              <>
+                <div className="text-14 font-medium text-zinc-900">
+                  {activeTerm.planLabel || "Annual Prepay"}
+                </div>
+                <div className="text-12 text-ink-secondary mt-1">
+                  {fmtDate(activeTerm.termStart)} to {fmtDate(activeTerm.termEnd)} · {String(activeTerm.status || "").replace(/_/g, " ")}
+                </div>
+                {activeTerm.coverageServiceType && (
+                  <div className="text-11 text-ink-secondary mt-1">
+                    Covers {activeTerm.coverageVisitCount || 4} {activeTerm.coverageServiceType} visit{Number(activeTerm.coverageVisitCount || 4) === 1 ? "" : "s"}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-12 text-ink-secondary">
+                No annual prepay term on this account.
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2 justify-end">
+            <Button onClick={onSendInvoice} size="md">
+              Send prepay invoice
+            </Button>
+            <Button onClick={onOpen} size="md" variant="secondary">
+              Record collected payment
+            </Button>
+          </div>
+        </div>
+        <div className="text-11 text-ink-secondary mt-2">
+          Default amount: {fmtCurrency(customer?.annualValue || (Number(customer?.monthlyRate || 0) * 12))}
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
+function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved }) {
+  const initialStart = defaultAnnualPrepayStart(activeTerm);
+  const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
+  const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
+  const defaultCoverageCadence = inferAnnualPrepayInitialCadence(activeTerm, prepaidPlans);
+  const defaultServiceType = formatAnnualPrepayServiceLabel(defaultServiceBase, defaultCoverageCadence) || "Quarterly Pest Control";
+  const defaultVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[defaultCoverageCadence] || "4";
+  const suggestedAmount = inferAnnualPrepaySuggestedAmount(
+    { ...customer, prepaidPlans, annualPrepayTerms },
+    defaultServiceType,
+    defaultCoverageCadence,
+    activeTerm,
+    prepaidPlans,
+  );
+  const [amount, setAmount] = useState(suggestedAmount ? suggestedAmount.toFixed(2) : "");
+  const [serviceType, setServiceType] = useState(defaultServiceType);
+  const [coverageCadence, setCoverageCadence] = useState(defaultCoverageCadence);
+  const [visitCount, setVisitCount] = useState(defaultVisitCount);
+  const [method, setMethod] = useState("card_present");
+  const [termStart, setTermStart] = useState(initialStart);
+  const [termEnd, setTermEnd] = useState(addMonthsInput(initialStart, 12));
+  const [reference, setReference] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [amountTouched, setAmountTouched] = useState(false);
+  const cadenceTouchedRef = useRef(false);
+  const visitCountTouchedRef = useRef(false);
+
+  const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ").trim() || "Customer";
+  const count = Number.parseInt(visitCount, 10);
+  const total = Number(amount);
+  const perVisit = Number.isFinite(total) && Number.isInteger(count) && count > 0
+    ? total / count
+    : 0;
+  const activeTermEnd = dateInputValue(activeTerm?.termEnd);
+  const submitDisabled = saving
+    || !(Number(amount) > 0)
+    || !serviceType.trim()
+    || !(Number.parseInt(visitCount, 10) > 0)
+    || !termStart
+    || !termEnd
+    || termEnd <= termStart;
+
+  const handleStartChange = (value) => {
+    setTermStart(value);
+    if (value) setTermEnd(addMonthsInput(value, 12));
+  };
+
+  const updateSuggestedAmount = (nextServiceType, nextCoverageCadence) => {
+    if (amountTouched) return;
+    const nextSuggested = inferAnnualPrepaySuggestedAmount(
+      { ...customer, prepaidPlans, annualPrepayTerms },
+      nextServiceType,
+      nextCoverageCadence,
+      activeTerm,
+      prepaidPlans,
+    );
+    if (nextSuggested > 0) setAmount(nextSuggested.toFixed(2));
+  };
+
+  const handleServiceTypeChange = (value) => {
+    setServiceType(value);
+    const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    if (inferredCadence && !cadenceTouchedRef.current) {
+      setCoverageCadence(inferredCadence);
+      const inferredVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[inferredCadence];
+      if (inferredVisitCount && !visitCountTouchedRef.current) {
+        setVisitCount(inferredVisitCount);
+      }
+    }
+    updateSuggestedAmount(value, inferredCadence || coverageCadence);
+  };
+
+  const handleServiceOptionChange = (value) => {
+    if (value === "__custom__") return;
+    handleServiceTypeChange(value);
+  };
+
+  const handleCadenceChange = (value) => {
+    cadenceTouchedRef.current = true;
+    setCoverageCadence(value);
+    const nextVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[value];
+    if (nextVisitCount && !visitCountTouchedRef.current) setVisitCount(nextVisitCount);
+    updateSuggestedAmount(serviceType, value);
+  };
+
+  const handleVisitCountChange = (value) => {
+    visitCountTouchedRef.current = true;
+    setVisitCount(value);
+  };
+
+  const handleAmountChange = (value) => {
+    setAmountTouched(true);
+    setAmount(value);
+  };
+
+  const handleSubmit = async () => {
+    if (submitDisabled) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
+        method: "POST",
+        body: JSON.stringify({
+          amount: Number(amount),
+          serviceType: serviceType.trim(),
+          visitCount: Number.parseInt(visitCount, 10),
+          coverageCadence,
+          method,
+          termStart,
+          termEnd,
+          reference: reference.trim() || undefined,
+          note: note.trim() || undefined,
+        }),
+      });
+      await onSaved?.(result);
+    } catch (err) {
+      setError(err.message || "Annual prepay failed");
+      setSaving(false);
+    }
+  };
+
+  const methodOptions = [
+    ["card_present", "In-person card"],
+    ["cash", "Cash"],
+    ["check", "Check"],
+    ["zelle", "Zelle"],
+    ["other", "Other"],
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      onClick={() => !saving && onClose?.()}
+    >
+      <div
+        className="bg-white w-full max-w-[540px] rounded-sm border-hairline border-zinc-300 my-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
+          <div>
+            <div className="text-15 font-medium text-zinc-900">Record collected annual prepay</div>
+            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+          </div>
+          <button
+            onClick={() => !saving && onClose?.()}
+            aria-label="Close"
+            className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {activeTermEnd && (
+            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+              Current term ends {fmtDate(activeTermEnd)}
+            </div>
+          )}
+          <label className="block sm:col-span-2">
+            <div className="u-label text-ink-secondary mb-1">Service plan</div>
+            <select
+              value={serviceOptions.some((option) => option.value === serviceType) ? serviceType : "__custom__"}
+              onChange={(e) => handleServiceOptionChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            >
+              {serviceOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+              <option value="__custom__">Custom label</option>
+            </select>
+          </label>
+          <label className="block sm:col-span-2">
+            <div className="u-label text-ink-secondary mb-1">Service covered</div>
+            <input
+              value={serviceType}
+              onChange={(e) => handleServiceTypeChange(e.target.value)}
+              placeholder="Enter custom service label"
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Cadence</div>
+            <select
+              value={coverageCadence}
+              onChange={(e) => handleCadenceChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            >
+              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
+            <input
+              type="number"
+              min="1"
+              max="24"
+              step="1"
+              value={visitCount}
+              onChange={(e) => handleVisitCountChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Amount collected</div>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={amount}
+              onChange={(e) => handleAmountChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+            {perVisit > 0 && (
+              <div className="text-11 text-ink-secondary mt-1">
+                {fmtCurrency(perVisit)} per application
+              </div>
+            )}
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Payment already collected by</div>
+            <select
+              value={method}
+              onChange={(e) => setMethod(e.target.value)}
+              className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            >
+              {methodOptions.map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Term starts</div>
+            <input
+              type="date"
+              value={termStart}
+              onChange={(e) => handleStartChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Term ends</div>
+            <input
+              type="date"
+              value={termEnd}
+              onChange={(e) => setTermEnd(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block sm:col-span-2">
+            <div className="u-label text-ink-secondary mb-1">Reference</div>
+            <input
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              placeholder="Receipt, check, Zelle, or Stripe reference"
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block sm:col-span-2">
+            <div className="u-label text-ink-secondary mb-1">Note</div>
+            <textarea
+              rows={3}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+        </div>
+        {error && (
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+            {error}
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+          <Button variant="secondary" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} disabled={submitDisabled}>
+            {saving ? "Recording..." : "Create paid annual term"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved }) {
+  const initialStart = defaultAnnualPrepayStart(activeTerm);
+  const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
+  const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
+  const defaultCoverageCadence = inferAnnualPrepayInitialCadence(activeTerm, prepaidPlans);
+  const defaultServiceType = formatAnnualPrepayServiceLabel(defaultServiceBase, defaultCoverageCadence) || "Quarterly Pest Control";
+  const defaultVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[defaultCoverageCadence] || "4";
+  const suggestedAmount = inferAnnualPrepaySuggestedAmount(
+    { ...customer, prepaidPlans, annualPrepayTerms },
+    defaultServiceType,
+    defaultCoverageCadence,
+    activeTerm,
+    prepaidPlans,
+  );
+  const [amount, setAmount] = useState(suggestedAmount ? suggestedAmount.toFixed(2) : "");
+  const [serviceType, setServiceType] = useState(defaultServiceType);
+  const [coverageCadence, setCoverageCadence] = useState(defaultCoverageCadence);
+  const [visitCount, setVisitCount] = useState(defaultVisitCount);
+  const [termStart, setTermStart] = useState(initialStart);
+  const [termEnd, setTermEnd] = useState(addMonthsInput(initialStart, 12));
+  const [dueDate, setDueDate] = useState(todayDateInput());
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [amountTouched, setAmountTouched] = useState(false);
+  const cadenceTouchedRef = useRef(false);
+  const visitCountTouchedRef = useRef(false);
+
+  const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ").trim() || "Customer";
+  const count = Number.parseInt(visitCount, 10);
+  const total = Number(amount);
+  const perVisit = Number.isFinite(total) && Number.isInteger(count) && count > 0
+    ? total / count
+    : 0;
+  const activeTermEnd = dateInputValue(activeTerm?.termEnd);
+  const submitDisabled = saving
+    || !(Number(amount) > 0)
+    || !serviceType.trim()
+    || !(Number.parseInt(visitCount, 10) > 0)
+    || !termStart
+    || !termEnd
+    || termEnd <= termStart
+    || !dueDate;
+
+  const handleStartChange = (value) => {
+    setTermStart(value);
+    if (value) setTermEnd(addMonthsInput(value, 12));
+  };
+
+  const updateSuggestedAmount = (nextServiceType, nextCoverageCadence) => {
+    if (amountTouched) return;
+    const nextSuggested = inferAnnualPrepaySuggestedAmount(
+      { ...customer, prepaidPlans, annualPrepayTerms },
+      nextServiceType,
+      nextCoverageCadence,
+      activeTerm,
+      prepaidPlans,
+    );
+    if (nextSuggested > 0) setAmount(nextSuggested.toFixed(2));
+  };
+
+  const handleServiceTypeChange = (value) => {
+    setServiceType(value);
+    const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    if (inferredCadence && !cadenceTouchedRef.current) {
+      setCoverageCadence(inferredCadence);
+      const inferredVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[inferredCadence];
+      if (inferredVisitCount && !visitCountTouchedRef.current) {
+        setVisitCount(inferredVisitCount);
+      }
+    }
+    updateSuggestedAmount(value, inferredCadence || coverageCadence);
+  };
+
+  const handleServiceOptionChange = (value) => {
+    if (value === "__custom__") return;
+    handleServiceTypeChange(value);
+  };
+
+  const handleCadenceChange = (value) => {
+    cadenceTouchedRef.current = true;
+    setCoverageCadence(value);
+    const nextVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[value];
+    if (nextVisitCount && !visitCountTouchedRef.current) setVisitCount(nextVisitCount);
+    updateSuggestedAmount(serviceType, value);
+  };
+
+  const handleVisitCountChange = (value) => {
+    visitCountTouchedRef.current = true;
+    setVisitCount(value);
+  };
+
+  const handleAmountChange = (value) => {
+    setAmountTouched(true);
+    setAmount(value);
+  };
+
+  const handleSubmit = async () => {
+    if (submitDisabled) return;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+        method: "POST",
+        body: JSON.stringify({
+          amount: Number(amount),
+          serviceType: serviceType.trim(),
+          visitCount: Number.parseInt(visitCount, 10),
+          coverageCadence,
+          termStart,
+          termEnd,
+          dueDate,
+          note: note.trim() || undefined,
+        }),
+      });
+      if (result?.delivery && result.delivery.ok === false) {
+        const reason = result.delivery.error || result.delivery.sms?.error || result.delivery.email?.error || "delivery failed";
+        setError(`Invoice created, but delivery failed: ${reason}. Open Invoices to resend.`);
+        setSaving(false);
+        return;
+      }
+      await onSaved?.(result);
+    } catch (err) {
+      setError(err.message || "Annual prepay invoice failed");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      onClick={() => !saving && onClose?.()}
+    >
+      <div
+        className="bg-white w-full max-w-[540px] rounded-sm border-hairline border-zinc-300 my-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
+          <div>
+            <div className="text-15 font-medium text-zinc-900">Send annual prepay invoice</div>
+            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+          </div>
+          <button
+            onClick={() => !saving && onClose?.()}
+            aria-label="Close"
+            className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {activeTermEnd && (
+            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+              Current term ends {fmtDate(activeTermEnd)}
+            </div>
+          )}
+          <label className="block sm:col-span-2">
+            <div className="u-label text-ink-secondary mb-1">Service plan</div>
+            <select
+              value={serviceOptions.some((option) => option.value === serviceType) ? serviceType : "__custom__"}
+              onChange={(e) => handleServiceOptionChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            >
+              {serviceOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+              <option value="__custom__">Custom label</option>
+            </select>
+          </label>
+          <label className="block sm:col-span-2">
+            <div className="u-label text-ink-secondary mb-1">Service covered</div>
+            <input
+              value={serviceType}
+              onChange={(e) => handleServiceTypeChange(e.target.value)}
+              placeholder="Enter custom service label"
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Cadence</div>
+            <select
+              value={coverageCadence}
+              onChange={(e) => handleCadenceChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            >
+              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
+            <input
+              type="number"
+              min="1"
+              max="24"
+              step="1"
+              value={visitCount}
+              onChange={(e) => handleVisitCountChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Invoice amount</div>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={amount}
+              onChange={(e) => handleAmountChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+            {perVisit > 0 && (
+              <div className="text-11 text-ink-secondary mt-1">
+                {fmtCurrency(perVisit)} per application
+              </div>
+            )}
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Term starts</div>
+            <input
+              type="date"
+              value={termStart}
+              onChange={(e) => handleStartChange(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Term ends</div>
+            <input
+              type="date"
+              value={termEnd}
+              onChange={(e) => setTermEnd(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">Invoice due</div>
+            <input
+              type="date"
+              value={dueDate}
+              onChange={(e) => setDueDate(e.target.value)}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+          <label className="block sm:col-span-2">
+            <div className="u-label text-ink-secondary mb-1">Invoice note</div>
+            <textarea
+              rows={3}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+          </label>
+        </div>
+        {error && (
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+            {error}
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+          <Button variant="secondary" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} disabled={submitDisabled}>
+            {saving ? "Sending..." : "Create & send invoice"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
@@ -1770,6 +2997,8 @@ export default function Customer360ProfileV2({
   const [smsErr, setSmsErr] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
+  const [annualPrepayInvoiceOpen, setAnnualPrepayInvoiceOpen] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState("");
@@ -1881,7 +3110,7 @@ export default function Customer360ProfileV2({
   ]);
 
   if (loading)
-    return createPortal(
+    return (
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
@@ -1896,12 +3125,11 @@ export default function Customer360ProfileV2({
             Loading customer profile…
           </div>{" "}
         </div>{" "}
-      </div>,
-      document.body,
+      </div>
     );
 
   if (!data || !data.customer)
-    return createPortal(
+    return (
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
         onClick={onClose}
@@ -1916,8 +3144,7 @@ export default function Customer360ProfileV2({
             Failed to load customer
           </div>{" "}
         </div>{" "}
-      </div>,
-      document.body,
+      </div>
     );
 
   const c = data.customer;
@@ -1939,17 +3166,9 @@ export default function Customer360ProfileV2({
   const services = data.services || [];
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
-  const upcomingScheduled = data.upcomingScheduled || scheduled;
   const accountProperties = data.accountProperties || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
-  const displayedAnnualPrepayTerm = activeAnnualPrepayTerm
-    || annualPrepayTerms.find((t) => t.status === "payment_pending")
-    || annualPrepayTerms[0]
-    || null;
-  const displayedAnnualPrepayStatus = displayedAnnualPrepayTerm?.status
-    ? displayedAnnualPrepayTerm.status.replace(/_/g, " ")
-    : null;
 
   const updateNotificationPrefs = async (patch) => {
     const previous = data.notificationPrefs || {};
@@ -2020,6 +3239,13 @@ export default function Customer360ProfileV2({
     }
   };
 
+  const handleAnnualPrepaySaved = async () => {
+    await reloadCustomer();
+    setAnnualPrepayOpen(false);
+    setAnnualPrepayInvoiceOpen(false);
+    setActiveTab("billing");
+  };
+
   const balanceOwed = invoices
     .filter((i) => i.status !== "paid")
     .reduce(
@@ -2029,16 +3255,19 @@ export default function Customer360ProfileV2({
     );
   const lastPayment = payments[0];
   const today = todayDateInput();
-  const nextService = upcomingScheduled.find((s) => {
+  const inactiveNextServiceStatuses = new Set([
+    "cancelled",
+    "canceled",
+    "completed",
+    "rescheduled",
+    "skipped",
+    "no_show",
+  ]);
+  const nextService = scheduled.find((s) => {
     const status = String(s.status || "").toLowerCase();
-    const scheduledDate = dateInputValue(s.scheduled_date);
     return (
-      status !== "cancelled" &&
-      status !== "completed" &&
-      status !== "rescheduled" &&
-      status !== "skipped" &&
-      status !== "no_show" &&
-      scheduledDate >= today
+      !inactiveNextServiceStatuses.has(status) &&
+      dateInputValue(s.scheduled_date) >= today
     );
   });
 
@@ -2190,7 +3419,7 @@ export default function Customer360ProfileV2({
     { key: "compliance", label: "Compliance" },
   ];
 
-  return createPortal(
+  return (
     <div
       className="fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
@@ -2266,61 +3495,39 @@ export default function Customer360ProfileV2({
                 )}
               </div>
             )}
-            {[
-              {
-                key: "1",
-                label: "Service contact:",
-                name: c.serviceContactName,
-                phone: c.serviceContactPhone,
-                email: c.serviceContactEmail,
-              },
-              {
-                key: "2",
-                label: "Service contact 2:",
-                name: c.serviceContact2Name,
-                phone: c.serviceContact2Phone,
-                email: c.serviceContact2Email,
-              },
-              {
-                key: "3",
-                label: "Service contact 3:",
-                name: c.serviceContact3Name,
-                phone: c.serviceContact3Phone,
-                email: c.serviceContact3Email,
-              },
-            ]
-              .filter((slot) => slot.phone || slot.email)
-              .map((slot) => (
-                <div key={slot.key} className="text-12 text-ink-secondary mb-1.5">
-                  {" "}
-                  <span className="text-ink-tertiary mr-1">{slot.label}</span>
-                  {slot.name && (
-                    <span className="text-zinc-900 mr-2">{slot.name}</span>
-                  )}
-                  {slot.phone && (
-                    <CallBridgeLink
-                      phone={slot.phone}
-                      customerName={
-                        slot.name ||
-                        `${c.firstName || ""} ${c.lastName || ""}`.trim()
-                      }
-                      className="u-nums text-zinc-900 hover:underline mr-3"
-                    >
-                      {slot.phone}
-                    </CallBridgeLink>
-                  )}
-                  {slot.email && (
-                    <a
-                      href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(slot.email)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-zinc-900 hover:underline"
-                    >
-                      {slot.email}
-                    </a>
-                  )}
-                </div>
-              ))}
+            {(c.serviceContactPhone || c.serviceContactEmail) && (
+              <div className="text-12 text-ink-secondary mb-1.5">
+                {" "}
+                <span className="text-ink-tertiary mr-1">Service contact:</span>
+                {c.serviceContactName && (
+                  <span className="text-zinc-900 mr-2">
+                    {c.serviceContactName}
+                  </span>
+                )}
+                {c.serviceContactPhone && (
+                  <CallBridgeLink
+                    phone={c.serviceContactPhone}
+                    customerName={
+                      c.serviceContactName ||
+                      `${c.firstName || ""} ${c.lastName || ""}`.trim()
+                    }
+                    className="u-nums text-zinc-900 hover:underline mr-3"
+                  >
+                    {c.serviceContactPhone}
+                  </CallBridgeLink>
+                )}
+                {c.serviceContactEmail && (
+                  <a
+                    href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.serviceContactEmail)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-zinc-900 hover:underline"
+                  >
+                    {c.serviceContactEmail}
+                  </a>
+                )}
+              </div>
+            )}
             <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
               {(() => {
                 const parts = [
@@ -2391,6 +3598,15 @@ export default function Customer360ProfileV2({
               {isAdmin && (
                 <button
                   type="button"
+                  onClick={() => setAnnualPrepayInvoiceOpen(true)}
+                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                >
+                  Prepay Invoice
+                </button>
+              )}
+              {isAdmin && (
+                <button
+                  type="button"
                   onClick={() => onAddProperty?.(c)}
                   className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
@@ -2444,76 +3660,23 @@ export default function Customer360ProfileV2({
                 {" "}
                 <ChevronLeft size={18} strokeWidth={1.75} />{" "}
               </button>{" "}
-              <div className="flex items-center gap-1.5">
-                {c.phone ? (
+              <div className="flex items-center gap-2">
+                {c.phone && (
                   <a
                     href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                    aria-label="Text customer"
-                    title="Text"
-                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
-                    <MessageSquare size={17} strokeWidth={1.75} />
+                    Text
                   </a>
-                ) : (
-                  <button
-                    type="button"
-                    disabled
-                    aria-label="Text customer"
-                    title="No phone number on file — add one with Edit"
-                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm bg-zinc-200 text-zinc-400 cursor-not-allowed border-0"
-                  >
-                    <MessageSquare size={17} strokeWidth={1.75} />
-                  </button>
                 )}
-                {c.phone ? (
+                {c.phone && (
                   <CallBridgeLink
                     phone={c.phone}
                     customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
-                    aria-label="Call customer"
-                    title="Call"
-                    style={{ background: "#18181b", color: "#fff" }}
-                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm no-underline u-focus-ring border-0"
+                    className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
-                    <Phone size={17} strokeWidth={1.75} />
+                    Call
                   </CallBridgeLink>
-                ) : (
-                  <button
-                    type="button"
-                    disabled
-                    aria-label="Call customer"
-                    title="No phone number on file — add one with Edit"
-                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm bg-zinc-200 text-zinc-400 cursor-not-allowed border-0"
-                  >
-                    <Phone size={17} strokeWidth={1.75} />
-                  </button>
-                )}
-                {isAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditForm({
-                        firstName: c.firstName || "",
-                        lastName: c.lastName || "",
-                        email: c.email || "",
-                        phone: c.phone || "",
-                        profileLabel: c.profileLabel || "",
-                        addressLine1: c.address?.line1 || "",
-                        city: c.address?.city || "",
-                        state: c.address?.state || "",
-                        zip: c.address?.zip || "",
-                        monthlyRate: c.monthlyRate ?? "",
-                        tier: c.tier || "",
-                        pipelineStage: c.pipelineStage || "new_lead",
-                      });
-                      setEditErr("");
-                      setEditOpen(true);
-                    }}
-                    aria-label="Edit customer"
-                    title="Edit customer"
-                    className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-                  >
-                    <PenLine size={17} strokeWidth={1.75} />
-                  </button>
                 )}
                 <div ref={menuRef} className="relative">
                   {" "}
@@ -2531,6 +3694,56 @@ export default function Customer360ProfileV2({
                       role="menu"
                       className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
                     >
+                      {isAdmin && (
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setEditForm({
+                              firstName: c.firstName || "",
+                              lastName: c.lastName || "",
+                              email: c.email || "",
+                              phone: c.phone || "",
+                              addressLine1: c.address?.line1 || "",
+                              city: c.address?.city || "",
+                              state: c.address?.state || "",
+                              zip: c.address?.zip || "",
+                              monthlyRate: c.monthlyRate ?? "",
+                              tier: c.tier || "",
+                              pipelineStage: c.pipelineStage || "new_lead",
+                            });
+                            setEditErr("");
+                            setEditOpen(true);
+                            setMenuOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                        >
+                          Edit customer
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setAnnualPrepayInvoiceOpen(true);
+                            setMenuOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                        >
+                          Send prepay invoice
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setAnnualPrepayOpen(true);
+                            setMenuOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                        >
+                          Record collected prepay
+                        </button>
+                      )}
                       <button
                         role="menuitem"
                         onClick={() => {
@@ -2855,42 +4068,36 @@ export default function Customer360ProfileV2({
                       {fmtDate(lastPayment.payment_date)}
                     </div>
                   )}
-                  {displayedAnnualPrepayTerm && (
+                  {activeAnnualPrepayTerm && (
                     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="text-12 font-medium text-zinc-900">
-                          {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
-                        </div>
-                        <span className={`shrink-0 border rounded-sm px-1.5 py-0.5 text-10 font-medium ${annualPrepayStatusClass(displayedAnnualPrepayTerm)}`}>
-                          {formatAnnualPrepayStatusLabel(displayedAnnualPrepayTerm)}
-                        </span>
+                      <div className="text-12 font-medium text-zinc-900">
+                        {activeAnnualPrepayTerm.planLabel || "Annual Prepay"}
                       </div>
-                      {displayedAnnualPrepayStatus && (
-                        <div className="text-11 text-ink-secondary mt-0.5 capitalize">
-                          Status: {displayedAnnualPrepayStatus}
-                        </div>
-                      )}
                       <div className="text-11 text-ink-secondary mt-0.5">
-                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
-                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
-                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
+                        Term ends {fmtDate(activeAnnualPrepayTerm.termEnd)}
+                        {activeAnnualPrepayTerm.lastScheduledServiceDate
+                          ? ` · last scheduled ${fmtDate(activeAnnualPrepayTerm.lastScheduledServiceDate)}`
                           : ""}
                       </div>
-                      {displayedAnnualPrepayTerm.prepayInvoiceNumber && (
-                        <div className="text-11 text-ink-secondary mt-0.5">
-                          Invoice {displayedAnnualPrepayTerm.prepayInvoiceNumber}
-                          {displayedAnnualPrepayTerm.prepayInvoiceTotal != null
-                            ? ` · ${fmtCurrency(displayedAnnualPrepayTerm.prepayInvoiceTotal)}`
-                            : ""}
-                        </div>
-                      )}
-                      {displayedAnnualPrepayTerm.renewalDecision && (
+                      {activeAnnualPrepayTerm.renewalDecision && (
                         <div className="text-11 text-ink-secondary mt-0.5">
                           Decision:{" "}
-                          {displayedAnnualPrepayTerm.renewalDecision.replace(/_/g, " ")}
+                          {activeAnnualPrepayTerm.renewalDecision.replace(
+                            "_",
+                            " ",
+                          )}
                         </div>
                       )}
                     </div>
+                  )}
+                  {isAdmin && (
+                    <Button
+                      size="sm"
+                      onClick={() => setAnnualPrepayOpen(true)}
+                      className="mb-3"
+                    >
+                      Record annual prepay
+                    </Button>
                   )}
                   {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
                     <div className="mb-3">
@@ -3144,6 +4351,14 @@ export default function Customer360ProfileV2({
                 customerName={`${c.firstName} ${c.lastName}`}
                 canCharge={isAdmin}
               />{" "}
+              {isAdmin && (
+                <AnnualPrepayPanelV2
+                  customer={c}
+                  activeTerm={activeAnnualPrepayTerm}
+                  onOpen={() => setAnnualPrepayOpen(true)}
+                  onSendInvoice={() => setAnnualPrepayInvoiceOpen(true)}
+                />
+              )}
               <SectionTitle>Invoices ({invoices.length})</SectionTitle>
               {invoices.length > 0 ? (
                 <Table className="mb-5">
@@ -3955,8 +5170,8 @@ export default function Customer360ProfileV2({
               ))}
             </div>{" "}
           </div>{" "}
-          <div className="flex flex-col md:max-h-[250px] md:overflow-y-auto">
-            {filteredTimeline.slice(0, 50).map((item, i) => {
+          <div className="max-h-[250px] overflow-y-auto flex flex-col">
+            {filteredTimeline.slice(0, 30).map((item, i) => {
               const TYPE_LABEL = {
                 sms: "SMS",
                 call: "CALL",
@@ -4023,6 +5238,26 @@ export default function Customer360ProfileV2({
         }}
         standalone
       />
+      {annualPrepayOpen && (
+        <AnnualPrepayModal
+          customer={c}
+          activeTerm={activeAnnualPrepayTerm}
+          prepaidPlans={data.prepaidPlans || []}
+          annualPrepayTerms={data.annualPrepayTerms || []}
+          onClose={() => setAnnualPrepayOpen(false)}
+          onSaved={handleAnnualPrepaySaved}
+        />
+      )}
+      {annualPrepayInvoiceOpen && (
+        <AnnualPrepayInvoiceModal
+          customer={c}
+          activeTerm={activeAnnualPrepayTerm}
+          prepaidPlans={data.prepaidPlans || []}
+          annualPrepayTerms={data.annualPrepayTerms || []}
+          onClose={() => setAnnualPrepayInvoiceOpen(false)}
+          onSaved={handleAnnualPrepaySaved}
+        />
+      )}
       {editOpen && (
         <div
           className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
@@ -4202,7 +5437,6 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>
       )}
-    </div>,
-    document.body,
+    </div>
   );
 }

@@ -11,7 +11,8 @@ const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { listCustomerPrepaidPlans } = require('../services/prepaid-series');
-const { documentRequiresSignature } = require('../services/contracts');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -86,11 +87,9 @@ const SERVICE_KEY_ALIASES = {
   mosquito: ['mosquito_monthly'],
   termite_bait: ['termite_bait'],
   termite_bait_installation: ['termite_bait'],
-  // The estimator sells rodent bait at 4 visits/year ("Quarterly monitoring")
-  // — route accepted lines to the profile-backed quarterly service so they
-  // complete through the typed rodent_bait_station flow; the monthly
-  // monitoring service stays as fallback for catalogs without the new row.
   rodent_bait: ['rodent_bait_quarterly', 'rodent_monitoring'],
+  rodent_bait_station: ['rodent_bait_quarterly', 'rodent_monitoring'],
+  rodent_bait_stations: ['rodent_bait_quarterly', 'rodent_monitoring'],
   rodent_monitoring: ['rodent_monitoring'],
   rodent_trapping: ['rodent_exclusion'],
   rodent_exclusion: ['rodent_exclusion'],
@@ -183,15 +182,12 @@ function serviceCatalogMatch(line, serviceIndex) {
 
   const text = `${rawKey} ${labelKey}`.replace(/_/g, ' ');
   const pick = (key) => serviceIndex.byKey.get(key);
-  // Termite picks require the word "termite" — bare "bait"/"station" text
-  // used to satisfy both halves of this test, swallowing rodent bait lines
-  // before the rodent branches below could run.
-  if (/termite/.test(text) && /install|station|bait/.test(text)) return pick('termite_bait');
+  if (/rodent|rat|mouse/.test(text) && /monitor|monthly/.test(text)) return pick('rodent_monitoring');
+  if (/rodent|rat|mouse/.test(text) && /bait|station/.test(text)) return pick('rodent_bait_quarterly') || pick('rodent_monitoring');
+  if (/rodent|rat|mouse|exclusion|trapping/.test(text)) return pick('rodent_exclusion');
+  if (/termite|bait/.test(text) && /install|station|bait/.test(text)) return pick('termite_bait');
   if (/termite|wdo/.test(text) && /inspect|letter/.test(text)) return pick('wdo_inspection');
   if (/termite|trench|liquid/.test(text)) return pick('termite_liquid');
-  if (/rodent|rat|mouse/.test(text) && /monthly/.test(text)) return pick('rodent_monitoring') || pick('rodent_bait_quarterly');
-  if (/rodent|rat|mouse/.test(text) && /monitor|bait/.test(text)) return pick('rodent_bait_quarterly') || pick('rodent_monitoring');
-  if (/rodent|rat|mouse|exclusion|trapping/.test(text)) return pick('rodent_exclusion');
   if (/tree|shrub|ornamental/.test(text)) return pick('tree_shrub_program');
   if (/mosquito/.test(text)) return pick('mosquito_monthly');
   if (/lawn|turf|weed|fertil/.test(text)) return pick('lawn_care_recurring');
@@ -426,56 +422,12 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   };
 }
 
-// Service-contact slots stay compacted (no empty slot before a filled one):
-// clearing the visible slot-1 contact promotes slot 2 instead of leaving a
-// hidden contact still receiving notifications. Mutates `updates` in place;
-// no-op unless a slot column is being updated.
-const SERVICE_CONTACT_SLOT_COLUMNS = [
-  ['service_contact_name', 'service_contact_phone', 'service_contact_email'],
-  ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email'],
-  ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email'],
-];
-
-function compactServiceContactSlots(updates, before = {}) {
-  if (!SERVICE_CONTACT_SLOT_COLUMNS.flat().some((col) => updates[col] !== undefined)) return updates;
-  const merged = SERVICE_CONTACT_SLOT_COLUMNS
-    .map(([n, p, e]) => ({
-      name: String((updates[n] !== undefined ? updates[n] : before[n]) || '').trim(),
-      phone: String((updates[p] !== undefined ? updates[p] : before[p]) || '').trim(),
-      email: String((updates[e] !== undefined ? updates[e] : before[e]) || '').trim(),
-    }))
-    .filter((slot) => slot.name || slot.phone || slot.email);
-  SERVICE_CONTACT_SLOT_COLUMNS.forEach(([n, p, e], i) => {
-    updates[n] = merged[i]?.name || null;
-    updates[p] = merged[i]?.phone || null;
-    updates[e] = merged[i]?.email || null;
-  });
-  return updates;
-}
-
 function mapCustomerListRow(c) {
   return {
-    id: c.id,
-    firstName: c.first_name,
-    lastName: c.last_name,
-    accountId: c.account_id,
-    profileLabel: c.profile_label,
+    id: c.id, firstName: c.first_name, lastName: c.last_name,
+    accountId: c.account_id, profileLabel: c.profile_label,
     isPrimaryProfile: !!c.is_primary_profile,
-    email: c.email,
-    phone: c.phone,
-    city: c.city,
-    address: `${c.address_line1 || ''}, ${c.city || ''}, ${c.state || ''} ${c.zip || ''}`.trim(),
-    tier: c.waveguard_tier,
-    monthlyRate: parseFloat(c.monthly_rate || 0),
-    memberSince: c.member_since,
-    active: c.active,
-    pipelineStage: c.pipeline_stage,
-    leadScore: c.lead_score,
-    leadSource: c.lead_source,
-    leadSourceDetail: c.lead_source_detail,
-    landingPageUrl: c.landing_page_url,
-    companyName: c.company_name,
-    propertyType: c.property_type,
+    email: c.email, phone: c.phone, city: c.city,
     serviceContactName: c.service_contact_name,
     serviceContactPhone: c.service_contact_phone,
     serviceContactEmail: c.service_contact_email,
@@ -485,22 +437,62 @@ function mapCustomerListRow(c) {
     serviceContact3Name: c.service_contact3_name,
     serviceContact3Phone: c.service_contact3_phone,
     serviceContact3Email: c.service_contact3_email,
-    lastContactDate: c.last_contact_date,
-    lastContactType: c.last_contact_type,
+    address: `${c.address_line1 || ''}, ${c.city || ''}, ${c.state || ''} ${c.zip || ''}`.trim(),
+    tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
+    memberSince: c.member_since, active: c.active,
+    pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
+    leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
+    landingPageUrl: c.landing_page_url, companyName: c.company_name,
+    propertyType: c.property_type,
+    lastContactDate: c.last_contact_date, lastContactType: c.last_contact_type,
     nextFollowUp: c.next_follow_up_date,
     lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
     totalServices: parseInt(c.total_services || c.services_count || 0),
-    lastServiceDate: c.last_service_date,
-    nextServiceDate: c.next_service_date,
+    lastServiceDate: c.last_service_date, nextServiceDate: c.next_service_date,
     serviceTypes: c.service_types || '',
     serviceCount: parseInt(c.service_type_count || 0),
     lastRating: c.last_rating != null ? parseInt(c.last_rating) : null,
     tags: (c.tags_str || '').split(',').filter(Boolean),
-    onboardingComplete: c.onboarding_complete,
     balanceOwed: parseFloat(c.balance_owed || 0),
     healthScore: c.health_score != null ? parseInt(c.health_score) : null,
     cardsOnFile: parseInt(c.cards_on_file || 0),
   };
+}
+
+const SERVICE_CONTACT_SLOT_FIELDS = [
+  ['service_contact_name', 'service_contact_phone', 'service_contact_email'],
+  ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email'],
+  ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email'],
+];
+
+function compactServiceContactSlots(updates, before = {}) {
+  const hasServiceContactUpdate = SERVICE_CONTACT_SLOT_FIELDS
+    .flat()
+    .some((field) => Object.prototype.hasOwnProperty.call(updates, field));
+  if (!hasServiceContactUpdate) return updates;
+
+  const normalizedValue = (value) => {
+    if (value === undefined || value === null) return null;
+    if (typeof value === 'string' && value.trim() === '') return null;
+    return value;
+  };
+
+  const compacted = SERVICE_CONTACT_SLOT_FIELDS
+    .map((fields) => fields.map((field) => (
+      Object.prototype.hasOwnProperty.call(updates, field)
+        ? normalizedValue(updates[field])
+        : normalizedValue(before[field])
+    )))
+    .filter((slot) => slot.some((value) => value !== null));
+
+  SERVICE_CONTACT_SLOT_FIELDS.forEach((fields, index) => {
+    const slot = compacted[index] || [null, null, null];
+    fields.forEach((field, fieldIndex) => {
+      updates[field] = slot[fieldIndex];
+    });
+  });
+
+  return updates;
 }
 
 function customerSearchTerms(value) {
@@ -649,6 +641,100 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
   ['appointmentNotifyPrimary', 'appointment_notify_primary'],
   ['serviceReportNotifyPrimary', 'service_report_notify_primary'],
 ];
+
+const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_present', 'other']);
+
+function parseAnnualPrepayAmount(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { error: 'amount must be greater than 0' };
+  }
+  return { amount: Math.round((amount + 1e-9) * 100) / 100 };
+}
+
+function parseAnnualPrepayVisitCount(value) {
+  const count = Number.parseInt(value, 10);
+  if (!Number.isInteger(count) || count <= 0) {
+    return { error: 'visitCount must be greater than 0' };
+  }
+  return { visitCount: Math.min(count, 24) };
+}
+
+function parseDateOnlyInput(value, field) {
+  if (value === undefined || value === null || value === '') return { date: null };
+  const text = String(value).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return { error: `${field} must be YYYY-MM-DD` };
+  }
+  const d = new Date(`${text}T12:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== text) {
+    return { error: `${field} must be a valid date` };
+  }
+  return { date: text };
+}
+
+function addDaysDateOnly(value, days) {
+  const text = dateOnlyForApi(value) || etDateString();
+  const d = new Date(`${text}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + Number(days || 0));
+  return d.toISOString().slice(0, 10);
+}
+
+function addMonthsDateOnly(value, months) {
+  const text = dateOnlyForApi(value) || etDateString();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const monthIndex = month - 1 + Number(months || 0);
+  const targetYear = year + Math.floor(monthIndex / 12);
+  const targetMonthIndex = ((monthIndex % 12) + 12) % 12;
+  const targetMonth = targetMonthIndex + 1;
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth, 0, 12)).getUTCDate();
+  return `${targetYear}-${String(targetMonth).padStart(2, '0')}-${String(Math.min(day, lastDay)).padStart(2, '0')}`;
+}
+
+function defaultAnnualPrepayTermStart(activeTerm, today = etDateString()) {
+  const termEnd = dateOnlyForApi(activeTerm?.term_end || activeTerm?.termEnd);
+  if (termEnd && termEnd >= today) return addDaysDateOnly(termEnd, 1);
+  return today;
+}
+
+function mapAnnualPrepayTerm(term) {
+  if (!term) return null;
+  return {
+    id: term.id,
+    customerId: term.customer_id,
+    sourceEstimateId: term.source_estimate_id,
+    prepayInvoiceId: term.prepay_invoice_id,
+    prepayInvoiceNumber: term.prepay_invoice_number,
+    prepayInvoiceStatus: term.prepay_invoice_status,
+    prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
+    planLabel: term.plan_label,
+    monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
+    prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+    coverageServiceType: term.coverage_service_type || null,
+    coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
+    coverageCadence: term.coverage_cadence || null,
+    termStart: dateOnlyForApi(term.term_start),
+    termEnd: dateOnlyForApi(term.term_end),
+    status: term.status,
+    lastScheduledServiceId: term.last_scheduled_service_id,
+    lastScheduledServiceDate: dateOnlyForApi(term.last_scheduled_service_date),
+    lastScheduledServiceType: term.last_scheduled_service_type,
+    notice30SentAt: term.notice_30_sent_at,
+    notice15SentAt: term.notice_15_sent_at,
+    notice7SentAt: term.notice_7_sent_at,
+    renewalContactedAt: term.renewal_contacted_at,
+    renewalContactedBy: term.renewal_contacted_by,
+    renewalDecision: term.renewal_decision,
+    renewalDecisionAt: term.renewal_decision_at,
+    renewalNotes: term.renewal_notes,
+    createdAt: term.created_at,
+    updatedAt: term.updated_at,
+  };
+}
 
 function adminNotificationPrefsDbUpdates(body = {}, existing = {}) {
   const dbUpdates = {};
@@ -999,7 +1085,7 @@ router.get('/', async (req, res, next) => {
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
-      db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed')) as next_service_date"),
+      db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','canceled','completed','rescheduled','skipped','no_show')) as next_service_date"),
       db.raw("(SELECT string_agg(tag, ',') FROM customer_tags WHERE customer_tags.customer_id = customers.id) as tags_str"),
       db.raw("(SELECT string_agg(DISTINCT service_type, ',') FROM service_records WHERE service_records.customer_id = customers.id) as service_types"),
       db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
@@ -1398,7 +1484,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
           'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at',
         ),
       db('messages')
-        .join('conversations', 'messages.conversation_id', 'conversations.id')
+        .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
         .where('conversations.customer_id', customer.id)
         .whereIn('messages.channel', ['sms', 'voice'])
         .orderBy('messages.created_at', 'desc')
@@ -1438,29 +1524,21 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/customers/:id/latest-scheduled-service
-// Lightweight lookup used by the tech project report form: returns the
-// customer's most recent (by date) scheduled service so the form can
-// pre-fill the service title + date. Cancelled visits are ignored.
 router.get('/:id/latest-scheduled-service', async (req, res, next) => {
   try {
-    const row = await db('scheduled_services')
+    const service = await db('scheduled_services')
       .where({ customer_id: req.params.id })
-      .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'])
       .orderBy('scheduled_date', 'desc')
-      .orderBy('window_start', 'desc')
-      .first(
-        'id',
-        'service_type',
-        db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date"),
-        'status',
-      );
+      .orderBy('created_at', 'desc')
+      .first('id', 'service_type', 'scheduled_date', 'status');
+
     res.json({
-      service: row ? {
-        id: row.id,
-        serviceType: row.service_type || null,
-        scheduledDate: row.scheduled_date || null,
-        status: row.status || null,
+      service: service ? {
+        id: service.id,
+        serviceType: service.service_type,
+        scheduledDate: dateOnlyForApi(service.scheduled_date),
+        status: service.status,
       } : null,
     });
   } catch (err) { next(err); }
@@ -1491,7 +1569,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -1504,11 +1582,10 @@ router.get('/:id', async (req, res, next) => {
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
-      db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
       db('scheduled_services')
         .where({ customer_id: c.id })
         .where('scheduled_date', '>=', etDateString())
-        .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped'])
+        .whereNotIn('status', ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show'])
         .orderBy('scheduled_date')
         .orderBy('window_start')
         .limit(20),
@@ -1640,12 +1717,6 @@ router.get('/:id', async (req, res, next) => {
         serviceContactName: c.service_contact_name,
         serviceContactPhone: c.service_contact_phone,
         serviceContactEmail: c.service_contact_email,
-        serviceContact2Name: c.service_contact2_name,
-        serviceContact2Phone: c.service_contact2_phone,
-        serviceContact2Email: c.service_contact2_email,
-        serviceContact3Name: c.service_contact3_name,
-        serviceContact3Phone: c.service_contact3_phone,
-        serviceContact3Email: c.service_contact3_email,
         address: { line1: c.address_line1, city: c.city, state: c.state, zip: c.zip },
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
@@ -1672,7 +1743,7 @@ router.get('/:id', async (req, res, next) => {
         isPrimaryProfile: !!p.is_primary_profile,
       })),
       tags: tags.map(t => t.tag),
-      interactions, preferences: prefs, services, estimates, payments, scheduled, upcomingScheduled, smsLog,
+      interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
       healthScore: healthScore || null,
       invoices: mappedInvoices,
       cards: cards || [],
@@ -1715,14 +1786,16 @@ router.get('/:id', async (req, res, next) => {
         consentTextSnapshot: contract.consent_text_snapshot,
         contractTextSnapshot: contract.contract_text_snapshot,
         esignDisclosureSnapshot: contract.esign_disclosure_snapshot,
-        documentTemplateId: contract.document_template_id || null,
-        documentTemplateVersionId: contract.document_template_version_id || null,
-        documentTemplateKey: contract.document_template_key || null,
-        documentTemplateCategory: contract.document_template_category || null,
-        documentTemplateDocumentType: contract.document_template_document_type || null,
+        documentTemplateId: contract.document_template_id,
+        documentTemplateVersionId: contract.document_template_version_id,
+        documentTemplateKey: contract.document_template_key,
+        documentTemplateCategory: contract.document_template_category,
+        documentTemplateDocumentType: contract.document_template_document_type,
         requiresSignature: contract.contract_type === 'document_template'
-          ? documentRequiresSignature(contract)
+          ? contract.document_template_requires_signature !== false
           : true,
+        documentVariablesSnapshot: contract.document_variables_snapshot || {},
+        documentRenderSummary: contract.document_render_summary || {},
         shareTokenExpiresAt: contract.share_token_expires_at,
         sharedAt: contract.shared_at,
         viewedAt: contract.viewed_at,
@@ -1740,34 +1813,7 @@ router.get('/:id', async (req, res, next) => {
         lastFour: contract.last_four || contract.bank_last_four,
         bankName: contract.bank_name,
       })),
-      annualPrepayTerms: (annualPrepayTerms || []).map((term) => ({
-        id: term.id,
-        customerId: term.customer_id,
-        sourceEstimateId: term.source_estimate_id,
-        prepayInvoiceId: term.prepay_invoice_id,
-        prepayInvoiceNumber: term.prepay_invoice_number,
-        prepayInvoiceStatus: term.prepay_invoice_status,
-        prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
-        planLabel: term.plan_label,
-        monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
-        prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
-        termStart: dateOnlyForApi(term.term_start),
-        termEnd: dateOnlyForApi(term.term_end),
-        status: term.status,
-        lastScheduledServiceId: term.last_scheduled_service_id,
-        lastScheduledServiceDate: dateOnlyForApi(term.last_scheduled_service_date),
-        lastScheduledServiceType: term.last_scheduled_service_type,
-        notice30SentAt: term.notice_30_sent_at,
-        notice15SentAt: term.notice_15_sent_at,
-        notice7SentAt: term.notice_7_sent_at,
-        renewalContactedAt: term.renewal_contacted_at,
-        renewalContactedBy: term.renewal_contacted_by,
-        renewalDecision: term.renewal_decision,
-        renewalDecisionAt: term.renewal_decision_at,
-        renewalNotes: term.renewal_notes,
-        createdAt: term.created_at,
-        updatedAt: term.updated_at,
-      })),
+      annualPrepayTerms: (annualPrepayTerms || []).map(mapAnnualPrepayTerm),
       prepaidPlans: (prepaidPlans || []).map((plan) => ({
         ...plan,
         paidAt: plan.paidAt instanceof Date ? plan.paidAt.toISOString() : plan.paidAt,
@@ -1919,7 +1965,6 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else { updates[v] = req.body[k]; }
       }
     }
-    compactServiceContactSlots(updates, before);
     // Stamp when the review flag flips so admins can see who/when later.
     if (updates.has_left_google_review !== undefined) {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
@@ -1927,6 +1972,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
       updates.pipeline_stage_changed_at = new Date();
     }
+    compactServiceContactSlots(updates, before);
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
         req.params.id,
@@ -2187,6 +2233,355 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/customers/:id/annual-prepay-invoice - create and send an
+// unpaid annual prepay invoice. The linked annual_prepay_terms row stays
+// payment_pending until Stripe/manual payment marks the invoice paid; the
+// payment lifecycle then activates the term and stamps covered visits prepaid.
+router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const hasAnnualTerms = await db.schema.hasTable('annual_prepay_terms');
+    if (!hasAnnualTerms) {
+      return res.status(500).json({ error: 'Annual prepay terms table is not available' });
+    }
+
+    const parsedAmount = parseAnnualPrepayAmount(req.body?.amount);
+    if (parsedAmount.error) return res.status(400).json({ error: parsedAmount.error });
+    const amount = parsedAmount.amount;
+
+    const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
+    if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
+    const visitCount = parsedVisitCount.visitCount;
+
+    const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
+    const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
+    const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+
+    const activeTerm = await db('annual_prepay_terms')
+      .where({ customer_id: customer.id })
+      .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+      .orderBy('term_end', 'desc')
+      .first();
+
+    const termStartInput = parseDateOnlyInput(req.body?.termStart, 'termStart');
+    if (termStartInput.error) return res.status(400).json({ error: termStartInput.error });
+    const termStart = termStartInput.date || defaultAnnualPrepayTermStart(activeTerm);
+
+    const termEndInput = parseDateOnlyInput(req.body?.termEnd, 'termEnd');
+    if (termEndInput.error) return res.status(400).json({ error: termEndInput.error });
+    const termEnd = termEndInput.date || addMonthsDateOnly(termStart, 12);
+    if (!termEnd || termEnd <= termStart) {
+      return res.status(400).json({ error: 'termEnd must be after termStart' });
+    }
+
+    const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
+    if (activeTermEnd && termStart <= activeTermEnd && req.body?.allowOverlap !== true) {
+      return res.status(409).json({
+        error: `Customer already has an annual prepay term through ${activeTermEnd}. Use a start date after ${activeTermEnd}.`,
+        activeTermId: activeTerm.id,
+        activeTermEnd,
+      });
+    }
+
+    const note = cleanOptionalText(req.body?.note);
+    const dueDateInput = parseDateOnlyInput(req.body?.dueDate, 'dueDate');
+    if (dueDateInput.error) return res.status(400).json({ error: dueDateInput.error });
+    const dueDate = dueDateInput.date || etDateString();
+    const perVisit = Math.round((amount / visitCount) * 100) / 100;
+    const invoiceNotes = [
+      `Annual prepaid ${coverageServiceType}.`,
+      `Covers ${visitCount} service application${visitCount === 1 ? '' : 's'} from ${termStart} through ${termEnd}.`,
+      `Payment of this invoice will automatically mark those scheduled visits prepaid.`,
+      note,
+    ].filter(Boolean).join('\n');
+
+    const InvoiceService = require('../services/invoice');
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    let invoice;
+    let term;
+    await db.transaction(async (trx) => {
+      invoice = await InvoiceService.create({
+        database: trx,
+        customerId: customer.id,
+        title: `${coverageServiceType} - Annual Prepay`,
+        lineItems: [{
+          description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
+          quantity: 1,
+          unit_price: amount,
+          category: 'Annual prepay',
+        }],
+        notes: invoiceNotes,
+        dueDate,
+      });
+
+      term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+        customerId: customer.id,
+        prepayInvoiceId: invoice.id,
+        planLabel,
+        monthlyRate: Math.round((amount / 12) * 100) / 100,
+        prepayAmount: amount,
+        termStart,
+        termEnd,
+        coverageServiceType,
+        coverageVisitCount: visitCount,
+        coverageCadence,
+        conn: trx,
+      });
+      if (!term) throw new Error('Annual prepay term could not be created');
+
+      await trx('activity_log').insert({
+        customer_id: customer.id,
+        action: 'annual_prepay_invoice_created',
+        description: `Annual prepay invoice ${invoice.invoice_number} created for ${coverageServiceType}: $${amount.toFixed(2)} covering ${visitCount} visit(s)`,
+        metadata: JSON.stringify({
+          invoice_id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          annual_prepay_term_id: term.id,
+          coverage_service_type: coverageServiceType,
+          coverage_visit_count: visitCount,
+          coverage_cadence: coverageCadence,
+          per_visit_amount: perVisit,
+          term_start: termStart,
+          term_end: termEnd,
+        }),
+      }).catch((err) => logger.warn(`[customers:annual-prepay-invoice] activity_log insert failed: ${err.message}`));
+    });
+
+    let delivery = null;
+    try {
+      delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id);
+    } catch (err) {
+      delivery = { ok: false, error: err.message };
+      logger.warn(`[customers:annual-prepay-invoice] send failed for ${invoice.id}: ${err.message}`);
+    }
+
+    const payUrl = delivery?.payUrl || await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: 'invoice',
+      entityType: 'invoices',
+      entityId: invoice.id,
+      customerId: customer.id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+
+    await auditCustomerMutation(req, 'customer.annual_prepay.invoice_send', customer.id, {
+      invoiceId: invoice.id,
+      invoiceNumber: invoice.invoice_number,
+      annualPrepayTermId: term.id,
+      amount,
+      serviceType: coverageServiceType,
+      visitCount,
+      coverageCadence,
+      termStart,
+      termEnd,
+      deliveryOk: !!delivery?.ok,
+    }, true);
+
+    res.status(201).json({
+      success: true,
+      invoice: {
+        ...invoice,
+        payUrl,
+      },
+      annualPrepayTerm: mapAnnualPrepayTerm(term),
+      delivery,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/:id/annual-prepay - record a 12-month prepay that
+// has already been collected, create the paid invoice, and activate/extend the
+// annual prepay term used by renewal alerts and Customer 360.
+router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const hasAnnualTerms = await db.schema.hasTable('annual_prepay_terms');
+    if (!hasAnnualTerms) {
+      return res.status(500).json({ error: 'Annual prepay terms table is not available' });
+    }
+
+    const parsedAmount = parseAnnualPrepayAmount(req.body?.amount);
+    if (parsedAmount.error) return res.status(400).json({ error: parsedAmount.error });
+    const amount = parsedAmount.amount;
+
+    const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
+    if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
+    const visitCount = parsedVisitCount.visitCount;
+
+    const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
+    const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
+    const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+
+    const method = cleanText(req.body?.method || 'card_present').toLowerCase();
+    if (!ANNUAL_PREPAY_PAYMENT_METHODS.has(method)) {
+      return res.status(400).json({
+        error: `method must be one of: ${Array.from(ANNUAL_PREPAY_PAYMENT_METHODS).join(', ')}`,
+      });
+    }
+
+    const activeTerm = await db('annual_prepay_terms')
+      .where({ customer_id: customer.id })
+      .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+      .orderBy('term_end', 'desc')
+      .first();
+
+    const termStartInput = parseDateOnlyInput(req.body?.termStart, 'termStart');
+    if (termStartInput.error) return res.status(400).json({ error: termStartInput.error });
+    const termStart = termStartInput.date || defaultAnnualPrepayTermStart(activeTerm);
+
+    const termEndInput = parseDateOnlyInput(req.body?.termEnd, 'termEnd');
+    if (termEndInput.error) return res.status(400).json({ error: termEndInput.error });
+    const termEnd = termEndInput.date || addMonthsDateOnly(termStart, 12);
+    if (!termEnd || termEnd <= termStart) {
+      return res.status(400).json({ error: 'termEnd must be after termStart' });
+    }
+
+    const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
+    if (activeTermEnd && termStart <= activeTermEnd && req.body?.allowOverlap !== true) {
+      return res.status(409).json({
+        error: `Customer already has an active annual prepay term through ${activeTermEnd}. Use a start date after ${activeTermEnd}.`,
+        activeTermId: activeTerm.id,
+        activeTermEnd,
+      });
+    }
+
+    const reference = cleanOptionalText(req.body?.reference);
+    const note = cleanOptionalText(req.body?.note);
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    const invoiceNotes = [
+      'Created from Customer 360 annual prepay.',
+      `Annual prepaid ${coverageServiceType}.`,
+      `Covers ${visitCount} service application${visitCount === 1 ? '' : 's'} from ${termStart} through ${termEnd}.`,
+      `Payment already collected via ${method.replace(/_/g, ' ')}.`,
+      reference ? `Reference: ${reference}.` : null,
+      note ? `Note: ${note}` : null,
+    ].filter(Boolean).join('\n');
+
+    const InvoiceService = require('../services/invoice');
+    let result;
+    await db.transaction(async (trx) => {
+      const invoice = await InvoiceService.create({
+        database: trx,
+        customerId: customer.id,
+        title: `${coverageServiceType} - Annual Prepay`,
+        lineItems: [{
+          description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
+          quantity: 1,
+          unit_price: amount,
+          category: 'Annual prepay',
+        }],
+        notes: invoiceNotes,
+        dueDate: termStart,
+      });
+
+      const [updatedInvoice] = await trx('invoices')
+        .where({ id: invoice.id })
+        .update({
+          status: 'paid',
+          paid_at: trx.fn.now(),
+          payment_method: method,
+          payment_reference: reference || null,
+          payment_recorded_by: recordedBy,
+          payment_recorded_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+      if (!updatedInvoice) throw new Error('Annual prepay invoice could not be marked paid');
+
+      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+        customerId: customer.id,
+        prepayInvoiceId: updatedInvoice.id,
+        planLabel,
+        monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
+        prepayAmount: amount,
+        termStart,
+        termEnd,
+        coverageServiceType,
+        coverageVisitCount: visitCount,
+        coverageCadence,
+        conn: trx,
+      });
+      if (!term) throw new Error('Annual prepay term could not be activated');
+
+      const [payment] = await trx('payments').insert({
+        customer_id: customer.id,
+        amount: Number(updatedInvoice.total),
+        status: 'paid',
+        description: `Invoice ${updatedInvoice.invoice_number} - annual prepay (${method.replace(/_/g, ' ')})`,
+        payment_date: etDateString(),
+        metadata: JSON.stringify({
+          invoice_id: updatedInvoice.id,
+          annual_prepay_term_id: term.id,
+          source: 'customer360_annual_prepay',
+          method,
+          reference: reference || null,
+          term_start: termStart,
+          term_end: termEnd,
+          coverage_service_type: coverageServiceType,
+          coverage_visit_count: visitCount,
+          coverage_cadence: coverageCadence,
+        }),
+      }).returning('*');
+
+      await trx('activity_log').insert({
+        customer_id: customer.id,
+        action: 'annual_prepay_recorded',
+        description: `Annual prepay recorded for ${coverageServiceType}: $${Number(updatedInvoice.total).toFixed(2)} covering ${visitCount} visit(s) via ${method.replace(/_/g, ' ')}`,
+        metadata: JSON.stringify({
+          invoice_id: updatedInvoice.id,
+          invoice_number: updatedInvoice.invoice_number,
+          annual_prepay_term_id: term.id,
+          payment_id: payment?.id || null,
+          coverage_service_type: coverageServiceType,
+          coverage_visit_count: visitCount,
+          coverage_cadence: coverageCadence,
+          term_start: termStart,
+          term_end: termEnd,
+        }),
+      }).catch((err) => logger.warn(`[customers:annual-prepay] activity_log insert failed: ${err.message}`));
+
+      result = { invoice: updatedInvoice, term, payment };
+    });
+
+    await auditCustomerMutation(req, 'customer.annual_prepay.record', customer.id, {
+      invoiceId: result.invoice.id,
+      invoiceNumber: result.invoice.invoice_number,
+      annualPrepayTermId: result.term.id,
+      amount: Number(result.invoice.total),
+      baseAmount: amount,
+      method,
+      serviceType: coverageServiceType,
+      visitCount,
+      coverageCadence,
+      termStart,
+      termEnd,
+    }, true);
+
+    res.status(201).json({
+      success: true,
+      invoice: result.invoice,
+      annualPrepayTerm: {
+        id: result.term.id,
+        customerId: result.term.customer_id,
+        prepayInvoiceId: result.term.prepay_invoice_id,
+        planLabel: result.term.plan_label,
+        monthlyRate: result.term.monthly_rate != null ? Number(result.term.monthly_rate) : null,
+        prepayAmount: result.term.prepay_amount != null ? Number(result.term.prepay_amount) : null,
+        termStart: dateOnlyForApi(result.term.term_start),
+        termEnd: dateOnlyForApi(result.term.term_end),
+        status: result.term.status,
+        coverageServiceType: result.term.coverage_service_type || null,
+        coverageVisitCount: result.term.coverage_visit_count != null ? Number(result.term.coverage_visit_count) : null,
+        coverageCadence: result.term.coverage_cadence || null,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 // =========================================================================
 // POST /api/admin/customers/:id/refund — Refund a Stripe payment
 // =========================================================================
@@ -2223,9 +2618,11 @@ router._private = {
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
+  addMonthsDateOnly,
   cadenceFromEstimateLine,
   compactServiceContactSlots,
   customerSearchTerms,
+  defaultAnnualPrepayTermStart,
   hasMembership,
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
@@ -2233,13 +2630,13 @@ router._private = {
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
+  parseAnnualPrepayAmount,
+  parseAnnualPrepayVisitCount,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
 };
 
+router.ensureCustomerAccount = ensureCustomerAccount;
+router.createDefaultCustomerRows = createDefaultCustomerRows;
+
 module.exports = router;
-// Reusable customer-provisioning helpers for other route modules (e.g. creating
-// a customer from a lead when booking an appointment). Attached to the router
-// export so the account-dedup + default-rows logic lives in one place.
-module.exports.ensureCustomerAccount = ensureCustomerAccount;
-module.exports.createDefaultCustomerRows = createDefaultCustomerRows;
