@@ -653,7 +653,20 @@ const TwilioService = {
     const {
       sendCustomerMessage,
     } = require("./messaging/send-customer-message");
+    // Cached-landline shortcut: the customers.line_type cache is the customer's
+    // PRIMARY phone (learned from Twilio Lookup or a prior 30006 bounce). If it's
+    // a landline, the primary number can't receive SMS, so skip it and let the
+    // email fallback carry the notice.
+    const digitsOnly = (v) => String(v || "").replace(/\D/g, "").slice(-10);
+    const primaryDigits = digitsOnly(customer.phone);
+    const cachedPrimaryLandline = customer.line_type === "landline" && !!primaryDigits;
+    let attemptedSms = false;
+    let landlineSkipped = false;
     for (const contact of contacts) {
+      if (cachedPrimaryLandline && digitsOnly(contact.phone) === primaryDigits) {
+        landlineSkipped = true;
+        continue;
+      }
       const firstName = contact.name || customer.first_name || "";
       let body = null;
       if (typeof smsTemplatesRouter.getTemplate === "function") {
@@ -671,6 +684,7 @@ const TwilioService = {
         );
         continue;
       }
+      attemptedSms = true;
       results.push(
         await sendCustomerMessage({
           to: contact.phone,
@@ -688,7 +702,27 @@ const TwilioService = {
       );
     }
 
-    return { success: results.some((r) => r?.sent), results };
+    const delivered = results.some((r) => r?.sent);
+
+    // None of the contacts could receive the en-route text (landline / no mobile /
+    // blocked) — send the en-route notice by email instead so the customer still
+    // knows the tech is on the way.
+    if (!delivered && (attemptedSms || landlineSkipped)) {
+      try {
+        const AppointmentEmail = require("./appointment-email");
+        await AppointmentEmail.sendTechEnRouteEmail({
+          customerId,
+          techName: customerTechName,
+          etaMinutes,
+          trackUrl: trackUrl || longTrackUrl,
+          idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
+        });
+      } catch (e) {
+        logger.warn(`[twilio] en-route email fallback failed for customer ${customerId}: ${e.message}`);
+      }
+    }
+
+    return { success: delivered, results };
   },
 
   /**

@@ -17,6 +17,109 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
+const AppointmentEmail = require('./appointment-email');
+const NotificationService = require('./notification-service');
+
+// ── SMS → email fallback ──
+// Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
+// carrier-undeliverable / no mobile / blocked) we send the same information by
+// email instead so the customer still gets the notice. Only confirmation, 72h,
+// 24h, and en-route messages are covered (en-route email lives in services/twilio.js
+// for the live send; the async-delivery path here only learns the landline for it).
+const FALLBACK_KIND_LABEL = {
+  confirmation: 'appointment confirmation',
+  '72h': '72-hour appointment reminder',
+  '24h': '24-hour appointment reminder',
+  en_route: 'technician en-route notice',
+};
+
+// messaging_audit_log purpose / original_message_type → fallback kind.
+const PURPOSE_TO_KIND = {
+  appointment_confirmation: 'confirmation',
+  appointment_reminder_72h: '72h',
+  appointment_reminder_24h: '24h',
+  tech_en_route: 'en_route',
+};
+const MTYPE_TO_KIND = {
+  confirmation: 'confirmation',
+  appointment_confirmation: 'confirmation',
+  reminder_72h: '72h',
+  reminder_24h: '24h',
+  tech_en_route: 'en_route',
+};
+
+function looksLikeEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
+}
+
+// Raise a single admin alert when an appointment notice can reach the customer
+// by neither SMS nor email, so a human can call them or add an email. Deduped to
+// one bell entry per customer+occurrence per 24h.
+async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = null }) {
+  try {
+    if (!customerId) return;
+    const dedupeKey = `appt-no-channel:${customerId}:${scheduledServiceId || kind}`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '24 hours'"))
+      .first('id')
+      .catch(() => null);
+    if (existing) return;
+
+    const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
+    const name = customer
+      ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || customer.company_name || 'Customer')
+      : 'Customer';
+    const label = FALLBACK_KIND_LABEL[kind] || 'appointment notice';
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Appointment notice undeliverable — no text or email',
+      `${name}: the ${label} could not be delivered by text (landline / no mobile) and there is no email on file. Call the customer or add an email address.`,
+      {
+        link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
+        metadata: { dedupeKey, customer_id: customerId, scheduled_service_id: scheduledServiceId, kind },
+      },
+    );
+    logger.warn(`[appt-remind] No reachable channel for customer ${customerId} (${kind})`);
+  } catch (err) {
+    logger.warn(`[appt-remind] no-channel alert failed for ${customerId}: ${err.message}`);
+  }
+}
+
+// Send the email version of an appointment notice after the SMS could not be
+// delivered. Returns true if the email was sent. On no-email-on-file, raises the
+// no-channel admin alert. Best-effort — never throws.
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service' }) {
+  try {
+    if (!customerId) return false;
+    let res;
+    if (kind === 'confirmation') {
+      res = await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel });
+    } else if (kind === '72h' || kind === '24h') {
+      res = await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind });
+    } else {
+      return false;
+    }
+    if (res?.ok) {
+      logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
+      return true;
+    }
+    if (res?.skipped && res.reason === 'missing_email') {
+      await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    } else {
+      logger.warn(`[appt-remind] ${kind} email fallback not sent for customer ${customerId}: ${res?.reason || res?.error || 'unknown'}`);
+    }
+    return false;
+  } catch (err) {
+    logger.error(`[appt-remind] ${kind} email fallback error for ${customerId}: ${err.message}`);
+    return false;
+  }
+}
+
+function lastTenDigits(value) {
+  return String(value || '').replace(/\D/g, '').slice(-10);
+}
 
 /**
  * Render an SMS body from sms_templates. If the template is missing/disabled,
@@ -206,7 +309,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer') {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}) {
   if (!body) {
     logger.warn(`[appt-remind] Empty SMS body for customer ${customerId}, skipping ${messageType}`);
     return false;
@@ -228,7 +331,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     purpose,
     customerId,
     identityTrustLevel,
-    metadata: { original_message_type: messageType },
+    metadata: { original_message_type: messageType, ...metaExtra },
   });
   if (result.blocked || result.sent === false) {
     logger.warn(`[appt-remind] SMS blocked for customer ${customerId}: ${result.code || 'unknown'} ${result.reason || ''}`);
@@ -237,7 +340,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   return true;
 }
 
-async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment') {
+async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}) {
   const contacts = getAppointmentContacts(customer, prefs);
   if (!contacts.length) {
     logger.warn(`[appt-remind] No appointment contact for customer ${customer?.id || 'unknown'}, skipping SMS`);
@@ -250,7 +353,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'
       : 'phone_matches_customer';
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel);
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra);
     sentAny = sentAny || sent;
   }
   return sentAny;
@@ -343,7 +446,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
           { first_name: firstName, service_type: serviceLabel, date, time, day },
           { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
         );
-      }, 'confirmation', 'appointment_confirmation');
+      }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId });
 
       // Mark sent whether or not delivery succeeded (landline / block) so
       // reminders can proceed and we don't retry the confirmation.
@@ -352,6 +455,16 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
       if (sent) {
         logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${serviceLabel}`);
+      } else {
+        // SMS could not be delivered (landline / no mobile / blocked) — send the
+        // confirmation by email instead so the customer still gets it.
+        await deliverAppointmentEmailFallback({
+          kind: 'confirmation',
+          customerId,
+          scheduledServiceId,
+          apptTime,
+          serviceLabel,
+        });
       }
       return sent;
     }
@@ -644,18 +757,28 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
-            await safeSendAppointment(customer, prefs.raw, async (contact) => {
+            const sent72 = await safeSendAppointment(customer, prefs.raw, async (contact) => {
               const firstName = contact.name || customer?.first_name || 'there';
               return renderTemplate(
                 'reminder_72h',
                 { first_name: firstName, service_type: serviceLabel, day, date, time },
                 { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
               );
-            }, 'reminder_72h', 'appointment_reminder_72h');
+            }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id });
 
             await db('appointment_reminders')
               .where({ id: r.id })
               .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
+
+            if (!sent72) {
+              await deliverAppointmentEmailFallback({
+                kind: '72h',
+                customerId: r.customer_id,
+                scheduledServiceId: r.scheduled_service_id,
+                apptTime,
+                serviceLabel,
+              });
+            }
 
             results.sent72h++;
             logger.info(`[appt-remind] 72h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
@@ -692,18 +815,28 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
-            await safeSendAppointment(customer, prefs.raw, async (contact) => {
+            const sent24 = await safeSendAppointment(customer, prefs.raw, async (contact) => {
               const firstName = contact.name || customer?.first_name || 'there';
               return renderTemplate(
                 'reminder_24h',
                 { first_name: firstName, service_type: serviceLabel, time },
                 { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
               );
-            }, 'appointment_reminder', 'appointment_reminder_24h');
+            }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id });
 
             await db('appointment_reminders')
               .where({ id: r.id })
               .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+
+            if (!sent24) {
+              await deliverAppointmentEmailFallback({
+                kind: '24h',
+                customerId: r.customer_id,
+                scheduledServiceId: r.scheduled_service_id,
+                apptTime,
+                serviceLabel,
+              });
+            }
 
             results.sent24h++;
             logger.info(`[appt-remind] 24h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
@@ -723,6 +856,85 @@ const AppointmentReminders = {
     }
 
     return results;
+  },
+
+  /**
+   * Async delivery-failure fallback. Called from the Twilio status webhook when an
+   * outbound SMS comes back undelivered/failed. If it was an appointment text we
+   * cover (confirmation / 72h / 24h / en-route), learn the landline on carrier
+   * 30006 so future texts route to email at send time, and — for confirmation /
+   * 72h / 24h — send the email version now so the customer still gets the notice.
+   *
+   * En-route notices are intentionally NOT re-sent by email after the fact (a late
+   * ETA is stale/misleading); we only learn the landline. Best-effort; never throws.
+   */
+  async handleUndeliveredSms({ sid, status, errorCode, to } = {}) {
+    try {
+      if (!sid) return;
+      const audit = await db('messaging_audit_log')
+        .where({ provider_message_id: sid })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!audit || audit.channel !== 'sms') return;
+
+      const mtype = audit.metadata?.original_message_type || '';
+      const kind = PURPOSE_TO_KIND[audit.purpose] || MTYPE_TO_KIND[mtype];
+      if (!kind) return; // not an appointment message this fallback covers
+
+      const customerId = audit.customer_id;
+      if (!customerId) return;
+
+      const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
+      if (!customer) return;
+
+      // Only act on the customer's PRIMARY phone. A bounce on a service-contact
+      // number does not mean the customer missed it on their own phone, and the
+      // line_type cache is primary-only. If there is a primary phone on file and
+      // this bounce was for a different number, the primary channel governs —
+      // skip (its own success or its own bounce decides the fallback).
+      const primaryDigits = lastTenDigits(customer.phone);
+      const targetDigits = lastTenDigits(to);
+      if (primaryDigits && targetDigits && primaryDigits !== targetDigits) return;
+
+      // Carrier 30006 = "landline or unreachable carrier" — learn it (primary
+      // phone only) so future appointment texts skip SMS and go straight to email
+      // at send time.
+      if (String(errorCode) === '30006' && primaryDigits && primaryDigits === targetDigits && customer.line_type !== 'landline') {
+        await db('customers').where({ id: customerId }).update({ line_type: 'landline' });
+        logger.info(`[appt-remind] Cached customer ${customerId} primary phone as landline (Twilio 30006)`);
+      }
+
+      const scheduledServiceId = audit.metadata?.scheduled_service_id || null;
+
+      if (kind === 'en_route') {
+        // A late en-route ETA email is stale — don't send it. Only alert if the
+        // customer has no email either, so a human can still reach them.
+        if (!looksLikeEmail(customer.email)) {
+          await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+        }
+        return;
+      }
+
+      // confirmation / 72h / 24h: reconstruct the appointment details and email it.
+      let apptTime = null;
+      let serviceLabel = 'service';
+      const reminderRow = scheduledServiceId
+        ? await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).first().catch(() => null)
+        : await db('appointment_reminders')
+          .where({ customer_id: customerId, cancelled: false })
+          .where('appointment_time', '>=', db.raw("now() - interval '1 hour'"))
+          .orderBy('appointment_time', 'asc')
+          .first()
+          .catch(() => null);
+      if (reminderRow) {
+        apptTime = new Date(reminderRow.appointment_time);
+        serviceLabel = smsServiceLabelStored(reminderRow.service_type);
+      }
+
+      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel });
+    } catch (err) {
+      logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
+    }
   },
 
   /**
