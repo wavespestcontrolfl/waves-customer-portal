@@ -117,9 +117,10 @@ const gates = {
   // HERMES_SERVICE_TOKEN is set; the auth middleware also fails closed without it.
   hermesWorker: isProd ? process.env.GATE_HERMES_WORKER === 'true' : true,
 
-  // Link Prospect Outreach — auto-serve of outreach-lane prospects to the worker.
-  // Default OFF everywhere; outbound sends from the primary inbox stay
-  // human-approval-gated until volume/quality is proven (M3b).
+  // Link Prospect Outreach — master switch for the outreach lane: serves outreach
+  // prospects to the worker (claim) AND arms the M3b approval-gated send valve
+  // (link-prospect-outreach.js). Default OFF everywhere; even when ON, a send still
+  // requires an operator's explicit, authenticated approval click — never auto-send.
   linkProspectOutreach: process.env.GATE_LINK_OUTREACH === 'true',
 
   // Marchex Auto-Block — reject inbound calls the Marchex Clean Call

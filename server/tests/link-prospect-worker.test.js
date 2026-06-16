@@ -75,6 +75,22 @@ describe('link prospect worker — report mapping', () => {
     const p = mapReportToPatch('placed', { live_url: 'https://x' });
     expect(p.quality_signals).toBeUndefined();
   });
+
+  test('drafted parks the outreach draft, leaves status unchanged, releases lease', () => {
+    const p = mapReportToPatch('drafted', {
+      outreach_to_email: ' editor@site.com ',
+      outreach_subject: 'Pitch',
+      outreach_body: 'Hello',
+      notes: 'found editor contact',
+    });
+    expect(p.status).toBeUndefined(); // NOT contacted — nothing sends until human approval
+    expect(p.outreach_status).toBe('drafted');
+    expect(p.outreach_to_email).toBe('editor@site.com'); // trimmed
+    expect(p.outreach_subject).toBe('Pitch');
+    expect(p.outreach_body).toBe('Hello');
+    expect(p.claimed_at).toBeNull();
+    expect(p.claimed_by).toBeNull();
+  });
 });
 
 describe('link prospect worker — business profile (canonical NAP)', () => {

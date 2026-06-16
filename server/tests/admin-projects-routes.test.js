@@ -513,6 +513,7 @@ describe('admin projects routes', () => {
           suggestedFindings: {
             property_address: '8920 Forty Ninth Ave Bradenton FL',
             structures_inspected: 'Main single-family residential structure and attached garage.',
+            structure_type: 'Wood Frame',
             inspection_scope: 'Visible and readily accessible interior areas, garage, attic access, exterior perimeter, and accessible structural components.',
             previous_treatment_evidence: 'Yes',
             previous_treatment_notes: 'Photo appears to show a prior treatment notice near the garage.',
@@ -555,6 +556,7 @@ describe('admin projects routes', () => {
       expect(body.suggestedFindings).toEqual(expect.objectContaining({
         property_address: '8920 49th Ave E Bradenton, FL 34211',
         structures_inspected: 'Main single-family residential structure and attached garage.',
+        structure_type: 'CMU / Concrete Masonry Unit',
         inspection_scope: expect.stringContaining('Visible and readily accessible'),
       }));
       expect(body.suggestedFindings.property_address).toBe('8920 49th Ave E Bradenton, FL 34211');
@@ -568,6 +570,160 @@ describe('admin projects routes', () => {
         model: expect.any(String),
         messages: expect.any(Array),
       }));
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo intelligence blanks unsupported construction suggestions without supporting facts', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    lookupPropertyFromAITrio.mockResolvedValue({
+      propertyType: 'Single Family',
+      squareFootage: 1840,
+      yearBuilt: 2004,
+      stories: 1,
+      _aiConfidence: 'medium',
+    });
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          suggestedFindings: {
+            structures_inspected: 'Main single-family residential structure.',
+            structure_type: 'Wood Frame',
+            inspection_scope: 'Visible and readily accessible interior areas and exterior perimeter.',
+          },
+          confidence: 'medium',
+        }),
+      }],
+    });
+
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'customer-1',
+        first_name: 'Van',
+        last_name: 'Lee',
+        address_line1: '8920 49th Ave E',
+        city: 'Bradenton',
+        state: 'FL',
+        zip: '34211',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: 'customer-1', findings: {} }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.suggestedFindings.structures_inspected).toBe('Main single-family residential structure.');
+      expect(body.suggestedFindings.structure_type).toBe('');
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo intelligence maps canonical wood-frame facts to dropdown value', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    lookupPropertyFromAITrio.mockResolvedValue({
+      propertyType: 'Single Family',
+      constructionMaterial: 'WOOD_FRAME',
+      _aiConfidence: 'medium',
+    });
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          suggestedFindings: {
+            structures_inspected: 'Main single-family residential structure.',
+            structure_type: '',
+            inspection_scope: 'Visible and readily accessible interior areas and exterior perimeter.',
+          },
+          confidence: 'medium',
+        }),
+      }],
+    });
+
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'customer-1',
+        first_name: 'Van',
+        last_name: 'Lee',
+        address_line1: '8920 49th Ave E',
+        city: 'Bradenton',
+        state: 'FL',
+        zip: '34211',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: 'customer-1', findings: {} }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.suggestedFindings.structures_inspected).toBe('Main single-family residential structure.');
+      expect(body.suggestedFindings.structure_type).toBe('Wood Frame');
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo intelligence maps brick construction facts to the masonry dropdown value', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    lookupPropertyFromAITrio.mockResolvedValue({
+      propertyType: 'Single Family',
+      constructionMaterial: 'BRICK',
+      _aiConfidence: 'medium',
+    });
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          suggestedFindings: {
+            structures_inspected: 'Main single-family residential structure.',
+            structure_type: '',
+            inspection_scope: 'Visible and readily accessible interior areas and exterior perimeter.',
+          },
+          confidence: 'medium',
+        }),
+      }],
+    });
+
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'customer-1',
+        first_name: 'Van',
+        last_name: 'Lee',
+        address_line1: '8920 49th Ave E',
+        city: 'Bradenton',
+        state: 'FL',
+        zip: '34211',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: 'customer-1', findings: {} }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.suggestedFindings.structure_type).toBe('CMU / Concrete Masonry Unit');
     });
     delete process.env.ANTHROPIC_API_KEY;
   });

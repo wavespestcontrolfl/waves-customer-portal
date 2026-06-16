@@ -86,14 +86,21 @@ function isFreshTechStatusTimestamp(updatedAt) {
 }
 
 function formatScheduledTracker(service, tech, customer) {
-  const currentStep = stepForTrackState(service?.track_state);
+  // A no-show is an operational-status flip (admin-dispatch) that does NOT
+  // move track_state, so derive the customer-facing state from status —
+  // otherwise a job no-showed mid-en_route keeps reporting state 'en_route'
+  // / currentStep 3, which streams live tech GPS (enrichScheduledWithTechStatus)
+  // and drives the 15s client poll (PortalPage). Terminalize it (step 7,
+  // same as cancelled) so both stop. Mirrors track-public.js.
+  const isNoShow = service?.status === 'no_show';
+  const currentStep = isNoShow ? 7 : stepForTrackState(service?.track_state);
   const custLat = parseFiniteCoordinate(customer?.latitude);
   const custLng = parseFiniteCoordinate(customer?.longitude);
   const serviceSummary = service.service_customer_visible === false ? null : service.service_description || null;
   const trackTokenLive = !!service.track_view_token && isTrackTokenLive(service.track_token_expires_at);
   return {
     id: service.id,
-    state: service.track_state || 'scheduled',
+    state: isNoShow ? 'no_show' : (service.track_state || 'scheduled'),
     trackToken: trackTokenLive ? service.track_view_token : null,
     trackUrl: trackTokenLive ? `/track/${service.track_view_token}` : null,
     enRouteAt: service.en_route_at || null,

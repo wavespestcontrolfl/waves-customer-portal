@@ -110,6 +110,9 @@ async function sharePublishedBlog(blog) {
       guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
       imageUrl: publicBlogImageUrl(blog),
+      // Autonomous: use the blog's own image, else the brand card — never an AI
+      // image (publishToAll renders the card when no imageUrl resolves).
+      noAiImage: true,
     });
     if (result?.dryRun) {
       logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);
@@ -310,6 +313,8 @@ async function sharePublishedNewsletter(send) {
       guid: `newsletter_${send.id}`,
       source: 'newsletter',
       customContent,
+      // Autonomous: brand card (publishToAll renders it) — never an AI image.
+      noAiImage: true,
     });
 
     if (result?.dryRun) {

@@ -8551,39 +8551,47 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
     });
 }
 
-// Lawn care tier → cadence. The lawn engine produces 6/9/12-visit tiers
-// (Standard/Enhanced/Premium); customers see them as cadences, matching the
-// house convention (6=Bi-monthly, 9=Every 6 weeks, 12=Monthly).
+// Lawn care tier → cadence. The lawn engine produces 4/6/9/12-visit tiers
+// (Basic/Standard/Enhanced/Premium); customers see them as cadences, matching
+// the house convention (4=Quarterly, 6=Bi-monthly, 9=Every 6 weeks, 12=Monthly).
 function lawnTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
   const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
   if (raw.includes('premium') || visits === 12) return 'premium';
   if (raw.includes('enhanced') || visits === 9) return 'enhanced';
   if (raw.includes('standard') || visits === 6) return 'standard';
-  // Basic (4 visits) is the hidden manager-only tier — keep it DISTINCT from
-  // standard so the customer-cadence whitelist drops it instead of aliasing it
-  // onto the 6-visit Standard slot (which would surface the cheaper 4-visit
-  // price as "Bi-monthly" while accept re-stamps to 6 visits).
   if (raw.includes('basic') || visits === 4) return 'basic';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
-const LAWN_CADENCE_LABEL = { standard: 'Bi-monthly', enhanced: 'Every 6 weeks', premium: 'Monthly' };
+const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: 'Every 6 weeks', premium: 'Monthly' };
 
 // Customer-facing lawn cadence options from the stored lawn cost-floor tiers.
 // Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
 // estimates (when lawn is the sole recurring service); mixed bundles price
-// lawn inside the pest cadence. Pricing is unchanged — the 6/9/12 cost-floor
-// numbers, relabeled as Bi-monthly / Every 6 weeks / Monthly.
+// lawn inside the pest cadence. Pricing is unchanged — the 4/6/9/12 cost-floor
+// numbers, relabeled as Quarterly / Bi-monthly / Every 6 weeks / Monthly.
 function lawnFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];
+  return lawnFrequenciesFromRows(rows, estData);
+}
+
+// Shared core: turn lawn cost-floor tier rows into the customer-facing cadence
+// ladder. Fed by stored result.results.lawn (v1 path) and by the live engine
+// lawn line item tiers (engine-invocation path) so both surfaces present the
+// same 4/6/9/12 application options instead of one collapsed entry. Callers may
+// pass an explicit manual discount (e.g. one read off a just-generated engine
+// summary that the stored blob doesn't carry); otherwise it's read from estData.
+function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride) {
   const seen = new Set();
-  const rawManualDiscount = normalizeManualDiscountSummary(estData);
-  return rows
+  const rawManualDiscount = manualDiscountOverride !== undefined
+    ? manualDiscountOverride
+    : normalizeManualDiscountSummary(estData);
+  return (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
-      if (!['standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
+      if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey) || seen.has(tierKey)) return null;
       seen.add(tierKey);
       const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
       const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
@@ -8648,9 +8656,106 @@ function lawnFrequenciesFromResultStats(estData = {}) {
     })
     .filter(Boolean)
     .sort((a, b) => {
-      const order = { standard: 0, enhanced: 1, premium: 2 };
+      const order = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
       return (order[a.key] ?? 99) - (order[b.key] ?? 99);
     });
+}
+
+// Recurring (ongoing-plan) service keys, used to decide whether an engine
+// result is lawn-only. Mirrors the canonical recurring-line set — note 'rodent'
+// is NOT recurring (the recurring rodent service is rodent_bait; rodent_trapping
+// is a one-time specialty that fuzzily maps onto 'rodent').
+const RECURRING_SERVICE_KEYS = new Set([
+  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito',
+  'termite_bait', 'palm_injection', 'rodent_bait',
+]);
+
+// A recurring engine line carries real monthly/annual billing. One-time
+// follow-ups (one_time_*) and specialty one-time rows (e.g. rodent_trapping)
+// do NOT, so they're excluded from the lawn-only check even when their service
+// key maps onto a recurring family.
+function isRecurringEngineLineItem(li = {}) {
+  if (!li || /^one[_-]?time/.test(String(li.service || '').toLowerCase())) return false;
+  if (!RECURRING_SERVICE_KEYS.has(recurringServiceKey(li))) return false;
+  const annual = finiteNumberOrNull(li.annual ?? li.annualAfterDiscount ?? li.annualBeforeDiscount);
+  const monthly = finiteNumberOrNull(li.monthly ?? li.monthlyAfterDiscount);
+  return (annual != null && annual > 0) || (monthly != null && monthly > 0);
+}
+
+// Apply a flat (WaveGuard) discount factor to a pre-discount tier value,
+// keeping cents. factor === 1 (no membership discount) returns the value as-is.
+function applyLawnTierDiscount(value, factor) {
+  const n = finiteNumberOrNull(value);
+  if (n == null) return null;
+  if (!(factor < 1)) return n;
+  return Math.round(n * factor * 100) / 100;
+}
+
+// Engine-invocation lawn-only equivalent of lawnFrequenciesFromResultStats.
+// Server-authoritative / IB estimates store engineInputs (not a precomputed
+// result.results.lawn), so the no-pest pricing branch reads the lawn line
+// item's tier ladder off a live generateEstimate() result. Only fires when
+// lawn_care is the sole recurring line — mixed bundles keep pricing lawn
+// inside the pest cadence. Returns [] for any non-lawn-only result so the
+// caller falls back to the single-frequency view.
+function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
+  const recurringLineItems = (Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [])
+    .filter(isRecurringEngineLineItem);
+  const recurringServices = new Set(recurringLineItems.map((li) => recurringServiceKey(li)));
+  if (recurringServices.size !== 1 || !recurringServices.has('lawn_care')) return [];
+  const lawnLine = recurringLineItems.find((li) => recurringServiceKey(li) === 'lawn_care');
+  const tiers = Array.isArray(lawnLine?.tiers) ? lawnLine.tiers : [];
+
+  // The per-tier monthly/annual/per-app values are pre-discount market prices,
+  // but generateEstimate applies the WaveGuard membership % to the lawn line for
+  // existing customers (priorQualifyingServices lifts the combined tier). The
+  // accept handler bills selectedFrequency.monthly/annual directly, so each tier
+  // must carry the same discounted price the line total reflects.
+  const beforeAnnual = finiteNumberOrNull(lawnLine?.annualBeforeDiscount);
+  const afterAnnual = finiteNumberOrNull(lawnLine?.annualAfterDiscount);
+  const discountFactor = (beforeAnnual && beforeAnnual > 0 && afterAnnual != null)
+    ? afterAnnual / beforeAnnual
+    : 1;
+
+  // After acceptance the chosen tier is persisted in customerSelection (the
+  // engine inputs are NOT restamped), so honor it when marking the selected row;
+  // otherwise fall back to the engine's resolved tier.
+  const selection = estData?.customerSelection || estData?.result?.customerSelection || {};
+  const selectedKey = String(selection.serviceTierKey || selection.serviceTier || '').trim().toLowerCase();
+  const selectedTierKey = ['basic', 'standard', 'enhanced', 'premium'].includes(selectedKey)
+    ? selectedKey
+    : lawnLine.tier;
+
+  const rows = tiers.map((t) => {
+    const annual = applyLawnTierDiscount(t.annual, discountFactor);
+    const visits = finiteNumberOrNull(t.visits ?? t.freq);
+    const monthly = annual != null
+      ? Math.round((annual / 12) * 100) / 100
+      : applyLawnTierDiscount(t.monthly, discountFactor);
+    const perApp = (annual != null && visits)
+      ? Math.round((annual / visits) * 100) / 100
+      : applyLawnTierDiscount(t.perApp, discountFactor);
+    return {
+      name: t.label,
+      tier: t.tier,
+      mo: monthly,
+      ann: annual,
+      pa: perApp,
+      v: visits,
+      recommended: t.recommended === true,
+      selected: t.tier === selectedTierKey,
+    };
+  });
+
+  // The per-tier values above carry the WaveGuard membership discount but not
+  // any manual recurring discount, which the engine surfaces on the live
+  // summary. When the replayed engineInputs apply a manual discount the stored
+  // blob doesn't already record, read it off the just-generated summary so each
+  // tier prices/bills after the manual discount (matching the old single-entry
+  // shapeFrequencyEntry path).
+  const manualDiscount = normalizeManualDiscountSummary({ summary: engineResult?.summary })
+    || normalizeManualDiscountSummary(estData);
+  return lawnFrequenciesFromRows(rows, estData, manualDiscount);
 }
 
 function mosquitoTierKey(row = {}) {
@@ -8918,6 +9023,7 @@ function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) 
 // established (bi_monthly / every_6_weeks / monthly) so the accepted recurring
 // line rides the proven downstream scheduling + billing plumbing.
 const LAWN_CADENCE_RUNTIME = {
+  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly', visitsPerYear: 4 },
   standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 },
   enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 weeks', visitsPerYear: 9 },
   premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
@@ -8988,7 +9094,7 @@ function markSelectedLawnTierRows(rows = [], selectedTierKey = '') {
   const normalizedSelected = String(selectedTierKey || '').trim().toLowerCase();
   return rows.map((row) => {
     const tierKey = lawnTierKey(row);
-    if (!['standard', 'enhanced', 'premium'].includes(tierKey)) return row;
+    if (!['basic', 'standard', 'enhanced', 'premium'].includes(tierKey)) return row;
     return { ...row, selected: tierKey === normalizedSelected, isSelected: tierKey === normalizedSelected };
   });
 }
@@ -9911,12 +10017,21 @@ async function buildPricingBundle(estimate) {
       }
     }
   } else {
-    // No pest in the estimate — slider is meaningless. Single entry
-    // using the single engine call at whatever was stored.
+    // No pest in the estimate — the pest cadence slider is meaningless. Run
+    // the engine once at whatever was stored.
     try {
       const engineResult = generateEstimate(engineInputs);
       anchorEngineResult = engineResult;
-      frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
+      // Lawn-only estimates expose the 4/6/9/12 application ladder
+      // (Basic/Standard/Enhanced/Premium) off the live lawn line item, mirroring
+      // the v1 result.results.lawn path. Mixed bundles and other single-service
+      // estimates keep the existing single-entry view.
+      const lawnFreqs = lawnFrequenciesFromEngineResult(engineResult, estData);
+      if (lawnFreqs.length) {
+        frequencies.push(...lawnFreqs);
+      } else {
+        frequencies.push(shapeFrequencyEntry(FREQUENCY_LADDER[0], engineResult, engineInputs));
+      }
     } catch (err) {
       logger.error(`[estimate-data] engine failed (no-pest path): ${err.message}`);
     }
@@ -10288,6 +10403,7 @@ module.exports.isTreeShrubServiceName = isTreeShrubServiceName;
 module.exports.isMosquitoServiceName = isMosquitoServiceName;
 module.exports.isLawnServiceName = isLawnServiceName;
 module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
+module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;
 module.exports.sectionTierEligibleFromKeys = sectionTierEligibleFromKeys;

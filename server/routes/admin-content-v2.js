@@ -44,7 +44,6 @@ const BLOG_UPDATE_FIELDS = new Set([
   'author_slug',
   'reviewer_slug',
   'technically_reviewed_at',
-  'fact_checked_by',
   'fact_checked_at',
   'category',
   'post_type',

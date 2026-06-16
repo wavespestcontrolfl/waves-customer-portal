@@ -731,6 +731,11 @@ const AppointmentReminders = {
   async handleReschedule(scheduledServiceId, newTime, options = {}) {
     try {
       const sendNotification = options.sendNotification !== false;
+      // Callers that send their own reschedule notice off this path (the
+      // dispatch route renders + sends, then calls markRescheduleNoticeSent)
+      // pass coverDueWindows:true so we cover any already-due window now —
+      // see the covered-flags comment below.
+      const coverDueWindows = options.coverDueWindows === true;
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();
@@ -750,22 +755,51 @@ const AppointmentReminders = {
       // below, we mark any already-due reminder windows as sent so cron does
       // not immediately repeat the same appointment details.
       //
-      // When the notice is suppressed (admin chose "Don't send a
-      // notification"), windows already due for the NEW time must be marked
-      // covered here instead — otherwise the next 15-min cron tick sees an
-      // "unsent" due reminder and texts the customer minutes after the admin
-      // explicitly opted for silence. Future windows stay unsent either way,
-      // so reminders still follow the new appointment time.
+      // When this path won't send a notice itself (sendNotification:false),
+      // the caller owns the customer message — two sub-cases:
+      //   • coverDueWindows:true — the caller WILL send its own reschedule
+      //     notice (the dispatch route renders + sends, then calls
+      //     markRescheduleNoticeSent). Cover any window already due for the
+      //     new time now, so the 15-min reminder cron can't fire a day-before
+      //     reminder in the gap before the caller's notice lands and
+      //     double-text the customer.
+      //   • otherwise — a truly silent move (e.g. an admin "don't notify"
+      //     reschedule). Leave the 24h window pending so the cron still
+      //     delivers the normal day-before reminder; a silent reshuffle must
+      //     not strand the customer with no message at all. The 72h window
+      //     stays covered when due — firing it the instant after a move would
+      //     just echo details the customer hasn't been told changed.
+      // Future windows stay unsent in every case, so reminders follow the
+      // new appointment time.
       const covered = sendNotification
         ? { alreadyInside72hWindow: false, alreadyInside24hWindow: false }
-        : reminderFlagsCoveredByNotice(newApptTime);
+        : coverDueWindows
+          ? reminderFlagsCoveredByNotice(newApptTime)
+          : { ...reminderFlagsCoveredByNotice(newApptTime), alreadyInside24hWindow: false };
+
+      // Resolve the post-reschedule state of each reminder window:
+      //   • A real start-time move re-arms from the covered/pending value
+      //     above (old sent state is irrelevant — it was for a different time).
+      //   • A same-start edit (duration-only resize, notifyCustomer:false)
+      //     preserves an ALREADY-SENT flag so the cron can't re-send a
+      //     duplicate. A still-pending flag on a same-start edit falls through
+      //     to the covered value, so a notifying edit (coverDueWindows) still
+      //     covers the due window and the cron can't race the route's SMS.
+      const startMoved = newApptTime.getTime() !== new Date(record.appointment_time).getTime();
+      const now = new Date();
+      const resolveFlag = (coveredVal, prevSent, prevSentAt) => {
+        if (!startMoved && prevSent) return { sent: true, at: prevSentAt };
+        return { sent: coveredVal, at: coveredVal ? now : null };
+      };
+      const r72 = resolveFlag(covered.alreadyInside72hWindow, record.reminder_72h_sent, record.reminder_72h_sent_at);
+      const r24 = resolveFlag(covered.alreadyInside24hWindow, record.reminder_24h_sent, record.reminder_24h_sent_at);
       const rescheduleUpdate = {
         appointment_time: newApptTime,
-        reminder_72h_sent: covered.alreadyInside72hWindow,
-        reminder_72h_sent_at: covered.alreadyInside72hWindow ? new Date() : null,
-        reminder_24h_sent: covered.alreadyInside24hWindow,
-        reminder_24h_sent_at: covered.alreadyInside24hWindow ? new Date() : null,
-        updated_at: new Date(),
+        reminder_72h_sent: r72.sent,
+        reminder_72h_sent_at: r72.at,
+        reminder_24h_sent: r24.sent,
+        reminder_24h_sent_at: r24.at,
+        updated_at: now,
       };
       // A reschedule supersedes a still-pending creation confirmation — admin
       // saves defer the confirmation SMS off the request path, so a reschedule
@@ -907,6 +941,103 @@ const AppointmentReminders = {
       return record;
     } catch (err) {
       logger.error(`[appt-remind] handleCancellation failed: ${err.message}`);
+      return null;
+    }
+  },
+
+  /**
+   * Handle a no-show — notify the customer that we missed them and invite
+   * them to get back on the schedule. Fired from the dispatch "Mark as
+   * no-show" action. Unlike handleCancellation this reads the appointment
+   * timing straight off scheduled_services (a no-show may not have an
+   * appointment_reminders row) so the notice still sends. Best-effort:
+   * landline/opt-out guards and template-missing all degrade to no send,
+   * never throw.
+   */
+  async handleNoShow(scheduledServiceId, options = {}) {
+    try {
+      // Supersede any reminder row for this visit so a deferred
+      // confirmation still queued for the same-day appointment can't fire
+      // after it's been no-showed — the deferred-confirmation path
+      // suppresses on cancelled/confirmation_sent. Runs regardless of the
+      // notify preference: the visit is terminal either way. Best-effort.
+      try {
+        await db('appointment_reminders')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .update({ cancelled: true, updated_at: new Date() });
+      } catch (e) {
+        logger.warn(`[appt-remind] no-show reminder supersede failed: ${e.message}`);
+      }
+
+      const sendNotification = options.sendNotification !== false;
+      if (!sendNotification) {
+        logger.info(`[appt-remind] No-show notice suppressed for ${scheduledServiceId}`);
+        return null;
+      }
+
+      const svc = await db('scheduled_services')
+        .where({ 'scheduled_services.id': scheduledServiceId })
+        .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .select(
+          'scheduled_services.customer_id',
+          'scheduled_services.scheduled_date',
+          'scheduled_services.window_start',
+          'technicians.name as tech_name',
+        )
+        .first();
+      if (!svc) {
+        logger.info(`[appt-remind] No-show: scheduled service ${scheduledServiceId} not found`);
+        return null;
+      }
+
+      const { customer } = await getCustomerAndTech(svc.customer_id, scheduledServiceId);
+      if (!customer) return null;
+
+      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => null);
+
+      // scheduled_date is a DATE, window_start a TIME — compose into the
+      // naive 'YYYY-MM-DDTHH:MM:SS' shape parseETDateTime expects so the
+      // displayed time lands in ET.
+      const datePart = svc.scheduled_date instanceof Date
+        ? svc.scheduled_date.toISOString().slice(0, 10)
+        : String(svc.scheduled_date || '').slice(0, 10);
+      const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+      const apptDate = (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+      const time = apptDate ? formatTime(apptDate) : 'your scheduled time';
+      const techFirst = (svc.tech_name ? String(svc.tech_name).trim().split(/\s+/)[0] : '') || 'the team';
+
+      // The status route only blocks FUTURE no-shows, so a back-dated visit
+      // can still be marked — "today" would then be wrong. Render "today"
+      // only for a same-day miss; otherwise name the actual day/date.
+      let when = 'today';
+      if (datePart && datePart !== etDateString()) {
+        const dayDate = apptDate || parseETDateTime(`${datePart}T00:00`);
+        when = `on ${formatDay(dayDate)}, ${formatDate(dayDate)}`;
+      }
+
+      await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const customerFirst = contact.name || customer?.first_name || 'there';
+        return renderTemplate('appointment_no_show', {
+          first_name: customerFirst,
+          tech_name: techFirst,
+          when,
+          time,
+        }, {
+          workflow: 'appointment_no_show',
+          entity_type: 'scheduled_service',
+          entity_id: scheduledServiceId,
+        });
+        // messageType keeps the no-show label for analytics; the messaging
+        // policy `purpose` reuses the registered transactional
+        // 'appointment_cancellation' profile (a no-show notice is the same
+        // class of "your appointment isn't happening — let's rebook" comms,
+        // and 'appointment_no_show' is not a registered MessagePurpose).
+      }, 'appointment_no_show', 'appointment_cancellation');
+      logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+
+      return { customer_id: svc.customer_id };
+    } catch (err) {
+      logger.error(`[appt-remind] handleNoShow failed: ${err.message}`);
       return null;
     }
   },

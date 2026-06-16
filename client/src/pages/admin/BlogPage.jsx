@@ -488,7 +488,6 @@ function PostEditor({ post, onBack, onUpdate }) {
         author_slug: editing.author_slug || null,
         reviewer_slug: editing.reviewer_slug || null,
         technically_reviewed_at: editing.technically_reviewed_at || null,
-        fact_checked_by: editing.fact_checked_by || null,
         fact_checked_at: editing.fact_checked_at || null,
         category: editing.category || null,
         post_type: editing.post_type || null,
@@ -1001,38 +1000,6 @@ function PostEditor({ post, onBack, onUpdate }) {
                   technically_reviewed_at: e.target.value || null,
                 }))
               }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-              }}
-            />{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Fact-Checked By
-            </label>{" "}
-            <input
-              value={editing.fact_checked_by || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({
-                  ...prev,
-                  fact_checked_by: e.target.value,
-                }))
-              }
-              placeholder="e.g. Virginia Gelser"
               style={{
                 width: "100%",
                 padding: "6px 10px",

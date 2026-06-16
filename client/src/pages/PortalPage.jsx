@@ -7657,6 +7657,7 @@ function ServiceTracker() {
   // pull from tracker.techPosition.eta.distanceMiles when available.
   const distMi = tracker.techPosition?.eta?.distanceMiles;
   const status = (() => {
+    if (tracker.state === 'no_show') return { label: 'Missed visit', color: B.orange };
     if (step === 7) return { label: 'Service complete', color: B.green };
     if (step >= 4) {
       if (step === 6) return { label: 'Finishing up', color: B.green };
@@ -7813,8 +7814,24 @@ function ServiceTracker() {
           </>
         )}
 
+        {/* Step 7: NO-SHOW (terminal; status='no_show' maps to step 7 but
+            must not read as a completed visit) */}
+        {step === 7 && tracker.state === 'no_show' && (
+          <>
+            <div style={{
+              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              lineHeight: 1.25, color: B.blueDeeper,
+            }}>
+              We missed you.
+            </div>
+            <div style={{ fontSize: 16, color: B.textBody, marginTop: 8 }}>
+              We weren't able to complete your {svcType.toLowerCase()} today. Reschedule any time and we'll find a slot that works for you.
+            </div>
+          </>
+        )}
+
         {/* Step 7: COMPLETE */}
-        {step === 7 && (
+        {step === 7 && tracker.state !== 'no_show' && (
           <>
             <div style={{
               fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,

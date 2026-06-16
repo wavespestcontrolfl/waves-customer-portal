@@ -359,7 +359,7 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
               {/* Reassign-disabled when the job is in a terminal
                   state. Server enforces the same rule (409); this
                   is just to keep the affordance honest. */}
-              {['completed', 'cancelled', 'skipped'].includes(job.status) ? (
+              {['completed', 'cancelled', 'skipped', 'no_show'].includes(job.status) ? (
                 <div className="text-14 text-ink-primary">
                   {job.tech_full_name || (
                     <span className="text-ink-tertiary italic">Unassigned</span>

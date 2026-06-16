@@ -15,6 +15,7 @@ import {
   getFavorites,
   toggleFavorite as toggleFavoriteStorage,
 } from '../utils/ibStorage';
+import { filesToImageParts, MAX_ATTACHMENTS } from '../utils/ibImages';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -49,6 +50,11 @@ export function useIntelligenceBar({
   const [expanded, setExpanded] = useState(false);
   const [recentPrompts, setRecentPrompts] = useState(() => getRecents(context));
   const [favorites, setFavorites] = useState(() => getFavorites(context));
+  // Attached photos for the next query (vision). Each: {mediaType,data,name,previewUrl}.
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const attachmentConversionRef = useRef(0);
+  const attachmentsLoadingRef = useRef(false);
 
   const buildPageDataRef = useRef(buildPageData);
   const onAfterSubmitRef = useRef(onAfterSubmit);
@@ -73,9 +79,40 @@ export function useIntelligenceBar({
     setFavorites(next);
   }, [context]);
 
+  const setAttachmentBusy = useCallback((busy) => {
+    attachmentsLoadingRef.current = busy;
+    setAttachmentsLoading(busy);
+  }, []);
+
+  const resetAttachments = useCallback(() => {
+    attachmentConversionRef.current += 1;
+    setAttachments([]);
+    setAttachmentBusy(false);
+  }, [setAttachmentBusy]);
+
+  const addAttachments = useCallback(async (files) => {
+    const conversionId = attachmentConversionRef.current + 1;
+    attachmentConversionRef.current = conversionId;
+    setAttachmentBusy(true);
+    try {
+      const parts = await filesToImageParts(files, attachments.length);
+      if (attachmentConversionRef.current === conversionId && parts.length) {
+        setAttachments((prev) => [...prev, ...parts].slice(0, MAX_ATTACHMENTS));
+      }
+    } finally {
+      if (attachmentConversionRef.current === conversionId) {
+        setAttachmentBusy(false);
+      }
+    }
+  }, [attachments.length, setAttachmentBusy]);
+
+  const removeAttachment = useCallback((index) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
   const submit = useCallback(async (text) => {
     const q = (text ?? prompt).trim();
-    if (!q || loading) return;
+    if (!q || loading || attachmentsLoadingRef.current) return;
 
     setLoading(true);
     setExpanded(true);
@@ -87,6 +124,9 @@ export function useIntelligenceBar({
 
     const body = { prompt: q, conversationHistory };
     if (context) body.context = context;
+    if (attachments.length) {
+      body.images = attachments.map(({ mediaType, data }) => ({ mediaType, data }));
+    }
     if (buildPageDataRef.current) {
       const pd = buildPageDataRef.current();
       if (pd) body.pageData = pd;
@@ -110,15 +150,17 @@ export function useIntelligenceBar({
 
     setLoading(false);
     setPrompt('');
-  }, [prompt, loading, conversationHistory, context]);
+    resetAttachments();
+  }, [prompt, loading, conversationHistory, context, attachments, resetAttachments]);
 
   const clear = useCallback(() => {
     setConversationHistory([]);
     setResponse(null);
     setStructuredData(null);
     setPendingActions([]);
+    resetAttachments();
     setExpanded(false);
-  }, []);
+  }, [resetAttachments]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
@@ -137,6 +179,10 @@ export function useIntelligenceBar({
     recentPrompts,
     favorites,
     toggleFavorite,
+    attachments,
+    attachmentsLoading,
+    addAttachments,
+    removeAttachment,
     submit,
     clear,
     handleKeyDown,

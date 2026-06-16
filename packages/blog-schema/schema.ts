@@ -44,6 +44,7 @@ export const waveGuardTier = z.enum(['Bronze', 'Silver', 'Gold', 'Platinum']);
 
 export const schemaType = z.enum([
   'Article',
+  'BlogPosting',
   'FAQPage',
   'BreadcrumbList',
   'HowTo',
@@ -132,6 +133,10 @@ export const trackingSchema = z.object({
 // ─────────────────────────────────────────────────────────────
 
 export const blogPostFrontmatter = z.object({
+  // Schema version marker. Optional for backward compat with posts
+  // authored before the version field landed; when present must be 2.
+  // The migration script sets this to 2 once a post conforms to v2.
+  schemaVersion: z.literal(2).optional(),
   // Identity
   title: z.string().min(1),
   slug: slugPath,
@@ -155,7 +160,10 @@ export const blogPostFrontmatter = z.object({
   // Byline + review chain (PR 1 trust layer backing)
   author: authorSchema,
   technically_reviewed_by: reviewerSchema,
-  fact_checked_by: z.string().min(1),
+  // fact_checked_by is no longer a required trust-chain field (owner decision —
+  // no fabricated fact-check attribution). Kept optional for backward-compat
+  // with legacy frontmatter that may still carry it.
+  fact_checked_by: z.string().min(1).optional(),
 
   // Four surfaced dates
   published: ymdDate,
@@ -180,6 +188,42 @@ export const blogPostFrontmatter = z.object({
 });
 
 export type BlogPostFrontmatter = z.infer<typeof blogPostFrontmatter>;
+
+// ─────────────────────────────────────────────────────────────
+// v1 (legacy) frontmatter — permissive shape matching the WP export
+// that backs the 198 pre-migration posts. Used only so the publish
+// gatekeeper can parse legacy posts without throwing 20 blockers per
+// file. v1 posts skip component + props validation entirely.
+// ─────────────────────────────────────────────────────────────
+
+export const blogPostFrontmatterV1 = z.looseObject({
+  title: z.string().min(1),
+  slug: z.string().min(1),
+  metaTitle: z.string().optional(),
+  metaDescription: z.string().optional(),
+  canonical: z.string().optional(),
+  date: z.string().optional(),
+  modified: z.string().optional(),
+  ogImage: z.string().optional().nullable(),
+});
+
+export type BlogPostFrontmatterV1 = z.infer<typeof blogPostFrontmatterV1>;
+
+// ─────────────────────────────────────────────────────────────
+// Detects which schema applies. Explicit schemaVersion wins; otherwise
+// presence of a v2-only field (primary_keyword) triggers v2 handling.
+// Everything else is treated as v1. Keeps the gatekeeper usable on
+// the 198 legacy posts without forcing a one-shot migration.
+// ─────────────────────────────────────────────────────────────
+
+export function detectSchemaVersion(fm: unknown): 1 | 2 {
+  if (!fm || typeof fm !== 'object') return 1;
+  const obj = fm as Record<string, unknown>;
+  if (obj.schemaVersion === 2) return 2;
+  if (obj.schemaVersion === 1) return 1;
+  if (typeof obj.primary_keyword === 'string') return 2;
+  return 1;
+}
 
 // ─────────────────────────────────────────────────────────────
 // §10 — Component catalog + post-type requirements
@@ -213,9 +257,184 @@ export const COMPONENT_NAMES = [
   'DisclosureBlock',
   'GrassTypeSection',
   'FAQBlock',
+  'PestEvidenceGrid',
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
+
+// ─────────────────────────────────────────────────────────────
+// §10b — Component prop schemas
+//
+// Each entry in COMPONENT_NAMES has a Zod schema here defining its
+// prop surface. This is the contract authors hit when invoking the
+// component in MDX, and what the v5b2 validator will check against.
+//
+// Prop schemas are intentionally lean — required fields are the minimum
+// signal the component needs to render meaningfully. Optional fields are
+// for affordances (captions, credits, etc.). If a component truly has no
+// props (reads everything from frontmatter), its schema is `z.object({})`.
+// ─────────────────────────────────────────────────────────────
+
+const waveGuardTierEnum = z.enum(['Bronze', 'Silver', 'Gold', 'Platinum']);
+const grassTypeEnum = z.enum(['st-augustine', 'bahia', 'zoysia', 'bermuda']);
+const confidenceEnum = z.enum(['high', 'medium', 'low']);
+const severityEnum = z.enum(['low', 'medium', 'high']);
+const monthEnum = z.enum([
+  'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+  'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+]);
+
+export const componentPropSchemas = {
+  BottomLineBox: z.object({
+    verdict: z.string().min(1),
+    recommendation: z.string().min(1),
+    confidence: confidenceEnum.optional(),
+  }),
+  WhyTrustUs: z.object({
+    // Reads author + reviewer from frontmatter; override props optional.
+    hideReviewer: z.boolean().optional(),
+  }),
+  TLDR: z.object({
+    summary: z.string().min(1),
+    bullets: z.array(z.string().min(1)).max(7).optional(),
+  }),
+  DataCallout: z.object({
+    stat: z.string().min(1),
+    source: z.string().min(1),
+    sourceUrl: z.string().url().optional(),
+    context: z.string().optional(),
+  }),
+  ProTip: z.object({
+    title: z.string().optional(),
+    tip: z.string().min(1),
+  }),
+  HonestRejection: z.object({
+    audience: z.string().min(1),
+    reason: z.string().min(1),
+  }),
+  ComparisonTable: z
+    .object({
+      columns: z.array(z.string().min(1)).min(2),
+      rows: z
+        .array(
+          z.object({
+            label: z.string().min(1),
+            values: z.array(z.string()).min(2),
+          }),
+        )
+        .min(1),
+      caption: z.string().optional(),
+      // 0-based index into the OPTION columns (those after the row-label column)
+      // to visually emphasize — e.g. highlight={0} bolds the first option column.
+      highlight: z.number().int().min(0).optional(),
+    })
+    // highlight must reference an existing option column (columns minus the
+    // leading row-label column), so the renderer actually emphasizes something.
+    // Guarded on columns being a known array — a missing/invalid `columns`
+    // already errors in the base object, so the refine just passes through
+    // rather than dereferencing undefined.
+    .refine((d) => d.highlight === undefined || !Array.isArray(d.columns) || d.highlight < d.columns.length - 1, {
+      message: 'highlight must be a 0-based index within the option columns (0..columns.length-2)',
+      path: ['highlight'],
+    }),
+  PestEvidenceGrid: z.object({
+    title: z.string().optional(),
+    items: z
+      .array(
+        z.object({
+          label: z.string().min(1),
+          note: z.string().min(1),
+        }),
+      )
+      .optional(),
+    caption: z.string().optional(),
+  }),
+  AnnotatedDiagnosticPhoto: z.object({
+    src: imagePath,
+    alt: z.string().min(1),
+    caption: z.string().optional(),
+    annotations: z
+      .array(
+        z.object({
+          x: z.number().min(0).max(100),
+          y: z.number().min(0).max(100),
+          label: z.string().min(1),
+        }),
+      )
+      .optional(),
+  }),
+  CaseStudy: z.object({
+    neighborhood: z.string().min(1),
+    pest: z.string().min(1),
+    before: imagePath,
+    after: imagePath,
+    outcome: z.string().min(1),
+    duration: z.string().optional(),
+  }),
+  SeasonalCalendar: z.object({
+    activities: z
+      .array(
+        z.object({
+          month: monthEnum,
+          activity: z.string().min(1),
+          severity: severityEnum.optional(),
+        }),
+      )
+      .min(1),
+  }),
+  PestDiagnosticTree: z.object({
+    rootQuestion: z.string().min(1),
+    branches: z
+      .array(
+        z.object({
+          condition: z.string().min(1),
+          outcome: z.string().min(1),
+        }),
+      )
+      .min(2),
+  }),
+  WaveGuardLadder: z.object({
+    tiers: z.array(waveGuardTierEnum).min(1).max(4).optional(),
+    highlight: waveGuardTierEnum.optional(),
+  }),
+  RecommendationQuiz: z.object({
+    id: z.string().min(1),
+    questions: z
+      .array(
+        z.object({
+          q: z.string().min(1),
+          options: z.array(z.string().min(1)).min(2),
+        }),
+      )
+      .min(1),
+  }),
+  ContentUpgrade: z.object({
+    title: z.string().min(1),
+    description: z.string().min(1),
+    downloadUrl: z.string().min(1),
+    leadMagnet: z.boolean().optional(),
+  }),
+  DisclosureBlock: z.object({
+    type: disclosureType,
+    text: z.string().optional(),
+  }),
+  GrassTypeSection: z.object({
+    grass: grassTypeEnum,
+    advice: z.string().optional(),
+  }),
+  FAQBlock: z.object({
+    faqs: z
+      .array(
+        z.object({
+          q: z.string().min(1),
+          a: z.string().min(1),
+        }),
+      )
+      .min(1),
+  }),
+} satisfies Record<ComponentName, z.ZodObject>;
+
+export type ComponentPropSchemas = typeof componentPropSchemas;
 
 export interface PostTypeRequirement {
   required: ComponentName[];
@@ -319,6 +538,224 @@ function extractMdxComponentNames(mdx: string): Set<string> {
     names.add(match[1]);
   }
   return names;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Per-invocation prop validation (§10b — step 5b2)
+//
+// Walks every JSX invocation of a known component in the MDX body,
+// extracts its attributes, and checks them against the component's
+// prop schema from `componentPropSchemas`.
+//
+// Limitations (intentional, first-pass):
+//   - Only string literals and simple literal-expression props are
+//     validated ({true}, {false}, {null}, {42}). Complex expressions
+//     ({[…]}, {{…}}, {someVariable}) are marked as `unvalidated`
+//     and assumed correct at runtime — the validator does not parse
+//     arbitrary JS/TS expressions.
+//   - Upgrade to a full MDX AST walk (remark-mdx) if false positives
+//     from the regex extractor become real.
+// ─────────────────────────────────────────────────────────────
+
+export interface ComponentPropIssue {
+  component: ComponentName;
+  index: number; // 0-based invocation index within the body
+  issue: 'missing-required' | 'invalid-value' | 'unknown-prop';
+  prop: string;
+  message: string;
+}
+
+export interface ComponentPropValidationResult {
+  ok: boolean;
+  issues: ComponentPropIssue[];
+  unvalidated_props: Array<{ component: ComponentName; index: number; prop: string }>;
+}
+
+export function validateMarkdownComponentProps(
+  body_mdx: string,
+): ComponentPropValidationResult {
+  const cleaned = body_mdx.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  const invocations = extractComponentInvocations(cleaned);
+
+  const issues: ComponentPropIssue[] = [];
+  const unvalidated: ComponentPropValidationResult['unvalidated_props'] = [];
+  const perComponentCount: Record<string, number> = {};
+
+  for (const inv of invocations) {
+    if (!(inv.name in componentPropSchemas)) continue; // unknown — handled by name validator
+    const name = inv.name as ComponentName;
+    const idx = (perComponentCount[name] = (perComponentCount[name] ?? 0));
+    perComponentCount[name] = idx + 1;
+
+    const schema = componentPropSchemas[name];
+    const knownPropNames = new Set(Object.keys(schema.shape));
+    const { simple, expressions } = parseJsxProps(inv.attrs);
+
+    // Unknown-prop detection — any prop name not in the schema shape.
+    for (const propName of Object.keys(simple)) {
+      if (!knownPropNames.has(propName)) {
+        issues.push({
+          component: name,
+          index: idx,
+          issue: 'unknown-prop',
+          prop: propName,
+          message: `<${name}> has unknown prop "${propName}"`,
+        });
+      }
+    }
+    for (const propName of expressions) {
+      if (!knownPropNames.has(propName)) {
+        issues.push({
+          component: name,
+          index: idx,
+          issue: 'unknown-prop',
+          prop: propName,
+          message: `<${name}> has unknown prop "${propName}"`,
+        });
+      } else if (!(propName in simple)) {
+        unvalidated.push({ component: name, index: idx, prop: propName });
+      }
+    }
+
+    // Missing-required detection — check before Zod so we can classify.
+    // A required prop must have a value in either `simple` or `expressions`.
+    for (const propName of knownPropNames) {
+      if (propName in simple || expressions.has(propName)) continue;
+      if (isOptionalField(schema.shape[propName])) continue;
+      issues.push({
+        component: name,
+        index: idx,
+        issue: 'missing-required',
+        prop: propName,
+        message: `<${name}> is missing required prop "${propName}"`,
+      });
+    }
+
+    // Invalid-value detection — only validates simple (parseable) props.
+    // Expression props are substituted with a placeholder so Zod doesn't
+    // reject them; remaining failures are genuine value-shape mismatches.
+    const toParse: Record<string, unknown> = {};
+    for (const propName of knownPropNames) {
+      if (propName in simple) {
+        toParse[propName] = simple[propName];
+      } else if (expressions.has(propName)) {
+        toParse[propName] = placeholderForField(schema.shape[propName]);
+      }
+    }
+
+    const result = schema.safeParse(toParse);
+    if (result.success) continue;
+
+    for (const err of result.error.issues) {
+      const propPath = err.path[0];
+      const propName = typeof propPath === 'string' ? propPath : '(unknown)';
+
+      // Already reported as missing-required above — skip.
+      if (!(propName in toParse)) continue;
+      // Expression placeholder — we can't validate the real runtime value.
+      if (expressions.has(propName) && !(propName in simple)) continue;
+
+      issues.push({
+        component: name,
+        index: idx,
+        issue: 'invalid-value',
+        prop: propName,
+        message: `<${name}> prop "${propName}": ${err.message}`,
+      });
+    }
+  }
+
+  return { ok: issues.length === 0, issues, unvalidated_props: unvalidated };
+}
+
+// Zod 4 `_def.type` values are lowercase tokens: 'string', 'number',
+// 'boolean', 'array', 'object', 'enum', 'optional', 'default', 'nullable'.
+// We read them as-is (no case-insensitive matching).
+
+function zodTypeName(field: z.ZodTypeAny): string {
+  const def = (field as { _def?: { type?: string; typeName?: string } })._def;
+  return (def?.type ?? def?.typeName ?? '').toString();
+}
+
+function unwrap(field: z.ZodTypeAny): z.ZodTypeAny | null {
+  const inner = (field as unknown as { _def?: { innerType?: z.ZodTypeAny } })._def?.innerType;
+  return inner ?? null;
+}
+
+function isOptionalField(field: z.ZodTypeAny): boolean {
+  const t = zodTypeName(field);
+  return t === 'optional' || t === 'default' || t === 'nullable';
+}
+
+// For expression-only known props, we pass a placeholder of the right
+// type so Zod doesn't mis-report "invalid" on something we've already
+// decided to skip validating. Returns a shape-compatible value for the
+// common Zod node types in our prop schemas.
+function placeholderForField(field: z.ZodTypeAny): unknown {
+  const t = zodTypeName(field);
+  if (t === 'string') return '__expr__';
+  if (t === 'number') return 0;
+  if (t === 'boolean') return true;
+  if (t === 'array') return [];
+  if (t === 'object') return {};
+  if (t === 'enum') {
+    const values = (field as unknown as { options?: string[] }).options;
+    return Array.isArray(values) && values.length ? values[0] : '';
+  }
+  if (t === 'url') return 'https://example.com';
+  const inner = unwrap(field);
+  if (inner) return placeholderForField(inner);
+  return '__expr__';
+}
+
+interface ParsedInvocation {
+  name: string;
+  attrs: string;
+}
+
+function extractComponentInvocations(cleaned: string): ParsedInvocation[] {
+  const invocations: ParsedInvocation[] = [];
+  // Matches opening tag up to closing `>`, capturing name + raw attr string.
+  // Handles self-closing (<Foo ... />) and paired (<Foo ...>…</Foo>).
+  const pattern = /<([A-Z][A-Za-z0-9]*)((?:\s+[^>]*?)?)\s*(\/?)>/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(cleaned)) !== null) {
+    invocations.push({ name: match[1], attrs: match[2] ?? '' });
+  }
+  return invocations;
+}
+
+function parseJsxProps(attrs: string): {
+  simple: Record<string, string | boolean | number | null>;
+  expressions: Set<string>;
+} {
+  const simple: Record<string, string | boolean | number | null> = {};
+  const expressions = new Set<string>();
+
+  // prop="value"
+  const dq = /\b([a-zA-Z_$][\w$]*)\s*=\s*"([^"]*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = dq.exec(attrs)) !== null) simple[m[1]] = m[2];
+
+  // prop='value'
+  const sq = /\b([a-zA-Z_$][\w$]*)\s*=\s*'([^']*)'/g;
+  while ((m = sq.exec(attrs)) !== null) simple[m[1]] = m[2];
+
+  // prop={true|false|null|number}
+  const lit = /\b([a-zA-Z_$][\w$]*)\s*=\s*\{\s*(true|false|null|-?\d+(?:\.\d+)?)\s*\}/g;
+  while ((m = lit.exec(attrs)) !== null) {
+    const raw = m[2];
+    simple[m[1]] =
+      raw === 'true' ? true : raw === 'false' ? false : raw === 'null' ? null : Number(raw);
+  }
+
+  // prop={…anything else…} — record as expression, don't try to parse
+  const expr = /\b([a-zA-Z_$][\w$]*)\s*=\s*\{/g;
+  while ((m = expr.exec(attrs)) !== null) {
+    if (!(m[1] in simple)) expressions.add(m[1]);
+  }
+
+  return { simple, expressions };
 }
 
 // ─────────────────────────────────────────────────────────────

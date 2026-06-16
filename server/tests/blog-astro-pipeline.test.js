@@ -248,6 +248,13 @@ describe('blog Astro frontmatter validation', () => {
     expect(data.schema_types).toEqual(['Article', 'FAQPage']);
   });
 
+  test('schemaTypesForContent preserves BlogPosting (allowed by blog-schema) and drops unknown types', () => {
+    expect(AstroPublisher._internals.schemaTypesForContent('Some body.', ['BlogPosting', 'BreadcrumbList']))
+      .toEqual(['BlogPosting', 'BreadcrumbList']);
+    expect(AstroPublisher._internals.schemaTypesForContent('Some body.', ['Article', 'NotARealType']))
+      .toEqual(['Article']);
+  });
+
   test('does not build live URLs from unsupported target_sites hosts', () => {
     expect(AstroPublisher.liveUrlForPost({
       title: 'Bad host',

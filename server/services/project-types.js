@@ -21,20 +21,28 @@ const WDO_TARGET_OPTIONS = [
   'Other',
 ];
 
+const WDO_CONSTRUCTION_OPTIONS = [
+  'CMU / Concrete Masonry Unit',
+  'Wood Frame',
+  'Metal Frame',
+  'Manufactured / Mobile Home',
+];
+
 const PROJECT_TYPES = {
   wdo_inspection: {
     label: 'WDO Inspection',
     short: 'WDO',
-    description: 'FDACS-13645 wood-destroying organism inspection report for real estate / pre-purchase files.',
+    defaultTitle: 'WDO Inspection Service',
     requiresFollowup: false,
     photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'previous_treatment', 'other'],
     findingsFields: [
       { key: 'property_address', label: 'Property inspected', type: 'text', placeholder: 'Street address, city, state, ZIP' },
-      { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', placeholder: 'Main home, detached garage, shed, addition…' },
+      { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', placeholder: 'Main home, attached garage, detached garage, shed, addition…' },
+      { key: 'structure_type', label: 'Structure type', type: 'select', options: WDO_CONSTRUCTION_OPTIONS },
       { key: 'structure_sqft', label: 'Structure footprint (approx. sq ft)', type: 'text', placeholder: 'Under-roof area, e.g. 2200 — used for the fee tier if no fee is picked' },
       { key: 'inspection_fee', label: 'Inspection fee ($)', type: 'text', placeholder: 'Any amount, e.g. 175 — varies by construction (wood frame), new build, prior termite history' },
-      { key: 'requested_by', label: 'Inspection requested by', type: 'text', placeholder: 'Name and contact information' },
-      { key: 'report_sent_to', label: 'Report sent to', type: 'text', placeholder: 'Name and contact information if different' },
+      { key: 'requested_by', label: 'Inspection requested by', type: 'customer_search', customerValue: 'contact_summary', placeholder: 'Search customer database or type name and contact information' },
+      { key: 'report_sent_to', label: 'Report sent to', type: 'customer_search', customerValue: 'contact_summary', placeholder: 'Search customer database or type name and contact information if different' },
       { key: 'inspection_scope', label: 'Visible / accessible areas inspected', type: 'textarea', placeholder: 'Interior, attic access, garage, exterior perimeter, crawlspace…' },
       { key: 'wdo_finding', label: 'FDACS Section 2 finding', type: 'select', options: ['No visible signs of WDO observed', 'Visible evidence of WDO observed'] },
       { key: 'live_wdo', label: 'Live WDO(s)', type: 'textarea', placeholder: 'Common name of organism and location, if any' },
@@ -43,7 +51,7 @@ const PROJECT_TYPES = {
       { key: 'inaccessible_areas', label: 'Obstructions / inaccessible areas', type: 'textarea', placeholder: 'Attic, interior, exterior, crawlspace, other: specific areas and reasons' },
       { key: 'previous_treatment_evidence', label: 'Evidence of previous treatment', type: 'select', options: ['No', 'Yes'] },
       { key: 'previous_treatment_notes', label: 'Previous treatment observations', type: 'textarea', placeholder: 'Visible evidence suggesting possible previous treatment' },
-      { key: 'notice_location', label: 'Notice of Inspection location', type: 'text', placeholder: 'Where the notice was affixed to the structure' },
+      { key: 'notice_location', label: 'Notice of Inspection location', type: 'text', defaultValue: 'Electrical Panel', placeholder: 'Where the notice was affixed to the structure' },
       { key: 'treated_at_inspection', label: 'Treated at time of inspection', type: 'select', options: ['No', 'Yes'] },
       { key: 'organism_treated', label: 'Organism treated', type: 'multi_select', options: WDO_TARGET_OPTIONS },
       { key: 'pesticide_used', label: 'Pesticide used', type: 'product_search', placeholder: 'Search product catalog or type product name' },
@@ -929,4 +937,4 @@ function isValidProjectType(key) {
   return Object.prototype.hasOwnProperty.call(PROJECT_TYPES, key);
 }
 
-module.exports = { PROJECT_TYPES, PROJECT_TYPE_KEYS, getProjectType, isValidProjectType };
+module.exports = { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, getProjectType, isValidProjectType };

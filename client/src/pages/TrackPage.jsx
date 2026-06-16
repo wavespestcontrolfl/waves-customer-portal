@@ -610,6 +610,33 @@ function CancelledCard({ data }) {
   );
 }
 
+function NoShowCard({ data }) {
+  const when = data.window?.start ? formatCompleteDate(data.window.start) : null;
+  return (
+    <Card accent={COLORS.orange}>
+      <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
+        Missed visit
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3 }}>
+        We missed you{data.customerFirstName ? `, ${data.customerFirstName}` : ''}.
+      </div>
+      <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+        We weren't able to complete your {data.service?.type?.toLowerCase() || 'service'}
+        {when ? ` on ${when}` : ' today'}. Let's get you back on the schedule — reschedule any time and we'll find a slot that works for you.
+      </div>
+      <a
+        href={WAVES_SUPPORT_PHONE_TEL}
+        style={{
+          display: 'block', marginTop: 20, padding: '14px 20px',
+          background: COLORS.blueDeeper, color: COLORS.white,
+          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
+          textDecoration: 'none',
+        }}
+      >Call to reschedule</a>
+    </Card>
+  );
+}
+
 // ── Loading + error states ───────────────────────────────────────
 function SkeletonCard() {
   return (
@@ -731,6 +758,7 @@ export default function TrackPage() {
       {data.state === 'on_property' ? <OnPropertyCard data={data} /> : null}
       {data.state === 'complete' ? <CompleteCard data={data} /> : null}
       {data.state === 'cancelled' ? <CancelledCard data={data} /> : null}
+      {data.state === 'no_show' ? <NoShowCard data={data} /> : null}
     </Page>
   );
 }

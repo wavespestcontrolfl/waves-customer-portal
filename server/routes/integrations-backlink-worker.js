@@ -34,8 +34,10 @@ router.post('/report', async (req, res, next) => {
   try {
     const { prospect_id, outcome } = req.body || {};
     if (!prospect_id) return res.status(400).json({ error: 'prospect_id required' });
-    if (!['placed', 'failed', 'skipped'].includes(outcome)) {
-      return res.status(400).json({ error: "outcome must be 'placed', 'failed', or 'skipped'" });
+    // 'drafted' = outreach lane: the worker researched + drafted a one-to-one email
+    // (outreach_to_email/subject/body); it's parked for human approval, never auto-sent.
+    if (!['placed', 'failed', 'skipped', 'drafted'].includes(outcome)) {
+      return res.status(400).json({ error: "outcome must be 'placed', 'failed', 'skipped', or 'drafted'" });
     }
     const result = await worker.report(req.body);
     if (!result.ok) {

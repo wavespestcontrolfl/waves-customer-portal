@@ -47,14 +47,6 @@ exports.up = async function (knex) {
       sort_order: 44,
     },
     {
-      template_key: 'auto_new_lead',
-      name: 'New Lead',
-      category: 'automations',
-      body: 'Hi {first_name}! Thanks for your interest in Waves Pest Control. We just sent you an email with more info about our services.\n\nReply here anytime if you have questions!',
-      variables: JSON.stringify(['first_name']),
-      sort_order: 45,
-    },
-    {
       template_key: 'auto_service_renewal',
       name: 'Service Renewal Reminder',
       category: 'automations',
@@ -74,6 +66,6 @@ exports.down = async function (knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
   await knex('sms_templates').whereIn('template_key', [
     'auto_new_recurring', 'auto_lawn_service', 'auto_new_appointment',
-    'auto_bed_bug', 'auto_cockroach', 'auto_new_lead', 'auto_service_renewal',
+    'auto_bed_bug', 'auto_cockroach', 'auto_service_renewal',
   ]).del();
 };

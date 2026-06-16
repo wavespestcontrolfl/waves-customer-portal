@@ -352,8 +352,25 @@ Env: `HERMES_SERVICE_TOKEN` (claim/report auth), `HERMES_BASE_URL` (if portal ev
     (FOR UPDATE SKIP LOCKED lease; `report` only moves prospects to `placed` — verifier promotes
     to live), hourly lease-expiry sweep. Env: `HERMES_SERVICE_TOKEN`, `GATE_HERMES_WORKER`,
     `GATE_LINK_OUTREACH`. Outreach lane stays unserved until `linkProspectOutreach` is on.
-  - **M3b — approval-gated outreach send** (Gmail OAuth, `contact@wavespestcontrol.com`, rate-limit) — TODO.
-  - **M3c — Hermes agent deployment** (Docker, skill that calls claim/report) — infra, not repo code — TODO.
+  - **M3b — approval-gated outreach send** (Gmail OAuth, `contact@wavespestcontrol.com`, rate-limit) — ✅ SHIPPED:
+    `link-prospect-outreach.js` — `saveDraft` + `sendOutreach` + `reconcileSendError`, gated by
+    `linkProspectOutreach`, trailing-24h rate-limit (`LINK_OUTREACH_DAILY_CAP`, default 12, counted by
+    `outreach_attempted_at` so an attempt counts regardless of outcome). Send is idempotent + concurrency-safe:
+    cap-check + claim run under a pg advisory lock; the claim stamps a private `outreach_send_token` and returns
+    the locked row, so rollback/finalize touch only their own claim and the sent draft is the current one.
+    Outreach state machine `none→drafted→sending→sent`, with `send_error` for AMBIGUOUS Gmail failures (may have
+    reached Gmail) — never silently requeued: a stuck/ambiguous send is resolved only by the explicit
+    `reconcileSendError` (`sent` vs `requeue`). Gmail send via `email/gmail-client` (sender `contact@`), with an
+    `isConnected` pre-check so a misconfig fails clean. Worker gains a `drafted` outcome (Hermes hybrid lane:
+    research + draft, human approves); `claim()` skips drafted/sending/sent/send_error rows; reports validate the
+    recipient + reject reopening a sent/in-flight outreach. New columns
+    `outreach_to_email/subject/body/status/send_token/attempted_at`. Admin routes `prospects/outreach/pending`,
+    `prospects/:id/outreach/{draft,send,reconcile}` (the auth'd send IS the approval click). 51 unit tests.
+    The approval-queue UI in the Link Building board is the immediate follow-up.
+  - **M3c — Hermes agent deployment** (Docker, skill that calls claim/report) — signup skill SHIPPED in the
+    dashboard; the **outreach auto-draft skill is authored** at `docs/hermes/waves-outreach-drafter-skill.md`
+    (claim `?type=outreach` → research → compose one-to-one draft → report `outcome:"drafted"` → lands in the
+    M3b approval queue). Deploying it into the Hostinger Skills tab + flipping `GATE_LINK_OUTREACH` are operator steps.
 - **M4 — Cutover:** retire Playwright worker per §11.
 
 M1 alone satisfies "Backlink Manager with all the columns." Hermes is M3 — additive, gated,

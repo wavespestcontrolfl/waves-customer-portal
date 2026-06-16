@@ -22,7 +22,7 @@ const LAWN_PRICING_V2 = {
     standard: { label: 'Standard', applicationsPerYear: 6, customerFacing: true },
     enhanced: { label: 'Enhanced', applicationsPerYear: 9, customerFacing: true, default: true },
     premium: { label: 'Premium', applicationsPerYear: 12, customerFacing: true },
-    basic: { label: 'Basic', applicationsPerYear: 4, customerFacing: false, hidden: true },
+    basic: { label: 'Basic', applicationsPerYear: 4, customerFacing: true, hidden: false },
   },
 };
 

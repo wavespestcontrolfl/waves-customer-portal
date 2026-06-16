@@ -170,6 +170,7 @@ const FIELD_LABELS = {
   treatment_recommendation: 'Treatment recommendation',
   property_address: 'Property inspected',
   structures_inspected: 'Structure(s) inspected',
+  structure_type: 'Structure type',
   requested_by: 'Inspection requested by',
   report_sent_to: 'Report sent to',
   inspection_scope: 'Visible / accessible areas inspected',

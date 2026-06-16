@@ -1789,8 +1789,8 @@ function priceLawnCare(property, options = {}) {
 
   const annualCost = scaledMaterial + annualLabor + GLOBAL.ADMIN_ANNUAL;
 
-  // ── Tier array: 6 Apps / 9 Apps / 12 Apps (basic hidden unless includeHiddenTiers) ──
-  const TIER_LIST = ['basic', 'standard', 'enhanced', 'premium'];
+  // ── Tier array: 4 Apps / 6 Apps / 9 Apps / 12 Apps ──
+  const TIER_LIST = includeHiddenTiers ? Object.keys(LAWN_TIERS) : LAWN_SOLD_TIERS;
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;

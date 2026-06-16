@@ -271,7 +271,7 @@ finding and warns on P1. Reviewers must return JSON matching
   is never collected for an estimate accept would reject, 409 for exempt
   policies, PaymentIntent idempotent per estimate+amount with
   metadata-pinned purpose/estimate id; dark behind
-  ESTIMATE_DEPOSIT_REQUIRED),
+  ESTIMATE_DEPOSIT_REQUIRED).
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
@@ -284,6 +284,24 @@ finding and warns on P1. Reviewers must return JSON matching
   lead per diagnostic via an atomic `whereNull('lead_id')` guard returning 409
   on repeat, no raw PII logging, never mutates diagnostic scoring or any
   customer/assessment table).
+  `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
+  no auth, no DB writes, no PII — returns a deterministic Florida
+  pest-pressure model keyed only on a curated city slug / FL ZIP plus
+  public NWS + FAWN weather; no request body. Intentionally CORS-open
+  (`Access-Control-Allow-Origin: *`) so the free embeddable forecast
+  widget can run on third-party domains; inherits the global `/api/` IP
+  rate limit, served from a 3h per-location server cache and public CDN
+  `Cache-Control`. Note: unlike the token-gated read routes, this surface
+  is deliberately cacheable and indexable — it exposes only modeled,
+  non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
+  NOT apply here).
+  `/api/public/social-feed` (read-only aggregate of already-public social
+  posts for the marketing /social page — Instagram + Facebook Graph API,
+  Google Business Profile localPosts, YouTube channel RSS; no tokens, no
+  PII, returns only public post metadata
+  (caption/thumbnail/permalink/timestamp), 60 req/min rate limit, 15-min
+  in-memory cache + 5-min public Cache-Control, per-source graceful failure,
+  never 500s — returns an empty payload on total upstream failure).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

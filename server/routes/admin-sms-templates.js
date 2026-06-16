@@ -324,7 +324,6 @@ const MSG_TYPE_TO_TEMPLATE = {
   onboarding_start: 'estimate_accepted_customer',
   estimate_sent: 'estimate_sent',
   estimate_accepted_onetime: 'estimate_accepted_onetime',
-  estimate_onetime_followup: 'estimate_onetime_followup',
   estimate_accepted_customer: 'estimate_accepted_customer',
   estimate_auto_renewed: 'estimate_auto_renewed',
   estimate_followup: 'estimate_followup_unviewed',

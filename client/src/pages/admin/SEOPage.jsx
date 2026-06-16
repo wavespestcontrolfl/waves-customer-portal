@@ -2068,12 +2068,16 @@ function BacklinksTab() {
 // =========================================================================
 const PROSPECT_VIEWS = [
   { key: "all", label: "All", statuses: null },
+  { key: "approvals", label: "Needs approval", statuses: null }, // outreach drafts → send (M3b)
   { key: "outreach", label: "Needs outreach", statuses: ["prospect", "contacted", "negotiating"] },
   { key: "placed", label: "In progress", statuses: ["placed"] },
   { key: "notindexed", label: "Live · not indexed", statuses: ["live"] },
   { key: "indexed", label: "Indexed", statuses: ["indexed"] },
   { key: "lost", label: "Lost", statuses: ["lost"] },
 ];
+
+// Outreach (M3b): link types whose prospects can be drafted + sent as one-to-one email.
+const OUTREACH_TYPES_UI = ["editorial", "resource", "guest_post", "haro"];
 
 const PROSPECT_STATUS_COLOR = {
   prospect: D.muted,
@@ -2092,9 +2096,13 @@ function LinkBuildingBoard({ canRun }) {
   const [view, setView] = useState("all");
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [drafting, setDrafting] = useState(null); // prospect being drafted for outreach (M3b)
   const [form, setForm] = useState({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
 
   const load = () => {
+    adminFetch("/admin/backlink-agent/prospects/stats").then(setStats).catch(() => {});
+    // The approvals view is self-fetching (OutreachApprovals) — skip the board query.
+    if (view === "approvals") { setItems([]); return; }
     const cur = PROSPECT_VIEWS.find((v) => v.key === view);
     const qs = cur?.statuses?.length === 1 ? `?status=${cur.statuses[0]}` : "";
     const request = cur?.statuses?.length > 1
@@ -2111,7 +2119,6 @@ function LinkBuildingBoard({ canRun }) {
     request
       .then((rows) => setItems(rows))
       .catch(() => setItems([]));
-    adminFetch("/admin/backlink-agent/prospects/stats").then(setStats).catch(() => {});
   };
 
   useEffect(load, [view]);
@@ -2186,8 +2193,11 @@ function LinkBuildingBoard({ canRun }) {
         )}
       </div>
 
+      {/* Outreach approvals (M3b) — its own self-fetching panel */}
+      {view === "approvals" && <OutreachApprovals canRun={canRun} onChange={load} />}
+
       {/* Add form */}
-      {adding && canRun && (
+      {view !== "approvals" && adding && canRun && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
           <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Prospect site/page URL (planned)" value={form.target_url} onChange={(e) => setForm({ ...form, target_url: e.target.value })} />
           <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Live URL — if link is already placed" value={form.live_url} onChange={(e) => setForm({ ...form, live_url: e.target.value })} />
@@ -2204,7 +2214,7 @@ function LinkBuildingBoard({ canRun }) {
       )}
 
       {/* Table */}
-      {items.length === 0 ? (
+      {view !== "approvals" && (items.length === 0 ? (
         <Card style={{ padding: 30, textAlign: "center" }}><div style={{ color: D.muted }}>No prospects in this view.</div></Card>
       ) : (
         <div style={{ overflowX: "auto" }}>
@@ -2233,7 +2243,12 @@ function LinkBuildingBoard({ canRun }) {
                   </td>
                   <td style={{ padding: "8px 10px" }}><span style={{ color: PROSPECT_STATUS_COLOR[p.status] || D.muted, fontWeight: 500 }}>{p.status}</span></td>
                   <td style={{ padding: "8px 10px", color: D.muted }}>{p.domain_rating ?? "—"}</td>
-                  <td style={{ padding: "8px 10px" }}>
+                  <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
+                    {p.status === "prospect" && OUTREACH_TYPES_UI.includes(p.link_type) && (
+                      <button onClick={() => setDrafting(p)} style={{ padding: "3px 8px", borderRadius: 5, border: `1px solid ${D.teal}`, background: "transparent", color: D.teal, fontSize: 11, cursor: "pointer", marginRight: 6 }}>
+                        {p.outreach_status === "drafted" ? "Edit draft" : "Draft"}
+                      </button>
+                    )}
                     {p.live_url && <button onClick={() => recheck(p.id)} disabled={busy} style={{ padding: "3px 8px", borderRadius: 5, border: `1px solid ${D.border}`, background: "transparent", color: D.teal, fontSize: 11, cursor: "pointer" }}>Recheck</button>}
                   </td>
                 </tr>
@@ -2241,7 +2256,216 @@ function LinkBuildingBoard({ canRun }) {
             </tbody>
           </table>
         </div>
+      ))}
+
+      {drafting && (
+        <OutreachDraftModal
+          prospect={drafting}
+          onClose={() => setDrafting(null)}
+          onSaved={() => { setDrafting(null); load(); }}
+        />
       )}
+    </div>
+  );
+}
+
+// =========================================================================
+// OUTREACH APPROVALS — review drafts, approve + send, reconcile (Backlink M3b)
+// =========================================================================
+// Friendly text for the structured result codes the outreach routes return.
+const OUTREACH_CODE_MSG = {
+  gate_off: "Outreach lane is OFF — set GATE_LINK_OUTREACH to enable sending.",
+  gmail_not_connected: "Gmail isn't connected — authorize it first.",
+  rate_limited: "Daily send cap reached — try again later.",
+  already_sent: "Already sent or in flight.",
+  not_actionable: "Prospect is no longer open.",
+  no_draft: "No draft to send.",
+  invalid_recipient: "Recipient email is invalid.",
+  incomplete_draft: "Draft is missing a subject or body.",
+  send_failed: "Send failed (ambiguous) — reconcile it below.",
+  finalize_failed: "Email sent but recording failed — reconcile manually.",
+  needs_reconcile: "This send is awaiting reconciliation.",
+  not_reconcilable: "Nothing to reconcile.",
+  send_in_flight: "A send is currently in flight.",
+  not_found: "Prospect not found.",
+  bad_outcome: "Invalid reconcile outcome.",
+};
+
+// Raw POST that returns the parsed body even on non-2xx, so we can read the
+// structured {code}. (adminFetch throws on non-2xx and loses the code.)
+async function outreachPost(path, body) {
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body || {}),
+  });
+  let data = {};
+  try { data = await r.json(); } catch { /* ignore */ }
+  return { ok: r.ok, status: r.status, data };
+}
+
+const outreachBtn = (color, filled, busy) => ({
+  padding: "6px 12px", borderRadius: 6, fontSize: 12, whiteSpace: "nowrap",
+  cursor: busy ? "default" : "pointer", border: `1px solid ${color}`,
+  background: filled ? color : "transparent", color: filled ? D.white : color,
+  opacity: busy ? 0.6 : 1,
+});
+
+function OutreachApprovals({ canRun, onChange }) {
+  const [data, setData] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [editing, setEditing] = useState(null);
+
+  const load = () => {
+    adminFetch("/admin/backlink-agent/prospects/outreach/pending")
+      .then(setData)
+      .catch(() => setData({ items: [], needsReconcile: [], gateOn: false, rateLimit: {} }));
+  };
+  useEffect(load, []);
+  const refresh = () => { load(); if (onChange) onChange(); };
+
+  const send = async (id) => {
+    setBusyId(id); setMsg(null);
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`);
+    setMsg({ ok, text: ok ? "Outreach sent." : (OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.") });
+    setBusyId(null); refresh();
+  };
+  const reconcile = async (id, outcome) => {
+    setBusyId(id); setMsg(null);
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome });
+    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
+    setBusyId(null); refresh();
+  };
+
+  if (!data) return <div style={{ color: D.muted, padding: 30, textAlign: "center" }}>Loading approvals…</div>;
+
+  const drafts = data.items || [];
+  const reconciles = data.needsReconcile || [];
+  const cap = data.rateLimit?.cap;
+  const sentToday = data.rateLimit?.sentToday;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 12, padding: "4px 10px", borderRadius: 6,
+          background: data.gateOn ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)",
+          color: data.gateOn ? D.green : D.amber }}>
+          {data.gateOn ? "Outreach lane: ON" : "Outreach lane: OFF — sends disabled (GATE_LINK_OUTREACH)"}
+        </span>
+        {cap != null && <span style={{ fontSize: 12, color: D.muted }}>Sent (24h): {sentToday}/{cap}</span>}
+      </div>
+
+      {msg && (
+        <div style={{ fontSize: 12, padding: "8px 12px", borderRadius: 6, background: D.card,
+          border: `1px solid ${msg.ok ? D.green : D.amber}`, color: msg.ok ? D.green : D.amber }}>
+          {msg.text}
+        </div>
+      )}
+
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 8 }}>
+          Drafts awaiting approval ({drafts.length})
+        </div>
+        {drafts.length === 0 ? (
+          <Card style={{ padding: 24, textAlign: "center" }}>
+            <div style={{ color: D.muted, fontSize: 13 }}>
+              No drafts to approve. Use “Draft” on an editorial / resource / guest-post / HARO prospect to queue one here.
+            </div>
+          </Card>
+        ) : drafts.map((p) => (
+          <div key={p.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ minWidth: 0, flex: "1 1 320px" }}>
+                <div style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>
+                  {p.target_domain} <span style={{ color: D.muted, fontWeight: 400 }}>· {p.link_type}</span>
+                </div>
+                <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email}</div>
+                <div style={{ fontSize: 12, color: D.text, marginTop: 4 }}><b>{p.outreach_subject}</b></div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 4, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{p.outreach_body}</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                <button onClick={() => send(p.id)} disabled={!canRun || busyId === p.id} style={outreachBtn(D.teal, true, busyId === p.id)}>
+                  {busyId === p.id ? "Sending…" : "Approve & send"}
+                </button>
+                <button onClick={() => setEditing(p)} disabled={busyId === p.id} style={outreachBtn(D.teal, false)}>Edit</button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {reconciles.length > 0 && (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: D.amber, marginBottom: 6 }}>
+            Needs reconciliation ({reconciles.length})
+          </div>
+          <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>
+            These sends errored ambiguously and may have reached Gmail. Check the Sent folder, then confirm.
+          </div>
+          {reconciles.map((p) => (
+            <div key={p.id} style={{ background: D.card, border: `1px solid ${D.amber}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}>{p.target_domain}</div>
+                  <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email} · <b>{p.outreach_subject}</b></div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button onClick={() => reconcile(p.id, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>
+                  <button onClick={() => reconcile(p.id, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <OutreachDraftModal prospect={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />
+      )}
+    </div>
+  );
+}
+
+// Compose / edit a one-to-one outreach draft (M3b). Saving never sends — an admin
+// approves + sends from the approvals view.
+function OutreachDraftModal({ prospect, onClose, onSaved }) {
+  const [to, setTo] = useState(prospect.outreach_to_email || "");
+  const [subject, setSubject] = useState(prospect.outreach_subject || "");
+  const [body, setBody] = useState(prospect.outreach_body || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    const { ok, data } = await outreachPost(`/admin/backlink-agent/prospects/${prospect.id}/outreach/draft`, { to, subject, body });
+    setBusy(false);
+    if (ok) onSaved();
+    else setErr(OUTREACH_CODE_MSG[data.code] || data.error || "Could not save draft.");
+  };
+
+  const field = { width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 13, background: D.white, color: D.text, boxSizing: "border-box" };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, width: 580, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>Outreach draft — {prospect.target_domain}</div>
+        <div style={{ fontSize: 11, color: D.muted }}>One-to-one only. Saving does not send; an admin approves + sends from the primary inbox.</div>
+        <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Recipient email</label>
+        <input style={field} value={to} onChange={(e) => setTo(e.target.value)} placeholder="editor@example.com" />
+        <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Subject</label>
+        <input style={field} value={subject} onChange={(e) => setSubject(e.target.value)} />
+        <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Body</label>
+        <textarea style={{ ...field, minHeight: 200, resize: "vertical", fontFamily: "inherit" }} value={body} onChange={(e) => setBody(e.target.value)} />
+        {err && <div style={{ fontSize: 12, color: D.amber }}>{err}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+          <button onClick={onClose} style={outreachBtn(D.muted, false)}>Cancel</button>
+          <button onClick={save} disabled={busy || !to || !subject || !body} style={outreachBtn(D.teal, true, busy)}>{busy ? "Saving…" : "Save draft"}</button>
+        </div>
+      </div>
     </div>
   );
 }

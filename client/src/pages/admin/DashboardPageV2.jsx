@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   Badge,
-  Button,
   Card,
   CardBody,
   CardHeader,
@@ -85,9 +84,6 @@ export default function DashboardPageV2() {
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
   const [alerts, setAlerts] = useState([]);
-  const [commandCenter, setCommandCenter] = useState(null);
-  const [commandCenterError, setCommandCenterError] = useState(null);
-  const [commandCenterAction, setCommandCenterAction] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -125,17 +121,14 @@ export default function DashboardPageV2() {
         ),
         track("/billing-health", adminFetch("/admin/billing-health")),
         track("/alerts", adminFetch("/admin/dashboard/alerts")),
-        track("/command-center", adminFetch("/admin/command-center")),
       ]);
-      const [d, cmp, td, bh, al, cc] = wave1;
+      const [d, cmp, td, bh, al] = wave1;
       if (cancelled) return;
       setData(d);
       setCompare(cmp);
       setToday(td);
       setBilling(bh?.summary || null);
       setAlerts(Array.isArray(al?.alerts) ? al.alerts : []);
-      setCommandCenter(cc);
-      setCommandCenterError(cc ? null : new Error("Command Center unavailable"));
       setLoading(false);
 
       const wave2 = await Promise.all([
@@ -156,29 +149,6 @@ export default function DashboardPageV2() {
       cancelled = true;
     };
   }, []);
-
-  async function handleCommandCenterAlertAction(row, action) {
-    if (!row?.alertId || !action) return;
-    setCommandCenterAction(`${row.alertId}:${action}`);
-    try {
-      const body = { action };
-      if (action === "snooze") {
-        body.snoozedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-      }
-      await adminFetch(`/admin/command-center/alerts/${row.alertId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      });
-      const refreshed = await adminFetch("/admin/command-center");
-      setCommandCenter(refreshed);
-      setCommandCenterError(null);
-    } catch (err) {
-      console.error("[dashboard-v2] command-center alert action", err);
-      setCommandCenterError(err);
-    } finally {
-      setCommandCenterAction(null);
-    }
-  }
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -355,12 +325,6 @@ export default function DashboardPageV2() {
         </div>{" "}
       </header>
       {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
-      <CommandCenterPanel
-        data={commandCenter}
-        error={commandCenterError}
-        onAlertAction={handleCommandCenterAlertAction}
-        pendingAction={commandCenterAction}
-      />
       {/* Hero KPI row — sparkline + delta */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
         {HERO.map((h) => (
@@ -413,6 +377,7 @@ export default function DashboardPageV2() {
               total={today.total}
               remaining={today.remaining}
               cancelled={today.cancelled}
+              noShow={today.noShow}
             />
           ) : (
             <EmptyState>Loading…</EmptyState>
@@ -807,189 +772,6 @@ function DashboardAlertsBanner({ alerts }) {
         </div>{" "}
       </CardBody>{" "}
     </Card>
-  );
-}
-
-const COMMAND_SECTIONS = [
-  { key: "jobsNeedingAttention", title: "Jobs Needing Attention", empty: "No jobs need attention today." },
-  { key: "todaysJobs", title: "Today's Jobs", empty: "No jobs scheduled for the selected day." },
-  { key: "pipelineFollowUp", title: "Pipeline Follow-Up", empty: "No aged estimates found." },
-  { key: "missedLeads", title: "Missed Leads", empty: "No missed or stale leads found." },
-  { key: "moneyCollections", title: "Money / Collections", empty: "No collection issues found." },
-  { key: "customerIssues", title: "Customer Issues", empty: "No unread customer issues found." },
-  { key: "teamAttention", title: "Team Attention", empty: "No team follow-up items found." },
-];
-
-function CommandCenterPanel({ data, error, onAlertAction, pendingAction }) {
-  const summary = data?.summary || {};
-  const sections = data?.sections || {};
-  const cards = [
-    { key: "todaysJobs", label: "Today's Jobs", value: summary.todaysJobs || 0 },
-    { key: "jobsNeedingAttention", label: "Need Attention", value: summary.jobsNeedingAttention || 0, alert: (summary.jobsNeedingAttention || 0) > 0 },
-    { key: "pipelineFollowUp", label: "Aged Estimates", value: summary.agedEstimates || 0, alert: (summary.agedEstimates || 0) > 0 },
-    { key: "missedLeads", label: "Missed Leads", value: summary.missedLeads || 0, alert: (summary.missedLeads || 0) > 0 },
-    { key: "moneyCollections", label: "Overdue Invoices", value: summary.overdueInvoices || 0, alert: (summary.overdueInvoices || 0) > 0 },
-    { key: "customerIssues", label: "Customer Issues", value: summary.openCustomerIssues || 0, alert: (summary.openCustomerIssues || 0) > 0 },
-    { key: "teamAttention", label: "Team Attention", value: summary.teamAttentionItems || 0, alert: (summary.teamAttentionItems || 0) > 0 },
-  ];
-
-  return (
-    <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
-      <CardHeader className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <CardTitle>Command Center</CardTitle>
-          <div className="text-12 text-ink-secondary mt-1">
-            {data?.date ? `Operating issues for ${data.date}` : "Daily operating issue surface"}
-          </div>
-        </div>
-        <Badge tone={error ? "alert" : "strong"}>{error ? "Unavailable" : "Read-only"}</Badge>
-      </CardHeader>
-      <CardBody>
-        {error ? (
-          <EmptyState>Could not load Command Center.</EmptyState>
-        ) : !data ? (
-          <EmptyState>Loading Command Center...</EmptyState>
-        ) : (
-          <>
-            <div className="grid grid-cols-2 md:grid-cols-7 gap-2 mb-4">
-              {cards.map((card) => (
-                <a
-                  key={card.key}
-                  href={`#cc-${card.key}`}
-                  className={cn(
-                    "rounded-sm border-hairline px-3 py-3 bg-surface-sunken hover:bg-white u-focus-ring",
-                    card.alert ? "border-alert-fg/30" : "border-zinc-200",
-                  )}
-                >
-                  <div className="u-label text-ink-secondary">{card.label}</div>
-                  <div className={cn("u-nums text-22 font-medium leading-none mt-2", card.alert ? "text-alert-fg" : "text-zinc-900")}>
-                    {card.value}
-                  </div>
-                </a>
-              ))}
-            </div>
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-              {COMMAND_SECTIONS.map((section) => (
-                <CommandSection
-                  key={section.key}
-                  id={`cc-${section.key}`}
-                  title={section.title}
-                  rows={sections[section.key] || []}
-                  empty={section.empty}
-                  onAlertAction={onAlertAction}
-                  pendingAction={pendingAction}
-                />
-              ))}
-            </div>
-          </>
-        )}
-      </CardBody>
-    </Card>
-  );
-}
-
-function CommandSection({ id, title, rows, empty, onAlertAction, pendingAction }) {
-  return (
-    <div id={id} className="rounded-sm border-hairline border-zinc-200 bg-surface-sunken p-3 min-h-[160px]">
-      <div className="flex items-center justify-between gap-3 mb-2">
-        <div className="u-label text-zinc-900">{title}</div>
-        <Badge tone={rows.length ? "alert" : "neutral"}>{rows.length}</Badge>
-      </div>
-      {rows.length === 0 ? (
-        <div className="text-13 text-ink-secondary py-8 text-center">{empty}</div>
-      ) : (
-        <div className="divide-y divide-zinc-200">
-          {rows.slice(0, 8).map((row) => (
-            <CommandIssueRow
-              key={row.id}
-              row={row}
-              onAlertAction={onAlertAction}
-              pendingAction={pendingAction}
-            />
-          ))}
-          {rows.length > 8 && (
-            <div className="text-12 text-ink-secondary pt-2">
-              {rows.length - 8} more item{rows.length - 8 === 1 ? "" : "s"}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CommandIssueRow({ row, onAlertAction, pendingAction }) {
-  const amount = row.metadata?.total ?? row.metadata?.amount;
-  const detail = [
-    row.customer?.name,
-    row.employee?.name,
-    row.metadata?.serviceType,
-    row.metadata?.status,
-  ].filter(Boolean).slice(0, 3).join(" · ");
-  const canAct = Boolean(row.alertId && onAlertAction);
-  const isPending = (action) => pendingAction === `${row.alertId}:${action}`;
-  return (
-    <div className="py-2.5 text-13 hover:bg-white/70 rounded-xs px-1 -mx-1">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className={cn(
-              "h-2 w-2 rounded-full flex-shrink-0 mt-0.5",
-              row.severity === "high" ? "bg-alert-fg" : row.severity === "medium" ? "bg-amber-500" : "bg-zinc-400",
-            )} />
-            <span className="font-medium text-zinc-900 truncate">{row.label}</span>
-          </div>
-          <div className="text-12 text-ink-secondary mt-1 line-clamp-2">{row.summary}</div>
-          {detail && <div className="text-11 text-ink-secondary mt-1 truncate">{detail}</div>}
-          <div className="flex items-center gap-2 mt-2 flex-wrap">
-            <a href={row.href || "#"} className="text-11 font-medium uppercase text-zinc-900 underline-offset-2 hover:underline u-focus-ring">
-              Open source
-            </a>
-            {row.alertStatus && (
-              <span className="text-11 text-ink-secondary uppercase">{row.alertStatus}</span>
-            )}
-          </div>
-        </div>
-        <div className="flex-shrink-0 flex flex-col items-end gap-2">
-          {amount != null && (
-            <span className="u-nums text-12 text-zinc-900">
-              {fmtMoney(Number(amount) || 0)}
-            </span>
-          )}
-          {canAct && (
-            <div className="flex items-center gap-1 flex-wrap justify-end max-w-[220px]">
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 px-2"
-                disabled={Boolean(pendingAction)}
-                onClick={() => onAlertAction(row, "snooze")}
-              >
-                {isPending("snooze") ? "Snoozing" : "Snooze"}
-              </Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                className="h-7 px-2"
-                disabled={Boolean(pendingAction)}
-                onClick={() => onAlertAction(row, "dismiss")}
-              >
-                {isPending("dismiss") ? "Dismissing" : "Dismiss"}
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                className="h-7 px-2"
-                disabled={Boolean(pendingAction)}
-                onClick={() => onAlertAction(row, "resolve")}
-              >
-                {isPending("resolve") ? "Resolving" : "Resolve"}
-              </Button>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
   );
 }
 

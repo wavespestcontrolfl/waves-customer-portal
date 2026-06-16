@@ -144,6 +144,21 @@ app.use((req, res, next) => {
   return strictHelmet(req, res, next);
 });
 
+// Public, embeddable endpoints must be CORS-open to ANY origin and must answer
+// their own preflights BEFORE the credentialed allowlist below — the cors()
+// middleware terminates OPTIONS for non-allowlisted origins without an
+// Access-Control-Allow-Origin header, which would break third-party embeds.
+// (Approved public surface — see AGENTS.md.) Keep this above the global cors().
+app.use('/api/public/pest-forecast', (req, res, next) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Max-Age', '86400');
+  res.set('Vary', 'Origin');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -309,6 +324,7 @@ app.use('/api/admin/email-templates', require('./routes/admin-email-templates'))
 app.use('/api/admin/notification-events', require('./routes/admin-notification-events'));
 app.use('/api/admin/newsletter', require('./routes/admin-newsletter'));
 app.use('/api/public/newsletter', require('./routes/public-newsletter'));
+app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
@@ -317,6 +333,7 @@ app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
+app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // Twilio webhook signature validation. Runs before BOTH Twilio routers
@@ -398,6 +415,7 @@ app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/integrations', require('./routes/admin-integrations'));
 app.use('/api/integrations/backlink-worker', require('./routes/integrations-backlink-worker'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
+app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));

@@ -21,7 +21,7 @@ const config = require('../config');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
+const { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, isValidProjectType, getProjectType } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
@@ -271,7 +271,7 @@ function parseAiJsonObject(text) {
 }
 
 function normalizeWdoIntelligenceResult(raw, fallbackAddress, options = {}) {
-  const { hasPreviousTreatmentContext = false } = options;
+  const { hasPreviousTreatmentContext = false, propertyProfile = null } = options;
   const suggested = raw?.suggestedFindings || raw?.findings || {};
   const previousTreatment = cleanOneLine(suggested.previous_treatment_evidence || '', 20);
   const normalizedPreviousTreatment = hasPreviousTreatmentContext
@@ -282,6 +282,7 @@ function normalizeWdoIntelligenceResult(raw, fallbackAddress, options = {}) {
     suggestedFindings: {
       property_address: cleanOneLine(fallbackAddress, 500),
       structures_inspected: cleanMultiline(suggested.structures_inspected, 900),
+      structure_type: normalizeWdoConstructionSelection(suggested.structure_type || suggested.structures_inspected, propertyProfile),
       inspection_scope: cleanMultiline(suggested.inspection_scope, 900),
       previous_treatment_evidence: normalizedPreviousTreatment,
       previous_treatment_notes: hasPreviousTreatmentContext
@@ -298,6 +299,38 @@ function normalizeWdoIntelligenceResult(raw, fallbackAddress, options = {}) {
   };
 }
 
+function normalizeWdoConstructionSelection(value, propertyProfile = null) {
+  const text = cleanOneLine(value, 160);
+  const profileFacts = propertyProfile?.facts || propertyProfile || {};
+  const factCandidates = [
+    profileFacts.constructionMaterial,
+    profileFacts.construction_material,
+    profileFacts.structureType,
+    profileFacts.structure_type,
+    profileFacts.propertyType,
+    profileFacts.property_type,
+  ].map((item) => cleanOneLine(item, 160)).filter(Boolean);
+
+  const mapCandidate = (candidate) => {
+    if (WDO_CONSTRUCTION_OPTIONS.includes(candidate)) return candidate;
+    const lower = candidate.toLowerCase();
+    if (/\b(cmu|cbs|cb|concrete\s+masonry|masonry\s+unit|masonry|block|concrete\s+block|brick)\b/.test(lower)) {
+      return 'CMU / Concrete Masonry Unit';
+    }
+    if (/\b(manufactured|mobile|modular)\b/.test(lower)) return 'Manufactured / Mobile Home';
+    if (/\b(metal|steel|aluminum)\b/.test(lower)) return 'Metal Frame';
+    if (/(^|[\W_])wood(?:en)?([\W_]|$)|(^|[\W_])wood[_\s-]*frame([\W_]|$)|^frame$/.test(lower)) return 'Wood Frame';
+    return '';
+  };
+
+  for (const candidate of factCandidates) {
+    const mapped = mapCandidate(candidate);
+    if (mapped) return mapped;
+  }
+
+  return '';
+}
+
 function buildWdoIntelligencePrompt({ customer, propertyAddress, currentFindings, propertyProfile, hasPreviousTreatmentPhoto }) {
   const customerName = [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || '[not provided]';
   const existingLines = Object.entries(currentFindings || {})
@@ -312,17 +345,19 @@ Return JSON only. Do not write report prose. Be conservative and do not invent a
 Prefill only these fields:
 - property_address
 - structures_inspected
+- structure_type
 - inspection_scope
 - previous_treatment_evidence ("Yes" or "No" only; leave blank if not supported)
 - previous_treatment_notes
 
 Rules:
 1. property_address should use the exact selected customer property address when available.
-2. structures_inspected should describe the primary residential structure from the home facts. Mention an attached garage only if it is part of a typical main home description or supported by the facts. Do not mention detached buildings unless clearly supported.
-3. inspection_scope should be a defensible WDO scope for visible and readily accessible areas. Include interior, garage, attic access, exterior perimeter, and accessible structural components when reasonable. Mention crawlspace only if the property facts indicate one.
-4. Previous treatment is photo-grounded. If a prior-treatment photo is provided, look for visible treatment stickers/notices, drill holes, bait stations, patching, trench/rod marks, old treatment tags, or other visible treatment indicators. Use cautious language such as "photo appears to show" when the evidence is not definitive.
-5. If no prior-treatment photo is provided and the existing fields do not mention prior treatment, leave previous_treatment_evidence and previous_treatment_notes blank. Do not default to "No" just because no photo was uploaded.
-6. Do not fill FDACS finding, live WDO, WDO evidence, damage, treatment performed, pesticide, or treatment method.
+2. structures_inspected should list the structures on the property that are being inspected, such as main home, attached garage, detached garage, shed, or addition. Do not mention detached buildings unless clearly supported.
+3. structure_type must be exactly one of these dropdown values when supported by property facts: ${WDO_CONSTRUCTION_OPTIONS.join(', ')}. Leave blank if the construction type is not supported by the facts.
+4. inspection_scope should be a defensible WDO scope for visible and readily accessible areas. Include interior, garage, attic access, exterior perimeter, and accessible structural components when reasonable. Mention crawlspace only if the property facts indicate one.
+5. Previous treatment is photo-grounded. If a prior-treatment photo is provided, look for visible treatment stickers/notices, drill holes, bait stations, patching, trench/rod marks, old treatment tags, or other visible treatment indicators. Use cautious language such as "photo appears to show" when the evidence is not definitive.
+6. If no prior-treatment photo is provided and the existing fields do not mention prior treatment, leave previous_treatment_evidence and previous_treatment_notes blank. Do not default to "No" just because no photo was uploaded.
+7. Do not fill FDACS finding, live WDO, WDO evidence, damage, treatment performed, pesticide, or treatment method.
 
 Selected customer: ${customerName}
 Property address: ${propertyAddress || '[not provided]'}
@@ -339,7 +374,8 @@ Respond with exactly this JSON shape:
 {
   "suggestedFindings": {
     "property_address": "<address or blank>",
-    "structures_inspected": "<short field text or blank>",
+    "structures_inspected": "<structure list text or blank>",
+    "structure_type": "${WDO_CONSTRUCTION_OPTIONS.join('|')}|",
     "inspection_scope": "<short field text or blank>",
     "previous_treatment_evidence": "Yes|No|",
     "previous_treatment_notes": "<short field text or blank>"
@@ -404,6 +440,7 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
     hasPreviousTreatmentContext: Boolean(previousTreatmentPhoto)
       || hasMeaningfulValue(currentFindings.previous_treatment_evidence)
       || hasMeaningfulValue(currentFindings.previous_treatment_notes),
+    propertyProfile,
   });
   return {
     ...normalized,

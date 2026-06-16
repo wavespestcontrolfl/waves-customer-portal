@@ -10,7 +10,7 @@ const { projectReportPathForProject } = require('./project-report-links');
 const { createAlertOnce } = require('./dispatch-alerts');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
-const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped']);
+const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -72,7 +72,7 @@ async function hasActiveRecurringSchedule(customerId, knex = db) {
 
   const row = await knex('scheduled_services')
     .where({ customer_id: customerId })
-    .whereNotIn('status', ['cancelled', 'completed', 'skipped'])
+    .whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show'])
     .where(function recurringOnly() {
       if (cols.is_recurring) this.orWhere({ is_recurring: true });
       if (cols.recurring_parent_id) this.orWhereNotNull('recurring_parent_id');

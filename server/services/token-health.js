@@ -32,6 +32,21 @@ async function getStoredGbpRefreshToken(locationKey) {
   }
 }
 
+async function fetchGraph(path, token) {
+  const separator = path.includes('?') ? '&' : '?';
+  const res = await fetch(`https://graph.facebook.com/v25.0${path}${separator}access_token=${encodeURIComponent(token)}`);
+  const data = await res.json();
+  return { res, data };
+}
+
+function graphErrorStatus(errorCode) {
+  return (errorCode === 190 || errorCode === 463) ? 'expired' : 'error';
+}
+
+function graphErrorMessage(data, fallbackStatus) {
+  return data?.error?.message || `HTTP ${fallbackStatus}`;
+}
+
 // ── Helper: upsert result into token_credentials ──
 async function upsertResult({ platform, tokenType, status, lastError, expiresAt, envVarName }) {
   try {
@@ -63,26 +78,126 @@ async function checkFacebook() {
   const platform = 'facebook';
   const envVarName = 'FACEBOOK_ACCESS_TOKEN';
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
+  const pageId = process.env.FACEBOOK_PAGE_ID;
 
-  if (!token) {
-    const result = { platform, status: 'not_configured', lastError: 'FACEBOOK_ACCESS_TOKEN not set', expiresAt: null };
+  if (!token || !pageId) {
+    const missing = [];
+    if (!token) missing.push('FACEBOOK_ACCESS_TOKEN');
+    if (!pageId) missing.push('FACEBOOK_PAGE_ID');
+    const result = { platform, status: 'not_configured', lastError: `Missing: ${missing.join(', ')}`, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v25.0/me?access_token=${token}`);
-    const data = await res.json();
+    const { res, data } = await fetchGraph(`/${pageId}?fields=id,name,instagram_business_account{id,username}`, token);
 
-    if (res.ok && !data.error) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+    if (res.ok && !data.error && data.id === pageId) {
+      const linkedIgId = data.instagram_business_account?.id || null;
+      const configuredIg = process.env.INSTAGRAM_ACCOUNT_ID;
+      // If an IG account is configured, the Page must actually link to THAT
+      // account — otherwise FB and IG posts would target different assets while
+      // the UI still reads "healthy".
+      if (configuredIg && linkedIgId !== configuredIg) {
+        const result = {
+          platform,
+          status: 'error',
+          lastError: linkedIgId
+            ? `Page's linked Instagram (${linkedIgId}) does not match INSTAGRAM_ACCOUNT_ID (${configuredIg})`
+            : `Page has no linked Instagram account, but INSTAGRAM_ACCOUNT_ID is set (${configuredIg})`,
+          expiresAt: null,
+          details: {
+            pageId: data.id,
+            pageName: data.name || null,
+            linkedInstagramAccountId: linkedIgId,
+            linkedInstagramUsername: data.instagram_business_account?.username || null,
+            checks: { pageResolved: true, pageMatchesConfig: true, instagramLinkMatches: false },
+          },
+        };
+        await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+        return result;
+      }
+      // A token can READ the Page yet lack publish rights, in which case every
+      // postToFacebook (/photos, /feed) fails while the strip shows green.
+      //
+      // We previously probed this via the Page node's `tasks` field, but `tasks`
+      // is NOT a valid field on a Page node — it only exists on the
+      // `/me/accounts` edge. Requesting it made the ENTIRE Page call fail with
+      // `(#100) Tried accessing nonexisting field (tasks) on node type (Page)`,
+      // which tripped the error branch below and false-flagged a working token.
+      //
+      // Instead introspect the token's granted scopes via debug_token (the same
+      // token-introspects-itself pattern used in knowledge-base.js) and require
+      // `pages_manage_posts`. Only treat an EXPLICIT absence as an error — if
+      // the scopes can't be read, leave the capability unknown rather than
+      // re-introducing a false alarm.
+      let canCreateContent = null;
+      try {
+        const { data: dbg } = await fetchGraph(`/debug_token?input_token=${encodeURIComponent(token)}`, token);
+        const scopes = Array.isArray(dbg?.data?.scopes) ? dbg.data.scopes : [];
+        const granular = Array.isArray(dbg?.data?.granular_scopes) ? dbg.data.granular_scopes : [];
+        // FB expresses a granted permission in `scopes` (flat) and/or
+        // `granular_scopes` (per-resource). When a granular entry exists for
+        // pages_manage_posts its `target_ids` are authoritative: the permission
+        // applies only to those Pages (no target_ids = all Pages). A flat-only
+        // grant with no granular entry is a broad grant. Only render a verdict
+        // when introspection actually returned scope data — otherwise leave the
+        // capability unknown rather than false-flagging.
+        const granularPublish = granular.find((g) => g && g.scope === 'pages_manage_posts');
+        if (granularPublish) {
+          const targets = Array.isArray(granularPublish.target_ids) ? granularPublish.target_ids.map(String) : null;
+          canCreateContent = !targets || targets.includes(String(pageId));
+        } else if (scopes.length || granular.length) {
+          canCreateContent = scopes.includes('pages_manage_posts');
+        }
+      } catch {
+        // network/parse failure — leave capability unknown, never false-flag
+      }
+      if (canCreateContent === false) {
+        const result = {
+          platform,
+          status: 'error',
+          lastError: 'Facebook token can read the Page but lacks publish rights (no pages_manage_posts scope) — Page posts will fail',
+          expiresAt: null,
+          details: {
+            pageId: data.id,
+            pageName: data.name || null,
+            linkedInstagramAccountId: linkedIgId,
+            linkedInstagramUsername: data.instagram_business_account?.username || null,
+            checks: { pageResolved: true, pageMatchesConfig: true, instagramLinkMatches: configuredIg ? true : null, canCreateContent: false },
+          },
+        };
+        await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+        return result;
+      }
+      const result = {
+        platform,
+        status: 'healthy',
+        lastError: null,
+        expiresAt: null,
+        details: {
+          pageId: data.id,
+          pageName: data.name || null,
+          linkedInstagramAccountId: linkedIgId,
+          linkedInstagramUsername: data.instagram_business_account?.username || null,
+          checks: {
+            pageResolved: true,
+            pageMatchesConfig: true,
+            instagramLinkMatches: configuredIg ? true : null,
+            canCreateContent,
+          },
+        },
+      };
       await upsertResult({ ...result, tokenType: 'oauth', envVarName });
       return result;
     }
 
     const errorCode = data.error?.code;
-    const status = (errorCode === 190 || errorCode === 463) ? 'expired' : 'error';
-    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    const status = graphErrorStatus(errorCode);
+    const lastError = data.id && data.id !== pageId
+      ? `FACEBOOK_ACCESS_TOKEN resolved page ${data.id}, expected ${pageId}`
+      : graphErrorMessage(data, res.status);
+    const result = { platform, status, lastError, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   } catch (err) {
@@ -107,18 +222,41 @@ async function checkInstagram() {
   }
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v25.0/${accountId}?access_token=${token}`);
-    const data = await res.json();
-
-    if (res.ok && !data.error) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+    const account = await fetchGraph(`/${accountId}?fields=id,username,name`, token);
+    if (!account.res.ok || account.data.error) {
+      const errorCode = account.data.error?.code;
+      const status = graphErrorStatus(errorCode);
+      const result = { platform, status, lastError: graphErrorMessage(account.data, account.res.status), expiresAt: null };
       await upsertResult({ ...result, tokenType: 'oauth', envVarName: 'INSTAGRAM_ACCOUNT_ID' });
       return result;
     }
 
-    const errorCode = data.error?.code;
-    const status = (errorCode === 190 || errorCode === 463) ? 'expired' : 'error';
-    const result = { platform, status, lastError: data.error?.message || `HTTP ${res.status}`, expiresAt: null };
+    const limit = await fetchGraph(`/${accountId}/content_publishing_limit`, token);
+    if (!limit.res.ok || limit.data.error) {
+      const errorCode = limit.data.error?.code;
+      const status = graphErrorStatus(errorCode);
+      const result = { platform, status, lastError: graphErrorMessage(limit.data, limit.res.status), expiresAt: null };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName: 'INSTAGRAM_ACCOUNT_ID' });
+      return result;
+    }
+
+    const quotaUsage = Array.isArray(limit.data.data) ? limit.data.data[0]?.quota_usage : null;
+    const result = {
+      platform,
+      status: 'healthy',
+      lastError: null,
+      expiresAt: null,
+      details: {
+        accountId: account.data.id,
+        username: account.data.username || null,
+        name: account.data.name || null,
+        quotaUsage: quotaUsage ?? null,
+        checks: {
+          accountResolved: true,
+          contentPublishingAllowed: true,
+        },
+      },
+    };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName: 'INSTAGRAM_ACCOUNT_ID' });
     return result;
   } catch (err) {

@@ -5815,6 +5815,7 @@ function normalizeProductArea(product = {}, serviceType = "") {
     ...product,
     applicationMethod,
     areaUnit: areaRequirement?.unit || product.areaUnit || "",
+    targets: Array.isArray(product.targets) ? product.targets : [],
   };
 }
 
@@ -7670,8 +7671,17 @@ export function CompletionPanel({
       (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
     )?.label || "";
     const payload = {
+      scheduledServiceId: service.id || null,
       customerName: service.customerName,
       serviceType: service.serviceType,
+      serviceLine: service.serviceLine || service.service_line || undefined,
+      products: selectedProducts.map((p) => ({
+        productId: p.productId || null,
+        name: p.name,
+        rate: p.rate || null,
+        rateUnit: p.rateUnit || null,
+        targets: Array.isArray(p.targets) ? p.targets : [],
+      })),
       technicianName: service.technicianName || "Waves Tech",
       serviceDate: new Date().toLocaleDateString("en-US", {
         month: "long", day: "numeric", year: "numeric",
@@ -7765,6 +7775,7 @@ export function CompletionPanel({
         applicationArea: "",
         areaValue: "",
         areaUnit: areaRequirement?.unit || "",
+        targets: [],
       },
     ]);
     setProductSearch("");
@@ -8216,6 +8227,7 @@ export function CompletionPanel({
             (areasServiced.length === 1 ? areasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
+          targets: Array.isArray(p.targets) ? p.targets : [],
         })),
         lawnProtocolCompletion:
           calibrationRequired && treatmentPlanStructuredProtocol
@@ -10279,6 +10291,26 @@ export function CompletionPanel({
                       >
                         ×
                       </button>{" "}
+                      <ProductTargetsPicker
+                        idSuffix={sp.productId}
+                        targets={sp.targets}
+                        onChange={(next) =>
+                          updateProduct(sp.productId, "targets", next)
+                        }
+                        theme={{
+                          labelColor: M.ink3,
+                          chipBg: M.muted,
+                          chipText: M.ink,
+                          chipBorder: M.hairline,
+                          inputStyle: {
+                            ...mInput,
+                            height: 40,
+                            padding: "0 12px",
+                            fontSize: 14,
+                            width: "auto",
+                          },
+                        }}
+                      />
                     </div>
                   ))}
                 </div>
@@ -12327,6 +12359,24 @@ export function CompletionPanel({
                   >
                     &times;
                   </button>{" "}
+                  <ProductTargetsPicker
+                    idSuffix={sp.productId}
+                    targets={sp.targets}
+                    onChange={(next) =>
+                      updateProduct(sp.productId, "targets", next)
+                    }
+                    theme={{
+                      labelColor: D.muted,
+                      chipBg: D.bg,
+                      chipText: D.text,
+                      chipBorder: D.border,
+                      inputStyle: {
+                        ...inputStyle,
+                        marginBottom: 0,
+                        width: "auto",
+                      },
+                    }}
+                  />
                 </div>
               ))}
             </div>
@@ -12891,6 +12941,154 @@ const checkboxRow = {
   cursor: "pointer",
   marginBottom: 8,
 };
+
+// Quick-pick suggestions for the per-product pest-target picker. The field is
+// free-text (string[]), so this list is convenience only — techs can type any
+// target. Common SWFL household/lawn pests.
+const PEST_TARGET_SUGGESTIONS = [
+  "Ghost ants",
+  "Big-headed ants",
+  "White-footed ants",
+  "Carpenter ants",
+  "Fire ants",
+  "Argentine ants",
+  "American roaches",
+  "German roaches",
+  "Silverfish",
+  "Spiders",
+  "Earwigs",
+  "Millipedes",
+  "Centipedes",
+  "Springtails",
+  "Booklice",
+  "Crickets",
+  "Wasps / hornets",
+  "Fleas",
+  "Ticks",
+  "Pantry pests",
+  "Rodents",
+  "Mosquitoes",
+  "Scorpions",
+];
+
+// Per-product pest-target multiselect: free-text chips with datalist
+// suggestions. Stored on the selected product as `targets` (string[]); the
+// completion route persists it to service_products.targets. Optional.
+function ProductTargetsPicker({ targets, onChange, idSuffix, theme }) {
+  const [draft, setDraft] = useState("");
+  const list = Array.isArray(targets) ? targets : [];
+  const datalistId = `pest-targets-${idSuffix}`;
+  function commit(raw) {
+    const cleaned = String(raw || "")
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (!cleaned.length) {
+      setDraft("");
+      return;
+    }
+    const next = [...list];
+    for (const value of cleaned) {
+      if (!next.some((t) => t.toLowerCase() === value.toLowerCase())) {
+        next.push(value);
+      }
+    }
+    if (next.length !== list.length) onChange(next);
+    setDraft("");
+  }
+  function remove(value) {
+    onChange(list.filter((t) => t !== value));
+  }
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: 6,
+        flex: "1 1 100%",
+        minWidth: 0,
+      }}
+    >
+      <span style={{ fontSize: 12, fontWeight: 600, color: theme.labelColor }}>
+        Targets
+      </span>
+      {list.map((t) => (
+        <span
+          key={t}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            background: theme.chipBg,
+            border: `1px solid ${theme.chipBorder}`,
+            color: theme.chipText,
+            borderRadius: 999,
+            padding: "2px 4px 2px 10px",
+            fontSize: 12,
+          }}
+        >
+          {t}
+          <button
+            type="button"
+            onClick={() => remove(t)}
+            aria-label={`Remove ${t}`}
+            style={{
+              background: "none",
+              border: "none",
+              color: theme.chipText,
+              cursor: "pointer",
+              fontSize: 14,
+              lineHeight: 1,
+              padding: "0 2px",
+            }}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        list={datalistId}
+        value={draft}
+        placeholder={list.length ? "Add target…" : "Add pest target…"}
+        onChange={(e) => {
+          const value = e.target.value;
+          if (value.includes(",")) {
+            commit(value);
+            return;
+          }
+          // Auto-commit when the value exactly matches a suggestion (datalist
+          // pick), so selecting works without relying on Enter/blur on mobile.
+          if (
+            PEST_TARGET_SUGGESTIONS.some(
+              (s) => s.toLowerCase() === value.trim().toLowerCase(),
+            )
+          ) {
+            commit(value);
+            return;
+          }
+          setDraft(value);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit(draft);
+          } else if (e.key === "Backspace" && !draft && list.length) {
+            remove(list[list.length - 1]);
+          }
+        }}
+        onBlur={() => commit(draft)}
+        style={{ ...theme.inputStyle, flex: "1 1 140px", minWidth: 120 }}
+      />
+      <datalist id={datalistId}>
+        {PEST_TARGET_SUGGESTIONS.map((p) => (
+          <option key={p} value={p} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
 
 /* ── Protocol Reference Tab ────────────────────────────── */
 

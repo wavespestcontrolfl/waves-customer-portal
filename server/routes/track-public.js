@@ -281,6 +281,7 @@ router.get('/:token', async (req, res, next) => {
         's.window_start',
         's.window_end',
         's.service_type',
+        's.status',
         's.track_state',
         's.en_route_at',
         's.arrived_at',
@@ -323,8 +324,14 @@ router.get('/:token', async (req, res, next) => {
       ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url)
       : null;
 
+    // A no-show is an operational-status flip (admin-dispatch) that does
+    // not move the track_state ENUM, so derive the customer-facing state
+    // from status when it's 'no_show'. Everything else maps 1:1 from the
+    // canonical track_state machine.
+    const customerState = row.status === 'no_show' ? 'no_show' : row.track_state;
+
     const response = {
-      state: row.track_state,
+      state: customerState,
       tech: row.technician_id
         ? {
             firstName: firstNameOf(row.tech_name),
@@ -358,16 +365,21 @@ router.get('/:token', async (req, res, next) => {
           ? (row.service_description || null)
           : null,
       },
-      vehicle: row.track_state === 'en_route' ? await buildVehicle(row) : null,
-      summary: row.track_state === 'complete' ? await buildSummary(row) : null,
-      cancellation: row.track_state === 'cancelled'
+      // Gate live-vehicle exposure + the 30s poll on the customer-facing
+      // state, not raw track_state: a no-show on an already-en_route job
+      // leaves track_state='en_route', and keying off it here would keep
+      // streaming fresh tech GPS coords and polling until token expiry
+      // even though the customer is shown a terminal missed-visit card.
+      vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
+      summary: customerState === 'complete' ? await buildSummary(row) : null,
+      cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
       prepToken: null,
       meta: {
-        pollIntervalSeconds: row.track_state === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
+        pollIntervalSeconds: customerState === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
       },
     };
 
