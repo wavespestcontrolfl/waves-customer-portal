@@ -633,7 +633,9 @@ const TwilioService = {
     const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
     const { getAppointmentContacts, isServiceContactRole } = require("./customer-contact");
     const contacts = getAppointmentContacts(customer, prefs);
-    if (!contacts.length) return;
+    // No early return on an empty contact list: a customer with an email but no
+    // appointment phone contacts should still get the en-route notice by email
+    // (handled by the fallback below).
 
     const origin = publicPortalUrl();
     const longTrackUrl = trackToken ? `${origin}/track/${trackToken}` : null;
@@ -705,9 +707,9 @@ const TwilioService = {
     const delivered = results.some((r) => r?.sent);
 
     // None of the contacts could receive the en-route text (landline / no mobile /
-    // blocked) — send the en-route notice by email instead so the customer still
-    // knows the tech is on the way.
-    if (!delivered && (attemptedSms || landlineSkipped)) {
+    // blocked), or there were no phone contacts at all — send the en-route notice
+    // by email instead so the customer still knows the tech is on the way.
+    if (!delivered && (attemptedSms || landlineSkipped || contacts.length === 0)) {
       try {
         const AppointmentEmail = require("./appointment-email");
         await AppointmentEmail.sendTechEnRouteEmail({

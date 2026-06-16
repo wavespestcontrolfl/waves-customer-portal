@@ -16,12 +16,13 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
 const NotificationService = require('../services/notification-service');
+const { getAppointmentContacts } = require('../services/customer-contact');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 // Minimal knex-style chainable query mock.
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotNull', 'whereNotExists', 'orderBy', 'select'].forEach((m) => {
+  ['where', 'whereIn', 'whereNotNull', 'whereNotExists', 'whereRaw', 'orderBy', 'select'].forEach((m) => {
     q[m] = jest.fn(() => q);
   });
   q.update = jest.fn(async () => 1);
@@ -104,6 +105,96 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     expect(AppointmentEmail.sendTechEnRouteEmail).not.toHaveBeenCalled();
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('service-contact bounce when primary was NOT a reachable recipient: still emails', async () => {
+    // Customer primary is +1941..1234; the only texted contact was the service
+    // contact +1941..7777 (notify-primary off), which bounced. Primary never got it.
+    getAppointmentContacts.mockReturnValueOnce([{ phone: '+19415557777', role: 'service_contact' }]);
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_confirmation',
+        customer_id: 'c4',
+        metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss4' },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c4', phone: '+19415551234', line_type: null } });
+    const prefsChain = chain({ first: { appointment_notify_primary: false } });
+    const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain],
+      notification_prefs: [prefsChain],
+      appointment_reminders: [reminderChain],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_test4', status: 'undelivered', errorCode: '30006', to: '+19415557777',
+    });
+
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('service-contact bounce when primary WAS a reachable recipient: skips (no duplicate email)', async () => {
+    getAppointmentContacts.mockReturnValueOnce([
+      { phone: '+19415551234', role: 'primary' },
+      { phone: '+19415557777', role: 'service_contact' },
+    ]);
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_confirmation',
+        customer_id: 'c5',
+        metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss5' },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c5', phone: '+19415551234', line_type: null } });
+    const prefsChain = chain({ first: { appointment_notify_primary: true } });
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain],
+      notification_prefs: [prefsChain],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_test5', status: 'undelivered', errorCode: '30006', to: '+19415557777',
+    });
+
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('email fallback blocked (suppressed) raises the no-channel admin alert', async () => {
+    AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValueOnce({ ok: false, blocked: true, reason: 'suppressed' });
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_confirmation',
+        customer_id: 'c6',
+        metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss6' },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c6', phone: '+19415551234', line_type: null } });
+    const custUpdateChain = chain({});
+    const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
+    const notifExistsChain = chain({ first: null });
+    const custNameChain = chain({ first: { id: 'c6', first_name: 'Pat', last_name: 'Doe' } });
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain, custUpdateChain, custNameChain],
+      appointment_reminders: [reminderChain],
+      notifications: [notifExistsChain],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_test6', status: 'undelivered', errorCode: '30006', to: '+19415551234',
+    });
+
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('non-appointment message is ignored (no landline change, no email)', async () => {

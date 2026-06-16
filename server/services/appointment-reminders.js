@@ -105,7 +105,10 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
       logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
       return true;
     }
-    if (res?.skipped && res.reason === 'missing_email') {
+    if ((res?.skipped && res.reason === 'missing_email') || res?.blocked) {
+      // No usable channel: the SMS failed and email is either unavailable (no
+      // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
+      // which block even transactional sends). Alert a human to reach the customer.
       await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
     } else {
       logger.warn(`[appt-remind] ${kind} email fallback not sent for customer ${customerId}: ${res?.reason || res?.error || 'unknown'}`);
@@ -887,14 +890,25 @@ const AppointmentReminders = {
       const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
       if (!customer) return;
 
-      // Only act on the customer's PRIMARY phone. A bounce on a service-contact
-      // number does not mean the customer missed it on their own phone, and the
-      // line_type cache is primary-only. If there is a primary phone on file and
-      // this bounce was for a different number, the primary channel governs —
-      // skip (its own success or its own bounce decides the fallback).
+      // A bounce on a service-contact number does not always mean the customer
+      // missed the notice on their own phone — but getAppointmentContacts OMITS
+      // the primary unless appointment_notify_primary is set, so the primary may
+      // never have been texted at all. Skip a non-primary bounce only when the
+      // primary phone was itself a reachable SMS recipient (in the contact list AND
+      // not a known landline) — i.e. the customer already got it (or the primary's
+      // own bounce callback will drive the fallback). When the primary was never a
+      // reachable recipient, this service-contact bounce is the only delivery
+      // signal and must trigger the fallback. The primary's own bounce
+      // (to === primary) always falls through.
       const primaryDigits = lastTenDigits(customer.phone);
       const targetDigits = lastTenDigits(to);
-      if (primaryDigits && targetDigits && primaryDigits !== targetDigits) return;
+      if (primaryDigits && targetDigits && primaryDigits !== targetDigits) {
+        const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+        const contacts = getAppointmentContacts(customer, prefsRow || {});
+        const primaryWasReachableRecipient = customer.line_type !== 'landline'
+          && contacts.some((c) => lastTenDigits(c.phone) === primaryDigits);
+        if (primaryWasReachableRecipient) return;
+      }
 
       // Carrier 30006 = "landline or unreachable carrier" — learn it (primary
       // phone only) so future appointment texts skip SMS and go straight to email
