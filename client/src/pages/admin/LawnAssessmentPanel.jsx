@@ -133,7 +133,6 @@ const TURF_PROFILE_OPTIONS = {
   ],
   sun_exposure: ["full_sun", "partial_shade", "heavy_shade"],
   irrigation_type: ["in_ground", "manual", "none", "mixed"],
-  irrigation_status: ["good", "dry", "wet", "unknown"],
 };
 
 const EMPTY_TURF_PROFILE = {
@@ -143,7 +142,6 @@ const EMPTY_TURF_PROFILE = {
   sun_exposure: "",
   lawn_sqft: "",
   irrigation_type: "",
-  irrigation_status: "",
   irrigation_inches_per_week: "",
   municipality: "",
   county: "",
@@ -360,7 +358,6 @@ export default function LawnAssessmentPanel() {
   // calibration pipeline actually meaningful.
   const [techScores, setTechScores] = useState(null);
   const [protocolChecks, setProtocolChecks] = useState({
-    irrigation_status: "",
     irrigation_inches_per_week: "",
     protocol_field_notes: "",
   });
@@ -463,7 +460,6 @@ export default function LawnAssessmentPanel() {
       const initialScores = r.adjustedScores || r.displayScores;
       setTechScores(initialScores ? { ...initialScores } : null);
       setProtocolChecks({
-        irrigation_status: "",
         irrigation_inches_per_week: "",
         protocol_field_notes: "",
       });
@@ -512,7 +508,6 @@ export default function LawnAssessmentPanel() {
     setResult(null);
     setTechScores(null);
     setProtocolChecks({
-      irrigation_status: "",
       irrigation_inches_per_week: "",
       protocol_field_notes: "",
     });
@@ -1237,31 +1232,10 @@ export default function LawnAssessmentPanel() {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                  gridTemplateColumns: "1fr",
                   gap: 10,
                 }}
               >
-                <div>
-                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                    Status
-                  </div>
-                  <select
-                    value={protocolChecks.irrigation_status || ""}
-                    onChange={(e) =>
-                      setProtocolChecks((prev) => ({
-                        ...prev,
-                        irrigation_status: e.target.value,
-                      }))
-                    }
-                    style={{ ...inputStyle, marginBottom: 0 }}
-                  >
-                    <option value="">Not checked</option>
-                    <option value="good">Adequate</option>
-                    <option value="dry">Too dry</option>
-                    <option value="wet">Too wet</option>
-                    <option value="unknown">Unknown</option>
-                  </select>
-                </div>
                 <div>
                   <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
                     Inches per week
@@ -1558,11 +1532,6 @@ export default function LawnAssessmentPanel() {
                   "irrigation_type",
                   "Irrigation",
                   TURF_PROFILE_OPTIONS.irrigation_type,
-                ],
-                [
-                  "irrigation_status",
-                  "Irrigation status",
-                  TURF_PROFILE_OPTIONS.irrigation_status,
                 ],
               ].map(([key, label, opts]) => (
                 <div key={key} style={{ marginBottom: 12 }}>
