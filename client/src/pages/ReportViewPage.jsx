@@ -102,6 +102,22 @@ export function formatDate(value) {
   });
 }
 
+// Compact axis label ("Jun 10") for the lawn trend chart. Uses the same robust
+// parse + report time zone as formatDate, so a full timestamp or Date value no
+// longer slips through and renders as "Invalid Date". Returns '' when the value
+// can't be parsed, letting the caller fall back to a visit-number label.
+export function formatShortDate(value) {
+  if (!value) return '';
+  const dateOnly = calendarDateFromDateOnlyValue(value);
+  const date = dateOnly || new Date(String(value));
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', {
+    timeZone: SERVICE_REPORT_TIME_ZONE,
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
 function formatMetric(metric) {
   if (metric.value == null || metric.value === '') return '—';
   if (metric.key === 'pressure_index') return formatPressureIndex(metric.value);
@@ -1053,7 +1069,8 @@ function lawnAssessmentBody(assessment = {}) {
   if (irrigationInches && profile?.irrigationStatus && profile.irrigationStatus !== 'unknown') {
     return `Irrigation was documented as ${formatEnumLabel(profile.irrigationStatus).toLowerCase()} at about ${irrigationInches}. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
   }
-  if (profile?.grassType) {
+  const rawGrass = String(profile?.grassType || '').toLowerCase().trim();
+  if (rawGrass && rawGrass !== 'unknown' && rawGrass !== 'mixed') {
     return `Assessment captured for ${formatEnumLabel(profile.grassType).toLowerCase()} turf. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
   }
   return 'Assessment scores reflect visible turf density, weed suppression, color health, fungus control, and thatch conditions documented during this lawn visit.';
@@ -1328,7 +1345,7 @@ function LawnTrendChart({ trend = [], summary }) {
             <circle cx={xFor(index)} cy={yFor(point.overallScore)} r="10" className="pressure-point-target" />
             <circle cx={xFor(index)} cy={yFor(point.overallScore)} r={index === points.length - 1 ? 4 : 3} className="lawn-health-point" />
             <text x={xFor(index)} y={height - 6} textAnchor="middle" className="chart-label">
-              {point.date ? new Date(`${point.date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : `V${index + 1}`}
+              {formatShortDate(point.date) || `V${index + 1}`}
             </text>
           </g>
         );
@@ -1348,7 +1365,13 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   const Root = embedded ? 'div' : 'section';
   const profile = assessment.turfProfile;
   const irrigationInches = formatIrrigationInches(profile?.irrigationInchesPerWeek);
-  const grassLabel = profile?.grassType ? formatEnumLabel(profile.grassType) : 'lawn';
+  // Only present a grass type the assessment is confident about. 'unknown'/'mixed'
+  // are AI fallbacks, not a detected species — surfacing them as fact ("Unknown",
+  // "for your Unknown") leaks the assumption to the customer, so they fall back to
+  // a generic "your lawn" / no chip. Real detections (St. Augustine, etc.) show.
+  const rawGrass = String(profile?.grassType || '').toLowerCase().trim();
+  const hasKnownGrass = !!rawGrass && rawGrass !== 'unknown' && rawGrass !== 'mixed';
+  const grassLabel = hasKnownGrass ? formatEnumLabel(profile.grassType) : 'lawn';
   // Over-watering evidence for the water-balance cross-link: the explicit vision
   // signal (mushrooms/standing water), or — for older assessments without it — a
   // low fungus-control score (moderate+ fungal activity) as a proxy.
@@ -1375,7 +1398,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
           {profile && (
             <div className="lawn-profile-line">
               {[
-                profile.grassType ? formatEnumLabel(profile.grassType) : null,
+                hasKnownGrass ? formatEnumLabel(profile.grassType) : null,
                 profile.lawnSqft ? `${Number(profile.lawnSqft).toLocaleString()} sq ft turf` : null,
                 profile.irrigationType ? `${formatEnumLabel(profile.irrigationType)} irrigation` : null,
                 profile.irrigationStatus ? `${formatEnumLabel(profile.irrigationStatus)} irrigation status` : null,
