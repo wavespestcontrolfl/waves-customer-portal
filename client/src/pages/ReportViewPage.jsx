@@ -7641,7 +7641,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
           {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {' '}This report is provided for your records.
-          {data.photoChain?.valid === true ? ' Photos hash-chained and tamper-evident.' : ''}
+          {/* Only claim tamper-evidence when at least one photo is displayed and
+              every displayed photo is part of the chain. Lawn turf photos
+              appended to the gallery are deliberately outside the service_photos
+              hash chain, and a chain over only a hidden photo (e.g. the gauge
+              shot filtered out of the display payload) must not over-claim. */}
+          {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
         <BrandFooter variant="document" />
       </main>

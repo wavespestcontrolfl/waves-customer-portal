@@ -6630,6 +6630,12 @@ export function CompletionPanel({
   // (soil readings, treatment plan/calibration, tank cleanout) never apply.
   const isLawn =
     !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
+  // Lawn visits replace the Service Photos uploader with the turf photos from
+  // the Lawn Assessment block — but only for a PURE lawn visit. A combined
+  // visit (e.g. lawn + Tree & Shrub) carries a companion findings schema whose
+  // compliance gate still requires its own completion photos (T&S needs >=2),
+  // so keep the uploader whenever any companion is present.
+  const hideServicePhotos = isLawn && companionSchemas.length === 0;
   const serviceTypeForArea = service?.serviceType || service?.service_type || "";
   const calibrationRequired = isLawn && !!service.waveguardTier;
   const currentAdminUser = (() => {
@@ -9808,8 +9814,11 @@ export function CompletionPanel({
                 {generating ? "Generating…" : "Generate AI report"}
               </button>
             )}
-            {/* Service photos */}
-            {!quickComplete && (
+            {/* Service photos — pure lawn visits capture turf photos in the
+                Lawn Assessment block above, which flow into the report gallery,
+                so this redundant second upload is hidden. Combined visits keep
+                it (companions have their own completion-photo gates). */}
+            {!quickComplete && !hideServicePhotos && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
                 <input
@@ -11901,8 +11910,11 @@ export function CompletionPanel({
                 : "Generate AI Service Report"}
             </button>
           )}
-          {/* Photo Upload — hidden in quick complete */}
-          {!quickComplete && (
+          {/* Photo Upload — hidden in quick complete. Pure lawn visits capture
+              turf photos in the Lawn Assessment block above (which flow into the
+              report gallery), so this redundant second upload is hidden.
+              Combined visits keep it (companions have their own photo gates). */}
+          {!quickComplete && !hideServicePhotos && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Service Photos</label>{" "}

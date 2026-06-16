@@ -2132,6 +2132,40 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       prevHashSha256: photo.prev_hash_sha256 || null,
       aiTags: parseJsonArray(photo.ai_tags),
     })));
+  // Lawn visits capture turf photos in the tech's Lawn Assessment block instead
+  // of a separate Service Photos upload. Surface those turf photos in the
+  // customer gallery so the single capture point feeds both the lawn scorecard
+  // and the report's photo gallery. Appended AFTER the service_photos hash chain
+  // is validated below so the tamper-evident chain stays over service_photos only.
+  if (serviceLine === 'lawn') {
+    const linkedAssessment = await loadLinkedLawnAssessment(service, knex);
+    if (linkedAssessment?.id) {
+      // customer_visible: true == passed the quality gate. Failed-quality
+      // photos are stored only for audit (customer_visible: false) and must
+      // never reach the customer's permanent report token.
+      const turfPhotos = await knex('lawn_assessment_photos')
+        .where({ assessment_id: linkedAssessment.id, customer_visible: true })
+        .orderBy('photo_order', 'asc')
+        .orderBy('taken_at', 'asc')
+        .catch(() => []);
+      const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
+        const url = await lawnPhotoUrl(photo);
+        if (!url) return null;
+        return {
+          id: `lawn-${photo.id}`,
+          url,
+          caption: photo.caption || photo.observations || '',
+          stateBadge: null,
+          zoneId: photo.zone_id || null,
+          capturedAt: photo.taken_at || photo.created_at,
+          hashSha256: null,
+          prevHashSha256: null,
+          aiTags: [],
+        };
+      }))).filter(Boolean);
+      if (turfGalleryItems.length) photoPayload.push(...turfGalleryItems);
+    }
+  }
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
