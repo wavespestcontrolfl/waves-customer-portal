@@ -121,6 +121,44 @@ describe('Ask Waves fallback — German roach questions', () => {
     expect(answer.toLowerCase()).toContain('breeding cycle');
   });
 
+  test('context builder exposes separately billed German Roach Cleanout rows in recurring mode', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 100,
+        annual_total: 1200,
+        onetime_total: 450,
+        show_one_time_option: false,
+      },
+      estData: {
+        result: {
+          recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 100 }] },
+        },
+      },
+      pricingBundle: {
+        anchorOneTimePrice: 450,
+        oneTimeBreakdown: {
+          total: 450,
+          items: [{ service: 'german_roach', label: 'German Roach Cleanout', amount: 450, detail: '3 visit program' }],
+        },
+        frequencies: [{ key: 'monthly', label: 'Monthly', monthly: 100, annual: 1200 }],
+      },
+      serviceMode: 'recurring',
+    });
+
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.oneTime?.items).toContainEqual(expect.objectContaining({
+      service: 'german_roach',
+      label: 'German Roach Cleanout',
+    }));
+
+    const answer = answerEstimateQuestionFallback('How do you get rid of German roaches?', context);
+    expect(answer.toLowerCase()).not.toContain('i do not see pest control');
+    expect(answer.toLowerCase()).toContain('german roaches');
+    expect(answer.toLowerCase()).toContain('breeding cycle');
+  });
+
   test('a non-roach Initial Pest Cleanout does NOT get treated as a German Roach Cleanout', () => {
     const pestCleanoutContext = {
       serviceMode: 'one_time',

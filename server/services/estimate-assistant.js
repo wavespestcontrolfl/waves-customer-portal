@@ -540,6 +540,11 @@ function buildEstimateAssistantContext({
   const firstName = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0]
     || cleanText(estimate.customerFirstName);
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
+  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(isGermanRoachCleanoutContextRow);
+  const exposeOneTimeContext = !quoteRequired
+    && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
+    && (hasOneTimeValue || oneTimeServices.length > 0);
+  const oneTimeContextAmount = Number.isFinite(oneTimeTotal) && oneTimeTotal > 0 ? oneTimeTotal : null;
   const invoiceMode = truthy(estimate.bill_by_invoice) || truthy(estimate.billByInvoice);
   const normalBillingAmountText = billingAmount ? `${fmtMoney(billingAmount)} / ${billingPeriod}` : null;
   const oneTimeBillingAmount = Number.isFinite(oneTimeTotal) && oneTimeTotal > 0 ? oneTimeTotal : null;
@@ -591,9 +596,9 @@ function buildEstimateAssistantContext({
     recurringServices: recurringServices.map(rowWithSummary),
     setupFee,
     firstVisitFees,
-    oneTime: !quoteRequired && oneTimeAvailable && Number.isFinite(oneTimeTotal) && oneTimeTotal > 0 ? {
-      amount: oneTimeTotal,
-      amountText: fmtMoney(oneTimeTotal),
+    oneTime: exposeOneTimeContext ? {
+      amount: oneTimeContextAmount,
+      amountText: oneTimeContextAmount ? fmtMoney(oneTimeContextAmount) : null,
       items: oneTimeServices.map(rowWithSummary),
     } : null,
     guarantees: {
