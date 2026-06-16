@@ -16,6 +16,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { scrubCustomerText } = require('../services/lawn-diagnostic-report');
+const { etParts } = require('../utils/datetime-et');
 
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
 
@@ -127,7 +128,9 @@ function serverSeasonalNote(createdAt) {
   if (!createdAt) return null;
   const d = new Date(createdAt);
   if (Number.isNaN(d.getTime())) return null;
-  return SWFL_SEASONAL_NOTES[swflSeasonForMonth(d.getMonth() + 1)] || null;
+  // ET month — the portal is America/New_York; getMonth() (UTC on Railway) would
+  // pick the wrong SWFL season for reports created near a month boundary.
+  return SWFL_SEASONAL_NOTES[swflSeasonForMonth(etParts(d).month)] || null;
 }
 
 /**
