@@ -35,12 +35,24 @@ describe('sms-guard outbound validation', () => {
       expect(result).toEqual({ ok: false, reason: 'stale-month:april' });
     });
 
-    test('allows an intentional past month on a manual operator send', () => {
+    test('allows an intentional past month on a human-authored send', () => {
+      const result = validateOutbound(APRIL_BODY, {
+        messageType: 'manual',
+        humanAuthored: true,
+        now: NOW,
+      });
+      expect(result).toEqual({ ok: true });
+    });
+
+    test("does NOT exempt the legacy 'manual' messageType on its own", () => {
+      // 'manual' is overloaded — automated senders (e.g. reschedule-sms.js)
+      // reuse it for rendered templates, so only the explicit humanAuthored
+      // flag may bypass the month check.
       const result = validateOutbound(APRIL_BODY, {
         messageType: 'manual',
         now: NOW,
       });
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: false, reason: 'stale-month:april' });
     });
 
     test('keeps the internal_alert month exemption', () => {
@@ -59,17 +71,17 @@ describe('sms-guard outbound validation', () => {
       expect(result).toEqual({ ok: false, reason: 'stale-month:april' });
     });
 
-    test('manual sends are still caught by broken-render and unsubbed-variable checks', () => {
+    test('human-authored sends are still caught by broken-render and unsubbed-variable checks', () => {
       expect(
         validateOutbound('Hi {first_name}, see you in April.', {
-          messageType: 'manual',
+          humanAuthored: true,
           now: NOW,
         }),
       ).toEqual({ ok: false, reason: 'unsubstituted-variable:{first_name}' });
 
       expect(
         validateOutbound('Hi undefined, see you in April.', {
-          messageType: 'manual',
+          humanAuthored: true,
           now: NOW,
         }),
       ).toEqual({ ok: false, reason: 'broken-render:undefined' });

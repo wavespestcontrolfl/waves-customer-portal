@@ -349,7 +349,10 @@ const TwilioService = {
         const guard =
           hasMedia && !String(body || "").trim()
             ? { ok: true }
-            : validateOutbound(body, { messageType: options.messageType });
+            : validateOutbound(body, {
+                messageType: options.messageType,
+                humanAuthored: options.humanAuthored === true,
+              });
         if (!guard.ok) {
           logger.warn(
             `[SMS-GUARD BLOCKED] to=${maskPhone(to)} reason=${guard.reason} messageType=${options.messageType || "n/a"} bodyLen=${body?.length || 0}`,

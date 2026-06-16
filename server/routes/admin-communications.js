@@ -352,6 +352,12 @@ router.post('/sms', async (req, res, next) => {
         mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
         allowMediaUrls: cleanMediaUrls.length > 0,
         media,
+        // Operator typed (or reviewed + sent) this body by hand in the Comms
+        // composer — exempt it from the stale-month guard so an intentional
+        // reference to a past visit ("Adam visited back in April") isn't
+        // rejected as a stale template render. Scoped to this human-compose
+        // route, never inferred from messageType. See services/sms-guard.js.
+        humanAuthored: true,
       },
     });
     // The reservation has done its job — the real provider row now exists (on
