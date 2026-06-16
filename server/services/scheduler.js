@@ -1186,6 +1186,13 @@ function initScheduledJobs() {
               scheduled_sms_log_id: msg.id,
               fromNumber: msg.from_phone || undefined,
               adminUserId: msg.admin_user_id || undefined,
+              // Forward the operator-authored provenance persisted by
+              // /schedule-sms so a hand-composed scheduled message with an
+              // intentional past-month reference clears the stale-month guard
+              // at dispatch, same as the immediate manual send. Only the
+              // explicit persisted flag exempts — automated scheduled rows
+              // never carry it. See services/sms-guard.js.
+              humanAuthored: claimMeta.human_authored === true,
               // Decision linkage rides into the provider-created sms_log row
               // so the nightly sweep can recover the claims if the process
               // dies between Twilio's accept and the resolution below.
