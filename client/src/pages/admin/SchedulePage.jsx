@@ -4954,7 +4954,6 @@ const EMPTY_LAWN_STRESS_FLAGS = Object.fromEntries(
 );
 
 const EMPTY_PROTOCOL_FIELD_CHECKS = {
-  irrigationStatus: "unknown",
   thatchMeasurementIn: "",
   chinchFloatTestDone: false,
   chinchCountPerSqft: "",
@@ -5044,7 +5043,6 @@ function parseProtocolFieldChecks(value) {
       : value || {};
   return {
     ...EMPTY_PROTOCOL_FIELD_CHECKS,
-    irrigationStatus: parsed.irrigationStatus || parsed.irrigation_status || "unknown",
     thatchMeasurementIn: parsed.thatchMeasurementIn ?? parsed.thatch_measurement_in ?? "",
     chinchFloatTestDone: !!(parsed.chinchFloatTestDone ?? parsed.chinch_float_test_done),
     chinchCountPerSqft: parsed.chinchCountPerSqft ?? parsed.chinch_count_per_sqft ?? "",
@@ -5237,7 +5235,6 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
           adjustedScores: techScores || result.adjustedScores || result.displayScores,
           stress_flags: stressFlags,
           protocol_field_checks: {
-            irrigationStatus: protocolFieldChecks.irrigationStatus,
             thatchMeasurementIn: protocolFieldChecks.thatchMeasurementIn,
             chinchFloatTestDone: protocolFieldChecks.chinchFloatTestDone,
             chinchCountPerSqft: protocolFieldChecks.chinchCountPerSqft,
@@ -5436,21 +5433,6 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
                 Protocol field checks
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8 }}>
-                <select
-                  value={protocolFieldChecks.irrigationStatus}
-                  onChange={(e) =>
-                    setProtocolFieldChecks((prev) => ({
-                      ...prev,
-                      irrigationStatus: e.target.value,
-                    }))
-                  }
-                  style={inputStyle}
-                >
-                  <option value="unknown">Irrigation unknown</option>
-                  <option value="good">Irrigation good</option>
-                  <option value="dry">Dry</option>
-                  <option value="wet">Wet</option>
-                </select>
                 <input
                   type="number"
                   min="0"
