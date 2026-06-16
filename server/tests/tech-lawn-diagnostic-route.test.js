@@ -44,6 +44,7 @@ const { normalizeProductLabelConstraints } = require('../services/lawn-diagnosti
 const {
   enrichAppliedProducts,
   labelConstraintsFromCatalog,
+  deriveOverallScore,
   normalizeContact,
   hasSendableContact,
   contactName,
@@ -234,6 +235,30 @@ describe('tech lawn diagnostic analyze route', () => {
     expect(norm.source).not.toBe('product_db');
     expect(norm.confidence).not.toBe('db_authoritative');
     expect(norm.requires_label_review).toBe(true);
+  });
+
+  test('catalog HIT strips request top-level label timing when the catalog has no directive', async () => {
+    mockColumnInfo = { id: true, name: true, label_verified_at: true };
+    mockCatalogRows = [{ id: 'P1', name: 'Reviewed Product', label_verified_at: '2026-06-14T12:00:00.000Z' }];
+    const products = await enrichAppliedProducts([{
+      product_id: 'P1',
+      // Request asserts authoritative timing at TOP LEVEL; catalog row has no directive.
+      post_app_irrigation: 'hold 48h',
+      label_source: 'product_db',
+    }]);
+
+    const p = products[0];
+    expect(p.post_app_irrigation).toBeNull();
+    // normalize must not treat the stripped request timing as db-authoritative.
+    const norm = normalizeProductLabelConstraints(p);
+    expect(norm.confidence).not.toBe('db_authoritative');
+    expect(norm.requires_label_review).toBe(true);
+  });
+
+  test('deriveOverallScore is null for a no-finding/minimal report, and caps inflated client scores', () => {
+    expect(deriveOverallScore({ diagnosis: { findings: [] } }, 100)).toBeNull();
+    expect(deriveOverallScore({ diagnosis: { findings: [], severity: 'moderate' } })).toBeNull();
+    expect(deriveOverallScore({ diagnosis: { findings: [{ severity: 'severe' }] } }, 100)).toBeLessThanOrEqual(39);
   });
 
   test('catalog enrichment keeps DB compliance fields authoritative', async () => {

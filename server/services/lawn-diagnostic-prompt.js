@@ -210,8 +210,8 @@ ${AUTO_RELEASE_RULE}
   with" / "treated as suspected"; only "high" may be definitive.
 - Naming discipline: only name a specific cause (pest, disease, weed species,
   deficiency) when that finding's confidence is moderate or high. For low/unknown
-  findings, describe the symptom and lean on the finding's own customer_wording —
-  never upgrade a symptom into a named cause in the summary.
+  findings, describe the symptom from its label and confidence — never upgrade a
+  symptom into a named cause in the summary.
 - Calm, specific, actionable. No fear-selling, no overpromising (no "eliminate",
   "guaranteed", "100%", "pest-free").
 - Realism check before finalizing: would a skeptical homeowner standing on the lawn
@@ -306,15 +306,18 @@ function buildNarrativeContext(contract = {}) {
   return JSON.stringify({
     primary_finding: diag.primary_finding ? safeConditionLabel(diag.primary_finding) : null,
     confidence: diag.confidence || 'unknown',
+    // Only allowlisted labels + structured fields reach the model — never raw
+    // finding/flag free text (scrub can't catch arbitrary injected prose). finding_id
+    // lets the model align treatment.addresses_findings without seeing raw wording.
     findings: (diag.findings || []).map((finding) => ({
+      finding_id: finding.finding_id || null,
       name: safeConditionLabel(finding.name),
       confidence: finding.confidence,
       severity: finding.severity,
-      customer_wording: finding.customer_wording ? scrubCustomerText(finding.customer_wording) : null,
     })),
     customer_visible_flags: (contract.reconciliation_flags || [])
       .filter((flag) => flag.customer_visible)
-      .map((flag) => ({ type: flag.type, customer_wording: scrubCustomerText(flag.customer_wording) })),
+      .map((flag) => ({ type: flag.type })),
     treatment: (contract.treatment_rationale || []).map((row) => ({
       application_class: row.application_class,
       addresses_findings: row.addresses_findings,

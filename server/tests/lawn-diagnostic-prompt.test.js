@@ -32,7 +32,7 @@ describe('lawn-diagnostic prompt v0.4 naming gate', () => {
 
   test('narrative prompt forbids upgrading a low/unknown symptom into a named cause', () => {
     expect(NARRATIVE_SYSTEM_PROMPT).toMatch(/Naming discipline:/);
-    expect(NARRATIVE_SYSTEM_PROMPT).toMatch(/never upgrade a symptom into a named cause/);
+    expect(NARRATIVE_SYSTEM_PROMPT).toMatch(/never upgrade a\s+symptom into a named cause/);
   });
 
   test('normalizeDiagnosisJson keeps only object findings and defaults the summary', () => {

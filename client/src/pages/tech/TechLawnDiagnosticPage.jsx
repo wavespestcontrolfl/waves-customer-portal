@@ -168,12 +168,16 @@ export default function TechLawnDiagnosticPage() {
     // Send the same inputs the analyze step used so the server rebuilds the SAME
     // contract. Without photo metadata the persist route sees zero photos and
     // classifies the report 'minimal', wiping the diagnosis the tech just saw.
+    // Carry the analyzed photo quality so the server rebuild doesn't default photos to
+    // 'poor' → minimal → wipe the diagnosis the tech just reviewed.
+    const reviewedQuality = analysis?.input_assessment?.photo_quality || 'limited';
+    const reviewedLimitations = analysis?.input_assessment?.photo_limitations || [];
     const data = await techRequest('/tech/lawn-diagnostic', {
       method: 'POST',
       body: JSON.stringify({
         mode,
         findings,
-        photos: photos.map((p) => ({ photo_id: p.id })),
+        photos: photos.map((p) => ({ photo_id: p.id, quality: reviewedQuality, limitations: reviewedLimitations })),
         appliedProducts: [],
         compliance: {},
         contact: cleanContact(),

@@ -116,7 +116,11 @@ function severityCeiling(diagnosis = {}) {
 }
 
 function deriveOverallScore(contract = {}, clientScore = null) {
-  const { ceiling, fallback } = severityCeiling(contract.diagnosis || {});
+  const diagnosis = contract.diagnosis || {};
+  // Minimal / no-defensible-finding reports stay UNSCORED so the public label reads
+  // "Reviewed", not a default-severity "Keep an eye on it".
+  if (!Array.isArray(diagnosis.findings) || !diagnosis.findings.length) return null;
+  const { ceiling, fallback } = severityCeiling(diagnosis);
   const base = Number.isFinite(Number(clientScore)) ? Math.round(Number(clientScore)) : fallback;
   return Math.max(0, Math.min(ceiling, base));
 }
@@ -339,6 +343,13 @@ async function enrichAppliedProducts(inputProducts = []) {
         reentry_text: row.reentry_text || null,
         rainfast_minutes: row.rainfast_minutes ?? null,
         irrigation_required: row.irrigation_required ?? null,
+        // Catalog is authoritative: drop request-supplied top-level label timing/source
+        // so normalizeProductLabelConstraints can't read them as db_authoritative when
+        // the catalog row carries label_verified_at but no directive of its own.
+        label_source: row.label_verified_at ? 'product_db' : null,
+        labelSource: null,
+        post_app_irrigation: null,
+        postAppIrrigation: null,
         product_label_constraints: labelConstraintsFromCatalog(row, incomingConstraints),
       };
     });
@@ -673,6 +684,7 @@ module.exports = router;
 module.exports._test = {
   buildFindingsFromVision,
   downgradeRequestLabelConstraints,
+  deriveOverallScore,
   enrichAppliedProducts,
   labelConstraintsFromCatalog,
   normalizePhoto,

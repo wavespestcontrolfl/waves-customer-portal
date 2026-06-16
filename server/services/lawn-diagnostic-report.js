@@ -229,14 +229,21 @@ function buildWateringPlan({ products = [], compliance = {} } = {}) {
   const hasWaterIn = directives.some((constraints) => directiveRequiresWaterIn(constraints.post_app_irrigation));
   const labelConflict = maxHoldHours != null && hasWaterIn;
   const irrigation = compliance.irrigation_compliance || compliance.irrigationCompliance || compliance.watering_restriction || compliance.wateringRestriction || {};
-  const assignedDays = unique(irrigation.assigned_days || irrigation.assignedDays);
-  const allowedTimeWindows = unique(irrigation.allowed_time_windows || irrigation.allowedTimeWindows || irrigation.allowed_windows || irrigation.allowedWindows);
+  // Clamp client-supplied schedule to known weekdays / time-window shapes so no raw
+  // string reaches customer egress.
+  const WEEKDAYS = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']);
+  const TIME_WINDOW_RE = /^(before|after)\s+\d{1,2}(:\d{2})?\s*(am|pm)$/i;
+  const assignedDays = unique(irrigation.assigned_days || irrigation.assignedDays)
+    .filter((d) => WEEKDAYS.has(String(d).trim().toLowerCase()));
+  const allowedTimeWindows = unique(irrigation.allowed_time_windows || irrigation.allowedTimeWindows || irrigation.allowed_windows || irrigation.allowedWindows)
+    .filter((w) => TIME_WINDOW_RE.test(String(w).trim()));
   const maxDaysPerWeek = numberOrNull(irrigation.max_days_per_week || irrigation.maxDaysPerWeek);
-  const restrictionSummary = irrigation.restriction_summary_customer
-    || irrigation.restrictionSummaryCustomer
-    || (assignedDays.length || allowedTimeWindows.length
-      ? `You may water${assignedDays.length ? ` ${joinList(assignedDays)} only` : ''}${allowedTimeWindows.length ? `, ${joinList(allowedTimeWindows)}` : ''}.`
-      : null);
+  // Customer-facing restriction line is built from STRUCTURED fields ONLY — never the
+  // raw client restriction_summary_customer string, which would publish unscrubbed
+  // tech notes / gate codes on the unauthenticated report.
+  const restrictionSummary = (assignedDays.length || allowedTimeWindows.length)
+    ? `You may water${assignedDays.length ? ` ${joinList(assignedDays)} only` : ''}${allowedTimeWindows.length ? `, ${joinList(allowedTimeWindows)}` : ''}.`
+    : (maxDaysPerWeek ? `You may water no more than ${maxDaysPerWeek} day${maxDaysPerWeek === 1 ? '' : 's'} per week.` : null);
 
   let directive = 'Use only general low-risk watering guidance until product label constraints are reviewed.';
   if (maxHoldHours != null) {
@@ -507,13 +514,20 @@ const CONDITION_LABELS = [
   [/(drought|\bdry\b|water stress|wilt|under\s?water)/, 'drought stress'],
   [/(thin|bare|sparse|patchy)/, 'thinning turf'],
   [/(chlorosis|iron|nitrogen|nutrient|yellow)/, 'color and nutrient stress'],
-  [/(no (major|significant|visible)|healthy|looks good|no .*signal)/, 'no major visible stress'],
+  [/(\bhealthy\b|looks good|looks healthy|dense|uniform)/, 'no major visible stress'],
   [/(color|discolor|stress|decline)/, 'color stress'],
 ];
+
+// Negated / clean findings ("No visible disease", "No major stress signal",
+// "Unhealthy" excluded) must resolve to the no-stress label BEFORE the positive cause
+// matchers — otherwise a clean finding flips into an active problem on the public
+// report. Anchored on a standalone "no" so "unhealthy" / "nutrient" don't trip it.
+const NEGATED_FINDING = /\bno\b[^.]*\b(major|significant|visible|notable|obvious|stress|signal|sign|issue|problem|disease|weed|fungus|fungal|pest|insect|chinch|grub)\b|^\s*(none|clear)\b/;
 
 function safeConditionLabel(rawName) {
   const lower = String(rawName || '').toLowerCase();
   if (!lower) return null;
+  if (NEGATED_FINDING.test(lower)) return 'no major visible stress';
   for (const [pattern, label] of CONDITION_LABELS) {
     if (pattern.test(lower)) return label;
   }
@@ -523,17 +537,23 @@ function safeConditionLabel(rawName) {
 function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
   const primary = diagnosis.findings?.find((finding) => finding.name === diagnosis.primary_finding);
   if (!primary) return 'This lawn check is complete. The photos did not show enough detail to call out a specific pest or disease, so keep to your normal watering schedule and watch for any area that spreads, thins, or does not recover.';
-  // Allowlisted label, never the raw stored name — this string is published.
-  const name = safeConditionLabel(primary.name) || 'a lawn condition we are monitoring';
   const addressed = treatmentRationale.some((row) => row.addresses_findings.includes(primary.finding_id));
   const treatmentLine = addressed
     ? 'Today\'s treatment was matched to that pressure.'
     : 'We did not map a treatment to that finding today, so it should be watched or re-checked.';
+  // Naming gate (deterministic path): low/unknown findings stay SYMPTOM-only and never
+  // publish a named pest/disease, mirroring the v0.4 prompt. Only moderate+ may name.
+  const confidence = confidenceRank(primary.confidence);
+  if (confidence < CONFIDENCE_ORDER.moderate) {
+    return `The photos show an area of the lawn worth keeping an eye on. ${treatmentLine} We'd confirm with a closer look if it spreads, thins, or does not recover.`;
+  }
+  // Allowlisted label, never the raw stored name — this string is published.
+  const name = safeConditionLabel(primary.name) || 'a lawn condition we are monitoring';
   const lower = name.toLowerCase();
-  if (lower.includes('chinch') && confidenceRank(primary.confidence) < 3) {
+  if (lower.includes('chinch') && confidence < CONFIDENCE_ORDER.high) {
     return `The pattern is most consistent with chinch pressure, which can look very similar to drought stress. ${treatmentLine} If the patch continues expanding, re-check the margin.`;
   }
-  if (confidenceRank(primary.confidence) < 3) {
+  if (confidence < CONFIDENCE_ORDER.high) {
     return `The photos show signs most consistent with ${name}. ${treatmentLine} We should confirm if the area spreads or the pattern changes.`;
   }
   return `The photos show ${name}. ${treatmentLine} Watch for improvement based on the expected response timeline.`;

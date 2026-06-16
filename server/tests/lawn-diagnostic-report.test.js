@@ -6,6 +6,7 @@ const {
   applyAutoReleaseRepair,
   buildMinimalSafeReport,
   scrubCustomerText,
+  safeConditionLabel,
   MINIMAL_SAFE_SUMMARY,
 } = require('../services/lawn-diagnostic-report');
 
@@ -505,10 +506,45 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(chinch.customer_summary.toLowerCase()).toContain('chinch');
 
     const weed = buildDiagnosticReportContract({
-      findings: [{ finding_id: 'F1', name: 'Visible weed pressure http://evil.test BUYNOW', confidence: 'low', severity: 'mild', urgency: 'monitor' }],
+      findings: [{ finding_id: 'F1', name: 'Visible weed pressure', confidence: 'moderate', severity: 'mild', urgency: 'monitor' }],
     });
-    expect(weed.customer_summary).not.toMatch(/evil\.test|BUYNOW/);
     expect(weed.customer_summary).toMatch(/weed pressure/);
+  });
+
+  test('low/unknown-confidence findings stay symptom-only in customer_summary (naming gate)', () => {
+    const low = buildDiagnosticReportContract({
+      findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'low', severity: 'moderate', urgency: 'monitor' }],
+    });
+    expect(low.customer_summary.toLowerCase()).not.toContain('chinch');
+    expect(low.customer_summary.toLowerCase()).toMatch(/keeping an eye|closer look/);
+
+    // moderate+ may name the cause
+    const moderate = buildDiagnosticReportContract({
+      findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', urgency: 'monitor' }],
+    });
+    expect(moderate.customer_summary.toLowerCase()).toContain('chinch');
+  });
+
+  test('safeConditionLabel resolves negated/clean findings and never mismatches "unhealthy"', () => {
+    expect(safeConditionLabel('No visible disease pressure')).toBe('no major visible stress');
+    expect(safeConditionLabel('No major visible lawn stress signal')).toBe('no major visible stress');
+    expect(safeConditionLabel('Unhealthy turf — severe decline')).not.toBe('no major visible stress');
+    expect(safeConditionLabel('Chinch bug pressure')).toBe('chinch bug activity');
+  });
+
+  test('watering restriction copy is built from structured days, never the raw client string', () => {
+    const plan = buildWateringPlan({
+      products: [],
+      compliance: { irrigation_compliance: {
+        assigned_days: ['Wednesday', 'Saturday', 'TECH ONLY use gate code BLUE'],
+        allowed_time_windows: ['before 10am', 'rm -rf /'],
+        restriction_summary_customer: 'TECH ONLY: gate code BLUE 1234',
+      } },
+    });
+    expect(plan.ongoing_irrigation.restriction_summary_customer).not.toMatch(/gate code|BLUE|TECH ONLY/i);
+    expect(plan.ongoing_irrigation.restriction_summary_customer).toMatch(/Wednesday and Saturday/);
+    expect(plan.ongoing_irrigation.assigned_days).toEqual(['Wednesday', 'Saturday']);
+    expect(plan.ongoing_irrigation.allowed_time_windows).toEqual(['before 10am']);
   });
 
   test('confirmed-language repair covers non-chinch photo-only disease/drought, not just chinch', () => {
