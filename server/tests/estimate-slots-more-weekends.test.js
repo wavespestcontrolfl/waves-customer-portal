@@ -289,10 +289,10 @@ describe('estimate slot weekend and expander behavior', () => {
         result: {
           results: {
             lawn: [
-              { tier: 'basic', label: '4 Applications', v: 4, pa: 240 },
-              { tier: 'standard', label: '6 Applications', v: 6, pa: 180 },
-              { tier: 'enhanced', label: '9 Applications', v: 9, pa: 140 },
-              { tier: 'premium', label: '12 Applications', v: 12, pa: 120 },
+              { tier: 'basic', label: '4x applications/yr', v: 4, pa: 240 },
+              { tier: 'standard', label: '6x applications/yr', v: 6, pa: 180 },
+              { tier: 'enhanced', label: '9x applications/yr', v: 9, pa: 140 },
+              { tier: 'premium', label: '12x applications/yr', v: 12, pa: 120 },
             ],
           },
           recurring: {

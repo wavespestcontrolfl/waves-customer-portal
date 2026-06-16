@@ -724,10 +724,10 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.tiers).toHaveLength(4);
     expect(lawn.tiers.map(t => t.tier)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
     expect(lawn.tiers.every(t => t.label)).toBe(true);
-    expect(lawn.tiers[0].label).toBe('4 Applications');
-    expect(lawn.tiers[1].label).toBe('6 Applications');
-    expect(lawn.tiers[2].label).toBe('9 Applications');
-    expect(lawn.tiers[3].label).toBe('12 Applications');
+    expect(lawn.tiers[0].label).toBe('4x applications/yr');
+    expect(lawn.tiers[1].label).toBe('6x applications/yr');
+    expect(lawn.tiers[2].label).toBe('9x applications/yr');
+    expect(lawn.tiers[3].label).toBe('12x applications/yr');
   });
 
   test('includeHiddenTiers preserves the full lawn tier list', () => {
@@ -738,7 +738,7 @@ describe('lawn pricing production follow-up', () => {
 
     expect(lawn.tiers).toHaveLength(4);
     expect(lawn.tiers.map(t => t.tier)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
-    expect(lawn.tiers.map(t => t.label)).toEqual(['4 Applications', '6 Applications', '9 Applications', '12 Applications']);
+    expect(lawn.tiers.map(t => t.label)).toEqual(['4x applications/yr', '6x applications/yr', '9x applications/yr', '12x applications/yr']);
   });
 
   test('small lawn pricing uses market table when it is above the 45% floor', () => {

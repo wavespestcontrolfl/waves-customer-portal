@@ -24,7 +24,7 @@ describe('variantsForService — lawn_care', () => {
     const basic = all.find((o) => o.id === 'lawn-basic');
     expect(basic.tier).toBe('basic');
     expect(basic.lawnFreq).toBe(4);
-    expect(basic.label).toBe('Basic lawn care');
+    expect(basic.label).toBe('Lawn care — 4x applications/yr');
   });
 
   test('generic request returns the enhanced default only', () => {
@@ -40,6 +40,20 @@ describe('variantsForService — lawn_care', () => {
   test('explicit basic tier-name / 4-application intent returns basic only', () => {
     expect(variantsForService('lawn_care', 'just the basic lawn plan').map((o) => o.id)).toEqual(['lawn-basic']);
     expect(variantsForService('lawn_care', 'lawn with 4 applications').map((o) => o.id)).toEqual(['lawn-basic']);
+  });
+
+  test('Nx-suffix counts copied from the new labels narrow to the right tier', () => {
+    // "Nx applications/yr" is the customer-facing option label, so a copied
+    // request must resolve to the matching tier rather than the 6x default.
+    expect(variantsForService('lawn_care', 'lawn with 12x applications/yr').map((o) => o.id)).toEqual(['lawn-premium']);
+    expect(variantsForService('lawn_care', 'lawn with 4x applications/yr').map((o) => o.id)).toEqual(['lawn-basic']);
+    // Enhanced (9) now narrows for both the bare and "x"-suffixed forms.
+    expect(variantsForService('lawn_care', 'lawn with 9x applications/yr').map((o) => o.id)).toEqual(['lawn-enhanced']);
+    expect(variantsForService('lawn_care', 'lawn with 9 applications').map((o) => o.id)).toEqual(['lawn-enhanced']);
+    expect(variantsForService('lawn_care', 'enhanced lawn plan').map((o) => o.id)).toEqual(['lawn-enhanced']);
+    // 6x is Standard, the default — it stays the full ladder with Standard first.
+    expect(variantsForService('lawn_care', 'lawn with 6x applications/yr').map((o) => o.id))
+      .toEqual(['lawn-standard', 'lawn-enhanced', 'lawn-premium', 'lawn-basic']);
   });
 
   test('a stray digit (sq ft / address) does NOT collapse the quote to a single tier', () => {

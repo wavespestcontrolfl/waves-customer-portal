@@ -199,10 +199,10 @@ const PEST = {
 // ============================================================
 // Tiers: basic(4x), standard(6x), enhanced(9x), premium(12x) are sold.
 const LAWN_TIERS = {
-  basic:    { freq: 4,  index: 0, label: '4 Applications' },
-  standard: { freq: 6,  index: 1, label: '6 Applications' },
-  enhanced: { freq: 9,  index: 2, label: '9 Applications' },
-  premium:  { freq: 12, index: 3, label: '12 Applications' },
+  basic:    { freq: 4,  index: 0, label: '4x applications/yr' },
+  standard: { freq: 6,  index: 1, label: '6x applications/yr' },
+  enhanced: { freq: 9,  index: 2, label: '9x applications/yr' },
+  premium:  { freq: 12, index: 3, label: '12x applications/yr' },
 };
 const LAWN_SOLD_TIERS = ['basic', 'standard', 'enhanced', 'premium'];
 const LAWN_PRICING_V2 = {

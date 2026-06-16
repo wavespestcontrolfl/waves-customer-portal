@@ -119,10 +119,10 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
       monthly: 62.25,
       annual: 747,
       tiers: [
-        { tier: 'basic', label: '4 Applications', monthly: 35, annual: 420, perApp: 105, visits: 4, freq: 4, recommended: false },
-        { tier: 'standard', label: '6 Applications', monthly: 45, annual: 540, perApp: 90, visits: 6, freq: 6, recommended: false },
-        { tier: 'enhanced', label: '9 Applications', monthly: 62.25, annual: 747, perApp: 83, visits: 9, freq: 9, recommended: true },
-        { tier: 'premium', label: '12 Applications', monthly: 84, annual: 1008, perApp: 84, visits: 12, freq: 12, recommended: false },
+        { tier: 'basic', label: '4x applications/yr', monthly: 35, annual: 420, perApp: 105, visits: 4, freq: 4, recommended: false },
+        { tier: 'standard', label: '6x applications/yr', monthly: 45, annual: 540, perApp: 90, visits: 6, freq: 6, recommended: false },
+        { tier: 'enhanced', label: '9x applications/yr', monthly: 62.25, annual: 747, perApp: 83, visits: 9, freq: 9, recommended: true },
+        { tier: 'premium', label: '12x applications/yr', monthly: 84, annual: 1008, perApp: 84, visits: 12, freq: 12, recommended: false },
       ],
     };
   }

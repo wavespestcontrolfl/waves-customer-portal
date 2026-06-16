@@ -195,20 +195,27 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     // Standard stays first so the portal panel (which auto-selects options[0])
     // keeps defaulting to the 6-application plan, not the new 4-application one.
     const all = [
-      { id: 'lawn-standard', serviceKey, label: 'Standard lawn care', tier: 'standard', lawnFreq: 6, cadence: '6 visits/year' },
-      { id: 'lawn-enhanced', serviceKey, label: 'Enhanced lawn care', tier: 'enhanced', lawnFreq: 9, cadence: '9 visits/year' },
-      { id: 'lawn-premium', serviceKey, label: 'Premium lawn care', tier: 'premium', lawnFreq: 12, cadence: '12 visits/year' },
-      { id: 'lawn-basic', serviceKey, label: 'Basic lawn care', tier: 'basic', lawnFreq: 4, cadence: '4 visits/year' },
+      { id: 'lawn-standard', serviceKey, label: 'Lawn care — 6x applications/yr', tier: 'standard', lawnFreq: 6, cadence: '6 applications/yr' },
+      { id: 'lawn-enhanced', serviceKey, label: 'Lawn care — 9x applications/yr', tier: 'enhanced', lawnFreq: 9, cadence: '9 applications/yr' },
+      { id: 'lawn-premium', serviceKey, label: 'Lawn care — 12x applications/yr', tier: 'premium', lawnFreq: 12, cadence: '12 applications/yr' },
+      { id: 'lawn-basic', serviceKey, label: 'Lawn care — 4x applications/yr', tier: 'basic', lawnFreq: 4, cadence: '4 applications/yr' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');
     // Tier-intent narrowing uses the tier name or application-count wording only.
+    // The count form accepts an optional "x" so the "Nx applications/yr" labels
+    // a customer can copy from an option ("12x applications/yr", "9x", "4x") map
+    // to the right tier; a bare "Nx" token counts too. 6x is Standard, which is
+    // the default returned by the fallthrough below, so it needs no branch.
     // Bare cadence words ("quarterly"/"monthly") are NOT matched: in a prompt
     // like "I have quarterly pest and want lawn care" the cadence refers to the
     // existing pest plan, so matching it would wrongly hide the other lawn tiers.
-    if (/\bpremium\b|\b12\s*(?:applications?|apps?|visits?|treatments?)\b/i.test(prompt)) {
+    if (/\bpremium\b|\b12x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b12x\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-premium');
     }
-    if (/\bbasic\b|\b4\s*(?:applications?|apps?|visits?|treatments?)\b/i.test(prompt)) {
+    if (/\benhanced\b|\b9x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b9x\b/i.test(prompt)) {
+      return all.filter(o => o.id === 'lawn-enhanced');
+    }
+    if (/\bbasic\b|\b4x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b4x\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-basic');
     }
     return all;
