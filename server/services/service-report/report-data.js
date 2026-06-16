@@ -2140,8 +2140,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   if (serviceLine === 'lawn') {
     const linkedAssessment = await loadLinkedLawnAssessment(service, knex);
     if (linkedAssessment?.id) {
+      // customer_visible: true == passed the quality gate. Failed-quality
+      // photos are stored only for audit (customer_visible: false) and must
+      // never reach the customer's permanent report token.
       const turfPhotos = await knex('lawn_assessment_photos')
-        .where({ assessment_id: linkedAssessment.id })
+        .where({ assessment_id: linkedAssessment.id, customer_visible: true })
         .orderBy('photo_order', 'asc')
         .orderBy('taken_at', 'asc')
         .catch(() => []);
