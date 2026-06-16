@@ -74,6 +74,62 @@ function safeFindingNote(name, confidence) {
     : `We saw signs consistent with ${lower}.`;
 }
 
+// Stored finding.name / primary_finding are client/LLM free text. Never republish
+// them verbatim — map to a fixed, allowlisted customer-facing condition label so no
+// email/phone/product/tech-note can ride out on a finding name, and the derived
+// customer_note / watch_items stay safe. Falls back to a generic monitored-condition
+// label when nothing matches.
+const CONDITION_LABELS = [
+  [/chinch/, 'chinch bug activity'],
+  [/(army\s?worm|sod\s?webworm|caterpillar|\bworm)/, 'caterpillar activity'],
+  [/grub/, 'grub activity'],
+  [/(large patch|brown patch)/, 'large patch (fungal) activity'],
+  [/(gray|grey)\s?leaf/, 'gray leaf spot'],
+  [/dollar spot/, 'dollar spot'],
+  [/(fungus|fungal|disease|leaf spot|mold|mildew)/, 'fungal activity'],
+  [/(nutsedge|sedge|crabgrass|dollarweed|clover|spurge|\bweed)/, 'weed pressure'],
+  [/(overwater|too much water|excess(ive)?\s+(water|moisture)|soggy|saturat)/, 'overwatering signal'],
+  [/(drought|\bdry\b|water stress|wilt|under\s?water)/, 'drought stress'],
+  [/(thin|bare|sparse|patchy)/, 'thinning turf'],
+  [/(chlorosis|iron|nitrogen|nutrient|yellow)/, 'color and nutrient stress'],
+  [/(no (major|significant|visible)|healthy|looks good|no .*signal)/, 'no major visible stress'],
+  [/(color|discolor|stress|decline)/, 'color stress'],
+];
+
+function safeConditionLabel(rawName) {
+  const lower = String(scrubCustomerText(rawName || '') || '').toLowerCase();
+  if (!lower) return null;
+  for (const [pattern, label] of CONDITION_LABELS) {
+    if (pattern.test(lower)) return label;
+  }
+  return 'a lawn condition we are monitoring';
+}
+
+// SWFL seasonal note is SERVER-GENERATED from a fixed source keyed on the report's
+// creation month — never the client-supplied contract.seasonal_context free text,
+// which could carry product names, tech notes, or PII past the scrubber.
+const SWFL_SEASONAL_NOTES = {
+  winter: 'Winter in Southwest Florida means slower turf growth and cooler, drier weather, so lighter watering and a little patience go a long way right now.',
+  spring: 'Spring is green-up season in Southwest Florida — warming soil wakes the lawn up, and weeds and early fungus can move in quickly.',
+  summer: 'Summer brings heat, humidity, and afternoon storms to Southwest Florida, so fungus and insect pressure peak and steady monitoring matters most.',
+  fall: 'Fall stays warm in Southwest Florida with tapering rain — a good window to help the turf recover before the cooler, drier months.',
+};
+
+function swflSeasonForMonth(month) {
+  // SWFL bands: winter Dec–Feb, spring Mar–May, summer Jun–Sep, fall Oct–Nov.
+  if (month === 12 || month <= 2) return 'winter';
+  if (month <= 5) return 'spring';
+  if (month <= 9) return 'summer';
+  return 'fall';
+}
+
+function serverSeasonalNote(createdAt) {
+  if (!createdAt) return null;
+  const d = new Date(createdAt);
+  if (Number.isNaN(d.getTime())) return null;
+  return SWFL_SEASONAL_NOTES[swflSeasonForMonth(d.getMonth() + 1)] || null;
+}
+
 /**
  * Whitelist a stored diagnostic into the customer-facing report payload.
  * Pure + exhaustive allowlist: only the fields named here ever leave the server.
@@ -93,16 +149,17 @@ function buildPublicLawnReport(diagnostic = {}) {
   // no raw AI text, brand/active-ingredient name, or confirmed-pest claim escapes.
   const findings = Array.isArray(diagnosis.findings)
     ? diagnosis.findings.slice(0, 12).map((finding) => {
-      const name = scrubCustomerText(finding.name) || null;
+      // Allowlisted label, never the raw stored name (client/LLM free text).
+      const name = safeConditionLabel(finding.name);
       const confidence = clampEnum(finding.confidence, CONFIDENCE_VALUES);
       return {
         name,
         confidence,
         severity: clampEnum(finding.severity, SEVERITY_VALUES),
-        // Server-generated from the scrubbed name — never the raw client wording.
+        // Server-generated from the allowlisted label — never the raw client wording.
         customer_note: safeFindingNote(name, confidence),
       };
-    })
+    }).filter((f) => f.name)
     : [];
 
   const firstName = contact.first_name
@@ -114,7 +171,8 @@ function buildPublicLawnReport(diagnostic = {}) {
     city: typeof address.city === 'string' ? address.city.slice(0, 80) : null,
     overall_status: overallStatusLabel(diagnostic.overall_score),
     summary: scrubCustomerText(contract.customer_summary) || null,
-    primary_finding: scrubCustomerText(diagnosis.primary_finding) || null,
+    // Allowlisted label, never the raw stored primary_finding.
+    primary_finding: diagnosis.primary_finding ? safeConditionLabel(diagnosis.primary_finding) : null,
     confidence: clampEnum(diagnosis.confidence, CONFIDENCE_VALUES),
     findings,
     watering: {
@@ -131,7 +189,8 @@ function buildPublicLawnReport(diagnostic = {}) {
     // which is built from finding.confirmation_step (internal tech/QA text).
     watch_items: findings.map((f) => f.name).filter(Boolean).slice(0, 6)
       .map((name) => `We'll keep an eye on ${name.toLowerCase()} and how it responds.`),
-    seasonal_context: scrubCustomerText(contract.seasonal_context || ''),
+    // Server-generated from the report's creation month — never client free text.
+    seasonal_context: serverSeasonalNote(diagnostic.created_at),
   };
 }
 

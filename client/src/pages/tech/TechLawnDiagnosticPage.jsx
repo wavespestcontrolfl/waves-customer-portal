@@ -52,6 +52,33 @@ function fileToDataUrl(file) {
   });
 }
 
+// Downscale phone photos before upload (mirrors the admin lawn assessment flow).
+// Raw camera shots are several MB each; five originals can blow the server's JSON
+// limit or stall on field LTE before /analyze. Falls through with the original on
+// decode error so capture never hard-fails.
+function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const longEdge = Math.max(img.width, img.height);
+      if (longEdge <= maxEdge) { resolve(dataUrl); return; }
+      const scale = maxEdge / longEdge;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+function mimeFromDataUrl(dataUrl, fallback = 'image/jpeg') {
+  const m = /^data:([^;,]+)[;,]/.exec(String(dataUrl || ''));
+  return m ? m[1] : fallback;
+}
+
 function btn(bg, fg = D.white, disabled = false) {
   return {
     minHeight: 46, padding: '0 16px', border: 'none', borderRadius: 10,
@@ -95,8 +122,9 @@ export default function TechLawnDiagnosticPage() {
     const files = Array.from(fileList || []).slice(0, MAX_PHOTOS - photos.length);
     try {
       const added = await Promise.all(files.map(async (file, i) => {
-        const dataUrl = await fileToDataUrl(file);
-        return { id: `${Date.now()}-${i}`, dataUrl, base64: dataUrl.split(',')[1] || '', mimeType: file.type || 'image/jpeg' };
+        const original = await fileToDataUrl(file);
+        const dataUrl = await resizeImage(original, 1600, 0.85);
+        return { id: `${Date.now()}-${i}`, dataUrl, base64: dataUrl.split(',')[1] || '', mimeType: mimeFromDataUrl(dataUrl, file.type || 'image/jpeg') };
       }));
       setPhotos((p) => [...p, ...added].slice(0, MAX_PHOTOS));
     } catch (err) {
@@ -204,6 +232,23 @@ export default function TechLawnDiagnosticPage() {
     catch { setNotice('Copy failed — long-press the link to copy.'); }
   };
 
+  // Shared prospect contact/address inputs. Rendered in capture (collapsible) AND on
+  // the review step, so a tech who analyzed before filling contact details can still
+  // enter them inline before sending instead of dead-ending on the send 422.
+  const prospectInputs = (
+    <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+      <input style={inputStyle} placeholder="Name" value={contact.name} onChange={(e) => setContact({ ...contact, name: e.target.value })} />
+      <input style={inputStyle} placeholder="Email" type="email" value={contact.email} onChange={(e) => setContact({ ...contact, email: e.target.value })} />
+      <input style={inputStyle} placeholder="Phone" type="tel" value={contact.phone} onChange={(e) => setContact({ ...contact, phone: e.target.value })} />
+      <input style={inputStyle} placeholder="Street address" value={address.line1} onChange={(e) => setAddress({ ...address, line1: e.target.value })} />
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 8 }}>
+        <input style={inputStyle} placeholder="City" value={address.city} onChange={(e) => setAddress({ ...address, city: e.target.value })} />
+        <input style={inputStyle} placeholder="State" value={address.state} onChange={(e) => setAddress({ ...address, state: e.target.value })} />
+        <input style={inputStyle} placeholder="ZIP" value={address.zip} onChange={(e) => setAddress({ ...address, zip: e.target.value })} />
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ minHeight: '100vh', background: D.bg, color: D.text, fontFamily: BODY, padding: 16 }}>
       <h1 style={{ fontFamily: HEAD, fontSize: 24, fontWeight: 700, color: D.white, margin: '4px 0 16px' }}>Lawn Diagnostic</h1>
@@ -236,19 +281,7 @@ export default function TechLawnDiagnosticPage() {
             <button onClick={() => setShowProspect((s) => !s)} style={{ ...btn('transparent', D.muted), padding: 0, minHeight: 0, fontWeight: 600 }}>
               {showProspect ? '▾' : '▸'} Prospect details (for sending a report)
             </button>
-            {showProspect ? (
-              <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-                <input style={inputStyle} placeholder="Name" value={contact.name} onChange={(e) => setContact({ ...contact, name: e.target.value })} />
-                <input style={inputStyle} placeholder="Email" type="email" value={contact.email} onChange={(e) => setContact({ ...contact, email: e.target.value })} />
-                <input style={inputStyle} placeholder="Phone" type="tel" value={contact.phone} onChange={(e) => setContact({ ...contact, phone: e.target.value })} />
-                <input style={inputStyle} placeholder="Street address" value={address.line1} onChange={(e) => setAddress({ ...address, line1: e.target.value })} />
-                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 8 }}>
-                  <input style={inputStyle} placeholder="City" value={address.city} onChange={(e) => setAddress({ ...address, city: e.target.value })} />
-                  <input style={inputStyle} placeholder="State" value={address.state} onChange={(e) => setAddress({ ...address, state: e.target.value })} />
-                  <input style={inputStyle} placeholder="ZIP" value={address.zip} onChange={(e) => setAddress({ ...address, zip: e.target.value })} />
-                </div>
-              </div>
-            ) : null}
+            {showProspect ? prospectInputs : null}
           </Card>
 
           <button onClick={analyze} disabled={busy === 'analyze' || !photos.length} style={{ ...btn(D.teal), width: '100%' }}>
@@ -298,6 +331,12 @@ export default function TechLawnDiagnosticPage() {
               <button onClick={copyLink} style={btn(D.green)}>Copy link</button>
             </Card>
           ) : null}
+
+          <Card>
+            <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white }}>Prospect details</div>
+            <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>A name plus an email or address is required to send a report.</div>
+            {prospectInputs}
+          </Card>
 
           <div style={{ display: 'grid', gap: 8 }}>
             <button onClick={saveInternal} disabled={!!busy || !canActOnReport} style={btn('#0b131b', D.teal, !!busy || !canActOnReport)}>

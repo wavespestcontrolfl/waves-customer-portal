@@ -102,6 +102,25 @@ function scoreSeverity(score) {
   return 'mild';
 }
 
+// The public report turns overall_score into Healthy / Keep an eye on it / Needs
+// attention. Derive that score SERVER-SIDE from the rebuilt contract's worst finding
+// severity and never let a client-supplied score exceed the severity-implied ceiling,
+// so a stale/buggy client can't publish a "Healthy" banner over severe findings.
+function severityCeiling(diagnosis = {}) {
+  const severities = (Array.isArray(diagnosis.findings) ? diagnosis.findings : [])
+    .map((f) => String((f && f.severity) || '').toLowerCase());
+  if (!severities.length) severities.push(String(diagnosis.severity || '').toLowerCase());
+  if (severities.includes('severe')) return { ceiling: 39, fallback: 25 };
+  if (severities.includes('moderate')) return { ceiling: 69, fallback: 55 };
+  return { ceiling: 100, fallback: 85 };
+}
+
+function deriveOverallScore(contract = {}, clientScore = null) {
+  const { ceiling, fallback } = severityCeiling(contract.diagnosis || {});
+  const base = Number.isFinite(Number(clientScore)) ? Math.round(Number(clientScore)) : fallback;
+  return Math.max(0, Math.min(ceiling, base));
+}
+
 function confidenceFromDivergence(validResults = [], divergenceFlags = []) {
   if (!validResults.length) return 'low';
   if (divergenceFlags.length > 1) return 'low';
@@ -205,18 +224,42 @@ function normalizeProductId(product = {}) {
   return product.product_id || product.productId || product.id || null;
 }
 
+// On a catalog MISS the applied product is unverified, so no request-supplied label
+// authority may survive to the customer report. normalizeProductLabelConstraints()
+// reads top-level label_verified_at/label_source/post_app_irrigation as
+// product_db / db_authoritative, so a stale or hostile client could publish exact
+// watering instructions (e.g. post_app_irrigation: 'hold 48h') from an unverified
+// product. Strip those top-level fields AND downgrade any nested constraints to
+// request/inferred so watering falls back to label-limited copy.
 function downgradeRequestLabelConstraints(product = {}) {
-  const incomingConstraints = product.product_label_constraints || product.productLabelConstraints || product.label_constraints || product.labelConstraints || null;
-  if (!incomingConstraints || typeof incomingConstraints !== 'object') return product;
-  return {
-    ...product,
-    product_label_constraints: {
-      ...incomingConstraints,
-      source: incomingConstraints.source === 'product_db' ? 'request' : (incomingConstraints.source || 'request'),
-      confidence: incomingConstraints.confidence === 'db_authoritative' ? 'inferred' : (incomingConstraints.confidence || 'inferred'),
-      requires_label_review: true,
-    },
+  if (!product || typeof product !== 'object') return product;
+  const incoming = product.product_label_constraints || product.productLabelConstraints || product.label_constraints || product.labelConstraints || null;
+  const incomingObj = incoming && typeof incoming === 'object' ? incoming : {};
+  // Preserve any caller-supplied watering hint ONLY as inferred guidance; the
+  // downstream label-limited release then strips exact timing.
+  const postAppIrrigation = incomingObj.post_app_irrigation || incomingObj.postAppIrrigation
+    || product.post_app_irrigation || product.postAppIrrigation || null;
+
+  const downgraded = { ...product };
+  // Remove top-level authority signals normalizeProductLabelConstraints() would
+  // otherwise read as label-verified, even when no nested constraints were sent.
+  delete downgraded.label_verified_at;
+  delete downgraded.labelVerifiedAt;
+  delete downgraded.label_source;
+  delete downgraded.labelSource;
+  delete downgraded.post_app_irrigation;
+  delete downgraded.postAppIrrigation;
+
+  downgraded.product_label_constraints = {
+    ...incomingObj,
+    ...(postAppIrrigation ? { post_app_irrigation: postAppIrrigation } : {}),
+    source: incomingObj.source === 'product_db' ? 'request' : (incomingObj.source || 'request'),
+    confidence: incomingObj.confidence === 'db_authoritative'
+      ? 'inferred'
+      : (incomingObj.confidence || (postAppIrrigation ? 'inferred' : 'missing')),
+    requires_label_review: true,
   };
+  return downgraded;
 }
 
 function labelConstraintsFromCatalog(row = {}, incomingConstraints = null) {
@@ -512,7 +555,9 @@ router.post('/', async (req, res, next) => {
       ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode }),
       report_contract: JSON.stringify(sanitizedContract),
       ai_confidence: aiConfidence,
-      overall_score: overallScore,
+      // Server-derived from the rebuilt contract severity; a client-supplied
+      // overallScore can only lower it, never inflate past the findings.
+      overall_score: deriveOverallScore(sanitizedContract, overallScore),
       ai_summary: aiSummary,
     }).returning(['id', 'mode', 'status']);
 

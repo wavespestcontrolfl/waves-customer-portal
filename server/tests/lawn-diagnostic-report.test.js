@@ -5,6 +5,7 @@ const {
   classifyReleaseMode,
   applyAutoReleaseRepair,
   buildMinimalSafeReport,
+  scrubCustomerText,
   MINIMAL_SAFE_SUMMARY,
 } = require('../services/lawn-diagnostic-report');
 
@@ -479,6 +480,19 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(report.human_review_required).toBe(false);
     expect(report.input_assessment.human_review_required).toBe(false);
     expect(report.input_assessment.human_review_reason).toBe('');
+  });
+
+  test('scrubCustomerText downgrades predicate-form confirmed claims (fungus/drought/large patch)', () => {
+    expect(scrubCustomerText('The fungus is confirmed across the lawn.')).not.toMatch(/\bconfirmed\b/i);
+    expect(scrubCustomerText('Drought is confirmed in the back yard.')).not.toMatch(/\bconfirmed\b/i);
+    expect(scrubCustomerText('Large patch is confirmed here.')).toMatch(/most consistent with/i);
+  });
+
+  test('scrubCustomerText strips emails, phone numbers, and links from egress copy', () => {
+    const out = scrubCustomerText('Reach me at tech@waves.com or 941-555-1234, see https://x.co/abc.');
+    expect(out).not.toMatch(/@waves\.com/);
+    expect(out).not.toMatch(/941.?555.?1234/);
+    expect(out).not.toMatch(/https?:\/\//);
   });
 
   test('confirmed-language repair covers non-chinch photo-only disease/drought, not just chinch', () => {

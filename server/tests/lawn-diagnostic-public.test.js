@@ -49,6 +49,7 @@ function sentDiagnostic(overrides = {}) {
     id: 'diag-1',
     status: 'sent',
     overall_score: 62,
+    created_at: '2026-06-15T12:00:00.000Z',
     report_expires_at: new Date(Date.now() + 86400000).toISOString(),
     contact_snapshot: JSON.stringify({ first_name: 'Dana', last_name: 'Prospect', email: 'dana@example.com', phone: '9415551234' }),
     address_snapshot: JSON.stringify({ line1: '123 Palm St', city: 'Venice', state: 'FL', zip: '34285' }),
@@ -96,13 +97,23 @@ describe('buildPublicLawnReport whitelisting', () => {
   test('exposes customer-safe fields only', () => {
     const report = buildPublicLawnReport(sentDiagnostic());
     expect(report.summary).toContain('suspected insect pressure');
-    expect(report.primary_finding).toBe('Chinch bug pressure');
+    // Allowlisted label, not the raw stored finding name.
+    expect(report.primary_finding).toBe('chinch bug activity');
     expect(report.first_name).toBe('Dana');
     expect(report.city).toBe('Venice');
     expect(report.watering.customer_sequence).toBe('Water Wednesday and Saturday only.');
     expect(report.overall_status).toBe('Keep an eye on it');
-    // Finding note is server-generated from the scrubbed name, not the raw wording.
-    expect(report.findings[0].customer_note).toBe('We saw signs consistent with chinch bug pressure.');
+    // Finding note is server-generated from the allowlisted label, not raw wording.
+    expect(report.findings[0].customer_note).toBe('We saw signs consistent with chinch bug activity.');
+  });
+
+  test('seasonal_context is server-generated from the creation month, never client text', () => {
+    const report = buildPublicLawnReport(sentDiagnostic());
+    // Client supplied 'Peak season'; egress replaces it with a fixed SWFL note.
+    expect(report.seasonal_context).not.toBe('Peak season');
+    expect(report.seasonal_context).toMatch(/Southwest Florida/);
+    // No created_at → omit rather than guess.
+    expect(buildPublicLawnReport(sentDiagnostic({ created_at: null })).seasonal_context).toBeNull();
   });
 
   test('never leaks internal scores, raw AI, product names, or tech notes', () => {
@@ -181,7 +192,7 @@ describe('buildPublicLawnReport whitelisting', () => {
     });
     const report = buildPublicLawnReport(diag);
     expect(JSON.stringify(report)).not.toMatch(/float test|cut-and-pull|confirm active/i);
-    expect(report.watch_items).toEqual(["We'll keep an eye on chinch bug pressure and how it responds."]);
+    expect(report.watch_items).toEqual(["We'll keep an eye on chinch bug activity and how it responds."]);
   });
 });
 
@@ -217,7 +228,7 @@ describe('GET /api/public/lawn-diagnostic/:token', () => {
       expect(res.headers.get('cache-control')).toBe('no-store');
       expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
       const body = await res.json();
-      expect(body.report.primary_finding).toBe('Chinch bug pressure');
+      expect(body.report.primary_finding).toBe('chinch bug activity');
       expect(JSON.stringify(body)).not.toContain('Talstar');
     });
   });

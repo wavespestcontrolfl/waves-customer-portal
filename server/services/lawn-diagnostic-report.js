@@ -550,14 +550,21 @@ function classifyReleaseMode(contract = {}) {
   return 'standard';
 }
 
+// Condition nouns that must never appear as a "confirmed/active" claim in customer
+// copy. Shared by the adjective-form and predicate-form passes so the two stay in
+// sync — the predicate form previously omitted fungus/drought/multi-word diseases,
+// letting "fungus is confirmed" / "large patch is confirmed" slip through.
+const CONFIRMABLE_CONDITION = 'chinch(?:\\s*bugs?)?|fungus|fungal|disease|large patch|brown patch|gray leaf spot|grey leaf spot|dollar spot|drought|grubs?|insect|infestation';
+
 // Downgrade any over-confident pest/disease/drought wording to suggestive form.
 // Safety net for LLM-authored copy; deterministic copy never says "confirmed".
 function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text)
-    .replace(/\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\s+(chinch|fungus|fungal|disease|large patch|gray leaf spot|drought|grub|insect)/gi,
+    .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${CONFIRMABLE_CONDITION})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
-    .replace(/\b(chinch|fungal|disease|grub|insect)\s+(?:is|are)\s+confirmed\b/gi, '$1 most consistent with the visible pattern')
+    .replace(new RegExp(`\\b(${CONFIRMABLE_CONDITION})\\s+(?:is|are|was|were)\\s+confirmed\\b`, 'gi'),
+      '$1 most consistent with the visible pattern')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
 
@@ -568,6 +575,13 @@ const CUSTOMER_TEXT_BRANDS = /\b(?:talstar|arena|celsius|sedgehammer|prodiamine|
 // should reference "the property", never a street line that could leak elsewhere.
 const STREET_ADDRESS = /\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,3}\s+(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|cir|circle|ter|terrace|pl|place|hwy|highway|pkwy|parkway|trl|trail)\b\.?/gi;
 
+// PII that the brand/address scrubbers don't catch. Stored finding names, summaries,
+// and seasonal notes can carry client/LLM free text, so strip emails, phone numbers,
+// and links before any of it reaches an unauthenticated prospect report.
+const CUSTOMER_TEXT_URL = /\b(?:https?:\/\/|www\.)\S+/gi;
+const CUSTOMER_TEXT_EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/gi;
+const CUSTOMER_TEXT_PHONE = /(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
+
 // Final egress sanitizer for any free-text published to a prospect. Defense in
 // depth at the public boundary: even if a stale/buggy client stored unsanitized
 // copy, no confirmed-pest claim, brand/active-ingredient name, or street address
@@ -576,6 +590,9 @@ function scrubCustomerText(text) {
   if (text == null) return text;
   return stripConfirmedLanguage(String(text))
     .replace(CUSTOMER_TEXT_BRANDS, 'the treatment product')
+    .replace(CUSTOMER_TEXT_URL, '')
+    .replace(CUSTOMER_TEXT_EMAIL, '')
+    .replace(CUSTOMER_TEXT_PHONE, '')
     .replace(STREET_ADDRESS, 'the property')
     .replace(/\s{2,}/g, ' ')
     .trim();

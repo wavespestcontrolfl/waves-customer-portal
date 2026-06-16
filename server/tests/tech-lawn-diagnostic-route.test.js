@@ -40,6 +40,7 @@ jest.mock('../services/lawn-assessment', () => ({
 
 const express = require('express');
 const techLawnDiagnosticRouter = require('../routes/tech-lawn-diagnostic');
+const { normalizeProductLabelConstraints } = require('../services/lawn-diagnostic-report');
 const {
   enrichAppliedProducts,
   labelConstraintsFromCatalog,
@@ -209,6 +210,30 @@ describe('tech lawn diagnostic analyze route', () => {
       confidence: 'inferred',
       requires_label_review: true,
     });
+  });
+
+  test('catalog misses strip TOP-LEVEL request label authority even with no nested constraints', async () => {
+    const products = await enrichAppliedProducts([{
+      product_id: 'missing-product',
+      product_name: 'Request Product',
+      // Authority asserted ONLY via top-level fields (no nested constraints) —
+      // these previously survived and normalized to product_db/db_authoritative,
+      // publishing exact watering instructions for an unverified product.
+      label_verified_at: '2026-06-14T12:00:00.000Z',
+      label_source: 'product_db',
+      post_app_irrigation: 'hold 48h',
+    }]);
+
+    const p = products[0];
+    expect(p.label_verified_at).toBeUndefined();
+    expect(p.label_source).toBeUndefined();
+    expect(p.post_app_irrigation).toBeUndefined();
+
+    // Normalizing the downgraded product must never yield label authority.
+    const norm = normalizeProductLabelConstraints(p);
+    expect(norm.source).not.toBe('product_db');
+    expect(norm.confidence).not.toBe('db_authoritative');
+    expect(norm.requires_label_review).toBe(true);
   });
 
   test('catalog enrichment keeps DB compliance fields authoritative', async () => {
