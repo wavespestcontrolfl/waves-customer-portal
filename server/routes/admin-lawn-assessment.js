@@ -155,7 +155,12 @@ async function persistProtocolFieldChecks({ assessment, checks, trx = db }) {
   const assessmentCols = await trx('lawn_assessments').columnInfo().catch(() => ({}));
   const update = { updated_at: new Date() };
   for (const [key, value] of Object.entries(checks)) {
-    if (assessmentCols[key] && value !== undefined) update[key] = value;
+    if (!assessmentCols[key] || value === undefined) continue;
+    // The manual irrigation_status input has been retired from the tech UI, so it
+    // now arrives null. Don't clobber a previously-recorded status with that null —
+    // only write it when an actual value is present (mirrors the turf-profile guard below).
+    if (key === 'irrigation_status' && value == null) continue;
+    update[key] = value;
   }
   if (assessmentCols.protocol_field_checks) update.protocol_field_checks = JSON.stringify(checks);
   if (Object.keys(update).length > 1) {
