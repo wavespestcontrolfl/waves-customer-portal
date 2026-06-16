@@ -214,6 +214,7 @@ function sendAccountUpdatedForPrefs({ req, targetCustomerId, propertyLabel, item
   void AccountMembershipEmail.sendAccountUpdated({
     customerId: targetCustomerId || req.customerId,
     recipientCustomerId: req.customerId,
+    actorCustomerId: req.customerId,
     changedItems: items,
     changeSummary: summary,
     accountSection: section,

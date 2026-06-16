@@ -115,6 +115,7 @@ router.put('/', async (req, res, next) => {
       }
       void AccountMembershipEmail.sendAccountUpdated({
         customerId: req.customerId,
+        actorCustomerId: req.customerId,
         changedItems: changeItems(changed, previous, next),
         changeSummary: `${changed.length === 1 ? 'A service preference was' : 'Service preferences were'} updated for future visits.`,
         accountSection: 'Service preferences',
