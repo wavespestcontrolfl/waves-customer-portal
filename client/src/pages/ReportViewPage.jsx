@@ -1065,10 +1065,8 @@ function lawnAssessmentBody(assessment = {}) {
   const observations = String(assessment.observations || assessment.scores?.observations || '').trim();
   if (observations) return observations;
   const profile = assessment.turfProfile;
-  const irrigationInches = formatIrrigationInches(profile?.irrigationInchesPerWeek);
-  if (irrigationInches && profile?.irrigationStatus && profile.irrigationStatus !== 'unknown') {
-    return `Irrigation was documented as ${formatEnumLabel(profile.irrigationStatus).toLowerCase()} at about ${irrigationInches}. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
-  }
+  // The data-driven water balance (target vs. portal irrigation + rainfall) lives
+  // in LawnWaterBalance; we no longer surface a tech's manual wet/dry observation.
   const rawGrass = String(profile?.grassType || '').toLowerCase().trim();
   if (rawGrass && rawGrass !== 'unknown' && rawGrass !== 'mixed') {
     return `Assessment captured for ${formatEnumLabel(profile.grassType).toLowerCase()} turf. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
@@ -1401,7 +1399,6 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
                 hasKnownGrass ? formatEnumLabel(profile.grassType) : null,
                 profile.lawnSqft ? `${Number(profile.lawnSqft).toLocaleString()} sq ft turf` : null,
                 profile.irrigationType ? `${formatEnumLabel(profile.irrigationType)} irrigation` : null,
-                profile.irrigationStatus ? `${formatEnumLabel(profile.irrigationStatus)} irrigation status` : null,
                 irrigationInches ? `${irrigationInches} irrigation` : null,
               ].filter(Boolean).join(' · ')}
             </div>
