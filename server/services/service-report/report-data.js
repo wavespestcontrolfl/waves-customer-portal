@@ -1785,7 +1785,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       sunExposure: turfProfile.sun_exposure || null,
       lawnSqft: turfProfile.lawn_sqft || null,
       irrigationType: turfProfile.irrigation_type || null,
-      irrigationStatus: turfProfile.irrigation_status || assessment.irrigation_status || null,
+      // The manual wet/dry/good irrigation_status has been retired from the customer
+      // report: a tech's once-a-month point-in-time call isn't a meaningful watering
+      // signal. Watering guidance now comes from the data-driven water balance
+      // (grass×season target vs. portal irrigation inches + 7-day rainfall) in
+      // irrigationAdvice / LawnWaterBalance. The column still exists and is read by
+      // other surfaces (lawn-snapshot, waveguard-plan-engine), so it is not emitted here.
       irrigationInchesPerWeek: turfProfile.irrigation_inches_per_week
         ?? assessment.irrigation_inches_per_week
         ?? propertyPrefs?.irrigation_inches_per_week
