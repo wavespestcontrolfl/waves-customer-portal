@@ -53,6 +53,19 @@ const { BYLINE_AUTHORS } = interceptSeeder._internals;
 
 const DEDUPE_PREFIX = 'spoke:v1:';
 const DEFAULT_MANIFEST_PATH = path.join(__dirname, '../../data/spoke-seed-topics-v1.json');
+
+// Kill switch for the spoke blog network. Owner directive 2026-06-16: all blog
+// content is consolidated on the hub (wavespestcontrol.com) — blog posts must
+// NOT fan out to spoke domains. Seeding is therefore OFF by default; set
+// SPOKE_BLOG_NETWORK_ENABLED=true to re-enable the curated per-spoke blog lane.
+// Only the seedAll() entry point is gated — the seeding/overlay/routing LOGIC
+// (and its tests) is left intact, so re-enabling is a single env flip with no
+// code change. Note: this stops NEW spoke topics from being queued; it does not
+// touch spoke-seed rows already in opportunity_queue (see PR notes).
+function spokeBlogNetworkEnabled() {
+  const v = String(process.env.SPOKE_BLOG_NETWORK_ENABLED || '').trim().toLowerCase();
+  return v === 'true' || v === '1' || v === 'on';
+}
 const EXPIRES_DAYS_AFTER_AVAILABLE = 45;
 const HUB_DOMAIN_KEY = 'wavespestcontrol.com';
 // Spoke seeds score below the competitor-intercept clusters (82–88) so a
@@ -212,6 +225,10 @@ function rowForBrief(brief, manifest, { now = new Date() } = {}) {
  * pending.
  */
 async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new Date() } = {}) {
+  if (!spokeBlogNetworkEnabled()) {
+    logger.info('[spoke-seed-seeder] spoke blog network disabled (set SPOKE_BLOG_NETWORK_ENABLED=true to enable) — blogs publish hub-only; no spoke topics seeded');
+    return { disabled: true, count: 0, rows: [] };
+  }
   const manifest = loadManifest(file);
   const rows = manifest.briefs.map((brief) => rowForBrief(brief, manifest, { now }));
   if (dryRun) return { dryRun: true, count: rows.length, rows };
@@ -408,6 +425,7 @@ module.exports = {
   targetSitesFor,
   buildSpokeOverlay,
   _internals: {
+    spokeBlogNetworkEnabled,
     normalizeTargetSite,
     serviceForBrief,
     blockedTopicIdFor,

@@ -94,6 +94,40 @@ describe('spoke-seed-seeder: manifest + rows', () => {
   });
 });
 
+describe('spoke blog network kill switch (owner directive 2026-06-16: blogs are hub-only)', () => {
+  const ORIG = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+  afterEach(() => {
+    if (ORIG === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    else process.env.SPOKE_BLOG_NETWORK_ENABLED = ORIG;
+  });
+
+  test('disabled by default: seedAll no-ops, queues nothing (hub-only)', async () => {
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    expect(seeder._internals.spokeBlogNetworkEnabled()).toBe(false);
+    const result = await seeder.seedAll({});
+    expect(result.disabled).toBe(true);
+    expect(result.count).toBe(0);
+    expect(result.rows).toEqual([]);
+  });
+
+  test('stays disabled for non-truthy flag values', () => {
+    for (const v of ['', 'false', '0', 'off', 'no']) {
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = v;
+      expect(seeder._internals.spokeBlogNetworkEnabled()).toBe(false);
+    }
+  });
+
+  test('SPOKE_BLOG_NETWORK_ENABLED=true re-enables seeding (logic intact)', async () => {
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    expect(seeder._internals.spokeBlogNetworkEnabled()).toBe(true);
+    // dryRun short-circuits before any DB write — proves the manifest still
+    // composes the 5 curated rows when the lane is explicitly re-enabled.
+    const result = await seeder.seedAll({ dryRun: true });
+    expect(result.disabled).toBeUndefined();
+    expect(result.rows.length).toBe(5);
+  });
+});
+
 describe('MDX {{token}} crash guard (proof-caught bug)', () => {
   test('spoke binding instructions never tell the writer to emit {{brandName}} (crashes .mdx builds)', () => {
     const m = seeder.loadManifest();
