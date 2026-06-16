@@ -84,18 +84,29 @@ function buildDedupeKey({ invoiceId, paymentIntentId, phase, methodCategory, err
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
-// Client-side Stripe.js form-validation errors (incomplete/invalid card number,
-// CVC, or expiry) are typing-in-progress events, not payment failures — Stripe.js
-// blocks them in the browser before anything ever reaches Stripe (no PaymentIntent
+// Client-side Stripe.js form-validation errors (incomplete card number, CVC, or
+// expiry) are typing-in-progress events, not payment failures — Stripe.js blocks
+// them in the browser before anything ever reaches Stripe (no PaymentIntent
 // confirm, no charge, no decline). They must never raise a "bill payment error"
 // admin alert, or they drown out the real failures (declines, network errors,
 // the ACH tender-switch case) that genuinely need attention.
+//
+// Scope carefully: the customer pay page (`PayPageV2`) reports *every* client
+// error through `POST /pay/:token/error` with `source: 'client'`, copying
+// `err.type` into `metadata.stripe_type` — not just `elements.submit()`. The same
+// path also carries `confirmPayment` (ACH/wallet, phase `stripe_confirm` /
+// `express_confirm`) and `handleNextAction` (3DS, phase `next_action`) failures,
+// where a `validation_error` (e.g. a stale client secret or bad next-action
+// param) IS a real stuck payment that no server catch or webhook will cover.
+// So a bare `validation_error` *type* is only treated as form-not-finished at the
+// `payment_form_submit` phase; the `incomplete_*` field codes are unambiguous and
+// suppressed regardless of phase.
 function isClientFormValidationError(input = {}) {
   if (normalizePhase(input.source || 'server') !== 'client') return false;
-  const stripeType = cleanString(input.metadata?.stripe_type).toLowerCase();
-  if (stripeType === 'validation_error') return true;
   const code = cleanString(input.code || input.error?.code).toLowerCase();
-  return /^incomplete_/.test(code);
+  if (/^incomplete_/.test(code)) return true;
+  const stripeType = cleanString(input.metadata?.stripe_type).toLowerCase();
+  return stripeType === 'validation_error' && normalizePhase(input.phase) === 'payment_form_submit';
 }
 
 async function alertBillPaymentError(input = {}) {

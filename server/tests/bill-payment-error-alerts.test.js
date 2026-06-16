@@ -149,14 +149,18 @@ describe('bill-payment-error-alerts', () => {
     const { __private } = require('../services/bill-payment-error-alerts');
     const { isClientFormValidationError } = __private;
 
-    // client + validation_error type → suppressed
-    expect(isClientFormValidationError({ source: 'client', metadata: { stripe_type: 'validation_error' } })).toBe(true);
-    // client + incomplete_* code (no stripe_type) → suppressed
-    expect(isClientFormValidationError({ source: 'client', code: 'incomplete_cvc' })).toBe(true);
+    // client + validation_error type AT the submit phase → suppressed
+    expect(isClientFormValidationError({ source: 'client', phase: 'payment_form_submit', metadata: { stripe_type: 'validation_error' } })).toBe(true);
+    // client + validation_error type at a confirm / next-action phase → NOT suppressed
+    // (real stuck payment — no server catch or webhook covers it)
+    expect(isClientFormValidationError({ source: 'client', phase: 'stripe_confirm', metadata: { stripe_type: 'validation_error' } })).toBe(false);
+    expect(isClientFormValidationError({ source: 'client', phase: 'next_action', metadata: { stripe_type: 'validation_error' } })).toBe(false);
+    // client + incomplete_* field code → suppressed regardless of phase (unambiguous)
+    expect(isClientFormValidationError({ source: 'client', phase: 'stripe_confirm', code: 'incomplete_cvc' })).toBe(true);
     // server-sourced validation_error → NOT suppressed (real failures route through server)
-    expect(isClientFormValidationError({ source: 'server', metadata: { stripe_type: 'validation_error' } })).toBe(false);
+    expect(isClientFormValidationError({ source: 'server', phase: 'payment_form_submit', metadata: { stripe_type: 'validation_error' } })).toBe(false);
     // client-sourced real decline → NOT suppressed
-    expect(isClientFormValidationError({ source: 'client', code: 'card_declined' })).toBe(false);
+    expect(isClientFormValidationError({ source: 'client', phase: 'stripe_confirm', code: 'card_declined' })).toBe(false);
     // default source (server) → NOT suppressed
     expect(isClientFormValidationError({ code: 'incomplete_number' })).toBe(false);
   });
