@@ -9,20 +9,18 @@ describe('public estimate SMS templates', () => {
     jest.dontMock('../routes/admin-sms-templates');
   });
 
-  test('renders recurring accept onboarding SMS from the admin SMS template', async () => {
+  test('renders an editable accept SMS from the admin SMS template', async () => {
     const getTemplate = jest.fn(async () => 'Rendered template body');
     jest.doMock('../routes/admin-sms-templates', () => ({ getTemplate }));
 
     const { renderEditableSmsTemplate } = require('../routes/estimate-public');
-    const body = await renderEditableSmsTemplate('estimate_accepted_customer', {
+    const body = await renderEditableSmsTemplate('estimate_accepted_onetime', {
       first_name: 'Ada',
-      onboarding_url: 'https://portal.wavespestcontrol.com/l/abc23',
     });
 
     expect(body).toBe('Rendered template body');
-    expect(getTemplate).toHaveBeenCalledWith('estimate_accepted_customer', {
+    expect(getTemplate).toHaveBeenCalledWith('estimate_accepted_onetime', {
       first_name: 'Ada',
-      onboarding_url: 'https://portal.wavespestcontrol.com/l/abc23',
     }, {});
   });
 
@@ -51,9 +49,8 @@ describe('public estimate SMS templates', () => {
     }));
 
     const { renderEditableSmsTemplate } = require('../routes/estimate-public');
-    const body = await renderEditableSmsTemplate('estimate_accepted_customer', {
+    const body = await renderEditableSmsTemplate('estimate_accepted_onetime', {
       first_name: 'Ada',
-      onboarding_url: 'https://portal.wavespestcontrol.com/l/abc23',
     });
 
     expect(body).toBeNull();

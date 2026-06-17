@@ -4,7 +4,6 @@ const PUBLIC_ROUTE_PREFIXES = [
   '/contract',
   '/estimate',
   '/newsletter',
-  '/onboard',
   '/pay',
   '/quote',
   '/rate',

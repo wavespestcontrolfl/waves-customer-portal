@@ -38,7 +38,7 @@ describe('email automation SMS template governance', () => {
 
   test('defines SMS companions by template key only', () => {
     expect(EmailAutomationService.AUTOMATIONS.new_recurring.smsTemplateKey).toBe('auto_new_recurring');
-    expect(EmailAutomationService.AUTOMATIONS.lawn_service.smsTemplateKey).toBe('auto_lawn_service');
+    expect(EmailAutomationService.AUTOMATIONS.lawn_service.smsTemplateKey).toBeUndefined();
     expect(EmailAutomationService.AUTOMATIONS.new_appointment.smsTemplateKey).toBe('auto_new_appointment');
     expect(EmailAutomationService.AUTOMATIONS.bed_bug.smsTemplateKey).toBe('auto_bed_bug');
     expect(EmailAutomationService.AUTOMATIONS.cockroach.smsTemplateKey).toBe('auto_cockroach');

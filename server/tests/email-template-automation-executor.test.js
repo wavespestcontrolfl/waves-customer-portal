@@ -233,60 +233,6 @@ describe('email template automation executor', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('schedules false-completed reminders when trigger payload omits the flag', async () => {
-    const scheduledRun = run({
-      automation_key: 'onboarding.24h_reminder',
-      trigger_event_key: 'onboarding.created',
-      entity_type: 'onboarding',
-      entity_id: 'onboarding-1',
-      template_key: 'onboarding.24h_reminder',
-      recipient_type: 'customer',
-      recipient_id: 'cust-1',
-      idempotency_key: 'onboarding.24h_reminder:onboarding-1',
-      status: 'scheduled',
-      exit_reason: null,
-    });
-    const insertRunQuery = chain({ returning: [scheduledRun] });
-    setDbQueues({
-      'email_template_automations as a': [chain({
-        result: [automation({
-          automation_key: 'onboarding.24h_reminder',
-          trigger_event_key: 'onboarding.created',
-          template_key: 'onboarding.24h_reminder',
-          delay_minutes: 1440,
-          audience: 'customer',
-          idempotency_key_template: 'onboarding.24h_reminder:{onboarding_id}',
-          conditions: JSON.stringify({ completed: false }),
-          exit_conditions: JSON.stringify({ stop_if: ['onboarding.completed'] }),
-        })],
-      })],
-      email_template_automation_runs: [
-        chain({ first: null }),
-        insertRunQuery,
-      ],
-      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
-    });
-
-    const result = await AutomationExecutor.processTrigger({
-      triggerEventKey: 'onboarding.created',
-      payload: {
-        onboarding_id: 'onboarding-1',
-        customer_id: 'cust-1',
-        customer_email: 'sam@example.com',
-        first_name: 'Sam',
-      },
-      now: new Date('2026-05-18T12:00:00.000Z'),
-    });
-
-    expect(result.results[0].run.status).toBe('scheduled');
-    expect(insertRunQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'scheduled',
-      exit_reason: null,
-      completed_at: null,
-    }));
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-  });
-
   test('treats omitted estimate viewed state as unviewed', () => {
     expect(AutomationExecutor.conditionFailureFor(
       { estimate_viewed: false, estimate_status: ['sent', 'viewed'] },
@@ -480,59 +426,6 @@ describe('email template automation executor', () => {
     });
 
     expect(result.status).toBe('running');
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-  });
-
-  test('skips a delayed run when live exit conditions are met before send', async () => {
-    const queuedRun = run({
-      automation_key: 'onboarding.24h_reminder',
-      trigger_event_key: 'onboarding.created',
-      entity_type: 'onboarding',
-      entity_id: 'onboarding-1',
-      template_key: 'onboarding.24h_reminder',
-      recipient_type: 'customer',
-      payload: JSON.stringify({
-        onboarding_id: 'onboarding-1',
-        customer_email: 'sam@example.com',
-        first_name: 'Sam',
-        completed: false,
-      }),
-    });
-    const skipUpdateQuery = chain({ returning: [{ ...queuedRun, status: 'skipped', exit_reason: 'onboarding already completed' }] });
-    setDbQueues({
-      email_template_automation_runs: [
-        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
-        skipUpdateQuery,
-      ],
-      email_template_automation_run_events: [
-        chain({ returning: [{ id: 'event-1' }] }),
-        chain({ returning: [{ id: 'event-2' }] }),
-      ],
-      onboarding_sessions: [chain({
-        first: {
-          id: 'onboarding-1',
-          status: 'complete',
-          completed_at: new Date('2026-05-18T12:05:00.000Z'),
-        },
-      })],
-    });
-
-    const result = await AutomationExecutor.executeRun(queuedRun, {
-      automation: automation({
-        automation_key: 'onboarding.24h_reminder',
-        trigger_event_key: 'onboarding.created',
-        template_key: 'onboarding.24h_reminder',
-        conditions: JSON.stringify({ completed: false }),
-        exit_conditions: JSON.stringify({ stop_if: ['onboarding.completed'] }),
-      }),
-      now: new Date('2026-05-18T12:00:00.000Z'),
-    });
-
-    expect(result.status).toBe('skipped');
-    expect(skipUpdateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'skipped',
-      exit_reason: 'onboarding already completed',
-    }));
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 

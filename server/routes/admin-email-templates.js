@@ -59,9 +59,6 @@ const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
   'membership.started',
   'membership.updated',
   'new_lead',
-  'onboarding.24h_reminder',
-  'onboarding.72h_reminder',
-  'onboarding.expiring_notice',
   'payment.autopay_enabled',
   'payment.ach_processing',
   'payment.failed',
@@ -91,9 +88,6 @@ const PROTECTED_EMAIL_AUTOMATION_KEYS = new Set([
   'estimate.viewed_followup',
   'invoice.receipt',
   'invoice.sent',
-  'onboarding.24h_reminder',
-  'onboarding.72h_reminder',
-  'onboarding.expiring_notice',
   'payment.failed',
   'prep.bed_bug',
   'prep.cockroach',
@@ -365,20 +359,6 @@ async function dryRunAutomation(row) {
     }
     if (templateKey === 'estimate.extension_notice' && cols.renewal_count) q = q.where('renewal_count', '>', 0);
     result.source = 'estimates';
-    result.candidate_count = await countRows(q);
-    return result;
-  }
-
-  if (templateKey.startsWith('onboarding.')) {
-    const cols = await tableInfo('onboarding_sessions');
-    if (!cols) return countsFromHistory();
-    let q = db('onboarding_sessions');
-    if (cols.created_at) q = q.where('created_at', '>=', since);
-    if (cols.completed_at) q = q.whereNull('completed_at');
-    if (templateKey === 'onboarding.expiring_notice' && cols.expires_at) {
-      q = q.where('expires_at', '<=', new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)).where('expires_at', '>=', new Date());
-    }
-    result.source = 'onboarding_sessions';
     result.candidate_count = await countRows(q);
     return result;
   }

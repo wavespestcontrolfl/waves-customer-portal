@@ -31,8 +31,8 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
           Thanks, {who} — you're booked.
         </div>
         <div style={{ fontSize: 15, color: W.textBody, lineHeight: 1.55 }}>
-          Your estimate for {address || 'your property'} is accepted. Check your phone for the onboarding link
-          we just sent. Questions? Call <a href={`tel:${WAVES_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE}</a>.
+          Your estimate for {address || 'your property'} is accepted. Our team will follow up with the next steps.
+          Questions? Call <a href={`tel:${WAVES_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE}</a>.
         </div>
       </div>
     );

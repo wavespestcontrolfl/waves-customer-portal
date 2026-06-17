@@ -19,14 +19,6 @@ const TEMPLATES = [
     sort_order: 40,
   },
   {
-    template_key: 'auto_lawn_service',
-    name: 'Lawn Care Onboarding',
-    category: 'automations',
-    body: 'Hello {first_name}! Welcome to Waves lawn care. We just emailed your welcome guide with tips for the best results.\n\nQuestions or requests? Reply here.',
-    variables: ['first_name'],
-    sort_order: 41,
-  },
-  {
     template_key: 'auto_new_appointment',
     name: 'New First-Time Appointment',
     category: 'automations',
@@ -375,14 +367,6 @@ const TEMPLATES = [
     sort_order: 29,
   },
   {
-    template_key: 'estimate_accepted_customer',
-    name: 'Estimate Accepted — Customer Onboarding Link',
-    category: 'estimates',
-    body: "Hello {first_name}! Welcome to Waves. Complete your setup here: {onboarding_url}\n\nOnce you're done, we'll get your first service on the schedule. Questions or requests? Reply here.",
-    variables: ['first_name', 'onboarding_url'],
-    sort_order: 33,
-  },
-  {
     template_key: 'estimate_accepted_annual_prepay',
     name: 'Estimate Accepted — Annual Prepay',
     category: 'estimates',
@@ -681,14 +665,6 @@ const TEMPLATES = [
 
   // service
   {
-    template_key: 'onboarding_welcome',
-    name: 'Onboarding Welcome (hardcoded)',
-    category: 'service',
-    body: 'Welcome to Waves, {first_name}. Your first {service_type} is {service_date}{tech_clause}. Portal: portal.wavespestcontrol.com',
-    variables: ['first_name', 'service_type', 'service_date', 'tech_clause'],
-    sort_order: 0,
-  },
-  {
     template_key: 'appointment_confirmation',
     name: 'Appointment Confirmation',
     category: 'service',
@@ -817,22 +793,6 @@ const TEMPLATES = [
     sort_order: 16,
   },
   {
-    template_key: 'reschedule_confirmed_sms_reply',
-    name: 'Reschedule Confirmed - SMS Reply (hardcoded)',
-    category: 'service',
-    body: "Confirmed. Your service is rescheduled for {date}, {time}.\n\nWe'll remind you the day before.",
-    variables: ['date', 'time'],
-    sort_order: 17,
-  },
-  {
-    template_key: 'reschedule_call_requested',
-    name: 'Reschedule - Call Requested Reply (hardcoded)',
-    category: 'service',
-    body: "No problem. We'll give you a call shortly.",
-    variables: [],
-    sort_order: 18,
-  },
-  {
     template_key: 'self_booking_confirmation',
     name: 'Self-Booking Confirmation (hardcoded)',
     category: 'service',
@@ -855,30 +815,6 @@ const TEMPLATES = [
     body: "Hello {first_name}! Your Waves {scope} for {service_type} has been cancelled.\n\nWant to reschedule? Reply here and we'll get you back on the calendar.",
     variables: ['first_name', 'scope', 'service_type'],
     sort_order: 21,
-  },
-  {
-    template_key: 'onboarding_followup_24h',
-    name: 'Onboarding Follow-Up - 24h',
-    category: 'service',
-    body: 'Hello {first_name}! Thanks again for choosing Waves. Complete your setup here so we can get you on the schedule: {onboarding_url}\n\nQuestions or requests? Reply here.',
-    variables: ['first_name', 'onboarding_url'],
-    sort_order: 22,
-  },
-  {
-    template_key: 'onboarding_followup_72h',
-    name: 'Onboarding Follow-Up - 72h',
-    category: 'service',
-    body: "Hello {first_name}! Still here when you're ready. Finish your Waves setup and we'll confirm your first service: {onboarding_url}\n\nQuestions or requests? Reply here.",
-    variables: ['first_name', 'onboarding_url'],
-    sort_order: 23,
-  },
-  {
-    template_key: 'onboarding_followup_expiring',
-    name: 'Onboarding Follow-Up - Expiring',
-    category: 'service',
-    body: 'Hello {first_name}! Heads up: your Waves onboarding link expires on {expires_at}. Lock in your WaveGuard {waveguard_tier} plan and first service here: {onboarding_url}\n\nQuestions or requests? Reply here.',
-    variables: ['first_name', 'onboarding_url', 'expires_at', 'waveguard_tier'],
-    sort_order: 24,
   },
   {
     template_key: 'service_report_v1',

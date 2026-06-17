@@ -42,12 +42,11 @@ const AUTOMATIONS = {
     enabled: true,
   },
   lawn_service: {
-    name: 'Lawn Care Onboarding',
+    name: 'Lawn Care Welcome',
     description: 'For new recurring lawn care customers specifically',
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_LAWN || 'aut_0c794b25-1a87-46aa-9ef3-6c508348d288',
     tags: ['lawn', 'recurring'],
-    smsTemplateKey: 'auto_lawn_service',
     enabled: true,
   },
   new_appointment: {

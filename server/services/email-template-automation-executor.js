@@ -36,20 +36,6 @@ const TRIGGER_MAPPINGS = {
     recipientIdKeys: ['customer_id', 'lead_id'],
     emailKeys: ['customer_email', 'email'],
   },
-  'onboarding.created': {
-    entityType: 'onboarding',
-    entityIdKeys: ['onboarding_id', 'id'],
-    recipientType: 'customer',
-    recipientIdKeys: ['customer_id'],
-    emailKeys: ['customer_email', 'email'],
-  },
-  'onboarding.expiring_soon': {
-    entityType: 'onboarding',
-    entityIdKeys: ['onboarding_id', 'id'],
-    recipientType: 'customer',
-    recipientIdKeys: ['customer_id'],
-    emailKeys: ['customer_email', 'email'],
-  },
   'invoice.sent': {
     entityType: 'invoice',
     entityIdKeys: ['invoice_id', 'id'],
@@ -155,14 +141,6 @@ function boolValue(value) {
   return null;
 }
 
-function completionValue(payload = {}) {
-  if (payload.completed_at) return true;
-  const status = normalizeStatus(payload.onboarding_status || payload.status);
-  if (status === 'complete' || status === 'completed') return true;
-  const value = boolValue(payload.completed);
-  return value == null ? false : value;
-}
-
 function estimateViewedValue(payload = {}) {
   if (payload.viewed_at) return true;
   if (normalizeStatus(payload.estimate_status || payload.status) === 'viewed') return true;
@@ -188,10 +166,6 @@ function exitReasonFor(exitConditions, payload = {}) {
   if (stopIf.includes('estimate.archived') && ['archived', 'cancelled', 'declined'].includes(estimateStatus)) return `estimate status is ${estimateStatus}`;
   if (stopIf.includes('estimate.expired') && estimateStatus === 'expired') return 'estimate already expired';
   if (stopIf.includes('estimate.viewed') && estimateViewedValue(payload)) return 'estimate already viewed';
-
-  const onboardingCompleted = completionValue(payload);
-  if (stopIf.includes('onboarding.completed') && onboardingCompleted) return 'onboarding already completed';
-  if (stopIf.includes('onboarding.expired') && normalizeStatus(payload.onboarding_status || payload.status) === 'expired') return 'onboarding already expired';
 
   const invoiceStatus = normalizeStatus(payload.invoice_status || payload.status);
   if (stopIf.includes('invoice.paid') && invoiceStatus === 'paid') return 'invoice already paid';
@@ -231,10 +205,6 @@ function conditionFailureFor(conditions, payload = {}, now = new Date()) {
     }
   }
 
-  if (conditions.completed !== undefined) {
-    const actual = completionValue(payload);
-    if (actual !== !!conditions.completed) return `completed must be ${!!conditions.completed}`;
-  }
 
   if (conditions.expires_within_days !== undefined) {
     const raw = payload.expires_at || payload.new_expires_at;
@@ -615,24 +585,6 @@ async function livePayloadForRun(run, storedPayload = {}) {
       setLiveValue(live, 'estimate_viewed', !!row.viewed_at);
     }
     if (hasOwn(row, 'renewal_count')) setLiveValue(live, 'renewal_count', row.renewal_count);
-    if (hasOwn(row, 'expires_at')) setLiveValue(live, 'expires_at', row.expires_at);
-    return live;
-  }
-
-  if (entityType === 'onboarding' || entityType === 'onboarding_session') {
-    const row = await loadEntityRow('onboarding_sessions', id);
-    if (!row) return {};
-    const live = {};
-    setLiveValue(live, 'onboarding_id', row.id);
-    if (hasOwn(row, 'status')) {
-      setLiveValue(live, 'onboarding_status', row.status);
-      setLiveValue(live, 'status', row.status);
-    }
-    if (hasOwn(row, 'completed_at')) setLiveValue(live, 'completed_at', row.completed_at);
-    if (hasOwn(row, 'completed_at') || hasOwn(row, 'status')) {
-      const status = normalizeStatus(row.status);
-      setLiveValue(live, 'completed', !!row.completed_at || status === 'complete' || status === 'completed');
-    }
     if (hasOwn(row, 'expires_at')) setLiveValue(live, 'expires_at', row.expires_at);
     return live;
   }
