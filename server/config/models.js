@@ -61,3 +61,26 @@ module.exports = {
   // Backwards-compatible default export for quick imports
   DEFAULT: FLAGSHIP,
 };
+
+// ── Cross-provider touchpoints OUTSIDE this registry ──────────────────
+//
+// Call transcription/recording models are intentionally configured in
+// server/services/call-recording-processor.js, NOT here. They are
+// pipeline-specific and provider-specific, with audio/diarization
+// constraints (response_format, upload limits, multi-provider fallback,
+// output shape) that do not map cleanly onto the app's LLM reasoning
+// tiers. Listed here only as a breadcrumb so they're discoverable:
+//
+//   OPENAI_TRANSCRIPTION_MODEL     primary call transcription/diarization
+//                                  default: gpt-4o-transcribe-diarize
+//   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
+//                                  default: gemini-2.5-flash
+//   OPENAI_TRANSCRIPT_LABEL_MODEL  post-transcription Agent/Caller relabeling
+//                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
+//   GEMINI_EXTRACTION_MODEL        call extraction pipeline
+//                                  default: gemini-2.5-pro
+//
+// Do NOT move these into the tier registry without also updating that
+// processor's provider-specific validation, fallback, and output-shape
+// logic. This is where the cross-provider "GPT-5.5 not mini" / Gemini
+// upgrade work (owner-in-progress) will land.
