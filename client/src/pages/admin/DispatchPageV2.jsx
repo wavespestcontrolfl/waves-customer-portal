@@ -2380,6 +2380,7 @@ export default function DispatchPageV2({
           }}
           onCancelled={() => fetchSchedule(date)}
           onNoShow={() => fetchSchedule(date)}
+          onRescheduled={() => fetchSchedule(date)}
         />
       )}
       {checkoutService && (
