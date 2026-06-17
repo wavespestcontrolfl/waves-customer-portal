@@ -288,7 +288,7 @@ describe('annual prepay renewal helpers', () => {
     const updateQuery = query({ rows: 2 });
     setDbQueues({ scheduled_services: [columnQuery, updateQuery] });
 
-    await _private.clearPrepaidStampsForTerm('term-1', db);
+    await AnnualPrepayRenewals.clearPrepaidStampsForTerm('term-1', db);
 
     // Only the cancelled term's still-open visits are cleared; completed/terminal
     // visits are excluded so already-serviced work isn't re-billed.

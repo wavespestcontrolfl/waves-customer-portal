@@ -1374,6 +1374,7 @@ module.exports = {
   checkAndSend,
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
+  clearPrepaidStampsForTerm,
   recordDecision,
   _private: {
     dateOnly,
@@ -1400,7 +1401,6 @@ module.exports = {
     normalizeCoverageVisitCount,
     defaultCoverageDurationMinutes,
     ensureCoverageRowsForTerm,
-    clearPrepaidStampsForTerm,
     resetCachesForTests,
   },
 };

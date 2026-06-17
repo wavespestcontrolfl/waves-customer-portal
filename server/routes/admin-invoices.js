@@ -935,11 +935,16 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         await trx('annual_prepay_terms')
           .where({ id: termId })
           .update({ status: 'cancelled', updated_at: new Date() });
+        // Clear per-visit prepaid_amount stamps on the term's not-yet-completed
+        // visits FIRST (while they can still be found by term id). Completion
+        // billing keys on prepaid_amount independently of the term link, so an
+        // unflagged future visit would otherwise stay "prepaid" and skip
+        // invoicing — same cleanup the refund/void path runs.
+        await AnnualPrepayRenewals.clearPrepaidStampsForTerm(termId, trx);
         // Detach any scheduled visits attachScheduledServices() stamped while
         // the term was active — pricing-reality-check treats a non-null
         // annual_prepay_term_id as "Annual Prepay", so leaving them linked keeps
-        // visits reported/seeded as prepaid after the flag is removed. Per-visit
-        // prepaid_amount stamps (a separate concept) are left untouched.
+        // visits reported/seeded as prepaid after the flag is removed.
         await trx('scheduled_services')
           .where({ annual_prepay_term_id: termId })
           .update({ annual_prepay_term_id: null, updated_at: new Date() });
