@@ -23,6 +23,13 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
+// Gemini vision scorer model. Flag-gated upgrade to the registry's best
+// (gemini-3.5-flash); default stays gemini-2.5-flash until GATE_GEMINI_VISION_PRIMARY
+// is flipped. Fan-out/averaging logic is unchanged — only the model ID moves.
+const GEMINI_VISION_MODEL = process.env.GATE_GEMINI_VISION_PRIMARY === 'true'
+  ? MODELS.GEMINI_VISION_BEST
+  : 'gemini-2.5-flash';
+
 const VISION_PROMPT = `You are a lawn health assessment tool for a professional lawn care company in Southwest Florida. Analyze the provided lawn photo and return ONLY a JSON object with the following scores. Base your analysis on what is visible in the photo. The primary turf type in this region is St. Augustine grass.
 
 Agronomic tells to weigh:
@@ -102,7 +109,7 @@ async function callGeminiVision(base64Image, mimeType) {
   if (!GEMINI_KEY) return null;
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${GEMINI_KEY}`;
 
     const response = await fetch(url, {
       method: 'POST',

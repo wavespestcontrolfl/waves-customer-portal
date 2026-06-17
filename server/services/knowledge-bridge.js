@@ -25,6 +25,8 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODEL = require('../config/models').FLAGSHIP;
+const { ROUTES } = require('../config/models');
+const { dispatch } = require('./llm/call');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -35,6 +37,11 @@ function slugify(text) {
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
+  // Optional cross-provider route (flag default off; falls back to Claude on any miss).
+  if (process.env.GATE_OPENAI_KNOWLEDGE === 'true') {
+    const r = await dispatch(ROUTES.knowledgeAnswer, { system: systemPrompt, text: userPrompt, jsonMode: false, maxTokens });
+    if (r.ok && r.text) return r.text;
+  }
   if (!Anthropic) return null;
   try {
     const client = new Anthropic();

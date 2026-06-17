@@ -41,10 +41,17 @@
  * reasoning tiers default to Opus 4.8 (the strongest current Opus). Swap
  * any tier via its env var with no code change.
  *
- * NOTE: the cross-provider "best-model" routing (OpenAI GPT-5.5 / Gemini 3.5
- * Flash for parts of the stack) is owner-in-progress. The models exist at the
- * providers; what's pending is wiring + eval in OUR stack, so they're
- * intentionally absent from this registry for now.
+ * ── Cross-provider routing (ROUTES) ───────────────────────────────
+ *
+ * Beyond the Anthropic tiers above, some features route to OpenAI / Gemini
+ * (owner directive: best model for the job). The provider + model per feature
+ * lives in the ROUTES map below; services dispatch through services/llm/call.js.
+ * Each route is { provider, model } and is env-overridable, so every model ID —
+ * Anthropic or not — stays discoverable in one place. PR1 wires only the
+ * low-risk routes (leadClassify, knowledgeAnswer); the rest are listed as
+ * PLANNED until their feature is migrated (shadow-first for money-adjacent;
+ * managed agents stay on Anthropic). Each wired route sits behind a GATE_* flag
+ * (default off) with the Anthropic path retained as fallback.
  */
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || 'claude-opus-4-8';
@@ -59,6 +66,32 @@ const VISION    = process.env.MODEL_VISION    || 'claude-sonnet-4-6';
 // registry. Override via MODEL_LAWN_CHALLENGE (registry convention) or LAWN_CHALLENGE_MODEL.
 const LAWN_CHALLENGE = process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8';
 
+// ── Cross-provider routing ────────────────────────────────────────────
+// Provider ids — so callers / services/llm/call.js never hardcode a string.
+const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini' });
+
+// Cross-provider model defaults (env-overridable; same convention as the #1834
+// lawn pipeline's LAWN_WRITER_MODEL / LAWN_VISION_MODEL). NOT Anthropic IDs, so
+// scripts/check-models.js intentionally skips them (it validates Anthropic only).
+const OPENAI_BEST        = process.env.MODEL_OPENAI_BEST   || 'gpt-5.5';
+const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash';
+
+// Per-feature routes: { provider, model }. services/llm/call.js#dispatch switches
+// on .provider. Only routes WIRED in PR1 are defined; planned ones stay commented
+// so this map never implies a feature is migrated when it isn't. The vision
+// services (lawn-assessment, satellite-analyzer) keep their own provider fan-out
+// and read GEMINI_VISION_BEST directly rather than dispatching through a route.
+const ROUTES = Object.freeze({
+  leadClassify:    Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // lead-triage.js (GATE_OPENAI_LEAD_TRIAGE)
+  knowledgeAnswer: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // knowledge-bridge.js (GATE_OPENAI_KNOWLEDGE)
+  // ── PLANNED — not yet wired ──────────────────────────────────────────
+  // callExtract:       { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 2; currently Gemini in call-recording-processor.js
+  // estimateAssistant: { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 2 shadow-first (money-adjacent)
+  // taxCategorize:     { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 2; needs web-search tool parity
+  // mondayBriefing:    { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Managed Agent — rebuild required; stays on Anthropic
+  // contentStrategy:   { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // SEO advisor swappable; backlink half is an agent
+});
+
 module.exports = {
   FLAGSHIP,
   WORKHORSE,
@@ -66,6 +99,11 @@ module.exports = {
   VOICE,
   VISION,
   LAWN_CHALLENGE,
+  // Cross-provider routing (additive — legacy tier exports above are unchanged)
+  PROVIDER,
+  ROUTES,
+  OPENAI_BEST,
+  GEMINI_VISION_BEST,
   // Backwards-compatible default export for quick imports
   DEFAULT: FLAGSHIP,
 };

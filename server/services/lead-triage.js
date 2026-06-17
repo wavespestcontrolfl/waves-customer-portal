@@ -1,20 +1,26 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { dispatch } = require('./llm/call');
+
+function mapTriage(parsed) {
+  return {
+    serviceInterest: parsed.serviceInterest || null,
+    urgency: parsed.urgency || 'normal',
+    extractedData: parsed.extractedData || {},
+    suggestedReply: parsed.suggestedReply || null,
+  };
+}
 
 /**
- * AI-powered lead triage using Claude.
+ * AI-powered lead triage. Defaults to Claude (FLAGSHIP). When GATE_OPENAI_LEAD_TRIAGE
+ * is on, tries the cross-provider route first and falls back to Claude on any miss —
+ * so flag-off behavior is identical to before.
  * Extracts service interest, urgency, pest details, and generates a suggested SMS reply.
- * Cost: ~$0.003/lead
  */
 async function aiTriageLead({ name, phone, message, address, pageUrl, formName }) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey || !message) return null;
+  if (!message) return null;
 
-  try {
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey });
-
-    const prompt = `You are a lead triage assistant for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
+  const prompt = `You are a lead triage assistant for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
 
 Analyze this incoming lead and extract structured data:
 
@@ -36,21 +42,25 @@ Return a JSON object with:
 
 Return ONLY valid JSON, no markdown.`;
 
+  // Optional cross-provider route (flag default off; falls back to Claude on any miss).
+  if (process.env.GATE_OPENAI_LEAD_TRIAGE === 'true') {
+    const r = await dispatch(MODELS.ROUTES.leadClassify, { text: prompt, jsonMode: true, maxTokens: 300 });
+    if (r.ok && r.json) return mapTriage(r.json);
+  }
+
+  // Default path — Claude (FLAGSHIP).
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey });
     const response = await client.messages.create({
       model: MODELS.FLAGSHIP,
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });
-
     const text = response.content[0]?.text || '';
-    const parsed = JSON.parse(text);
-
-    return {
-      serviceInterest: parsed.serviceInterest || null,
-      urgency: parsed.urgency || 'normal',
-      extractedData: parsed.extractedData || {},
-      suggestedReply: parsed.suggestedReply || null,
-    };
+    return mapTriage(JSON.parse(text));
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);
     return null;
