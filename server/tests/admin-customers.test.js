@@ -7,6 +7,7 @@ const {
   cadenceFromEstimateLine,
   compactServiceContactSlots,
   customerSearchTerms,
+  defaultAnnualPrepayTermStart,
   hasMembership,
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
@@ -23,6 +24,37 @@ describe('admin customers route helpers', () => {
     expect(isValidStage('new_lead')).toBe(true);
     expect(isValidStage('active_customer')).toBe(true);
     expect(isValidStage('not_a_stage')).toBe(false);
+  });
+
+  test('anchors a new prepay term after a paid active term but inside an unpaid pending window', () => {
+    const today = '2026-06-16';
+    // No active term → starts today.
+    expect(defaultAnnualPrepayTermStart(null, today)).toBe(today);
+    // Paid/active term still covering → start the day after its term_end.
+    expect(
+      defaultAnnualPrepayTermStart({ status: 'active', term_end: '2026-12-31' }, today),
+    ).toBe('2027-01-01');
+    // payment_pending (sent-but-unpaid) STILL covering today → cover the same
+    // window (term_start), NOT term_end + 1, so the overlap guard rejects a
+    // stacked duplicate.
+    expect(
+      defaultAnnualPrepayTermStart(
+        { status: 'payment_pending', term_start: '2026-07-01', term_end: '2027-06-30' },
+        today,
+      ),
+    ).toBe('2026-07-01');
+    // An EXPIRED payment_pending window (term_end before today) is moot → start
+    // today so a fresh prepay isn't blocked by a stale unpaid row.
+    expect(
+      defaultAnnualPrepayTermStart(
+        { status: 'payment_pending', term_start: '2024-01-01', term_end: '2024-12-31' },
+        today,
+      ),
+    ).toBe(today);
+    // A paid term whose window already lapsed → starts today (fresh prepay).
+    expect(
+      defaultAnnualPrepayTermStart({ status: 'active', term_end: '2026-01-01' }, today),
+    ).toBe(today);
   });
 
   test('tokenizes visible customer-row search phrases', () => {

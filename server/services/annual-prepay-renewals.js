@@ -6,21 +6,23 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
 
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
-// Term statuses that represent a paid, still-current prepay period for BILLING
-// suppression. Renewal decisions flip an in-window term to renewed/switch_plan
-// (still covered through term_end) — those must stay billing-suppressed, so this
-// set is broader than ACTIVE_STATUSES (which drives renewal alerts). It excludes
-// payment_pending (unpaid) and cancelled (renewal decline / refund / termination).
-const BILLING_COVERED_STATUSES = ['active', 'renewal_pending', 'renewed', 'switch_plan'];
+const COVERED_STATUSES = [...ACTIVE_STATUSES, 'renewed', 'switch_plan'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
 const DEFAULT_ALERT_DAYS = 30;
 const LAST_SERVICE_GRACE_DAYS = 14;
 const LAST_SERVICE_TERM_END_LOOKBACK_DAYS = 120;
 const NOTICE_CLAIM_TTL_MS = 15 * 60 * 1000;
+// prepaid_method written when annual-prepay coverage stamps a visit. Stamp
+// cleanup filters on this so it never clears an independent cash/Zelle/etc.
+// prepayment made through the regular schedule prepay route.
+const ANNUAL_PREPAY_PREPAID_METHOD = 'annual_prepay_invoice';
 const INVOICE_CANCELLED_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
+const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
+const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
 
 let tableExistsCache = null;
+let termColsCache = null;
 let scheduledColsCache = null;
 let invoiceColsCache = null;
 
@@ -35,6 +37,13 @@ async function annualPrepayTableExists() {
   return tableExistsCache;
 }
 
+function resetCachesForTests() {
+  tableExistsCache = null;
+  termColsCache = null;
+  scheduledColsCache = null;
+  invoiceColsCache = null;
+}
+
 async function scheduledServiceColumns() {
   if (scheduledColsCache) return scheduledColsCache;
   try {
@@ -43,6 +52,18 @@ async function scheduledServiceColumns() {
     scheduledColsCache = {};
   }
   return scheduledColsCache;
+}
+
+async function annualPrepayColumns(conn = db) {
+  if (conn === db && termColsCache) return termColsCache;
+  let cols = {};
+  try {
+    cols = await conn('annual_prepay_terms').columnInfo();
+  } catch {
+    cols = {};
+  }
+  if (conn === db) termColsCache = cols;
+  return cols;
 }
 
 async function invoiceColumns() {
@@ -95,6 +116,310 @@ function daysUntil(fromYmd, toYmd) {
   const fromUtc = Date.UTC(from.year, from.month - 1, from.day, 12, 0, 0);
   const toUtc = Date.UTC(to.year, to.month - 1, to.day, 12, 0, 0);
   return Math.round((toUtc - fromUtc) / 86400000);
+}
+
+function normalizeCoverageServiceType(value) {
+  const cleaned = String(value || '').trim().replace(/\s+/g, ' ');
+  // Cap to 100: this value is written verbatim into scheduled_services.service_type
+  // (varchar(100)) when coverage rows are seeded, so a longer label would fail
+  // activation with a Postgres "value too long" error.
+  return cleaned ? cleaned.slice(0, 100) : null;
+}
+
+function normalizeCoverageVisitCount(value) {
+  const count = Number.parseInt(value, 10);
+  return Number.isInteger(count) && count > 0 ? Math.min(count, 24) : null;
+}
+
+function normalizeCoverageCadence(value) {
+  const cleaned = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  if (!cleaned) return null;
+
+  const aliases = {
+    bi_monthly: 'bimonthly',
+    every_2_months: 'bimonthly',
+    every_2_month: 'bimonthly',
+    every_two_months: 'bimonthly',
+    every_three_months: 'quarterly',
+    every_3_months: 'quarterly',
+    every_four_months: 'triannual',
+    every_4_months: 'triannual',
+    every_six_months: 'semiannual',
+    every_6_months: 'semiannual',
+    every_6_weeks: 'every_6_weeks',
+    every_six_weeks: 'every_6_weeks',
+    every_42_days: 'every_6_weeks',
+    six_weeks: 'every_6_weeks',
+    semi_annual: 'semiannual',
+    biannual: 'semiannual',
+    yearly: 'annual',
+  };
+
+  const normalized = aliases[cleaned] || cleaned;
+  return ['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual', 'every_6_weeks'].includes(normalized)
+    ? normalized
+    : null;
+}
+
+function coverageCadenceMonths(value) {
+  const cadence = normalizeCoverageCadence(value);
+  if (cadence === 'monthly') return 1;
+  if (cadence === 'bimonthly') return 2;
+  if (cadence === 'quarterly') return 3;
+  if (cadence === 'triannual') return 4;
+  if (cadence === 'semiannual') return 6;
+  if (cadence === 'annual') return 12;
+  return null;
+}
+
+function coverageCadenceDays(value) {
+  const cadence = normalizeCoverageCadence(value);
+  if (cadence === 'every_6_weeks') return 42;
+  return null;
+}
+
+function coverageCadenceSchedule(value) {
+  const cadence = normalizeCoverageCadence(value);
+  const months = coverageCadenceMonths(cadence);
+  if (months) return { unit: 'months', value: months, cadence };
+  const days = coverageCadenceDays(cadence);
+  if (days) return { unit: 'days', value: days, cadence };
+  return null;
+}
+
+function inferCoverageCadence(term = {}) {
+  const explicit = normalizeCoverageCadence(term?.coverage_cadence);
+  if (explicit) return explicit;
+
+  const serviceType = String(term?.coverage_service_type || '').toLowerCase();
+  if (/\bbi[-\s]?monthly\b|\bevery\s*2\s*months?\b/.test(serviceType)) return 'bimonthly';
+  if (/\bquarterly\b|\bevery\s*3\s*months?\b/.test(serviceType)) return 'quarterly';
+  if (/\btri[-\s]?annual\b|\bevery\s*4\s*months?\b/.test(serviceType)) return 'triannual';
+  if (/\bsemi[-\s]?annual\b|\bevery\s*6\s*months?\b/.test(serviceType)) return 'semiannual';
+  if (/\bannual\b|\byearly\b|\bevery\s*12\s*months?\b/.test(serviceType)) return 'annual';
+  if (/\bevery\s*6\s*weeks?\b|\b6\s*weeks\b|\b42\s*days\b/.test(serviceType)) return 'every_6_weeks';
+  if (/\bmonthly\b/.test(serviceType)) return 'monthly';
+
+  const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+  if (coverageVisitCount === 12) return 'monthly';
+  if (coverageVisitCount === 6) return 'bimonthly';
+  if (coverageVisitCount === 4) return 'quarterly';
+  if (coverageVisitCount === 3) return 'triannual';
+  if (coverageVisitCount === 2) return 'semiannual';
+  if (coverageVisitCount === 1) return 'annual';
+  if (coverageVisitCount === 9) return 'every_6_weeks';
+
+  return 'quarterly';
+}
+
+function coverageServiceKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\b(quarterly|monthly|bimonthly|bi-monthly|semiannual|semi-annual|annual|yearly|recurring|general|program|service|visit|application|applications|every|week|weeks|day|days|six|42|6)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function serviceMatchesCoverage(row, coverageServiceType) {
+  const target = coverageServiceKey(coverageServiceType);
+  const service = coverageServiceKey(row?.service_type);
+  if (!target || !service) return false;
+  return service === target || service.includes(target) || target.includes(service);
+}
+
+function splitCoverageAmount(totalDollars, visitCount) {
+  const total = Number(totalDollars);
+  const count = Number(visitCount);
+  if (!Number.isFinite(total) || total <= 0 || !Number.isInteger(count) || count <= 0) return [];
+  const totalCents = Math.round(total * 100);
+  const baseCents = Math.floor(totalCents / count);
+  const remainder = totalCents - baseCents * count;
+  return Array.from({ length: count }, (_, index) => (
+    (baseCents + (index === count - 1 ? remainder : 0)) / 100
+  ));
+}
+
+function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null) {
+  const normalizedStart = dateOnly(termStart);
+  const count = normalizeCoverageVisitCount(visitCount);
+  if (!normalizedStart || !count) return [];
+  const schedule = coverageCadenceSchedule(cadence) || coverageCadenceSchedule(inferCoverageCadence({ coverage_visit_count: count }));
+  if (!schedule) return [];
+  const normalizedEnd = termEnd ? dateOnly(termEnd) : null;
+  const dates = [];
+  for (let index = 0; index < count; index++) {
+    const date = schedule.unit === 'days'
+      ? addDaysYmd(normalizedStart, index * schedule.value)
+      : addMonthsSameDay(normalizedStart, index * schedule.value);
+    if (!date) return [];
+    if (normalizedEnd && date > normalizedEnd) break;
+    dates.push(date);
+  }
+  return dates;
+}
+
+function defaultCoverageDurationMinutes(serviceType) {
+  return /pest/i.test(String(serviceType || '')) ? 45 : 30;
+}
+
+async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
+  const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
+  const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+  const termStart = dateOnly(term?.term_start);
+  const termEnd = dateOnly(term?.term_end);
+  if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd) {
+    return [];
+  }
+
+  const rows = await conn('scheduled_services')
+    .where({ customer_id: term.customer_id })
+    .whereBetween('scheduled_date', [termStart, termEnd])
+    .orderBy(['scheduled_date', 'window_start', 'id'])
+    .select('*');
+
+  const filtered = includeTerminalStatuses
+    ? rows
+    : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
+
+  const matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  if (matching.length <= coverageVisitCount) return matching;
+
+  // More matching candidates than sold visits: keep the visits already committed
+  // to THIS term (linked or annual-prepay-stamped) inside the slice. Plain
+  // date-order slicing would let a newly-added earlier matching visit displace an
+  // already-stamped later one, which then keeps its orphaned prepaid stamp —
+  // leaving more than coverageVisitCount visits prepaid and skipping completion
+  // billing on the extra work. Fill any remaining slots with the earliest
+  // uncommitted matches, then return the selection in date order.
+  const isCommittedToTerm = (row) =>
+    (term.id != null && String(row.annual_prepay_term_id) === String(term.id))
+    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+  const selectedIds = new Set(
+    [...matching.filter(isCommittedToTerm), ...matching.filter((row) => !isCommittedToTerm(row))]
+      .slice(0, coverageVisitCount)
+      .map((row) => row.id),
+  );
+  return matching.filter((row) => selectedIds.has(row.id));
+}
+
+async function ensureCoverageRowsForTerm(term, conn = db) {
+  const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
+  const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+  const coverageCadence = inferCoverageCadence(term);
+  const termStart = dateOnly(term?.term_start);
+  const termEnd = dateOnly(term?.term_end);
+  const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, termEnd);
+  if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd || !targetDates.length) {
+    return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
+  }
+
+  const cols = await scheduledServiceColumns();
+  if (!cols.scheduled_date || !cols.service_type) {
+    return { createdCount: 0, targetDates, reason: 'scheduled_columns_missing' };
+  }
+
+  // Only count visits that can actually be stamped prepaid downstream:
+  // attachScheduledServices() / applyPrepaidCoverageForTerm() use the
+  // non-terminal coverage set, so a cancelled / skipped / no-show / rescheduled
+  // visit must NOT consume one of the sold coverageVisitCount slots or suppress
+  // its generated replacement — otherwise the paid term ends up with fewer
+  // covered visits than the admin sold.
+  const existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
+
+  // Existing in-window matching visits (e.g. the customer's pre-existing route)
+  // already satisfy coverage even when they don't land on the exact generated
+  // cadence dates. Treat a generated date within half a cadence interval of an
+  // existing visit as already covered, so a July-1 target doesn't lay a second
+  // series on top of an existing July-15 route. Each existing visit is consumed
+  // by at most ONE slot (removed from the pool once matched) — otherwise a single
+  // visit sitting midway between two cadence dates would suppress both and leave
+  // the paid coverage short. The remaining-count cap stops over-seeding when the
+  // customer already has at least the sold number of in-window matching visits.
+  const availableExistingDates = existingRows.map((row) => dateOnly(row.scheduled_date)).filter(Boolean);
+  const cadenceMonths = coverageCadenceMonths(coverageCadence);
+  const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
+  const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
+  const remainingToSeed = Math.max(0, coverageVisitCount - existingRows.length);
+  const datesToSeed = [];
+  for (const scheduledDate of targetDates) {
+    if (datesToSeed.length >= remainingToSeed) break;
+    const matchIndex = availableExistingDates.findIndex((existingDate) => {
+      const diff = daysUntil(existingDate, scheduledDate);
+      return diff != null && Math.abs(diff) <= slotToleranceDays;
+    });
+    if (matchIndex !== -1) {
+      availableExistingDates.splice(matchIndex, 1);
+      continue;
+    }
+    datesToSeed.push(scheduledDate);
+  }
+
+  const createdRows = [];
+  const baseDuration = defaultCoverageDurationMinutes(coverageServiceType);
+  const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
+  let createdParentId = recurringParentId;
+
+  // Give seeded visits a billable pre-tax per-visit price (from the prepay
+  // invoice subtotal) and flag create_invoice_on_complete, so that if the prepay
+  // is later voided/refunded and the prepaid stamp is cleared, completion billing
+  // has a price to invoice — prepay customers often have monthly_rate 0, which
+  // would otherwise leave these generated visits completing unbilled. While
+  // coverage is intact the prepaid stamp (>= this pre-tax price) still suppresses
+  // the invoice, so this never double-bills a covered visit.
+  let seededVisitPrice = null;
+  if (cols.estimated_price && term?.prepay_invoice_id) {
+    try {
+      const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total');
+      const base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      if (base > 0) seededVisitPrice = Math.round((base / coverageVisitCount) * 100) / 100;
+    } catch (err) {
+      logger.warn(`[annual-prepay] seeded visit price lookup skipped: ${err.message}`);
+    }
+  }
+
+  for (const scheduledDate of datesToSeed) {
+    const insertData = {
+      customer_id: term.customer_id,
+      scheduled_date: scheduledDate,
+      service_type: coverageServiceType,
+      status: 'pending',
+      notes: `Annual prepaid ${coverageServiceType} coverage`,
+      estimated_duration_minutes: baseDuration,
+    };
+    if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
+    if (cols.is_recurring) insertData.is_recurring = true;
+    if (cols.recurring_pattern) insertData.recurring_pattern = coverageCadence === 'every_6_weeks' ? 'custom' : coverageCadence;
+    if (cols.recurring_interval_days) insertData.recurring_interval_days = coverageCadence === 'every_6_weeks' ? 42 : null;
+    if (cols.recurring_ongoing) insertData.recurring_ongoing = false;
+    if (cols.recurring_parent_id) {
+      if (createdParentId) {
+        insertData.recurring_parent_id = createdParentId;
+      }
+    }
+    if (cols.time_window) insertData.time_window = null;
+    if (cols.window_start) insertData.window_start = null;
+    if (cols.window_end) insertData.window_end = null;
+    if (cols.technician_id) insertData.technician_id = null;
+    if (cols.customer_notes) insertData.customer_notes = null;
+    if (cols.estimated_price && seededVisitPrice != null) insertData.estimated_price = seededVisitPrice;
+    if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = true;
+
+    const [created] = await conn('scheduled_services').insert(insertData).returning('*');
+    if (!created) continue;
+    createdRows.push(created);
+    if (!createdParentId) {
+      createdParentId = created.id;
+    }
+  }
+
+  return {
+    createdCount: createdRows.length,
+    targetDates,
+    existingCount: existingRows.length,
+    createdRows,
+  };
 }
 
 function noticeColumnForDaysOut(daysOut) {
@@ -194,6 +519,21 @@ async function attachScheduledServices(term, conn = db) {
   const cols = await scheduledServiceColumns();
   if (!cols.annual_prepay_term_id || !term?.id) return;
   try {
+    const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
+    const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
+    if (coverageServiceType && coverageVisitCount) {
+      const rows = await coverageRowsForTerm(term, conn);
+      const ids = rows.map((row) => row.id).filter(Boolean);
+      if (!ids.length) return;
+      await conn('scheduled_services')
+        .whereIn('id', ids)
+        .where(function () {
+          this.whereNull('annual_prepay_term_id').orWhere('annual_prepay_term_id', term.id);
+        })
+        .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
+      return;
+    }
+
     await conn('scheduled_services')
       .where({ customer_id: term.customer_id })
       .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
@@ -207,6 +547,101 @@ async function attachScheduledServices(term, conn = db) {
   }
 }
 
+async function applyPrepaidCoverageForTerm(term, conn = db) {
+  const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
+  const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+  const totalAmount = Number(term?.prepay_amount);
+  if (!term?.id || !coverageServiceType || !coverageVisitCount || !(totalAmount > 0)) {
+    return { stampedCount: 0, matchedCount: 0, reason: 'coverage_not_configured' };
+  }
+
+  const cols = await scheduledServiceColumns();
+  if (!cols.prepaid_amount || !cols.prepaid_method || !cols.prepaid_at) {
+    return { stampedCount: 0, matchedCount: 0, reason: 'prepaid_columns_missing' };
+  }
+
+  const rows = await coverageRowsForTerm(term, conn);
+  const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
+  const now = new Date();
+  let stampedCount = 0;
+
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    const status = String(row.status || '').toLowerCase();
+    if (PREPAID_UPDATE_EXCLUDED_STATUSES.has(status)) continue;
+    if (
+      row.prepaid_amount != null
+      && Number(row.prepaid_amount) > 0
+      && (
+        // Already covered by a DIFFERENT annual-prepay term.
+        (row.annual_prepay_term_id && String(row.annual_prepay_term_id) !== String(term.id))
+        // OR independently prepaid (cash/Zelle/etc.) through the regular schedule
+        // route — attachScheduledServices may have linked it to this term, but its
+        // stamp is a real out-of-band payment. Don't overwrite the method, or the
+        // void/unflag cleanup (method-scoped) would later clear an already-collected
+        // visit and completion billing would re-invoice it.
+        || (row.prepaid_method && row.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD)
+      )
+    ) {
+      continue;
+    }
+
+    const visitAmount = slices[index] ?? slices[0] ?? 0;
+    const updates = {
+      prepaid_amount: visitAmount,
+      prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD,
+      prepaid_note: `Annual prepaid ${coverageServiceType} (${index + 1} of ${coverageVisitCount})`,
+      prepaid_at: row.prepaid_at || now,
+    };
+    if (cols.annual_prepay_term_id) updates.annual_prepay_term_id = term.id;
+    if (cols.updated_at) updates.updated_at = now;
+
+    const updated = await conn('scheduled_services')
+      .where({ id: row.id })
+      .update(updates)
+      .returning(['id']);
+    if (Array.isArray(updated) ? updated.length > 0 : updated) stampedCount++;
+  }
+
+  return {
+    stampedCount,
+    matchedCount: rows.length,
+    expectedVisitCount: coverageVisitCount,
+    perVisitAmount: slices[0] || 0,
+  };
+}
+
+// When a paid prepay invoice is voided/refunded the term flips to 'cancelled',
+// but its not-yet-completed covered visits keep the per-visit prepaid_amount
+// stamp that suppresses completion billing — so they'd be serviced free even
+// though coverage was cancelled. Clear the stamps on those future visits so they
+// bill normally again. Completed/terminal visits (PREPAID_UPDATE_EXCLUDED_STATUSES)
+// are left untouched — already serviced and not billable here. The term link is
+// kept for audit; billing-skip keys on prepaid_amount, which is now null.
+async function clearPrepaidStampsForTerm(termId, conn = db) {
+  if (!termId) return 0;
+  const cols = await scheduledServiceColumns();
+  if (!cols.annual_prepay_term_id || !cols.prepaid_amount) return 0;
+  const updates = { prepaid_amount: null };
+  if (cols.prepaid_method) updates.prepaid_method = null;
+  if (cols.prepaid_at) updates.prepaid_at = null;
+  if (cols.prepaid_note) updates.prepaid_note = null;
+  if (cols.updated_at) updates.updated_at = new Date();
+  try {
+    const q = conn('scheduled_services')
+      .where({ annual_prepay_term_id: termId })
+      .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
+    // Only clear stamps that annual prepay set — a visit manually marked prepaid
+    // (cash/Zelle) through the regular schedule route keeps its independent stamp.
+    if (cols.prepaid_method) q.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
+    const cleared = await q.update(updates);
+    return Array.isArray(cleared) ? cleared.length : cleared;
+  } catch (err) {
+    logger.warn(`[annual-prepay] clear prepaid stamps skipped for term ${termId}: ${err.message}`);
+    return 0;
+  }
+}
+
 async function refreshTermSnapshot(termOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
@@ -216,10 +651,20 @@ async function refreshTermSnapshot(termOrId, conn = db) {
 
   const termStart = dateOnly(term.term_start);
   const termEnd = dateOnly(term.term_end);
-  const lastService = await findLastScheduledServiceForTerm(term.customer_id, termStart, termEnd, conn);
+  const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
+  const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
+  const coverageCadence = inferCoverageCadence(term);
   if (ACTIVE_STATUSES.includes(term.status)) {
+    await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     await attachScheduledServices({ ...term, term_start: termStart, term_end: termEnd }, conn);
+    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
   }
+  const coveredRows = coverageServiceType && coverageVisitCount
+    ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn)
+    : [];
+  const lastService = coveredRows.length
+    ? coveredRows[coveredRows.length - 1]
+    : await findLastScheduledServiceForTerm(term.customer_id, termStart, termEnd, conn);
 
   const updates = {
     last_scheduled_service_id: lastService?.id || null,
@@ -316,6 +761,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         .update({ status: 'cancelled', updated_at: new Date() })
         .returning('*');
       current = updated || term;
+      // A true void/refund (no renewal decision) cancels coverage — drop the
+      // per-visit prepaid stamps so future covered visits bill normally. A
+      // renewal-lapse (renewal_decision set) keeps its paid window, so the
+      // whereNull guard leaves `updated` undefined and we don't clear.
+      if (updated && updated.status === 'cancelled') {
+        await clearPrepaidStampsForTerm(term.id, conn);
+      }
     }
 
     if (ACTIVE_STATUSES.includes(current.status)) {
@@ -324,6 +776,27 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       results.push(refreshed || current);
     } else {
       results.push(current);
+    }
+  }
+
+  if (nextStatus === 'cancelled') {
+    // A refund/void voids the prepaid coverage even for terms whose renewal was
+    // already decided (renewed / switch_plan / lapse) — these stay covered through
+    // term_end for the renewal flow and the loop above doesn't select them, so
+    // their future visits would keep annual-prepay stamps and skip billing after
+    // the refund. Clear those stamps too (method-scoped, so manual cash/Zelle
+    // stamps survive); the term's renewal-flow status is intentionally left as-is.
+    const decidedCoveredTerms = await conn('annual_prepay_terms')
+      .where({ prepay_invoice_id: invoice.id })
+      .where(function decidedCovered() {
+        this.whereIn('status', ['renewed', 'switch_plan'])
+          .orWhere(function lapsed() {
+            this.where('status', 'cancelled').whereNotNull('renewal_decision');
+          });
+      })
+      .select('id');
+    for (const decided of decidedCoveredTerms) {
+      await clearPrepaidStampsForTerm(decided.id, conn);
     }
   }
 
@@ -360,6 +833,98 @@ async function activatePaidPendingTerms(conn = db) {
   return activated;
 }
 
+/**
+ * Customer IDs whose prepay coverage is active on `asOf` (ET date string;
+ * defaults to today). A customer in this set has paid for the current period up
+ * front and MUST be excluded from monthly billing even when active +
+ * monthly_rate > 0 + autopay on. The paid coverage term — not a zeroed
+ * monthly_rate — is the billing-suppression source of truth.
+ *
+ * Coverage = today within [term_start, term_end] AND a COVERED_STATUSES term
+ * (or a payment_pending term whose invoice is in fact paid, or a renewal-lapsed
+ * term still inside its paid window) AND the prepay invoice is not void/refunded
+ * AND the prepay payment was not fully refunded. A refund (invoice flips to
+ * refunded / payment refund_status='full') correctly re-enables monthly billing.
+ */
+async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
+  if (!(await annualPrepayTableExists())) return new Set();
+  const coverageDate = dateOnly(asOf) || etDateString();
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const rows = await conn('annual_prepay_terms as t')
+    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.term_start', '<=', coverageDate)
+    .where('t.term_end', '>=', coverageDate)
+    // Covered = a paid-coverage status, OR a payment_pending term whose invoice
+    // is in fact paid (webhook/reconcile lag — activatePaidPendingTerms() is the
+    // canonical recovery, run before this in the billing cron), OR a renewal
+    // *lapse* (status='cancelled' with renewal_decision='cancel') whose already
+    // paid term is still current through term_end. A true refund sets
+    // status='cancelled' with a NULL renewal_decision and is dropped by the
+    // invoice/payment refund exclusions below.
+    .where(function statusGuard() {
+      this.whereIn('t.status', COVERED_STATUSES)
+        .orWhere(function paidPending() {
+          this.where('t.status', PAYMENT_PENDING_STATUS)
+            .andWhere(function invoicePaid() {
+              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+            });
+        })
+        .orWhere(function lapsedRenewalStillInTerm() {
+          this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
+        });
+    })
+    // Exclude void/refunded prepay invoices…
+    .whereRaw(
+      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    // …and any term whose prepay payment was FULLY refunded. The Stripe refund
+    // webhook (charge.refunded) flips a full refund to status='refunded' /
+    // refund_status='full' on the payment row — it does NOT flip invoices.status
+    // — so detect it on the payment via the invoice's Stripe identifiers.
+    // Partial refunds (status stays 'paid') keep coverage.
+    .whereRaw(
+      `not exists (
+        select 1 from payments p
+        where (p.status = 'refunded' or p.refund_status = 'full')
+          and (
+            (p.stripe_payment_intent_id is not null and p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+            or (p.stripe_charge_id is not null and p.stripe_charge_id = i.stripe_charge_id)
+          )
+      )`,
+    )
+    .distinct('t.customer_id');
+  return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
+}
+
+/**
+ * Customer IDs with an annual-prepay commitment whose invoice is still open.
+ * These customers have not paid for coverage yet, so they are not "actively
+ * covered"; the monthly billing cron still must not charge them while the
+ * annual-prepay invoice is pending review/payment. Bounded to terms whose
+ * window has not ended and whose linked invoice is still open (not paid, void,
+ * cancelled, or refunded) so a stale/void pending row cannot suppress billing
+ * indefinitely.
+ */
+async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
+  if (!(await annualPrepayTableExists())) return new Set();
+  const coverageDate = dateOnly(asOf) || etDateString();
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const rows = await conn('annual_prepay_terms as t')
+    .join('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.status', PAYMENT_PENDING_STATUS)
+    .whereNotNull('t.prepay_invoice_id')
+    .where('t.term_end', '>=', coverageDate)
+    .whereRaw(
+      `lower(coalesce(i.status, 'draft')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    .whereRaw("lower(coalesce(i.status, 'draft')) <> 'paid'")
+    .whereNull('i.paid_at')
+    .distinct('t.customer_id');
+  return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
+}
+
 async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
@@ -369,15 +934,30 @@ async function createTermForAnnualPrepay({
   prepayAmount = null,
   termStart = null,
   termEnd = null,
+  coverageServiceType = undefined,
+  coverageVisitCount = undefined,
+  coverageCadence = undefined,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   if (!customerId) throw new Error('customerId is required');
 
+  const hasExplicitTermStart = termStart !== null && termStart !== undefined && termStart !== '';
+  const hasExplicitTermEnd = termEnd !== null && termEnd !== undefined && termEnd !== '';
   const normalizedStart = dateOnly(termStart) || etDateString();
   const normalizedEnd = dateOnly(termEnd) || addMonthsSameDay(normalizedStart, 12);
   if (!normalizedEnd) throw new Error('Could not determine annual prepay term end');
   const nextStatus = await statusForPrepayInvoice(prepayInvoiceId, conn);
+  const termCols = await annualPrepayColumns(conn);
+  const normalizedCoverageServiceType = coverageServiceType === undefined
+    ? undefined
+    : normalizeCoverageServiceType(coverageServiceType);
+  const normalizedCoverageVisitCount = coverageVisitCount === undefined
+    ? undefined
+    : normalizeCoverageVisitCount(coverageVisitCount);
+  const normalizedCoverageCadence = coverageCadence === undefined
+    ? undefined
+    : normalizeCoverageCadence(coverageCadence);
 
   let existing = null;
   if (sourceEstimateId || prepayInvoiceId) {
@@ -410,14 +990,22 @@ async function createTermForAnnualPrepay({
       updated_at: new Date(),
     };
     // Honor explicitly supplied coverage dates so an edit can correct them.
-    // Only the start supplied → recompute the 12-month end from it; neither
-    // supplied → leave the existing window untouched (the estimate flow re-runs
-    // with null dates and must not have its term reset).
-    const suppliedStart = dateOnly(termStart);
-    const suppliedEnd = dateOnly(termEnd);
-    if (suppliedStart) updates.term_start = suppliedStart;
-    if (suppliedEnd) updates.term_end = suppliedEnd;
-    else if (suppliedStart) updates.term_end = addMonthsSameDay(suppliedStart, 12);
+    // Only the start supplied → recompute the 12-month end from it (normalizedEnd
+    // already carries start+12mo when termEnd was blank); neither supplied →
+    // leave the existing window untouched (the estimate flow re-runs with null
+    // dates and must not have its term reset).
+    if (hasExplicitTermStart) updates.term_start = normalizedStart;
+    if (hasExplicitTermEnd) updates.term_end = normalizedEnd;
+    else if (hasExplicitTermStart) updates.term_end = normalizedEnd;
+    if (termCols.coverage_service_type && normalizedCoverageServiceType !== undefined) {
+      updates.coverage_service_type = normalizedCoverageServiceType;
+    }
+    if (termCols.coverage_visit_count && normalizedCoverageVisitCount !== undefined) {
+      updates.coverage_visit_count = normalizedCoverageVisitCount;
+    }
+    if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
+      updates.coverage_cadence = normalizedCoverageCadence;
+    }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
     // any visits attachScheduledServices() stamped under the old window that now
@@ -430,12 +1018,33 @@ async function createTermForAnnualPrepay({
       if (scCols.annual_prepay_term_id) {
         const winStart = dateOnly(updates.term_start || existing.term_start);
         const winEnd = dateOnly(updates.term_end || existing.term_end);
+        function detachOutOfWindow() {
+          this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
+        }
         try {
+          // Completion billing keys on prepaid_amount independently of the term
+          // link, so a now-out-of-window FUTURE visit would still be treated as
+          // prepaid and skip invoicing unless its stamp is cleared too. Clear the
+          // stamps on the non-completed out-of-window visits first (while they're
+          // still findable by term id); completed/terminal visits keep their
+          // historical stamp.
+          if (scCols.prepaid_amount) {
+            const stampClear = { prepaid_amount: null, updated_at: new Date() };
+            if (scCols.prepaid_method) stampClear.prepaid_method = null;
+            if (scCols.prepaid_at) stampClear.prepaid_at = null;
+            if (scCols.prepaid_note) stampClear.prepaid_note = null;
+            const stampQuery = conn('scheduled_services')
+              .where({ annual_prepay_term_id: existing.id })
+              .andWhere(detachOutOfWindow)
+              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
+            // Only clear annual-prepay stamps; preserve an independent cash/Zelle
+            // prepayment made on the visit through the regular schedule route.
+            if (scCols.prepaid_method) stampQuery.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
+            await stampQuery.update(stampClear);
+          }
           await conn('scheduled_services')
             .where({ annual_prepay_term_id: existing.id })
-            .andWhere(function () {
-              this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
-            })
+            .andWhere(detachOutOfWindow)
             .update({ annual_prepay_term_id: null, updated_at: new Date() });
         } catch (err) {
           logger.warn(`[annual-prepay] scheduled service detach skipped: ${err.message}`);
@@ -445,22 +1054,33 @@ async function createTermForAnnualPrepay({
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
-      await syncCustomerRenewalDate(customerId, normalizedEnd, conn);
+      await syncCustomerRenewalDate(customerId, dateOnly(refreshed.term_end), conn);
     }
     return refreshed;
   }
 
-  const [term] = await conn('annual_prepay_terms').insert({
+  const insert = {
     customer_id: customerId,
     source_estimate_id: sourceEstimateId || null,
     prepay_invoice_id: prepayInvoiceId || null,
-    plan_label: planLabel,
+    plan_label,
     monthly_rate: monthlyRate != null ? monthlyRate : null,
     prepay_amount: prepayAmount != null ? prepayAmount : null,
     term_start: normalizedStart,
     term_end: normalizedEnd,
     status: nextStatus,
-  }).returning('*');
+  };
+  if (termCols.coverage_service_type && normalizedCoverageServiceType !== undefined) {
+    insert.coverage_service_type = normalizedCoverageServiceType;
+  }
+  if (termCols.coverage_visit_count && normalizedCoverageVisitCount !== undefined) {
+    insert.coverage_visit_count = normalizedCoverageVisitCount;
+  }
+  if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
+    insert.coverage_cadence = normalizedCoverageCadence;
+  }
+
+  const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
 
   await syncInvoiceTerm(prepayInvoiceId, term.id, conn);
   const refreshed = await refreshTermSnapshot(term.id, conn);
@@ -491,7 +1111,6 @@ async function getOpenRenewalAlerts({ daysAhead = DEFAULT_ALERT_DAYS, today = et
     .leftJoin('customers as c', 't.customer_id', 'c.id')
     .whereIn('t.status', ACTIVE_STATUSES)
     .whereNull('t.renewal_decision')
-    // Soft-deleted customers get no renewal outreach.
     .whereNull('c.deleted_at')
     .where(function () {
       this.whereBetween('t.term_end', [today, soon])
@@ -719,10 +1338,24 @@ async function checkAndSend({ today = etDateString() } = {}) {
         const claimCol = noticeClaimColumnForDaysOut(daysOut);
         this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
       })
-      .where('term_end', target)
+      // Anchor the reminder on the effective coverage end: term_end, OR the last
+      // covered visit when that is the effective end. Finite cadences (e.g. a
+      // quarterly term seeds visits at +0/+3/+6/+9mo while term_end is +12mo) end
+      // service before term_end, so a term_end-only match would fire the reminder
+      // months after coverage actually lapsed (or skip it). Mirrors the
+      // getOpenRenewalAlerts last_scheduled_service_date trigger so the automated
+      // sender and the admin alert list agree.
+      .where(function renewalAnchorMatches() {
+        this.where('term_end', target).orWhere('last_scheduled_service_date', target);
+      })
       .select('*');
 
     for (const term of terms) {
+      // Only treat the last-visit date as the anchor when it is genuinely near
+      // term end (the effective end); a term matched solely by an early
+      // last-service date still reminds on term_end instead.
+      const onTermEnd = dateOnly(term.term_end) === target;
+      if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
       try {
         const result = await sendCustomerTermNotice(term, daysOut);
         if (result.sent) sent++;
@@ -782,111 +1415,21 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
   return term || null;
 }
 
-/**
- * Customer IDs whose prepay coverage is active on `asOf` (ET date string;
- * defaults to today). A customer in this set has paid for the current period up
- * front and MUST be excluded from monthly billing even when active +
- * monthly_rate > 0 + autopay on. The paid coverage term — not a zeroed
- * monthly_rate — is the billing-suppression source of truth, so monthly_rate
- * stays on the profile for renewal/reporting math.
- *
- * Coverage = today within [term_start, term_end] AND a BILLING_COVERED_STATUSES
- * term AND the prepay invoice is not void/refunded. Keying on the paid invoice
- * (rather than only ACTIVE_STATUSES) keeps renewal-decided terms — renewed /
- * switch_plan, still covered through term_end — suppressed, while a refund
- * (invoice flips to refunded) correctly re-enables monthly billing.
- */
-async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
-  if (!(await annualPrepayTableExists())) return new Set();
-  const today = dateOnly(asOf) || etDateString();
-  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
-  const rows = await conn('annual_prepay_terms as t')
-    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
-    .where('t.term_start', '<=', today)
-    .where('t.term_end', '>=', today)
-    // Covered = a paid-coverage status, OR a payment_pending term whose invoice
-    // is in fact paid (webhook/reconcile lag). activatePaidPendingTerms() is the
-    // canonical recovery (run before this in the billing cron); this OR-branch
-    // is the belt-and-suspenders guard if that sync hasn't caught up.
-    .where(function statusGuard() {
-      this.whereIn('t.status', BILLING_COVERED_STATUSES)
-        .orWhere(function paidPending() {
-          this.where('t.status', PAYMENT_PENDING_STATUS)
-            .andWhere(function invoicePaid() {
-              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
-            });
-        })
-        // A 'cancelled' status is overloaded: a renewal *lapse* decision
-        // (renewal_decision='cancel') still leaves the already-paid term current
-        // through term_end, whereas a refund sets status='cancelled' with a NULL
-        // renewal_decision. Keep the lapsed-but-still-paid customer suppressed;
-        // the invoice/payment refund exclusions below still drop true refunds.
-        .orWhere(function lapsedRenewalStillInTerm() {
-          this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
-        });
-    })
-    // Exclude void/refunded prepay invoices…
-    .whereRaw(
-      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
-      cancelledStatuses,
-    )
-    // …and any term whose prepay payment was FULLY refunded. The Stripe refund
-    // webhook (charge.refunded) flips a full refund to status='refunded' /
-    // refund_status='full' on the payment row — it does NOT flip invoices.status
-    // or set refunded_at — so detect it on the payment via the invoice's Stripe
-    // identifiers. Partial refunds (status stays 'paid') keep coverage.
-    .whereRaw(
-      `not exists (
-        select 1 from payments p
-        where (p.status = 'refunded' or p.refund_status = 'full')
-          and (
-            (p.stripe_payment_intent_id is not null and p.stripe_payment_intent_id = i.stripe_payment_intent_id)
-            or (p.stripe_charge_id is not null and p.stripe_charge_id = i.stripe_charge_id)
-          )
-      )`,
-    )
-    .distinct('t.customer_id');
-  return new Set(rows.map((r) => String(r.customer_id)));
-}
-
-/**
- * Customer IDs with an annual-prepay commitment whose invoice is still open.
- * These customers have not paid for coverage yet, so they are not "actively
- * covered"; the monthly billing cron still must not charge them while the
- * annual-prepay invoice is pending review/payment.
- */
-async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
-  if (!(await annualPrepayTableExists())) return new Set();
-  const today = dateOnly(asOf) || etDateString();
-  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
-  const rows = await conn('annual_prepay_terms as t')
-    .join('invoices as i', 'i.id', 't.prepay_invoice_id')
-    .where('t.status', PAYMENT_PENDING_STATUS)
-    .whereNotNull('t.prepay_invoice_id')
-    .where('t.term_end', '>=', today)
-    .whereRaw(
-      `lower(coalesce(i.status, 'draft')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
-      cancelledStatuses,
-    )
-    .whereRaw("lower(coalesce(i.status, 'draft')) <> 'paid'")
-    .whereNull('i.paid_at')
-    .distinct('t.customer_id');
-  return new Set(rows.map((r) => String(r.customer_id)));
-}
-
 module.exports = {
   createTermForAnnualPrepay,
-  getActivelyCoveredCustomerIds,
-  getPaymentPendingCustomerIds,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   syncTermForInvoicePayment,
   syncTermForRefundedPayment,
   activatePaidPendingTerms,
+  getActivelyCoveredCustomerIds,
+  getPaymentPendingCustomerIds,
   getOpenRenewalAlerts,
   sendCustomerTermNotice,
   checkAndSend,
   hasAnnualPrepayRenewal,
+  applyPrepaidCoverageForTerm,
+  clearPrepaidStampsForTerm,
   recordDecision,
   _private: {
     dateOnly,
@@ -901,5 +1444,19 @@ module.exports = {
     formatDateLabel,
     parsePaymentMetadata,
     findInvoiceIdForRefundedPayment,
+    coverageServiceKey,
+    serviceMatchesCoverage,
+    splitCoverageAmount,
+    coverageScheduleDates,
+    normalizeCoverageCadence,
+    coverageCadenceMonths,
+    coverageCadenceDays,
+    inferCoverageCadence,
+    normalizeCoverageServiceType,
+    normalizeCoverageVisitCount,
+    defaultCoverageDurationMinutes,
+    ensureCoverageRowsForTerm,
+    coverageRowsForTerm,
+    resetCachesForTests,
   },
 };
