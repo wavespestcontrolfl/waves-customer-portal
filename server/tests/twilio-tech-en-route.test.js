@@ -25,6 +25,12 @@ jest.mock("../services/customer-contact", () => ({
 jest.mock("../services/messaging/send-customer-message", () => ({
   sendCustomerMessage: jest.fn(),
 }));
+jest.mock("../services/appointment-email", () => ({
+  sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
+}));
+jest.mock("../services/appointment-reminders", () => ({
+  alertNoReachableChannel: jest.fn(async () => ({})),
+}));
 
 const db = require("../models/db");
 const smsTemplates = require("../routes/admin-sms-templates");
@@ -33,6 +39,8 @@ const { getAppointmentContacts } = require("../services/customer-contact");
 const {
   sendCustomerMessage,
 } = require("../services/messaging/send-customer-message");
+const AppointmentEmail = require("../services/appointment-email");
+const AppointmentReminders = require("../services/appointment-reminders");
 const TwilioService = require("../services/twilio");
 
 function firstQuery(row) {
@@ -118,6 +126,29 @@ describe("TwilioService.sendTechEnRoute", () => {
       }),
     );
     expect(result.success).toBe(true);
+  });
+
+  test("cached landline en-route falls back to email, and alerts when email is missing", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", line_type: "landline" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_en_route: true, sms_enabled: true }),
+    );
+
+    // Primary phone is the only contact and is a cached landline → SMS is skipped.
+    getAppointmentContacts.mockReturnValue([
+      { phone: "+15551112222", name: "Sam", role: "primary" },
+    ]);
+    AppointmentEmail.sendTechEnRouteEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: "missing_email" });
+
+    const result = await TwilioService.sendTechEnRoute("cust-1", "Bryan", 20, null);
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendTechEnRouteEmail).toHaveBeenCalledTimes(1);
+    expect(AppointmentReminders.alertNoReachableChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: "cust-1", kind: "en_route" }),
+    );
+    expect(result.success).toBe(false);
   });
 
   test("sendTechArrived uses arrival copy instead of en-route copy", async () => {

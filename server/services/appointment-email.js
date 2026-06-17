@@ -217,7 +217,11 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
 }
 
 function toDate(value) {
-  if (value instanceof Date) return value;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  // Guard falsy values explicitly: new Date(null)/new Date(0) are valid 1970
+  // dates, which would render a bogus "January 1, 1970" when an appointment row
+  // can't be reconstructed. Treat missing as missing so the fields stay blank.
+  if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }

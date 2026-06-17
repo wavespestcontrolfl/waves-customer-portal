@@ -712,13 +712,21 @@ const TwilioService = {
     if (!delivered && (attemptedSms || landlineSkipped || contacts.length === 0)) {
       try {
         const AppointmentEmail = require("./appointment-email");
-        await AppointmentEmail.sendTechEnRouteEmail({
+        const emailRes = await AppointmentEmail.sendTechEnRouteEmail({
           customerId,
           techName: customerTechName,
           etaMinutes,
           trackUrl: trackUrl || longTrackUrl,
           idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
         });
+        // Unlike confirmation/reminders, a locally-skipped en-route SMS (cached
+        // landline / no phone contacts) produces no Twilio delivery callback, so
+        // this is the only path that can flag an unreachable customer. If the email
+        // also can't land (no address / suppressed), alert a human to call them.
+        if (!emailRes?.ok && ((emailRes?.skipped && emailRes.reason === "missing_email") || emailRes?.blocked)) {
+          const AppointmentReminders = require("./appointment-reminders");
+          await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route" });
+        }
       } catch (e) {
         logger.warn(`[twilio] en-route email fallback failed for customer ${customerId}: ${e.message}`);
       }

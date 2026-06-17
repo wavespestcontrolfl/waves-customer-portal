@@ -1329,6 +1329,11 @@ const AppointmentReminders = {
   },
 };
 
+// Exposed so other appointment send paths (e.g. the en-route send in
+// services/twilio.js, which has no Twilio delivery callback when the SMS is
+// skipped locally) can raise the same deduped "no reachable channel" admin alert.
+AppointmentReminders.alertNoReachableChannel = alertNoReachableChannel;
+
 AppointmentReminders._test = {
   maskPhone,
   sanitizeLookupError,

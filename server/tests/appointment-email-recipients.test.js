@@ -73,6 +73,23 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'primary@example.com' }));
   });
 
+  test('a null/unreconstructable appointment time renders blank fields, not 1970', async () => {
+    mockDb({
+      customer: { id: 'c5', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234' },
+      prefs: null,
+    });
+
+    await AppointmentEmail.sendAppointmentConfirmationEmail({
+      customerId: 'c5', scheduledServiceId: 'ss5', appointmentTime: null, serviceLabel: 'Quarterly Pest Control',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ appointment_day: '', appointment_date: '', appointment_time: '' }),
+    }));
+    const payload = EmailTemplates.sendTemplate.mock.calls[0][0].payload;
+    expect(JSON.stringify(payload)).not.toContain('1970');
+  });
+
   test('no email anywhere returns missing_email and does not call the email provider', async () => {
     mockDb({
       customer: {
