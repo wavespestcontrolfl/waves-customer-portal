@@ -384,8 +384,13 @@ function annualPrepayPretaxBase(term) {
   return Number(term.prepayAmount) || 0;
 }
 
+// A term that is current for renewal-amount defaulting: truly active OR moved to
+// renewal_pending by the reminder flow (the renewal modals are opened for that
+// term, so its pre-tax invoice subtotal is the correct default base).
+const ANNUAL_PREPAY_CURRENT_STATUSES = ["active", "renewal_pending"];
+
 function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
-  const matchingActiveTerm = activeTerm && activeTerm.status === "active" && annualPrepayLabelsMatch(
+  const matchingActiveTerm = activeTerm && ANNUAL_PREPAY_CURRENT_STATUSES.includes(activeTerm.status) && annualPrepayLabelsMatch(
     activeTerm.coverageServiceType || activeTerm.planLabel || "",
     serviceType,
   )
@@ -397,7 +402,7 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
   const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
     ? customer.annualPrepayTerms.find((term) => {
       const termLabel = term?.coverageServiceType || term?.planLabel || "";
-      return term?.status === "active" && annualPrepayLabelsMatch(termLabel, serviceType);
+      return ANNUAL_PREPAY_CURRENT_STATUSES.includes(term?.status) && annualPrepayLabelsMatch(termLabel, serviceType);
     })
     : null;
   const activeTermMatchBase = annualPrepayPretaxBase(activeTermMatch);
