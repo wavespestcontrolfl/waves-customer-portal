@@ -249,13 +249,14 @@ async function handleEvent(ev) {
       })
       .first()
     : null;
-  // Fallback: tracked sends carry custom_args.email_message_id, echoed on every
-  // event. If the X-Message-Id isn't bound yet (a webhook can race the post-send
-  // provider_message_id write), resolve the row by that id and backfill it.
-  // IMPORTANT: only accept the fallback for an UNBOUND row, or one already bound
-  // to THIS event's message id. A retry reuses the same email_messages.id with a
-  // new provider id, so a delayed event from a prior attempt (different message
-  // id) must NOT mutate the current row or trigger recovery.
+  // Fallback: tracked sends carry custom_args.email_message_id (+ send_attempt_token),
+  // echoed on every event. If the X-Message-Id isn't bound yet (a webhook can race
+  // the post-send provider_message_id write), resolve the row by that id and backfill.
+  // SAFETY: a retried idempotent send reuses the same email_messages.id with a NEW
+  // provider id + NEW attempt token, so accept the fallback only when the row is
+  // already bound to THIS event's message id, OR it is unbound AND the event's
+  // send_attempt_token matches the row's current token. Otherwise a delayed event
+  // from a prior attempt could mis-terminalize the row or mis-trigger recovery.
   if (!emailMessage && !newsletterDelivery && !automationSend && ev.email_message_id) {
     const candidate = await db('email_messages')
       .where({ id: String(ev.email_message_id) })
@@ -264,9 +265,12 @@ async function handleEvent(ev) {
       })
       .first()
       .catch(() => null);
-    const boundElsewhere = candidate?.provider_message_id
-      && String(candidate.provider_message_id) !== String(messageId || '');
-    if (candidate && !boundElsewhere) {
+    const boundHere = candidate?.provider_message_id
+      && String(candidate.provider_message_id) === String(messageId || '');
+    const tokenMatches = candidate?.send_attempt_token && ev.send_attempt_token
+      && String(candidate.send_attempt_token) === String(ev.send_attempt_token);
+    const acceptable = candidate && (boundHere || (!candidate.provider_message_id && tokenMatches));
+    if (acceptable) {
       emailMessage = candidate;
       if (messageId && !emailMessage.provider_message_id) {
         await db('email_messages')

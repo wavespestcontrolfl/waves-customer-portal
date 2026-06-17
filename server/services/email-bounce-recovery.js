@@ -19,6 +19,7 @@
  * call. See server/routes/webhooks-sendgrid.js.
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
@@ -331,6 +332,9 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
     categories: JSON.stringify(categories),
     status: 'queued',
     idempotency_key: idempotencyKey,
+    // Per-attempt token echoed in custom_args; the webhook fallback requires it
+    // to match before trusting an unbound row.
+    send_attempt_token: crypto.randomUUID(),
     queued_at: now,
     created_at: now,
     updated_at: now,
@@ -368,7 +372,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
       // So a fast delivery/bounce webhook can resolve this row even before
       // provider_message_id is committed below.
-      customArgs: { email_message_id: String(message.id) },
+      customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
     });
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.
@@ -612,21 +616,37 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         // when the bounced address uniquely identifies ONE record ACROSS both
         // tables — a typo appearing once in estimates AND once in leads can't be
         // proven to be the same prospect, so we leave both alone.
-        const estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]).select('id').catch(() => []);
-        const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]).select('id').catch(() => []);
-        const totalMatches = estRows.length + leadRows.length;
-        if (totalMatches === 1 && estRows.length === 1) {
-          const ok = await db('estimates').where({ id: estRows[0].id })
-            .update({ customer_email: correctedEmail, updated_at: new Date() })
-            .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
-          if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
-        } else if (totalMatches === 1 && leadRows.length === 1) {
-          const ok = await db('leads').where({ id: leadRows[0].id })
-            .update({ email: correctedEmail, updated_at: new Date() })
-            .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
-          if (Number(ok) > 0) updatedFields.push('leads.email');
-        } else if (totalMatches > 1) {
-          logger.warn(`[bounce-recovery] ambiguous source (${estRows.length} estimate(s) + ${leadRows.length} lead(s) share the typo) — left unchanged`);
+        let estRows;
+        let leadRows;
+        try {
+          estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]).select('id');
+          leadRows = await db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]).select('id');
+        } catch (err) {
+          // Fail closed: a failed lookup must not read as "zero matches" and let
+          // a single match on the other table slip through as unique.
+          logger.warn(`[bounce-recovery] source uniqueness lookup failed — left unchanged: ${err.message}`);
+          estRows = null;
+          leadRows = null;
+        }
+        if (estRows && leadRows) {
+          const totalMatches = estRows.length + leadRows.length;
+          if (totalMatches === 1 && estRows.length === 1) {
+            // Re-guard on the bounced address: don't clobber an operator edit made
+            // between the select and this update.
+            const ok = await db('estimates').where({ id: estRows[0].id })
+              .whereRaw('LOWER(customer_email) = ?', [bouncedEmail])
+              .update({ customer_email: correctedEmail, updated_at: new Date() })
+              .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
+            if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
+          } else if (totalMatches === 1 && leadRows.length === 1) {
+            const ok = await db('leads').where({ id: leadRows[0].id })
+              .whereRaw('LOWER(email) = ?', [bouncedEmail])
+              .update({ email: correctedEmail, updated_at: new Date() })
+              .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
+            if (Number(ok) > 0) updatedFields.push('leads.email');
+          } else if (totalMatches > 1) {
+            logger.warn(`[bounce-recovery] ambiguous source (${estRows.length} estimate(s) + ${leadRows.length} lead(s) share the typo) — left unchanged`);
+          }
         }
       }
     }

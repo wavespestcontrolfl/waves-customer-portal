@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const sendgrid = require('../sendgrid-mail');
@@ -163,6 +164,9 @@ async function sendLegacyServiceReportEmail({
   const idempotencyKey = serviceReportEmailIdempotencyKey(recordId, recipient);
   let message = null;
   let ledgerAvailable = true;
+  // Per-attempt token (function-scoped so it's visible in the send block below);
+  // echoed in custom_args so the webhook fallback can reject a stale prior attempt.
+  const sendAttemptToken = crypto.randomUUID();
 
   try {
     const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
@@ -179,6 +183,7 @@ async function sendLegacyServiceReportEmail({
     const baseSnapshot = {
       provider: 'sendgrid',
       template_key: 'service.report_ready.legacy',
+      send_attempt_token: sendAttemptToken,
       trigger_event_id: idempotencyKey,
       recipient_type: 'customer',
       recipient_id: customerId || null,
@@ -247,8 +252,9 @@ async function sendLegacyServiceReportEmail({
       asmGroupId: sendgrid.serviceGroupId(),
       attachments,
       // Echoed on every webhook event so bounce recovery can resolve this row
-      // even if a hard bounce races the provider_message_id write below.
-      ...(message?.id ? { customArgs: { email_message_id: message.id } } : {}),
+      // even if a hard bounce races the provider_message_id write below. The
+      // attempt token lets the webhook reject a stale prior-attempt event.
+      ...(message?.id ? { customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken } } : {}),
     });
     if (ledgerAvailable && message?.id) {
       // Always record provider id + send time; advance to 'sent' only while still

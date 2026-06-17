@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const {
@@ -788,8 +789,12 @@ async function sendTemplate({
   const fromEmail = template.from_email || 'contact@wavespestcontrol.com';
   const replyTo = template.reply_to || 'contact@wavespestcontrol.com';
   const allCategories = categoriesFor(template, test ? ['test', ...categories] : categories);
+  // Fresh per send attempt; echoed in custom_args so the webhook fallback can tell
+  // this attempt's events from a prior (retried) attempt's. See webhooks-sendgrid.js.
+  const sendAttemptToken = crypto.randomUUID();
   const messageSnapshot = {
     provider: 'sendgrid',
+    send_attempt_token: sendAttemptToken,
     template_id: template.id,
     template_version_id: version.id,
     template_key: template.template_key,
@@ -871,8 +876,9 @@ async function sendTemplate({
       attachments,
       // Echoed on every webhook event so bounce recovery can resolve this row
       // even if a hard bounce arrives before provider_message_id is written (or
-      // SendGrid returns no X-Message-Id). See email-bounce-recovery.js.
-      customArgs: { email_message_id: message.id },
+      // SendGrid returns no X-Message-Id). The attempt token lets the webhook
+      // reject a stale prior-attempt event. See email-bounce-recovery.js.
+      customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
     });
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via
@@ -894,6 +900,14 @@ async function sendTemplate({
       error_message: err.message.slice(0, 1000),
       updated_at: new Date(),
     });
+    // If a webhook already moved the row to a terminal status, the send actually
+    // reached SendGrid — report success (deduped) so callers don't retry a send
+    // that landed (and may already have triggered bounce recovery).
+    const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
+    const currentStatus = String(current?.status || '').toLowerCase();
+    if (current && currentStatus !== 'queued' && currentStatus !== 'failed') {
+      return { sent: true, deduped: true, message: current, rendered };
+    }
     await auditEmailTemplateIssue({
       templateKey: template.template_key,
       versionId: version.id,

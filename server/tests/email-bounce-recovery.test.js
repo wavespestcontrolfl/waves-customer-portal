@@ -222,7 +222,7 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     // P2: the send carries a custom arg so a fast webhook can resolve the row
     // before provider_message_id is committed.
-    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ customArgs: { email_message_id: 'msg1' } }));
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ customArgs: expect.objectContaining({ email_message_id: 'msg1' }) }));
     // round 10: the provider-id write must NOT also set status (so a fast
     // delivery/bounce webhook that already terminalized the row isn't regressed);
     // status is advanced separately, guarded on still-'queued'.

@@ -331,6 +331,11 @@ describe('email template library rendering', () => {
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
       categories: expectedCategories,
     }));
+    // Tracked sends carry the row id + a per-attempt token so the bounce-recovery
+    // webhook fallback can resolve the row and reject stale prior-attempt events.
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      customArgs: expect.objectContaining({ email_message_id: 'msg-1', send_attempt_token: expect.any(String) }),
+    }));
   });
 
   test('deduplicates membership.started categories before provider send', async () => {
