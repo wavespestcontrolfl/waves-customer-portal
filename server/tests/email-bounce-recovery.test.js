@@ -166,6 +166,16 @@ describe('attemptRecovery guards', () => {
     expect(res).toEqual({ skipped: 'marketing_stream' });
     expect(db).not.toHaveBeenCalled(); // skipped before any ledger write
   });
+
+  test('template test sends are not auto-recovered (codex round 16)', async () => {
+    delete process.env.EMAIL_BOUNCE_RECOVERY;
+    const res = await recovery.attemptRecovery(
+      { id: 'm5', recipient_email_snapshot: 'a@gmial.com', recipient_type: 'test', categories: ['email_template', 'test'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(res).toEqual({ skipped: 'test_message' });
+    expect(db).not.toHaveBeenCalled();
+  });
 });
 
 // Per-table mock that records every .update() in call order, so we can assert
@@ -571,5 +581,17 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
     expect(body).toContain('already belongs to another customer'); // collision alert
     expect(body).not.toContain('Updated'); // no record was overwritten
+  });
+
+  test('commits a billing_email recovery to notification_prefs (codex round 16)', async () => {
+    const rec = {
+      id: 'rec14', customer_id: 'c1', customer_email_field: 'billing_email',
+      corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    db.mockImplementation(commitDb({ rec }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg14', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('notification_prefs.billing_email');
   });
 });

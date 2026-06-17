@@ -221,9 +221,19 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
       .catch(() => null);
   }
   if (!customer) return null;
-  const field = CUSTOMER_EMAIL_FIELDS.find(
+  let field = CUSTOMER_EMAIL_FIELDS.find(
     (f) => String(customer[f] || '').trim().toLowerCase() === bouncedEmail,
   ) || null;
+  // notification_prefs.billing_email is also a sendable customer address (the
+  // invoice/balance path resolves it via getInvoiceEmailRecipients) but lives on
+  // a separate table. If the bounce was to that address, mark the field so the
+  // on-file check and commit fix it there rather than treating it as off-file.
+  if (!field) {
+    const pref = await db('notification_prefs').where({ customer_id: customer.id }).first('billing_email').catch(() => null);
+    if (pref && String(pref.billing_email || '').trim().toLowerCase() === bouncedEmail) {
+      field = 'billing_email';
+    }
+  }
   return { customerId: customer.id, field };
 }
 
@@ -439,6 +449,14 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       return { skipped: 'marketing_stream' };
     }
 
+    // Template/test sends (recipient_type 'test' or a 'test' category) are not real
+    // customer communications — never auto-resend a test snapshot to a corrected
+    // customer address.
+    if (String(bouncedMessage.recipient_type || '').toLowerCase() === 'test'
+        || parseJsonArray(bouncedMessage.categories).includes('test')) {
+      return { skipped: 'test_message' };
+    }
+
     // One recovery per original message (idempotent across webhook redelivery).
     const inserted = await db('email_bounce_recoveries')
       .insert({
@@ -616,6 +634,18 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
           return 0;
         });
       if (Number(affected) > 0) updatedFields.push(field);
+    } else if (rec.customer_id && rec.customer_email_field === 'billing_email' && correctedEmail) {
+      // The bounce was to the customer's notification_prefs.billing_email — fix it
+      // there (separate table) so future invoice/balance emails stop bouncing.
+      const affected = await db('notification_prefs')
+        .where({ customer_id: rec.customer_id })
+        .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
+        .update({ billing_email: correctedEmail, updated_at: new Date() })
+        .catch((err) => {
+          logger.warn(`[bounce-recovery] billing_email overwrite failed: ${err.message}`);
+          return 0;
+        });
+      if (Number(affected) > 0) updatedFields.push('notification_prefs.billing_email');
     }
 
     // 2. SOURCE estimate/lead rows that follow-ups read (estimate-follow-up.js →
