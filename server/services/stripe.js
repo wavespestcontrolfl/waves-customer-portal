@@ -1413,7 +1413,10 @@ const StripeService = {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
 
-    const saveCard = !!opts.saveCard;
+    // Never save a third-party payer's card onto the homeowner account (see
+    // createInvoicePaymentIntent) — the AP user can toggle this after the
+    // Element loads, so guard the update path too.
+    const saveCard = !!opts.saveCard && !invoice.payer_id;
     const selectedMethodCategory = methodCategory || 'card';
     const base = parseFloat(invoice.total);
     const baseCents = Math.round(base * 100);
@@ -1703,7 +1706,8 @@ const StripeService = {
 
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
     const usePreview = !!surchargeDetails;
-    const saveCard = !!opts.saveCard;
+    // Payer invoices never save the payer's card to the homeowner account.
+    const saveCard = !!opts.saveCard && !invoice.payer_id;
 
     // Update PI with final amount, attach PM, then confirm server-side
     const updateParams = {

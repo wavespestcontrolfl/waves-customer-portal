@@ -2966,18 +2966,35 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // recorded on channels but never change delivered/claim semantics — the
     // customer copy governs.
     let billingCopyEmail = '';
-    if (channels.email?.ok) {
+    // Bill-To delivery. For a third-party-billed invoice the payer AP inbox is
+    // the PRIMARY invoice/pay-link delivery — send it INDEPENDENTLY of whether
+    // the customer/report email succeeded (a homeowner with no/failed email
+    // must not strand the payer invoice), and require it for invoice
+    // finalization below. For self-pay, the billing-contact copy stays a
+    // best-effort courtesy copy gated on the customer email succeeding.
+    const payerBilling = invoice.payer
+      ? require('../services/payer').payerRecipient(invoice.payer)
+      : null;
+    const payerBilled = !!payerBilling?.email;
+    if (payerBilled) {
+      billingCopyEmail = String(payerBilling.email).trim().toLowerCase();
+      try {
+        const result = await ProjectEmail.sendProjectReportWithInvoice({
+          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+          reportAttached: isWdoProject,
+          recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
+          idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer:${new Date().toISOString()}`,
+        });
+        channels.payer_email = result.ok
+          ? { ok: true, recipient: billingCopyEmail }
+          : { ok: false, recipient: billingCopyEmail, error: projectEmailFailureMessage(result) };
+      } catch (e) {
+        logger.error(`[projects] combined send payer copy failed: ${e.message}`);
+        channels.payer_email = { ok: false, recipient: billingCopyEmail, error: e.message };
+      }
+    } else if (channels.email?.ok) {
       const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
-      // Third-party Bill-To: when this invoice carries a payer (attached above
-      // for the PDF), the invoice/pay-link copy must reach the payer's AP inbox
-      // — same reroute the standalone invoice email does — with the customer
-      // billing contact as the fallback when the payer has no usable AP email.
-      const payerBilling = invoice.payer
-        ? require('../services/payer').payerRecipient(invoice.payer)
-        : null;
-      const [billing] = payerBilling
-        ? [payerBilling]
-        : getInvoiceEmailRecipients(customer, prefs || {});
+      const [billing] = getInvoiceEmailRecipients(customer, prefs || {});
       const billingEmail = String(billing?.email || '').trim().toLowerCase();
       if (billingEmail && billingEmail !== String(emailRecipient.email || '').trim().toLowerCase()) {
         billingCopyEmail = billingEmail;
@@ -3029,7 +3046,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
     } else {
       try {
-        const smsBody = `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
+        // Payer-billed: the homeowner still gets the report link (their
+        // service) but NOT the pay link — AR routes to the payer's AP inbox.
+        const smsBody = payerBilled
+          ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
+          : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
         const result = await sendCustomerMessage({
           to: normalized,
           body: smsBody,
@@ -3075,10 +3096,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // scheduled-review fields), so a 'scheduled' invoice can't be re-sent later
     // by processScheduledSends. It does NOT send anything itself, so the
     // invoice's own SMS path never fires a second, duplicate text.
-    if (delivered) {
+    // Invoice finalization is keyed on BILL-TO delivery, not report delivery:
+    // a payer-billed invoice is "sent" only when the payer AP send succeeds
+    // (so it can't be marked sent off the back of the customer/report email),
+    // and conversely the payer send standing alone is enough even if the
+    // homeowner report email failed. Self-pay keeps the report-delivery rule.
+    const invoiceDelivered = payerBilled ? !!channels.payer_email?.ok : delivered;
+    if (invoiceDelivered) {
       await InvoiceService.markDeliverySent(invoice.id, {
         sms: !!channels.sms?.ok,
-        email: !!channels.email?.ok,
+        email: payerBilled ? !!channels.payer_email?.ok : !!channels.email?.ok,
         source: 'project_report_with_invoice',
         payUrl,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));

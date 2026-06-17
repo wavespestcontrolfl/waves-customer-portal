@@ -2334,20 +2334,32 @@ router.put('/:id/update-details', async (req, res, next) => {
     }
     // Per-job third-party Bill-To override + PO. Null clears the override so
     // the job falls back to the customer's default payer (or self-pay).
-    // Admin-only: this controls where the invoice is routed and who is asked
-    // to pay, so a technician token must not be able to change it (the route
-    // itself is requireTechOrAdmin).
+    // CHANGING the payer/PO is admin-only (it controls where the invoice is
+    // routed and who pays). The edit modal always echoes these fields on every
+    // save, so a tech editing something unrelated must NOT be rejected — only
+    // an actual change vs the stored values is admin-gated.
     if (payerId !== undefined || poNumber !== undefined) {
-      if (req.techRole !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
-      }
       try {
         const cols = await db('scheduled_services').columnInfo();
-        if (cols.payer_id && payerId !== undefined) {
-          updates.payer_id = (payerId === '' || payerId == null) ? null : (parseInt(payerId, 10) || null);
-        }
-        if (cols.po_number && poNumber !== undefined) {
-          updates.po_number = poNumber ? String(poNumber).trim().slice(0, 64) : null;
+        const hasPayerCol = !!cols.payer_id;
+        const hasPoCol = !!cols.po_number;
+        if (hasPayerCol || hasPoCol) {
+          const existing = await db('scheduled_services')
+            .where({ id: req.params.id })
+            .first('payer_id', 'po_number');
+          const nextPayerId = payerId === undefined
+            ? (existing?.payer_id ?? null)
+            : ((payerId === '' || payerId == null) ? null : (parseInt(payerId, 10) || null));
+          const nextPo = poNumber === undefined
+            ? (existing?.po_number ?? null)
+            : (poNumber ? String(poNumber).trim().slice(0, 64) : null);
+          const payerChanged = hasPayerCol && (existing?.payer_id ?? null) !== nextPayerId;
+          const poChanged = hasPoCol && (existing?.po_number ?? null) !== nextPo;
+          if ((payerChanged || poChanged) && req.techRole !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
+          }
+          if (payerChanged) updates.payer_id = nextPayerId;
+          if (poChanged) updates.po_number = nextPo;
         }
       } catch {}
     }
@@ -2680,6 +2692,10 @@ router.put('/:id/update-details', async (req, res, next) => {
               if (seriesCols.recurring_interval_days) childUpdates.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
               if (seriesCols.skip_weekends) childUpdates.skip_weekends = skipChild;
               if (seriesCols.weekend_shift && skipChild) childUpdates.weekend_shift = dirChild;
+              // Keep existing future visits' Bill-To in lockstep with the
+              // (freshly-updated) series parent so a payer change propagates.
+              if (seriesCols.payer_id) childUpdates.payer_id = parent.payer_id ?? null;
+              if (seriesCols.po_number) childUpdates.po_number = parent.po_number ?? null;
               await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
@@ -2815,6 +2831,11 @@ router.put('/:id/update-details', async (req, res, next) => {
               applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons);
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
               if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
+              // Inherit the (freshly-updated) parent's third-party Bill-To so
+              // future visits in the series route to the same payer/PO instead
+              // of silently falling back to the customer default / self-pay.
+              if (cols.payer_id) childData.payer_id = parent.payer_id ?? null;
+              if (cols.po_number) childData.po_number = parent.po_number ?? null;
             } catch { /* non-blocking */ }
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {

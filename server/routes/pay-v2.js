@@ -109,6 +109,11 @@ router.get('/:token', async (req, res, next) => {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
 
+    // Third-party Bill-To: an AP contact opening the emailed pay link must see
+    // the payer as "Billed to" (not the homeowner) and must not be offered
+    // "save card" (server already refuses to save it onto the homeowner).
+    await require('../services/payer').attachToInvoice(data);
+
     const customer = data.customer || {};
     const lineItems = data.line_items || [];
     const productsApplied = data.products_applied || [];
@@ -172,6 +177,17 @@ router.get('/:token', async (req, res, next) => {
         zip: customer.zip,
         isCommercial: customer.property_type === 'commercial' || customer.property_type === 'business',
       },
+      payer: data.payer
+        ? {
+            name: data.payer.company_name || data.payer.display_name || null,
+            email: data.payer.ap_email || null,
+            address: data.payer.billing_address_line1 || null,
+            city: data.payer.billing_city || null,
+            state: data.payer.billing_state || null,
+            zip: data.payer.billing_zip || null,
+            poNumber: data.po_number || null,
+          }
+        : null,
       processor: 'stripe',
       stripe: {
         available: StripeService.isAvailable(),

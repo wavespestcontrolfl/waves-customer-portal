@@ -279,7 +279,12 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
-  const [recipient] = getReceiptEmailRecipients(customer, prefs || {});
+  // Third-party Bill-To: the AP contact who received and paid the invoice gets
+  // the bookkeeping receipt + PDF (with payer Bill-To). Fall back to the
+  // customer receipt recipient when the payer has no usable AP email.
+  await PayerService.attachToInvoice(invoice);
+  const payerReceiptRecipient = invoice.payer ? PayerService.payerRecipient(invoice.payer) : null;
+  const recipient = payerReceiptRecipient || getReceiptEmailRecipients(customer, prefs || {})[0];
   if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
 
   const payment = await db('payments')

@@ -2591,7 +2591,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   style={inputStyle}
                 >
                   <option value="">
-                    Customer pays (default)
+                    {(() => {
+                      const def = customer.payerId
+                        ? payers.find(
+                            (p) => String(p.id) === String(customer.payerId),
+                          )
+                        : null;
+                      return def
+                        ? `Use account default — ${def.display_name}`
+                        : "Customer pays (self)";
+                    })()}
                   </option>
                   {payers.map((p) => (
                     <option key={p.id} value={String(p.id)}>
@@ -2603,9 +2612,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   ))}
                 </select>
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-                  Routes this visit&rsquo;s invoice to a builder / property
-                  manager instead of the customer. Manage payers in Billing →
-                  Payers.
+                  {customer.payerId
+                    ? "Blank inherits this customer’s default payer; pick a payer to override for just this visit."
+                    : "Routes this visit’s invoice to a builder / property manager instead of the customer."}{" "}
+                  Manage payers in Finance &rarr; Payers.
                 </div>
                 {form.payerId && (() => {
                   const selectedPayer = payers.find(

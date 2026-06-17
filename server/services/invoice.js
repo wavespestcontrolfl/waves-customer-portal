@@ -1421,6 +1421,13 @@ const InvoiceService = {
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { invoice, previousStatus, claimed } = claim;
 
+    // Third-party Bill-To: never text the homeowner a pay link for a
+    // payer-billed invoice — the pay link + AR route to the payer (email).
+    if (invoice.payer_id) {
+      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      return { sent: false, reason: "Suppressed — invoice billed to a third-party payer", code: "payer_billed" };
+    }
+
     const customer = await db("customers")
       .where({ id: invoice.customer_id })
       .first();
@@ -1616,21 +1623,29 @@ const InvoiceService = {
       }
     }
 
-    try {
-      const smsResult = await this.sendViaSMS(invoiceId, {
-        allowClaimed: true,
-        payUrlParams,
-      });
-      if (smsResult?.payUrl) payUrl = smsResult.payUrl;
-      if (smsResult?.sent) {
-        sms.ok = true;
-      } else {
-        sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
-        if (smsResult?.code) sms.code = smsResult.code;
+    // Third-party Bill-To: a payer-billed invoice must NOT text the homeowner
+    // a pay link — AR and the pay link route to the payer (email) instead.
+    // The homeowner is the service recipient, not the party being asked to pay.
+    if (claim.invoice?.payer_id) {
+      sms.error = "Suppressed — invoice billed to a third-party payer";
+      sms.code = "payer_billed";
+    } else {
+      try {
+        const smsResult = await this.sendViaSMS(invoiceId, {
+          allowClaimed: true,
+          payUrlParams,
+        });
+        if (smsResult?.payUrl) payUrl = smsResult.payUrl;
+        if (smsResult?.sent) {
+          sms.ok = true;
+        } else {
+          sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
+          if (smsResult?.code) sms.code = smsResult.code;
+        }
+      } catch (err) {
+        sms.error = err.message;
+        if (err.code) sms.code = err.code;
       }
-    } catch (err) {
-      sms.error = err.message;
-      if (err.code) sms.code = err.code;
     }
 
     try {

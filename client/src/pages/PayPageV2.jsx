@@ -320,7 +320,7 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -941,14 +941,19 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
       {/* Save-payment-method opt-in. methodType drives both the headline
           and the authorization copy (ACH variant satisfies NACHA/Reg E,
-          card variant covers card-network + TILA disclosures). */}
-      <div>
-        <SaveCardConsent
-          checked={!!saveCard}
-          onChange={(v) => onSaveCardChange?.(v)}
-          methodType={selectedMethod}
-        />
-      </div>
+          card variant covers card-network + TILA disclosures). Hidden for
+          third-party-billed invoices: the AP contact paying is not the
+          account holder, so we never offer to save their method on the
+          homeowner's account (the server refuses it regardless). */}
+      {!thirdPartyBilled && (
+        <div>
+          <SaveCardConsent
+            checked={!!saveCard}
+            onChange={(v) => onSaveCardChange?.(v)}
+            methodType={selectedMethod}
+          />
+        </div>
+      )}
 
       <div style={{
         padding: 16,
@@ -1238,7 +1243,7 @@ export default function PayPageV2() {
     );
   }
 
-  const { invoice, service, customer } = data;
+  const { invoice, service, customer, payer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
@@ -1390,10 +1395,30 @@ export default function PayPageV2() {
               marginBottom: 20,
             }}>
               <DetailBlock label="Billed to">
-                <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
-                {customer.address && <div>{customer.address}</div>}
-                {locationLine && <div>{locationLine}</div>}
+                {payer ? (
+                  <>
+                    <div style={{ fontWeight: 800 }}>{payer.name}</div>
+                    {payer.address && <div>{payer.address}</div>}
+                    {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
+                      <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
+                    )}
+                    {payer.poNumber && <div style={{ color: 'var(--text-muted)' }}>PO: {payer.poNumber}</div>}
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                    {customer.address && <div>{customer.address}</div>}
+                    {locationLine && <div>{locationLine}</div>}
+                  </>
+                )}
               </DetailBlock>
+              {payer && (
+                <DetailBlock label="Service address">
+                  <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                  {customer.address && <div>{customer.address}</div>}
+                  {locationLine && <div>{locationLine}</div>}
+                </DetailBlock>
+              )}
               <DetailBlock label="Service">
                 <div style={{ fontWeight: 800 }}>{serviceLabel}</div>
                 {serviceDateLabel && <div>{serviceDateLabel}</div>}
@@ -1566,10 +1591,11 @@ export default function PayPageV2() {
                 cardSurchargeRate={stripeSetup.cardSurchargeRate}
                 onSuccess={handlePaymentSuccess}
                 onError={(msg) => setPaymentError(msg)}
-                saveCard={saveCard}
+                saveCard={payer ? false : saveCard}
                 onSaveCardChange={setSaveCard}
-                customerName={[customer.firstName, customer.lastName].filter(Boolean).join(' ')}
-                customerEmail={customer.email}
+                thirdPartyBilled={!!payer}
+                customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}
+                customerEmail={payer ? (payer.email || customer.email) : customer.email}
                 onPaymentIntentReplaced={handlePaymentIntentReplaced}
               />
             ) : paymentState === 'error' ? null : (
