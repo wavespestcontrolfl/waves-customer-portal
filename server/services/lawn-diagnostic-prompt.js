@@ -46,7 +46,9 @@ const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash';
 const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
 const LAWN_CHALLENGE_MODEL = process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
-const LAWN_WRITER_MODEL = process.env.LAWN_WRITER_MODEL || process.env.OPENAI_MODEL || 'gpt-5.5';
+// Dedicated writer override — deliberately NOT chained through the global OPENAI_MODEL
+// (which other services default to a mini tier), so the lawn writer stays GPT-5.5.
+const LAWN_WRITER_MODEL = process.env.LAWN_WRITER_MODEL || 'gpt-5.5';
 
 // ── Curated SWFL St. Augustine reference (selection menu, not free-write) ──────
 const CURATED_REFERENCE = `## CURATED REFERENCE — SW Florida, primarily St. Augustine turf
@@ -665,6 +667,9 @@ async function runWriter(contract = {}, _context = {}) {
 
 module.exports = {
   PROMPT_VERSION,
+  // The RESOLVED pipeline model IDs (env override or default) — single source of truth
+  // for both the pipeline and the pre-merge readiness check.
+  LAWN_PIPELINE_MODELS: { vision: LAWN_VISION_MODEL, challenge: LAWN_CHALLENGE_MODEL, writer: LAWN_WRITER_MODEL },
   DIAGNOSIS_SYSTEM_PROMPT,
   CHALLENGE_SYSTEM_PROMPT,
   PERCEPTION_PROMPT,
