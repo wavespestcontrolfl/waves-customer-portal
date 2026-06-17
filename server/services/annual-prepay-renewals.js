@@ -763,6 +763,27 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
     }
   }
 
+  if (nextStatus === 'cancelled') {
+    // A refund/void voids the prepaid coverage even for terms whose renewal was
+    // already decided (renewed / switch_plan / lapse) — these stay covered through
+    // term_end for the renewal flow and the loop above doesn't select them, so
+    // their future visits would keep annual-prepay stamps and skip billing after
+    // the refund. Clear those stamps too (method-scoped, so manual cash/Zelle
+    // stamps survive); the term's renewal-flow status is intentionally left as-is.
+    const decidedCoveredTerms = await conn('annual_prepay_terms')
+      .where({ prepay_invoice_id: invoice.id })
+      .where(function decidedCovered() {
+        this.whereIn('status', ['renewed', 'switch_plan'])
+          .orWhere(function lapsed() {
+            this.where('status', 'cancelled').whereNotNull('renewal_decision');
+          });
+      })
+      .select('id');
+    for (const decided of decidedCoveredTerms) {
+      await clearPrepaidStampsForTerm(decided.id, conn);
+    }
+  }
+
   return results;
 }
 
