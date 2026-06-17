@@ -97,14 +97,23 @@ function uniqueCategories(values = []) {
   return out;
 }
 
-function mergeMeta(rec, extra) {
-  let base = {};
-  const raw = rec?.metadata;
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) base = raw;
+// Atomically merge keys into the row's jsonb metadata without read-modify-write,
+// so we never clobber concurrent writes (e.g. a delivery webhook racing a send).
+function jsonbMerge(extra) {
+  return db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(extra)]);
+}
+
+// The recovery ledger id we stamped into the recovery message's payload snapshot.
+// Used as a fallback to resolve the ledger when recovery_message_id has not been
+// linked yet (a fast delivery webhook racing the post-send ledger link).
+function recoveryIdFromMessage(message) {
+  const raw = message?.payload_snapshot;
+  let obj = null;
+  if (raw && typeof raw === 'object') obj = raw;
   else if (typeof raw === 'string') {
-    try { base = JSON.parse(raw) || {}; } catch { base = {}; }
+    try { obj = JSON.parse(raw); } catch { obj = null; }
   }
-  return JSON.stringify({ ...base, ...extra });
+  return obj && obj.recovery_id ? obj.recovery_id : null;
 }
 
 /**
@@ -175,8 +184,14 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
   return { customerId: customer.id, field };
 }
 
-/** Re-send the original message's stored snapshot to the corrected address. */
-async function resendSnapshot(bouncedMessage, correctedEmail, recoveryId) {
+/**
+ * Insert (or reuse) the QUEUED recovery email_messages row. Deliberately does
+ * NOT publish a provider_message_id — the caller links the ledger first, then
+ * dispatches. The SendGrid webhook can only match this row once provider_message_id
+ * is written, so writing it last guarantees the ledger is already linked when a
+ * (possibly very fast) delivery event arrives. Returns { message, categories }.
+ */
+async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId) {
   const now = new Date();
   const categories = uniqueCategories([...parseJsonArray(bouncedMessage.categories), RECOVERY_CATEGORY]);
   const idempotencyKey = `bounce_recovery:${bouncedMessage.id}`;
@@ -210,19 +225,25 @@ async function resendSnapshot(bouncedMessage, correctedEmail, recoveryId) {
     updated_at: now,
   };
 
-  let message;
   try {
-    [message] = await db('email_messages').insert(row).returning('*');
+    const [message] = await db('email_messages').insert(row).returning('*');
+    return { message, categories };
   } catch (err) {
     // A prior partial attempt may already have created the row.
     const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first().catch(() => null);
     if (!existing) throw err;
-    if (existing.status === 'sent' && existing.provider_message_id) {
-      return { ok: true, messageRowId: existing.id, reused: true };
-    }
-    message = existing;
+    return { message: existing, categories };
   }
+}
 
+/**
+ * Dispatch the recovery message via SendGrid and publish provider_message_id
+ * LAST. Idempotent — a row already sent (e.g. a partial-retry) is not re-sent.
+ */
+async function dispatchRecoveryMessage({ message, categories, bouncedMessage, correctedEmail }) {
+  if (message.status === 'sent' && message.provider_message_id) {
+    return { ok: true, messageRowId: message.id, reused: true };
+  }
   try {
     const result = await sendgrid.sendOne({
       to: correctedEmail,
@@ -302,29 +323,56 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
 
     if (decision.action === 'skip') {
       await db('email_bounce_recoveries').where({ id: recoveryId }).update({ ...baseUpdate, status: decision.status });
-      if (decision.status === 'no_candidate' || decision.status === 'corrected_suppressed') {
-        await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status });
+      // Every skip means a service/transactional email did NOT reach the
+      // customer — nudge a human to fix the address (and show the suggestion
+      // when we have one, e.g. a medium-confidence typo below the auto-send bar).
+      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence'].includes(decision.status)) {
+        await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
       }
       logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
       return { skipped: decision.status };
     }
 
-    const sendResult = await resendSnapshot(bouncedMessage, candidate.corrected, recoveryId);
-    if (!sendResult.ok) {
+    // Build the queued recovery row first (no provider id yet).
+    let built;
+    try {
+      built = await insertRecoveryMessage(bouncedMessage, candidate.corrected, recoveryId);
+    } catch (err) {
       await db('email_bounce_recoveries').where({ id: recoveryId }).update({
         ...baseUpdate,
         status: 'send_failed',
-        metadata: mergeMeta({ metadata: baseUpdate.metadata }, { send_error: sendResult.error }),
+        metadata: jsonbMerge({ send_error: String(err.message || err) }),
       });
+      await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
+      logger.warn(`[bounce-recovery] could not stage resend for ${redactEmail(candidate.corrected)}: ${err.message}`);
+      return { error: String(err.message || err) };
+    }
+
+    // Link the ledger to the recovery message BEFORE its provider id is
+    // published, so a fast delivery webhook can always resolve the ledger.
+    await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+      ...baseUpdate,
+      status: 'resent',
+      recovery_message_id: built.message.id,
+    });
+
+    const sendResult = await dispatchRecoveryMessage({
+      message: built.message,
+      categories: built.categories,
+      bouncedMessage,
+      correctedEmail: candidate.corrected,
+    });
+    if (!sendResult.ok) {
+      await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+        status: 'send_failed',
+        updated_at: new Date(),
+        metadata: jsonbMerge({ send_error: sendResult.error }),
+      });
+      await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
       logger.warn(`[bounce-recovery] resend failed for ${redactEmail(candidate.corrected)}: ${sendResult.error}`);
       return { error: sendResult.error };
     }
 
-    await db('email_bounce_recoveries').where({ id: recoveryId }).update({
-      ...baseUpdate,
-      status: 'resent',
-      recovery_message_id: sendResult.messageRowId,
-    });
     logger.info(`[bounce-recovery] re-sent ${bouncedMessage.template_key || 'email'} ${redactEmail(bouncedEmail)} → ${redactEmail(candidate.corrected)} (${candidate.rule}/${candidate.confidence})`);
     return { resent: true, corrected: candidate.corrected, rule: candidate.rule };
   } catch (err) {
@@ -341,7 +389,20 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
 async function commitRecoveryOnDelivery(recoveryMessage) {
   try {
     if (!recoveryMessage?.id) return;
-    const rec = await db('email_bounce_recoveries').where({ recovery_message_id: recoveryMessage.id }).first();
+    let rec = await db('email_bounce_recoveries').where({ recovery_message_id: recoveryMessage.id }).first();
+    if (!rec) {
+      // Fallback: the ledger may not be linked yet if delivery raced the send.
+      // Resolve via the recovery_id stamped in the message payload and self-heal.
+      const recoveryId = recoveryIdFromMessage(recoveryMessage);
+      if (recoveryId) {
+        rec = await db('email_bounce_recoveries').where({ id: recoveryId }).first().catch(() => null);
+        if (rec && !rec.recovery_message_id) {
+          await db('email_bounce_recoveries').where({ id: rec.id })
+            .update({ recovery_message_id: recoveryMessage.id, updated_at: new Date() })
+            .catch(() => {});
+        }
+      }
+    }
     if (!rec) return;
     if (rec.record_updated || rec.status === 'committed') return; // already done
 
@@ -366,7 +427,7 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
           await db('email_bounce_recoveries').where({ id: rec.id }).update({
             status: 'delivered',
             updated_at: new Date(),
-            metadata: mergeMeta(rec, { commit_skipped: 'email_in_use' }),
+            metadata: jsonbMerge({ commit_skipped: 'email_in_use' }),
           });
           await alertEmailCollision({ recovery: rec, correctedEmail });
           return;
@@ -391,7 +452,7 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       record_updated: recordUpdated,
       committed_at: new Date(),
       updated_at: new Date(),
-      metadata: mergeMeta(rec, { committed_field: updatedField }),
+      metadata: jsonbMerge({ committed_field: updatedField }),
     });
 
     await notifyRecoverySuccess({ recovery: rec, bouncedEmail, correctedEmail, recordUpdated, field: updatedField });
@@ -409,7 +470,7 @@ async function handleRecoveryBounce(recoveryMessage, ev) {
       await db('email_bounce_recoveries').where({ id: rec.id }).update({
         status: 'redelivered_bounced',
         updated_at: new Date(),
-        metadata: mergeMeta(rec, { redeliver_bounce_reason: ev?.reason || ev?.response || ev?.type || null }),
+        metadata: jsonbMerge({ redeliver_bounce_reason: ev?.reason || ev?.response || ev?.type || null }),
       });
       await alertUnrecoverableBounce({
         bouncedMessage: recoveryMessage,
@@ -441,23 +502,34 @@ async function adminAlertDeduped({ dedupeKey, windowHours = 168, category = 'ale
   }
 }
 
-async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId, status }) {
+const UNRECOVERABLE_REASONS = {
+  redelivered_bounced: 'the corrected address also bounced',
+  corrected_suppressed: 'the likely correction is on the suppression list',
+  send_failed: 're-sending to the corrected address failed',
+  skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
+  no_candidate: 'no safe address correction was possible',
+};
+
+async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId, status, candidate = null }) {
   // Marketing bounces are noise here — the suppression ledger already handles them.
   const stream = String(bouncedMessage?.suppression_group_key_snapshot || '').toLowerCase();
   if (stream.startsWith('marketing_')) return;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return;
-  const reasonLabel = status === 'redelivered_bounced'
-    ? 'the corrected address also bounced'
-    : 'no safe address correction was possible';
+  const reasonLabel = UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate;
+  // Surface the suggested address only when proposing it is actionable (i.e. it
+  // wasn't itself suppressed).
+  const suggestion = candidate?.corrected && (status === 'skipped_low_confidence' || status === 'send_failed')
+    ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
+    : '';
   await adminAlertDeduped({
     dedupeKey: `bounce-recovery-unrecoverable:${email}`,
     windowHours: 168,
     category: 'alert',
     title: 'Email bounced — needs a correct address',
-    body: `${email} hard-bounced on a ${bouncedMessage?.template_key || 'service'} email and ${reasonLabel}. Check/update the address on file.`,
+    body: `${email} hard-bounced on a ${bouncedMessage?.template_key || 'service'} email and ${reasonLabel}.${suggestion} Check/update the address on file.`,
     link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
-    metadata: { customer_id: customerId || null, original_message_id: bouncedMessage?.id || null, status },
+    metadata: { customer_id: customerId || null, original_message_id: bouncedMessage?.id || null, status, suggested_email: candidate?.corrected || null },
   });
 }
 

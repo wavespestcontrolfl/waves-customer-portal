@@ -12,6 +12,9 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 const db = require('../models/db');
+const sendgrid = require('../services/sendgrid-mail');
+const emailLib = require('../services/email-template-library');
+const NotificationService = require('../services/notification-service');
 const recovery = require('../services/email-bounce-recovery');
 
 // Minimal chainable knex mock. Every builder method returns the chain; the
@@ -140,5 +143,83 @@ describe('attemptRecovery guards', () => {
       { event: 'bounce', type: 'bounce' },
     );
     expect(res).toEqual({ skipped: 'already_attempted' });
+  });
+});
+
+// Per-table mock that records every .update() in call order, so we can assert
+// the ledger is linked before the provider id is published.
+function orderedDb(resolvers = {}) {
+  const calls = [];
+  const fn = jest.fn((table) => {
+    const chain = {};
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert']) {
+      chain[m] = jest.fn(() => chain);
+    }
+    chain.first = jest.fn(() => Promise.resolve(resolvers.first ? resolvers.first(table) : null));
+    chain.returning = jest.fn(() => Promise.resolve(resolvers.returning ? resolvers.returning(table) : []));
+    chain.update = jest.fn((data) => { calls.push({ table, data }); return Promise.resolve(resolvers.update ? resolvers.update(table, data) : 1); });
+    return chain;
+  });
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  fn._calls = calls;
+  return fn;
+}
+
+describe('attemptRecovery codex-fix behaviors', () => {
+  const orig = { ...process.env };
+  beforeEach(() => {
+    db.mockReset();
+    sendgrid.sendOne.mockReset();
+    emailLib.loadTemplateByKey.mockReset();
+    NotificationService.notifyAdmin.mockReset();
+    db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    delete process.env.EMAIL_BOUNCE_RECOVERY;
+    delete process.env.EMAIL_RECOVERY_MIN_CONFIDENCE;
+  });
+  afterEach(() => { process.env = { ...orig }; });
+
+  test('links the ledger BEFORE publishing the provider id (delivery-race fix)', async () => {
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_1' });
+    const mockDb = orderedDb({
+      first: () => null,
+      returning: (table) => {
+        if (table === 'email_bounce_recoveries') return [{ id: 'rec1' }];
+        if (table === 'email_messages') return [{ id: 'msg1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }];
+        return [];
+      },
+    });
+    db.mockImplementation(mockDb);
+
+    const res = await recovery.attemptRecovery(
+      { id: 'orig1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'estimate.delivery', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(res).toMatchObject({ resent: true });
+    const linkIdx = mockDb._calls.findIndex((c) => c.table === 'email_bounce_recoveries' && c.data.recovery_message_id === 'msg1');
+    const pubIdx = mockDb._calls.findIndex((c) => c.table === 'email_messages' && c.data.provider_message_id === 'pm_1');
+    expect(linkIdx).toBeGreaterThanOrEqual(0);
+    expect(pubIdx).toBeGreaterThanOrEqual(0);
+    expect(linkIdx).toBeLessThan(pubIdx);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('alerts with a suggestion when a medium-confidence typo is below the auto-send threshold', async () => {
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    db.mockImplementation(orderedDb({
+      first: () => null,
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec2' }] : []),
+    }));
+
+    const res = await recovery.attemptRecovery(
+      { id: 'orig2', recipient_email_snapshot: 'jane@gnaul.com', template_key: 'estimate.delivery', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(res).toEqual({ skipped: 'skipped_low_confidence' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('Suggested correction: jane@gmail.com');
   });
 });
