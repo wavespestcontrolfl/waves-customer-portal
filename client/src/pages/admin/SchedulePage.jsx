@@ -36,6 +36,7 @@ import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -387,29 +388,9 @@ function adminFetch(path, options = {}) {
   });
 }
 
-async function generateAiReport(payload) {
-  const r = await fetch(`${API_BASE}/admin/schedule/generate-report`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  let body = null;
-  try {
-    body = await r.json();
-  } catch {
-    /* non-JSON body */
-  }
-  if (!r.ok) {
-    const detail = body?.error || `HTTP ${r.status}`;
-    const err = new Error(detail);
-    err.status = r.status;
-    throw err;
-  }
-  return body || {};
-}
+// generateAiReport removed (Phase 2): the manual report-rewrite button is gone.
+// The /admin/schedule/generate-report endpoint stays for now; Phase 3 moves
+// report-copy generation fully server-side at completion.
 
 function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
@@ -6405,6 +6386,12 @@ export function CompletionPanel({
   onScheduleFollowup,
 }) {
   const [notes, setNotes] = useState("");
+  // Voice-to-text for the notes box. Appends final transcript chunks; the tech
+  // taps the mic again to stop. (Phase 2: the single notes box is the tech's
+  // only free-text input — the AI report copy is generated from it + photos.)
+  const dictation = useSpeechDictation((text) =>
+    setNotes((b) => (b ? `${b} ${text}` : text)),
+  );
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
   const [soilTemp, setSoilTemp] = useState("");
@@ -6425,7 +6412,6 @@ export function CompletionPanel({
   const [recapLoading, setRecapLoading] = useState(false);
   const [recapError, setRecapError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
   const [completionResult, setCompletionResult] = useState(null);
   const [elapsed, setElapsed] = useState("0:00");
@@ -7647,60 +7633,9 @@ export function CompletionPanel({
   // prompt won't turn a customer concern or a recommendation into a confirmed
   // finding (see the server prompt). photoCount is reported but never enough on
   // its own — the model can't see the photos.
-  function buildAiReportPayload() {
-    const productsApplied = selectedProducts
-      .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
-      .join(", ");
-    const actionsCompleted = labelsStillInNotes(selectedProtocolActionLabels);
-    const observations = labelsStillInNotes(selectedObservationLabels);
-    const recommendations = labelsStillInNotes(selectedRecommendationLabels);
-    const concern = customerConcern.trim();
-    const interactionLabel = CUSTOMER_INTERACTION_OPTIONS.find(
-      (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
-    )?.label || "";
-    const payload = {
-      scheduledServiceId: service.id || null,
-      customerName: service.customerName,
-      serviceType: service.serviceType,
-      serviceLine: service.serviceLine || service.service_line || undefined,
-      products: selectedProducts.map((p) => ({
-        productId: p.productId || null,
-        name: p.name,
-        rate: p.rate || null,
-        rateUnit: p.rateUnit || null,
-        targets: Array.isArray(p.targets) ? p.targets : [],
-      })),
-      technicianName: service.technicianName || "Waves Tech",
-      serviceDate: new Date().toLocaleDateString("en-US", {
-        month: "long", day: "numeric", year: "numeric",
-      }),
-      arrivalTime: service.checkInTime
-        ? new Date(service.checkInTime).toLocaleTimeString("en-US", {
-            hour: "numeric", minute: "2-digit", hour12: true,
-          })
-        : "",
-      serviceNotes: notes.trim(),
-      productsApplied,
-      areasServiced,
-      actionsCompleted,
-      observations,
-      recommendations,
-      customerInteraction: interactionLabel,
-      customerConcern: concern,
-      pestActivityRating: clientPestRating ?? null,
-      photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
-    };
-    const hasReportInput =
-      Boolean(payload.serviceNotes) ||
-      productsApplied.length > 0 ||
-      areasServiced.length > 0 ||
-      actionsCompleted.length > 0 ||
-      observations.length > 0 ||
-      recommendations.length > 0 ||
-      Boolean(concern) ||
-      payload.pestActivityRating !== null;
-    return { payload, hasReportInput };
-  }
+  // buildAiReportPayload removed (Phase 2): the manual "Generate AI report"
+  // button it fed is gone. Report copy is generated server-side from the notes,
+  // photos, products, and structured data — see Phase 3 auto-derive.
   function recordActionScope(label, scope, treatmentApplied) {
     if (!label || (scope !== "interior" && scope !== "exterior")) return;
     setActionScopeByLabel((prev) => ({
@@ -9652,9 +9587,26 @@ export function CompletionPanel({
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 rows={quickComplete ? 3 : 5}
-                placeholder="What did you do on this visit?"
+                placeholder={
+                  dictation.listening
+                    ? "Listening… speak your notes"
+                    : "What did you do on this visit?"
+                }
                 style={{ ...mTextarea, minHeight: quickComplete ? 90 : 140 }}
               />{" "}
+              {dictation.supported && (
+                <button
+                  type="button"
+                  onClick={dictation.toggle}
+                  style={{
+                    ...secondaryPill,
+                    marginTop: 6,
+                    color: dictation.listening ? M.err : M.ink2,
+                  }}
+                >
+                  {dictation.listening ? "● Stop dictation" : "🎙 Dictate notes"}
+                </button>
+              )}
             </Field>
             {!isTypedFindings && (
               <Field label="Protocol actions">
@@ -9766,36 +9718,9 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>
-            {/* AI report */}
-            {!quickComplete && (
-              <button
-                type="button"
-                onClick={async () => {
-                  const { payload, hasReportInput } = buildAiReportPayload();
-                  if (!hasReportInput) {
-                    alert("Add service notes, products, or visit details first.");
-                    return;
-                  }
-                  setGenerating(true);
-                  try {
-                    const r = await generateAiReport(payload);
-                    if (r.report) setNotes(r.report);
-                  } catch (e) {
-                    alert("AI report failed: " + e.message);
-                  }
-                  setGenerating(false);
-                }}
-                disabled={generating}
-                style={{
-                  ...secondaryPill,
-                  marginTop: 4,
-                  marginBottom: 20,
-                  opacity: generating ? 0.5 : 1,
-                }}
-              >
-                {generating ? "Generating…" : "Generate AI report"}
-              </button>
-            )}
+            {/* Manual "Generate AI report" button removed (Phase 2): the report
+                copy is generated server-side from the notes + photos + structured
+                data, not by rewriting the tech's notes in place. */}
             {/* Service photos — pure lawn visits capture turf photos in the
                 Lawn Assessment block above, which flow into the report gallery,
                 so this redundant second upload is hidden. Combined visits keep
@@ -11746,8 +11671,32 @@ export function CompletionPanel({
               fontFamily: "'Nunito Sans', sans-serif",
               boxSizing: "border-box",
             }}
-            placeholder="Notes about this service..."
+            placeholder={
+              dictation.listening
+                ? "Listening… speak your notes"
+                : "Notes about this service..."
+            }
           />
+          {dictation.supported && (
+            <button
+              type="button"
+              onClick={dictation.toggle}
+              style={{
+                marginTop: 8,
+                padding: "8px 14px",
+                borderRadius: 10,
+                border: `1px solid ${dictation.listening ? D.red : D.border}`,
+                background: D.input,
+                color: dictation.listening ? D.red : D.text,
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: "pointer",
+                fontFamily: "'Nunito Sans', sans-serif",
+              }}
+            >
+              {dictation.listening ? "● Stop dictation" : "🎙 Dictate notes"}
+            </button>
+          )}
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
             {!isTypedFindings && (
@@ -11849,49 +11798,8 @@ export function CompletionPanel({
               </select>{" "}
             </div>{" "}
           </div>
-          {/* AI Report Generator — hidden in quick complete */}
-          {!quickComplete && (
-            <button
-              onClick={async () => {
-                const { payload, hasReportInput } = buildAiReportPayload();
-                if (!hasReportInput) {
-                  alert("Add service notes, products, or visit details first.");
-                  return;
-                }
-                setGenerating(true);
-                try {
-                  const r = await generateAiReport(payload);
-                  if (r.report) setNotes(r.report);
-                } catch (e) {
-                  alert("AI report failed: " + e.message);
-                }
-                setGenerating(false);
-              }}
-              disabled={generating}
-              style={{
-                width: "100%",
-                padding: "10px 16px",
-                borderRadius: 10,
-                border: "none",
-                background: generating
-                  ? D.card
-                  : "linear-gradient(135deg, #8b5cf6, #6366f1)",
-                color: D.heading,
-                fontSize: 13,
-                fontWeight: 700,
-                cursor: generating ? "wait" : "pointer",
-                marginBottom: 20,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-              }}
-            >
-              {generating
-                ? "Generating Report..."
-                : "Generate AI Service Report"}
-            </button>
-          )}
+          {/* Manual "Generate AI Service Report" button removed (Phase 2): report
+              copy is generated server-side from notes + photos + structured data. */}
           {/* Photo Upload — hidden in quick complete. Pure lawn visits capture
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
