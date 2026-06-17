@@ -69,6 +69,7 @@ const {
 } = techLawnDiagnosticRouter._test;
 const { safeConditionLabel } = require('../services/lawn-diagnostic-report');
 const lawnPrompt = require('../services/lawn-diagnostic-prompt'); // the mocked module (per-test overrides)
+const { LAWN_CHALLENGE } = require('../config/models'); // registry = single source of truth for the Anthropic id
 
 function appServer() {
   const app = express();
@@ -397,7 +398,7 @@ describe('tech lawn diagnostic analyze route', () => {
 
   test('multimodel path: perception + Opus challenge drive findings and the GPT-5.5 writer runs', async () => {
     lawnPrompt.runPerception.mockResolvedValueOnce({ ok: true, model: 'gemini-3.5-flash', overall_notes: 'ok', observations: [{ area: 'front', color: 'browning', pattern: 'irregular patch', distribution: 'one section', detail: 'crown intact' }] });
-    lawnPrompt.runChallenge.mockResolvedValueOnce({ ok: true, findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', observed_evidence: ['sunny-edge browning'], confirmation_step: 'float test' }], challenge: { attempted: true, model: 'claude-opus-4-8', passed: true, degraded: false, failureType: null, removedFindingIds: [], softenedFindingIds: [], requiredConfirmationSteps: ['float test'] } });
+    lawnPrompt.runChallenge.mockResolvedValueOnce({ ok: true, findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', observed_evidence: ['sunny-edge browning'], confirmation_step: 'float test' }], challenge: { attempted: true, model: LAWN_CHALLENGE, passed: true, degraded: false, failureType: null, removedFindingIds: [], softenedFindingIds: [], requiredConfirmationSteps: ['float test'] } });
     lawnPrompt.runWriter.mockResolvedValueOnce({ ok: true, model: 'gpt-5.5', customer_summary: "The photos show signs most consistent with chinch pressure; today's visit targeted it." });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/tech/lawn-diagnostic/analyze`, {
@@ -407,7 +408,7 @@ describe('tech lawn diagnostic analyze route', () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body.findingsSource).toBe('multimodel');
-      expect(body.provenance).toMatchObject({ perceptionModel: 'gemini-3.5-flash', challengeModel: 'claude-opus-4-8', writerModel: 'gpt-5.5' });
+      expect(body.provenance).toMatchObject({ perceptionModel: 'gemini-3.5-flash', challengeModel: LAWN_CHALLENGE, writerModel: 'gpt-5.5' });
       expect(body.provenance.challenge.passed).toBe(true);
       expect(body.aiAvailable).toBe(true);
       expect(lawnPrompt.runWriter).toHaveBeenCalled();

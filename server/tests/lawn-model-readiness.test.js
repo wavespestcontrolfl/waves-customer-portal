@@ -13,11 +13,13 @@ const {
   checkOpenAI,
 } = require('../scripts/check-lawn-model-readiness');
 const { LAWN_PIPELINE_MODELS } = require('../services/lawn-diagnostic-prompt');
+const { LAWN_CHALLENGE } = require('../config/models'); // registry = single source of truth for the Anthropic id
 
 describe('lawn model readiness check', () => {
   test('exports the RESOLVED pipeline models (env override or default)', () => {
     expect(LAWN_PIPELINE_MODELS.vision).toBe(process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash');
-    expect(LAWN_PIPELINE_MODELS.challenge).toBe(process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8');
+    // Challenge id is derived from the central registry — never spelled here.
+    expect(LAWN_PIPELINE_MODELS.challenge).toBe(LAWN_CHALLENGE);
     // Writer is decoupled from the global OPENAI_MODEL on purpose.
     expect(LAWN_PIPELINE_MODELS.writer).toBe(process.env.LAWN_WRITER_MODEL || 'gpt-5.5');
   });
