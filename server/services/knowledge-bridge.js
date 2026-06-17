@@ -38,9 +38,13 @@ function slugify(text) {
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
   // Optional cross-provider route (flag default off; falls back to Claude on any miss).
+  // callClaude's sole caller (generateAssessmentRecommendations) strict-JSON.parses
+  // the result, so require PARSEABLE JSON here: dispatch with jsonMode and return the
+  // normalized JSON string. Invalid/preamble OpenAI output → { ok:false } → we fall
+  // through to Claude rather than returning text the caller can't parse.
   if (process.env.GATE_OPENAI_KNOWLEDGE === 'true') {
-    const r = await dispatch(ROUTES.knowledgeAnswer, { system: systemPrompt, text: userPrompt, jsonMode: false, maxTokens });
-    if (r.ok && r.text) return r.text;
+    const r = await dispatch(ROUTES.knowledgeAnswer, { system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
+    if (r.ok && r.json) return JSON.stringify(r.json);
   }
   if (!Anthropic) return null;
   try {

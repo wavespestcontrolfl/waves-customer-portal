@@ -75,3 +75,27 @@ describe('llm/call fails closed with no key and makes NO network call', () => {
     expect(await dispatch({ provider: 'nope', model: 'x' })).toEqual({ ok: false, reason: 'unknown_provider_nope' });
   });
 });
+
+// jsonMode is the mechanism the knowledge-bridge fallback relies on: invalid JSON
+// must surface as { ok:false } so the caller falls back to Claude instead of
+// returning text its strict JSON.parse can't handle.
+describe('callOpenAI jsonMode parsing', () => {
+  let saved;
+  beforeEach(() => { saved = process.env.OPENAI_API_KEY; process.env.OPENAI_API_KEY = 'test-key'; });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (saved === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = saved;
+  });
+
+  test('valid JSON → ok with parsed json', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"summary":"ok"}' }) });
+    const r = await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: true });
+    expect(r.ok).toBe(true);
+    expect(r.json).toEqual({ summary: 'ok' });
+  });
+
+  test('non-JSON output → empty_json so the caller can fall back', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: 'no json here' }) });
+    expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: true })).toEqual({ ok: false, reason: 'empty_json' });
+  });
+});
