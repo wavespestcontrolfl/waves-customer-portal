@@ -104,6 +104,9 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
     } else if (invoice.card_brand && invoice.card_last_four) {
       rows.push(['Method', `${invoice.card_brand.toUpperCase()} ···· ${invoice.card_last_four}`]);
     }
+  } else if (mode === 'prepaid') {
+    // Covered by account credit — nothing due, so no due date.
+    rows.push(['Covered', 'Account credit']);
   } else {
     rows.push(['Due', formatInvoiceDateOnly(invoice.due_date)]);
   }
@@ -309,7 +312,7 @@ function generateInvoicePDF(invoice, res) {
   let yLeft = 160;
   let yRight = 160;
   yLeft = billBlock(doc, invoice, customer, L, yLeft);
-  yRight = invoiceMetaBlock(doc, invoice, null, L + W / 2 + 20, yRight, 'invoice');
+  yRight = invoiceMetaBlock(doc, invoice, null, L + W / 2 + 20, yRight, isPrepaid ? 'prepaid' : 'invoice');
 
   let y = Math.max(yLeft, yRight) + 16;
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);

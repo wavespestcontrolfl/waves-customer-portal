@@ -2417,6 +2417,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   const [err, setErr] = useState("");
   const [loadError, setLoadError] = useState(false);
 
+  // Manual retry / post-mutation refresh (same customer — no race).
   const load = () => {
     setLoadError(false);
     adminFetch(`/admin/customers/${customerId}/credits`)
@@ -2426,7 +2427,28 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
       })
       .catch(() => setLoadError(true));
   };
-  useEffect(load, [customerId]);
+  // On customer switch, drop the previous customer's data immediately and
+  // ignore an in-flight response from the prior customer — otherwise the
+  // panel could show customer A's ledger while submits target customer B.
+  useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    setLoadError(false);
+    setOpen(false);
+    adminFetch(`/admin/customers/${customerId}/credits`)
+      .then((d) => {
+        if (!cancelled) {
+          setData(d);
+          setLoadError(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [customerId]);
 
   // Only treat the ledger as known once a fetch has succeeded AND the latest
   // fetch didn't fail. A failed refresh (even after a prior success) flips back
@@ -2565,7 +2587,6 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
                       <option value="cash">Cash</option>
                       <option value="check">Check</option>
                       <option value="zelle">Zelle</option>
-                      <option value="card">Card</option>
                       <option value="other">Other</option>
                     </select>
                   </label>
@@ -2591,7 +2612,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
               />
             </label>
             {err && <div className="text-12 text-alert-fg mb-2">{err}</div>}
-            <Button size="sm" variant="primary" disabled={saving} onClick={submit}>
+            <Button size="sm" variant="primary" disabled={saving || !loaded} onClick={submit}>
               {saving
                 ? "Saving…"
                 : direction === "deduct"

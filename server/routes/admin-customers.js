@@ -2738,7 +2738,12 @@ router.get('/:id/credits', async (req, res, next) => {
 // book NO payments row (they must never inflate revenue/tax). Applying credit
 // to an invoice later does NOT re-book revenue (see apply-credit). Referral /
 // invoice-application ledger sources are system-driven and not settable here.
-const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'card', 'other'];
+// Manual prepayment methods are off-gateway tenders only. `card` is
+// deliberately excluded — a card prepayment must go through Stripe (which
+// also applies the required card surcharge); booking it as a manual cash-
+// style payments row here would grant spendable credit + paid revenue
+// without actually collecting the card.
+const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
 
 router.post('/:id/credits', requireAdmin, async (req, res, next) => {
   try {

@@ -3033,7 +3033,7 @@ router.post('/:id/invoice', async (req, res, next) => {
           .forUpdate()
           .first();
         if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
-        if (lockedInvoice.status === 'paid') return { invoice: lockedInvoice, prepaidCredit: 0 };
+        if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
 
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) {
