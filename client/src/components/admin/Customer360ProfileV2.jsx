@@ -178,17 +178,16 @@ function addMonthsInput(value, months) {
 }
 function defaultAnnualPrepayStart(activeTerm) {
   const today = todayDateInput();
-  // A payment_pending term is sent-but-unpaid: its coverage window has not been
-  // paid yet, so a newly recorded/sent prepay should cover that same intended
-  // window rather than starting at term_end + 1. Advancing past it would stack a
-  // second paid term after the open invoice; anchoring at the pending term's
-  // start makes the server overlap guard reject the duplicate with 409 (forcing
-  // the admin to resolve the outstanding invoice) instead of silently creating
-  // a second coverage window beyond the unpaid one.
-  if (activeTerm?.status === "payment_pending") {
+  const end = dateInputValue(activeTerm?.termEnd);
+  // A payment_pending term that STILL covers today is sent-but-unpaid: anchor a
+  // new term at its start (not term_end + 1) so the server overlap guard rejects
+  // stacking a second paid term beyond the open invoice (forcing the admin to
+  // resolve the outstanding invoice). An EXPIRED pending window (term_end before
+  // today) is moot — fall through to the normal default so a fresh prepay isn't
+  // blocked by a stale unpaid row.
+  if (activeTerm?.status === "payment_pending" && end && end >= today) {
     return dateInputValue(activeTerm.termStart) || today;
   }
-  const end = dateInputValue(activeTerm?.termEnd);
   return end && end >= today ? addDaysInput(end, 1) : today;
 }
 function getAdminRole() {
