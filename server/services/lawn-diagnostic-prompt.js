@@ -714,6 +714,7 @@ module.exports = {
   runPerception,
   runChallenge,
   runWriter,
+  buildNarrativeContext,
   symptomFindingsFromObservations,
   // Legacy single-call passes, kept as the fallback rungs of the no-block ladder.
   runDiagnosis,
