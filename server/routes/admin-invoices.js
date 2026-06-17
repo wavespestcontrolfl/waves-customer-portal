@@ -10,6 +10,7 @@ const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
+const CustomerCredit = require('../services/customer-credit');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -1261,6 +1262,172 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// GET /:id/credit-context — available account credit + this invoice's
+// amount due, for the Apply-credit / Mark-prepaid modal.
+router.get('/:id/credit-context', async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id })
+      .first('id', 'customer_id', 'total', 'credit_applied', 'status', 'invoice_number');
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const total = CustomerCredit.round2(invoice.total || 0);
+    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
+    res.json({
+      customer_id: invoice.customer_id,
+      invoice_number: invoice.invoice_number,
+      total,
+      credit_applied: CustomerCredit.round2(invoice.credit_applied || 0),
+      amount_due: amountDue,
+      balance,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/apply-credit — draw down the customer's account credit to cover
+// this invoice (the prepaid / quarterly-prepay flow). Account credit is the
+// holding bucket for money paid ahead (recorded via Customer 360 "Issue
+// credit") or any goodwill/adjustment; applying it here recognizes the
+// revenue against the invoice.
+//
+// Body: {
+//   amount?:        number  — how much credit to apply (default: full amount
+//                             due). Capped at both the balance and amount due.
+//   waiveSetupFee?: boolean — record that the WaveGuard initial/setup fee was
+//                             waived for this prepaid invoice (flag only, like
+//                             the annual-prepay setupFeeWaived display flag —
+//                             does NOT recompute line-item totals).
+//   note?:          string  — operator note (≤400 chars).
+// }
+//
+// Fully covering the amount due transitions the invoice to the terminal
+// `prepaid` status and stops the follow-up sequence; a partial application
+// leaves the invoice collectible for the remainder. The customer row is
+// locked for the whole movement so concurrent applications can't
+// over-draw the balance or over-apply past the amount due.
+router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { amount, waiveSetupFee = false, note } = req.body || {};
+    const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
+
+    let requested = null;
+    if (amount !== undefined && amount !== null && amount !== '') {
+      requested = parsePositiveMoney(amount, 'amount');
+    }
+
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id }).forUpdate().first();
+        if (!invoice) {
+          const err = new Error('Invoice not found');
+          err.statusCode = 404; err.isOperational = true; throw err;
+        }
+        // Same transition guard as every other collection path.
+        try {
+          assertInvoiceCollectible(invoice.status);
+        } catch (err) {
+          err.statusCode = invoice.status === 'processing' ? 409 : 400;
+          err.isOperational = true;
+          throw err;
+        }
+        const total = CustomerCredit.round2(invoice.total || 0);
+        if (total <= 0) {
+          const err = new Error('Invoice has no amount to collect (total is $0)');
+          err.statusCode = 400; err.isOperational = true; throw err;
+        }
+        const alreadyApplied = CustomerCredit.round2(invoice.credit_applied || 0);
+        const amountDue = CustomerCredit.round2(total - alreadyApplied);
+        if (amountDue <= 0) {
+          const err = new Error('Invoice is already fully covered by credit');
+          err.statusCode = 400; err.isOperational = true; throw err;
+        }
+        const cover = CustomerCredit.round2(Math.min(requested ?? amountDue, amountDue));
+        if (cover <= 0) {
+          const err = new Error('amount must be greater than 0');
+          err.statusCode = 400; err.isOperational = true; throw err;
+        }
+
+        const newApplied = CustomerCredit.round2(alreadyApplied + cover);
+        const fullyCovered = newApplied + 0.005 >= total;
+
+        // Consume the credit (throws 400 on insufficient balance → rolls back).
+        const { balanceAfter } = await CustomerCredit.postCreditMovement({
+          customerId: invoice.customer_id,
+          delta: -cover,
+          source: fullyCovered ? 'invoice_prepaid' : 'invoice_application',
+          invoiceId: id,
+          note: trimmedNote || null,
+          createdBy: recordedBy,
+        }, trx);
+
+        const updates = {
+          credit_applied: newApplied,
+          updated_at: trx.fn.now(),
+        };
+        if (waiveSetupFee) updates.setup_fee_waived = true;
+        if (fullyCovered) {
+          updates.status = 'prepaid';
+          updates.prepaid_at = trx.fn.now();
+          updates.prepaid_by = recordedBy;
+        }
+        await trx('invoices').where({ id }).update(updates);
+
+        // Recognize the applied amount in the payments ledger so revenue
+        // dashboards count prepaid coverage. No `processor` — off-gateway,
+        // matching the manual-payment convention.
+        await trx('payments').insert({
+          customer_id: invoice.customer_id,
+          amount: cover,
+          status: 'paid',
+          description: `Invoice ${invoice.invoice_number} — account credit`
+            + `${fullyCovered ? ' (prepaid)' : ' (partial)'}`,
+          payment_date: etDateString(),
+        });
+
+        return { invoice, cover, newApplied, fullyCovered, balanceAfter };
+      });
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+      throw err;
+    }
+
+    const { invoice, cover, fullyCovered, balanceAfter } = outcome;
+
+    if (fullyCovered) {
+      try {
+        const FollowUps = require('../services/invoice-followups');
+        await FollowUps.stopOnPayment(id);
+      } catch (err) {
+        logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
+      }
+    }
+
+    await db('activity_log').insert({
+      customer_id: invoice.customer_id,
+      action: fullyCovered ? 'invoice_marked_prepaid' : 'invoice_credit_applied',
+      description: `$${cover.toFixed(2)} account credit applied to ${invoice.invoice_number}`
+        + `${fullyCovered ? ' — marked PREPAID' : ''}`
+        + ` (remaining credit $${balanceAfter.toFixed(2)}) — ${recordedBy}`
+        + (trimmedNote ? ` — ${trimmedNote.slice(0, 120)}` : ''),
+    }).catch((err) => logger.warn(`[admin-invoices:apply-credit] activity_log insert failed: ${err.message}`));
+
+    const final = await db('invoices').where({ id }).first();
+    res.json({
+      ok: true,
+      invoice: final,
+      applied: cover,
+      fully_covered: fullyCovered,
+      balance: balanceAfter,
+    });
+  } catch (err) {
+    logger.error(`[admin-invoices] apply-credit failed: ${err.message}`);
     next(err);
   }
 });

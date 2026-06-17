@@ -2388,6 +2388,182 @@ function AdminAutopayPanelV2({
   );
 }
 
+// ─── Account credit panel ───────────────────────────────────────
+// Shows the customer's account-credit balance + ledger history and lets
+// admins issue or adjust credit. Credit is the holding bucket for money
+// paid ahead (quarterly prepay) and goodwill; it is drawn down against
+// invoices from the invoice's "Apply credit" action. Self-contained:
+// fetches /admin/customers/:id/credits on its own.
+const CREDIT_SOURCE_LABELS = {
+  manual: "Manual credit",
+  adjustment: "Adjustment",
+  invoice_application: "Applied to invoice",
+  invoice_prepaid: "Prepaid invoice",
+  referral: "Referral",
+};
+
+function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onChanged }) {
+  const [data, setData] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [direction, setDirection] = useState("add");
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("manual");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  const load = () => {
+    adminFetch(`/admin/customers/${customerId}/credits`)
+      .then(setData)
+      .catch(() => {});
+  };
+  useEffect(load, [customerId]);
+
+  const balance = Number(data?.balance || 0);
+  const ledger = data?.ledger || [];
+
+  const submit = async () => {
+    const amt = parseFloat(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setErr("Enter an amount greater than 0");
+      return;
+    }
+    const delta = direction === "deduct" ? -amt : amt;
+    setSaving(true);
+    setErr("");
+    try {
+      await adminFetch(`/admin/customers/${customerId}/credits`, {
+        method: "POST",
+        body: JSON.stringify({ amount: delta, reason, note: note.trim() || undefined }),
+      });
+      setOpen(false);
+      setAmount("");
+      setNote("");
+      setDirection("add");
+      setReason("manual");
+      load();
+      if (onChanged) onChanged();
+    } catch (e) {
+      setErr(e.message || "Failed to update credit");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputClass =
+    "block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
+
+  return (
+    <Card className="mb-5">
+      <CardBody className="p-4">
+        <div className="flex justify-between items-start gap-3 flex-wrap mb-3">
+          <div>
+            <div className="u-label text-ink-secondary mb-1">Account credit</div>
+            <div className="text-22 text-zinc-900 u-nums leading-none">
+              {fmtCurrency(balance)}
+            </div>
+            <div className="text-12 text-ink-tertiary mt-1">
+              Available to apply to invoices
+            </div>
+          </div>
+          {canEdit && (
+            <Button size="sm" variant="secondary" onClick={() => setOpen((v) => !v)}>
+              {open ? "Cancel" : "Issue credit"}
+            </Button>
+          )}
+        </div>
+
+        {open && (
+          <div className="border-hairline border-zinc-200 rounded-sm p-3 mb-3 bg-zinc-50">
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <label className="block">
+                <span className="u-label text-ink-tertiary block mb-1">Direction</span>
+                <select
+                  value={direction}
+                  onChange={(e) => setDirection(e.target.value)}
+                  className={inputClass}
+                >
+                  <option value="add">Add credit</option>
+                  <option value="deduct">Deduct credit</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="u-label text-ink-tertiary block mb-1">Amount</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="0.00"
+                  className={cn(inputClass, "u-nums")}
+                />
+              </label>
+            </div>
+            <label className="block mb-2">
+              <span className="u-label text-ink-tertiary block mb-1">Reason</span>
+              <select
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className={inputClass}
+              >
+                <option value="manual">Manual credit (prepay, goodwill)</option>
+                <option value="adjustment">Adjustment / correction</option>
+              </select>
+            </label>
+            <label className="block mb-2">
+              <span className="u-label text-ink-tertiary block mb-1">Note (optional)</span>
+              <input
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="e.g. Q3 quarterly prepay collected by check"
+                className={inputClass}
+              />
+            </label>
+            {err && <div className="text-12 text-alert-fg mb-2">{err}</div>}
+            <Button size="sm" variant="primary" disabled={saving} onClick={submit}>
+              {saving
+                ? "Saving…"
+                : direction === "deduct"
+                  ? "Deduct credit"
+                  : `Add credit to ${customerName || "account"}`}
+            </Button>
+          </div>
+        )}
+
+        {ledger.length > 0 ? (
+          <div>
+            {ledger.slice(0, 8).map((row) => {
+              const delta = Number(row.delta || 0);
+              return (
+                <div
+                  key={row.id}
+                  className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+                >
+                  <span className={cn("u-nums", delta < 0 ? "text-ink-secondary" : "text-zinc-900")}>
+                    {delta >= 0 ? "+" : "−"}
+                    {fmtCurrency(Math.abs(delta))}
+                  </span>
+                  <span className="text-ink-secondary flex-1 truncate">
+                    {CREDIT_SOURCE_LABELS[row.source] || row.source}
+                    {row.note ? ` · ${row.note}` : ""}
+                  </span>
+                  <span className="text-ink-tertiary u-nums">
+                    {fmtCurrency(Number(row.balance_after || 0))}
+                  </span>
+                  <span className="text-ink-tertiary">{fmtDate(row.created_at)}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="text-12 text-ink-tertiary">No credit history yet</div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
 function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
   return (
     <Card className="mb-5">
@@ -4457,6 +4633,11 @@ export default function Customer360ProfileV2({
                 customerName={`${c.firstName} ${c.lastName}`}
                 canCharge={isAdmin}
               />{" "}
+              <AccountCreditPanelV2
+                customerId={c.id}
+                customerName={`${c.firstName} ${c.lastName}`}
+                canEdit={isAdmin}
+              />{" "}
               {isAdmin && (
                 <AnnualPrepayPanelV2
                   customer={c}
@@ -4495,7 +4676,11 @@ export default function Customer360ProfileV2({
                         <TD>
                           {" "}
                           <Badge
-                            tone={inv.status === "paid" ? "strong" : "alert"}
+                            tone={
+                              inv.status === "paid" || inv.status === "prepaid"
+                                ? "strong"
+                                : "alert"
+                            }
                           >
                             {inv.status}
                           </Badge>{" "}

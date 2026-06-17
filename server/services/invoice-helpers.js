@@ -18,6 +18,7 @@ const INVOICE_UPDATE_ALLOWED_FIELDS = Object.freeze([
 
 const INVOICE_UNCOLLECTIBLE_STATUSES = Object.freeze([
   'paid',
+  'prepaid',
   'processing',
   'void',
   'refunded',
@@ -37,6 +38,9 @@ function assertInvoiceCollectible(currentStatus) {
   const status = invoiceStatusKey(currentStatus);
   if (status === 'paid') {
     throw new Error('Invoice already paid');
+  }
+  if (status === 'prepaid') {
+    throw new Error('Invoice is already prepaid');
   }
   if (status === 'processing') {
     throw new Error('Bank payment is already processing');

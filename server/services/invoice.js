@@ -541,6 +541,7 @@ function invoiceNotSendableError(invoice) {
   if (invoice.status === "sending")
     return new Error("Invoice send already in progress");
   if (invoice.status === "paid") return new Error("Cannot send a paid invoice");
+  if (invoice.status === "prepaid") return new Error("Cannot send a prepaid invoice");
   if (invoice.status === "processing")
     return new Error("Cannot send an invoice while payment is processing");
   if (invoice.status === "void")
@@ -1859,7 +1860,7 @@ const InvoiceService = {
    */
   async sendReceipt(invoiceId, { force = false, recordActivity = true } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
-    if (!invoice || invoice.status !== "paid")
+    if (!invoice || (invoice.status !== "paid" && invoice.status !== "prepaid"))
       return { sent: false, reason: "not-paid" };
 
     if (invoice.receipt_sent_at && !force) {
@@ -2049,6 +2050,7 @@ const InvoiceService = {
       "sent",
       "viewed",
       "paid",
+      "prepaid",
       "processing",
       "void",
       "refunded",
@@ -2479,17 +2481,17 @@ const InvoiceService = {
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
         ),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
           [today],
         ),
         db.raw(
           "COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected",
         ),
         db.raw(
-          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
+          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
         ),
       )
       .whereNull("archived_at");

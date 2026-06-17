@@ -14,6 +14,7 @@ const { listCustomerPrepaidPlans } = require('../services/prepaid-series');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
+const CustomerCredit = require('../services/customer-credit');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1746,7 +1747,7 @@ router.get('/:id', async (req, res, next) => {
     const COLLECTIBLE_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid']);
     const mappedInvoices = (invoices || []).map(inv => {
       const total = parseFloat(inv.total || 0);
-      const isPaid = inv.status === 'paid';
+      const isPaid = inv.status === 'paid' || inv.status === 'prepaid';
       const isCollectible = COLLECTIBLE_STATUSES.has(inv.status);
       return {
         ...inv,
@@ -2706,6 +2707,69 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
     const StripeService = require('../services/stripe');
     const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /:id/credits — account credit balance + ledger history for Customer 360.
+router.get('/:id/credits', async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const [balance, ledger] = await Promise.all([
+      CustomerCredit.getBalance(req.params.id),
+      CustomerCredit.getLedger(req.params.id, { limit: 100 }),
+    ]);
+    res.json({ balance: balance || 0, ledger });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/credits — issue or adjust account credit (Customer 360).
+// Body: { amount: number (non-zero; negative deducts), reason?: 'manual'|'adjustment', note?: string }
+// Referral / invoice-application movements are system-driven and not
+// settable here.
+router.post('/:id/credits', requireAdmin, async (req, res, next) => {
+  try {
+    const { amount, reason = 'manual', note } = req.body || {};
+    const delta = Number(amount);
+    if (!Number.isFinite(delta) || delta === 0) {
+      return res.status(400).json({ error: 'amount must be a non-zero number' });
+    }
+    if (!['manual', 'adjustment'].includes(reason)) {
+      return res.status(400).json({ error: "reason must be 'manual' or 'adjustment'" });
+    }
+    const createdBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+
+    let result;
+    try {
+      result = await CustomerCredit.postCreditMovement({
+        customerId: req.params.id,
+        delta,
+        source: reason,
+        note: note || null,
+        createdBy,
+      });
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+      throw err;
+    }
+
+    await auditCustomerMutation(req, 'customer.credit.adjust', req.params.id, {
+      amount: CustomerCredit.round2(delta),
+      reason,
+      balance_after: result.balanceAfter,
+      note: note || null,
+    }, true);
+
+    await db('activity_log').insert({
+      customer_id: req.params.id,
+      action: 'account_credit_adjusted',
+      description: `Account credit ${delta >= 0 ? 'added' : 'deducted'} `
+        + `$${Math.abs(CustomerCredit.round2(delta)).toFixed(2)} (${reason})`
+        + ` — balance $${result.balanceAfter.toFixed(2)} · ${createdBy}`
+        + (note ? ` — ${String(note).slice(0, 120)}` : ''),
+    }).catch((e) => logger.warn(`[admin-customers] credit activity_log insert failed: ${e.message}`));
+
+    res.json({ ok: true, balance: result.balanceAfter, entry: result.entry });
   } catch (err) { next(err); }
 });
 
