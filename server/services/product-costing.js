@@ -42,6 +42,72 @@ function normalizeQuantityToOz(quantity) {
   return oz == null ? null : Math.round(oz * 100) / 100;
 }
 
+// Measurement families for the per-unit price breakdown. Weight and volume are
+// kept dimensionally separate — we never convert grams <-> millilitres.
+const WEIGHT_TO_GRAM = {
+  g: 1, gram: 1, gm: 1, kg: 1000,
+  oz: 28.3495, ounce: 28.3495, lb: 453.592, pound: 453.592,
+};
+const VOLUME_TO_ML = {
+  ml: 1, milliliter: 1, millilitre: 1, cc: 1,
+  l: 1000, liter: 1000, litre: 1000,
+  fl_oz: 29.5735, floz: 29.5735,
+  pt: 473.176, pint: 473.176, qt: 946.353, quart: 946.353,
+  gal: 3785.41, gallon: 3785.41,
+};
+// Units to express each family in (sub-units per 1 display unit).
+const WEIGHT_DISPLAY = [
+  { unit: 'g', sub: 1 },
+  { unit: 'oz', sub: 28.3495 },
+  { unit: 'lb', sub: 453.592 },
+];
+const VOLUME_DISPLAY = [
+  { unit: 'fl-oz', sub: 29.5735 },
+  { unit: 'qt', sub: 946.353 },
+  { unit: 'gal', sub: 3785.41 },
+];
+
+// Given a pack price + a size string ("4 lb", "1 gal", "32 oz"), return the
+// price expressed per unit across the matching measurement family. Plain "oz"
+// is ambiguous — treated as weight unless the product is flagged liquid.
+function unitPriceBreakdown(price, quantity, opts = {}) {
+  const p = Number(price);
+  if (!Number.isFinite(p) || p <= 0 || !quantity) return null;
+  const match = String(quantity).toLowerCase().trim().match(/^([\d.]+)\s*(.*)/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const unit = normalizeUnit(match[2]);
+  if (!unit) return null;
+
+  let family;
+  let totalBase; // grams or millilitres in the whole package
+  let displaySet;
+  if (unit === 'oz' || unit === 'ounce') {
+    if (opts.isLiquid) {
+      family = 'volume'; totalBase = amount * VOLUME_TO_ML.fl_oz; displaySet = VOLUME_DISPLAY;
+    } else {
+      family = 'weight'; totalBase = amount * WEIGHT_TO_GRAM.oz; displaySet = WEIGHT_DISPLAY;
+    }
+  } else if (WEIGHT_TO_GRAM[unit] != null) {
+    family = 'weight'; totalBase = amount * WEIGHT_TO_GRAM[unit]; displaySet = WEIGHT_DISPLAY;
+  } else if (VOLUME_TO_ML[unit] != null) {
+    family = 'volume'; totalBase = amount * VOLUME_TO_ML[unit]; displaySet = VOLUME_DISPLAY;
+  } else {
+    return null; // count / unknown unit — no weight/volume breakdown
+  }
+  if (!(totalBase > 0)) return null;
+
+  const perBase = p / totalBase; // $ per gram or per millilitre
+  return {
+    family,
+    units: displaySet.map((d) => ({
+      unit: d.unit,
+      pricePerUnit: Math.round(perBase * d.sub * 1e6) / 1e6,
+    })),
+  };
+}
+
 function calcLandedCost(price, shipping, taxRate) {
   const p = Number(price) || 0;
   const s = Number(shipping) || 0;
@@ -110,5 +176,6 @@ module.exports = {
   costLineFromUsage,
   normalizeQuantityToOz,
   normalizeUnit,
+  unitPriceBreakdown,
   usageAmountForArea,
 };

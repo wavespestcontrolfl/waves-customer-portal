@@ -17,6 +17,7 @@ const {
   calcLandedCost,
   costLineFromUsage,
   normalizeQuantityToOz,
+  unitPriceBreakdown,
 } = require('../services/product-costing');
 const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
@@ -323,6 +324,16 @@ function mapProduct(product, vendorPricing = []) {
   const lowStock = inventoryOnHand != null
     && lowStockThreshold != null
     && inventoryOnHand <= lowStockThreshold;
+  // Per-unit price breakdown ($/g · $/oz · $/lb, or $/fl-oz · $/qt · $/gal).
+  const isLiquid = looksLiquidProduct(product);
+  const enrichedPricing = vendorPricing.map((vp) => ({
+    ...vp,
+    unitPrices: unitPriceBreakdown(vp.price, vp.quantity, { isLiquid })?.units || null,
+  }));
+  const bestRow = enrichedPricing.find((vp) => vp.isBest) || enrichedPricing[0] || null;
+  const unitPrices = bestRow?.unitPrices
+    || unitPriceBreakdown(product.best_price, product.container_size, { isLiquid })?.units
+    || null;
   return {
     id: product.id,
     name: product.name,
@@ -350,7 +361,8 @@ function mapProduct(product, vendorPricing = []) {
     inventoryUnit: product.inventory_unit || null,
     lowStockThreshold,
     lowStock,
-    vendorPricing,
+    vendorPricing: enrichedPricing,
+    unitPrices,
     // Product Registry fields
     customerVisibility: product.customer_visibility || 'internal_only',
     contentStatus: product.content_status || 'draft',
