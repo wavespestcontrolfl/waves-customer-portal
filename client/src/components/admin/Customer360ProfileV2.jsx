@@ -2543,6 +2543,18 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     ["other", "Other"],
   ];
 
+  // Commercial invoices add county sales tax on top of the entered amount
+  // (residential is tax-free by operator policy), and the server records the
+  // taxed invoice total as the paid amount. So this field is the PRE-TAX service
+  // amount; surface the estimated tax-inclusive total actually recorded as paid
+  // (7% is the commercial default used elsewhere; the invoice finalizes the
+  // exact county rate).
+  const isCommercialCustomer =
+    customer?.property?.type === "commercial" || customer?.property?.type === "business";
+  const estTaxInclusiveTotal = isCommercialCustomer && Number(amount) > 0
+    ? Math.round(Number(amount) * 1.07 * 100) / 100
+    : Number(amount);
+
   return (
     <div
       className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
@@ -2622,7 +2634,9 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Amount collected</div>
+            <div className="u-label text-ink-secondary mb-1">
+              {isCommercialCustomer ? "Pre-tax service amount collected" : "Amount collected"}
+            </div>
             <input
               type="number"
               min="0"
@@ -2634,6 +2648,12 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
             {perVisit > 0 && (
               <div className="text-11 text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
+              </div>
+            )}
+            {isCommercialCustomer && Number(amount) > 0 && (
+              <div className="text-11 text-ink-secondary mt-1">
+                Commercial: ~7% county sales tax is added at invoicing — total
+                recorded as paid ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
