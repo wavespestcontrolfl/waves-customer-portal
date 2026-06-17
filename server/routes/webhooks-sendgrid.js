@@ -299,19 +299,19 @@ async function handleEvent(ev) {
   }
   if (emailMessage) {
     const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
-    // Bounce recovery runs AFTER the event transaction commits (it does a
-    // network re-send) and only when the event was newly processed (so a
-    // SendGrid redelivery of the same event can't re-trigger it). Best-effort —
-    // never let recovery break webhook ack.
+    // Bounce recovery runs AFTER the event transaction commits, only when the
+    // event was newly processed (so a SendGrid redelivery can't re-trigger it).
+    // It does a network re-send (sendgrid.sendOne), so dispatch it WITHOUT
+    // awaiting — a slow Mail Send must not hold the /events request open and
+    // stall the rest of the batch (SendGrid would retry the whole batch even
+    // though this event is already marked processed). Best-effort, fire-and-forget.
     if (processedNew) {
-      try {
-        if (bounceRecovery.isHardBounceEvent(ev)) {
-          await bounceRecovery.attemptRecovery(emailMessage, ev);
-        } else if (String(ev.event || '').toLowerCase() === 'delivered' && bounceRecovery.isRecoveryMessage(emailMessage)) {
-          await bounceRecovery.commitRecoveryOnDelivery(emailMessage);
-        }
-      } catch (err) {
-        logger.error(`[sendgrid-webhook] bounce recovery failed for ${messageId}: ${err.message}`);
+      if (bounceRecovery.isHardBounceEvent(ev)) {
+        bounceRecovery.attemptRecovery(emailMessage, ev)
+          .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery failed for ${messageId}: ${err.message}`));
+      } else if (String(ev.event || '').toLowerCase() === 'delivered' && bounceRecovery.isRecoveryMessage(emailMessage)) {
+        bounceRecovery.commitRecoveryOnDelivery(emailMessage)
+          .catch((err) => logger.error(`[sendgrid-webhook] recovery commit failed for ${messageId}: ${err.message}`));
       }
     }
     return;

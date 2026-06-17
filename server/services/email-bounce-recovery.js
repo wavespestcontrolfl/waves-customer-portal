@@ -266,14 +266,16 @@ async function bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId =
       const row = await db('estimates').where({ id: sourceEstimateId }).whereRaw('LOWER(customer_email) = ?', [email]).first('id');
       return !!row;
     }
-    const estQ = db('estimates').whereRaw('LOWER(customer_email) = ?', [email]);
-    const leadQ = db('leads').whereRaw('LOWER(email) = ?', [email]);
+    // Otherwise only a CUSTOMER-scoped lookup is safe. An unscoped no-customer
+    // lookup could match an unrelated prospect that merely shares the typo, which
+    // would keep a stale recovery alive — so for a no-customer recovery with no
+    // derivable source id we fail closed (route to manual).
     if (match?.customerId) {
-      estQ.where({ customer_id: match.customerId });
-      leadQ.where({ customer_id: match.customerId });
+      const estQ = db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).where({ customer_id: match.customerId });
+      const leadQ = db('leads').whereRaw('LOWER(email) = ?', [email]).where({ customer_id: match.customerId });
+      if (await estQ.first('id')) return true;
+      if (await leadQ.first('id')) return true;
     }
-    if (await estQ.first('id')) return true;
-    if (await leadQ.first('id')) return true;
   } catch (err) {
     logger.warn(`[bounce-recovery] on-file check failed — treating as not on file: ${err.message}`);
     return false;
@@ -690,9 +692,11 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         if (Number(estAffected) > 0) updatedFields.push('estimates.customer_email');
         if (Number(leadAffected) > 0) updatedFields.push('leads.email');
       } else {
-        // No-customer (prospect): prefer the ACTUAL source estimate, identified by
-        // the original send's trigger_event_id, so we never touch a different
-        // prospect that merely shares the typo.
+        // No-customer (prospect): rewrite ONLY the ACTUAL source estimate, identified
+        // by the original send's trigger_event_id. We do NOT fall back to an unscoped
+        // address match — that could overwrite a different prospect that merely shares
+        // the typo. (The pre-send on-file gate is scoped the same way, so a no-source
+        // recovery never reaches here.)
         let sourceEstimateId = null;
         try {
           const orig = await db('email_messages').where({ id: rec.original_message_id }).first('trigger_event_id');
@@ -707,37 +711,7 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
             .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
           if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
         } else {
-          // Fallback (no derivable source id): only rewrite when the bounced address
-          // uniquely identifies ONE record ACROSS both tables, and fail closed on a
-          // lookup error so a single match on one table can't slip through.
-          let estRows;
-          let leadRows;
-          try {
-            estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]).select('id');
-            leadRows = await db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]).select('id');
-          } catch (err) {
-            logger.warn(`[bounce-recovery] source uniqueness lookup failed — left unchanged: ${err.message}`);
-            estRows = null;
-            leadRows = null;
-          }
-          if (estRows && leadRows) {
-            const totalMatches = estRows.length + leadRows.length;
-            if (totalMatches === 1 && estRows.length === 1) {
-              const ok = await db('estimates').where({ id: estRows[0].id })
-                .whereRaw('LOWER(customer_email) = ?', [bouncedEmail])
-                .update({ customer_email: correctedEmail, updated_at: new Date() })
-                .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
-              if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
-            } else if (totalMatches === 1 && leadRows.length === 1) {
-              const ok = await db('leads').where({ id: leadRows[0].id })
-                .whereRaw('LOWER(email) = ?', [bouncedEmail])
-                .update({ email: correctedEmail, updated_at: new Date() })
-                .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
-              if (Number(ok) > 0) updatedFields.push('leads.email');
-            } else if (totalMatches > 1) {
-              logger.warn(`[bounce-recovery] ambiguous source (${estRows.length} estimate(s) + ${leadRows.length} lead(s) share the typo) — left unchanged`);
-            }
-          }
+          logger.warn(`[bounce-recovery] no source estimate id for no-customer recovery ${rec.id} — source left unchanged`);
         }
       }
     }

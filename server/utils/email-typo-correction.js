@@ -201,7 +201,13 @@ function correctEmailDomain(email) {
   // transactional snapshot to a guessed mailbox.
   const { domain: nearest, distance, tie } = closestKnownDomain(domain);
   if (nearest && nearest !== domain && !tie) {
-    if (distance === 1) return build(nearest, 'domain_typo', 'high');
+    // A single edit on a SHORT provider second-level label is ambiguous — it can
+    // turn a real different domain INTO a provider (he.com→me.com, box.net→cox.net,
+    // line.com→live.com). Only long SLDs (gmail, yahoo, hotmail, …) earn high
+    // confidence at distance 1; short ones drop to medium (below the auto-send
+    // bar → manual review). Distance 2 is always medium.
+    const nearestSld = nearest.slice(0, nearest.lastIndexOf('.'));
+    if (distance === 1) return build(nearest, 'domain_typo', nearestSld.length >= 5 ? 'high' : 'medium');
     if (distance === 2) return build(nearest, 'domain_typo', 'medium');
   }
 
