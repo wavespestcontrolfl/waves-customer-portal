@@ -666,13 +666,20 @@ const InvoiceService = {
     // a payer lookup can never block invoicing — and the inserted row is
     // unchanged for the (overwhelmingly common) self-pay case.
     const PayerService = require("./payer");
-    const { payerId: resolvedPayerId, poNumber: resolvedPoNumber } =
-      await PayerService.resolveForInvoice({
-        database,
-        customerId,
-        customer,
-        scheduledServiceId,
-      });
+    const {
+      payerId: resolvedPayerId,
+      poNumber: resolvedPoNumber,
+      taxExempt: resolvedTaxExempt,
+    } = await PayerService.resolveForInvoice({
+      database,
+      customerId,
+      customer,
+      scheduledServiceId,
+    });
+    // A tax-exempt payer (builder/HOA with a resale/exemption cert on file)
+    // zeroes tax on its invoices — even commercial jobs that would otherwise
+    // carry the +7%. Force the rate to 0 so the tax block below resolves to 0.
+    if (resolvedTaxExempt) taxRate = 0;
 
     // Pull service record context if linked
     let serviceData = serviceDate ? { service_date: serviceDate } : {};

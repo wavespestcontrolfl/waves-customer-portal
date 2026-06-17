@@ -639,6 +639,9 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
+    // Downloaded/printed PDF must show the same Bill-To = payer block as the
+    // emailed copy (getByToken doesn't attach the payer on its own).
+    await require('../services/payer').attachToInvoice(data);
     generateInvoicePDF(data, res);
   } catch (err) {
     next(err);

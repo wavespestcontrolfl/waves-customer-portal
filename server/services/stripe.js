@@ -1235,7 +1235,11 @@ const StripeService = {
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
 
-    const saveCard = !!opts.saveCard;
+    // Never save the payer's payment method onto the homeowner's account.
+    // For a third-party-billed invoice the person paying is the builder/AP
+    // contact, not invoice.customer_id — opting them into "save card" would
+    // attach their card to the homeowner for future off-session charges.
+    const saveCard = !!opts.saveCard && !invoice.payer_id;
     const stripeCustomerId = saveCard && invoice.customer_id
       ? await this.ensureStripeCustomer(invoice.customer_id)
       : null;

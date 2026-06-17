@@ -49,7 +49,7 @@ function buildPayerWrite(body = {}, { partial = false } = {}) {
   const out = {};
   const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
 
-  if (!partial || has('displayName')) {
+  if (!partial || has('displayName') || has('display_name')) {
     const displayName = cleanOrNull(body.displayName ?? body.display_name, 160);
     if (!displayName) return { error: 'Payer name is required' };
     out.display_name = displayName;
@@ -123,13 +123,21 @@ async function updatePayer(id, body) {
  * Never throws — returns { payerId: null, poNumber: null } on any problem.
  */
 async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null } = {}) {
+  const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false };
   try {
     let payerId = null;
     let poNumber = null;
 
+    // The owning customer of this invoice; used to scope the per-job lookup so
+    // a stale/mismatched scheduledServiceId can never snapshot a DIFFERENT
+    // customer's payer onto this invoice.
+    const ownerCustomerId = customerId || customer?.id || null;
+
     if (scheduledServiceId) {
+      const ssWhere = { id: scheduledServiceId };
+      if (ownerCustomerId) ssWhere.customer_id = ownerCustomerId;
       const ss = await database('scheduled_services')
-        .where({ id: scheduledServiceId })
+        .where(ssWhere)
         .first('payer_id', 'po_number')
         .catch(() => null);
       if (ss) {
@@ -146,17 +154,17 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
       if (cust && cust.payer_id) payerId = cust.payer_id;
     }
 
-    if (!payerId) return { payerId: null, poNumber: null };
+    if (!payerId) return SELF_PAY;
 
     // Only honor an ACTIVE payer link. A deactivated payer falls back to
     // self-pay rather than silently sending invoices to a dead AP inbox.
     const payer = await getPayer(payerId, database).catch(() => null);
-    if (!payer || payer.active === false) return { payerId: null, poNumber: null };
+    if (!payer || payer.active === false) return SELF_PAY;
 
-    return { payerId, poNumber };
+    return { payerId, poNumber, taxExempt: !!payer.tax_exempt };
   } catch (err) {
     logger.warn(`[payer] resolveForInvoice failed (falling back to self-pay): ${err.message}`);
-    return { payerId: null, poNumber: null };
+    return SELF_PAY;
   }
 }
 
@@ -168,7 +176,9 @@ async function attachToInvoice(invoice, database = db) {
   if (!invoice || !invoice.payer_id || invoice.payer) return invoice;
   try {
     const payer = await getPayer(invoice.payer_id, database);
-    if (payer) invoice.payer = payer;
+    // Mirror resolveForInvoice: a payer deactivated after the invoice was
+    // minted must NOT reroute delivery to its dead AP inbox.
+    if (payer && payer.active !== false) invoice.payer = payer;
   } catch (err) {
     logger.warn(`[payer] attachToInvoice failed for invoice ${invoice.id}: ${err.message}`);
   }

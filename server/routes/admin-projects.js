@@ -2968,7 +2968,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     let billingCopyEmail = '';
     if (channels.email?.ok) {
       const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
-      const [billing] = getInvoiceEmailRecipients(customer, prefs || {});
+      // Third-party Bill-To: when this invoice carries a payer (attached above
+      // for the PDF), the invoice/pay-link copy must reach the payer's AP inbox
+      // — same reroute the standalone invoice email does — with the customer
+      // billing contact as the fallback when the payer has no usable AP email.
+      const payerBilling = invoice.payer
+        ? require('../services/payer').payerRecipient(invoice.payer)
+        : null;
+      const [billing] = payerBilling
+        ? [payerBilling]
+        : getInvoiceEmailRecipients(customer, prefs || {});
       const billingEmail = String(billing?.email || '').trim().toLowerCase();
       if (billingEmail && billingEmail !== String(emailRecipient.email || '').trim().toLowerCase()) {
         billingCopyEmail = billingEmail;

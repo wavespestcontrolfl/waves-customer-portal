@@ -2607,19 +2607,33 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   manager instead of the customer. Manage payers in Billing →
                   Payers.
                 </div>
-                {form.payerId && (
-                  <div style={{ marginTop: 10 }}>
-                    <label style={labelStyle}>PO number (optional)</label>
-                    <input
-                      type="text"
-                      value={form.poNumber}
-                      onChange={(e) => update("poNumber", e.target.value)}
-                      placeholder="Purchase order #"
-                      className="font-bold"
-                      style={inputStyle}
-                    />
-                  </div>
-                )}
+                {form.payerId && (() => {
+                  const selectedPayer = payers.find(
+                    (p) => String(p.id) === String(form.payerId),
+                  );
+                  const needsPo =
+                    selectedPayer?.requires_po &&
+                    !String(form.poNumber || "").trim();
+                  return (
+                    <div style={{ marginTop: 10 }}>
+                      <label style={labelStyle}>PO number (optional)</label>
+                      <input
+                        type="text"
+                        value={form.poNumber}
+                        onChange={(e) => update("poNumber", e.target.value)}
+                        placeholder="Purchase order #"
+                        className="font-bold"
+                        style={inputStyle}
+                      />
+                      {needsPo && (
+                        <div style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>
+                          This payer usually requires a PO — consider adding one
+                          before billing.
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               {service.createdAt && (
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 14 }}>

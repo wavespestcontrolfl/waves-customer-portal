@@ -115,6 +115,9 @@ router.get('/:token/pdf', async (req, res, next) => {
     if (data.status !== 'paid') return res.status(409).json({ error: 'Receipt not available — invoice unpaid' });
 
     const payment = await loadPaymentForInvoice(data.id, data.customer_id);
+    // Keep the receipt's Bill-To consistent with the invoice (payer, not the
+    // homeowner, when the job was third-party-billed).
+    await require('../services/payer').attachToInvoice(data);
     generateReceiptPDF(data, payment, res);
   } catch (err) {
     next(err);

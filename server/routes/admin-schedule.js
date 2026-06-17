@@ -2334,7 +2334,13 @@ router.put('/:id/update-details', async (req, res, next) => {
     }
     // Per-job third-party Bill-To override + PO. Null clears the override so
     // the job falls back to the customer's default payer (or self-pay).
+    // Admin-only: this controls where the invoice is routed and who is asked
+    // to pay, so a technician token must not be able to change it (the route
+    // itself is requireTechOrAdmin).
     if (payerId !== undefined || poNumber !== undefined) {
+      if (req.techRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
+      }
       try {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.payer_id && payerId !== undefined) {

@@ -329,7 +329,7 @@ export default function PayersPage() {
                   checked={!!form.requires_po}
                   onChange={(e) => set("requires_po", e.target.checked)}
                 />
-                Require a PO number on each job
+                Usually needs a PO (advisory — staff are reminded, not blocked)
               </label>
               <label className="flex items-center gap-2 text-13 text-zinc-700 cursor-pointer">
                 <input
@@ -337,7 +337,7 @@ export default function PayersPage() {
                   checked={!!form.tax_exempt}
                   onChange={(e) => set("tax_exempt", e.target.checked)}
                 />
-                Tax-exempt
+                Tax-exempt (zeroes tax on this payer&rsquo;s invoices)
               </label>
               <label className="flex items-center gap-2 text-13 text-zinc-700 cursor-pointer">
                 <input
