@@ -272,6 +272,75 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(report.expectations.fungus).toBeNull();
     expect(JSON.stringify(report)).not.toMatch(/disease treatments/i);
   });
+
+  // Governed pest/disease/drought causes that must NEVER appear in diagnosis-driven
+  // customer copy for a low/unknown finding (the v0.4 naming gate). Deliberately omits
+  // "disease" (the generic "no specific pest or disease" fallback uses it) and "weed"
+  // (specific weeds are genericized to "weed pressure" at any confidence, by design).
+  const GOVERNED_CAUSE = /\b(chinch|caterpillar|armyworm|sod\s?webworm|grub|large patch|brown patch|gr[ae]y leaf|dollar spot|fungus|fungal|drought|water stress)\b/i;
+
+  // The diagnosis-driven, customer-facing fields — everything a cause name could leak
+  // into. Excludes seasonal_context (server-generated SWFL education that legitimately
+  // mentions "fungus/insect pressure") and first_name/city (PII, separately allowlisted).
+  function causeCopy(report) {
+    return [
+      report.summary,
+      report.primary_finding,
+      ...report.findings.flatMap((f) => [f.name, f.customer_note]),
+      report.expectations.weeds, report.expectations.fungus, report.expectations.insects, report.expectations.turf_recovery,
+      ...(report.watch_items || []),
+    ].filter(Boolean).join(' ');
+  }
+
+  // THE LADDER INVARIANT — one guardrail so "gate every egress path" stops being
+  // per-round whack-a-mole. If a future field forgets to confidence-gate, this fails
+  // fast instead of waiting for a codex round to find it.
+  describe('INVARIANT: a low/unknown finding never surfaces a governed cause in any diagnosis-driven public field', () => {
+    test.each([
+      'Chinch bug pressure',
+      'Large patch fungal disease',
+      'Gray leaf spot',
+      'Dollar spot fungus',
+      'Grub activity',
+      'Drought stress along the south edge',
+      'Fall armyworm caterpillars',
+    ])('low-confidence "%s" degrades to symptom-only copy', (name) => {
+      const diag = sentDiagnostic({
+        report_contract: JSON.stringify({
+          diagnosis: {
+            primary_finding: name,
+            confidence: 'low',
+            findings: [{ name, confidence: 'low', severity: 'severe', customer_wording: `We confirmed active ${name}.` }],
+          },
+          // Poison every cause-bearing field; egress must neutralize all of them.
+          expectations: {
+            weeds: 'Visible weed response often takes 10-14 days.',
+            fungus: 'Disease treatments are aimed at stopping spread first.',
+            insects: `The key sign is whether the ${name} edge stops expanding.`,
+          },
+          watch_items: [`Reapply for ${name} if it spreads.`],
+          customer_summary: `We confirmed ${name} and treated it.`,
+          watering: {},
+        }),
+      });
+      expect(causeCopy(buildPublicLawnReport(diag))).not.toMatch(GOVERNED_CAUSE);
+    });
+
+    test('positive control: a MODERATE finding still names its cause (invariant is not vacuous)', () => {
+      const diag = sentDiagnostic({
+        report_contract: JSON.stringify({
+          diagnosis: {
+            primary_finding: 'Chinch bug pressure',
+            confidence: 'moderate',
+            findings: [{ name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' }],
+          },
+          watering: {},
+          customer_summary: 'The pattern is most consistent with chinch pressure.',
+        }),
+      });
+      expect(causeCopy(buildPublicLawnReport(diag))).toMatch(GOVERNED_CAUSE);
+    });
+  });
 });
 
 describe('validateQuoteRequest', () => {
