@@ -1187,7 +1187,11 @@ export default function PayPageV2() {
     // row in that window — flagging it ensures the customer sees the
     // problem and Waves can reach out to re-confirm authorization.
     let consentFailed = false;
-    if (saveCard && paymentIntent.payment_method) {
+    // Payer-billed invoices never offer save-card (the PI isn't configured for
+    // it and the consent UI is hidden), so don't post /consent off a stale
+    // ?saveCard=1 parent state — the server would reject it and surface a
+    // spurious consent_failed banner for an option the AP user never saw.
+    if (saveCard && !data?.payer && paymentIntent.payment_method) {
       const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -76,16 +76,21 @@ exports.up = async function up(knex) {
   }
 
   // invoices.payer_id + po_number — frozen bill-to snapshot on the document.
+  // payer_snapshot freezes the payer's bill-to DETAILS (name/company/email/
+  // address) at creation so an issued invoice/receipt keeps its original
+  // Bill-To even if the payer row is later renamed, edited, or deactivated.
   if (await knex.schema.hasTable('invoices')) {
     const hasPayer = await knex.schema.hasColumn('invoices', 'payer_id');
     const hasPo = await knex.schema.hasColumn('invoices', 'po_number');
-    if (!hasPayer || !hasPo) {
+    const hasSnap = await knex.schema.hasColumn('invoices', 'payer_snapshot');
+    if (!hasPayer || !hasPo || !hasSnap) {
       await knex.schema.alterTable('invoices', (t) => {
         if (!hasPayer) {
           t.integer('payer_id').references('id').inTable('payers').onDelete('SET NULL');
           t.index(['payer_id'], 'invoices_payer_id_idx');
         }
         if (!hasPo) t.string('po_number', 64);
+        if (!hasSnap) t.jsonb('payer_snapshot');
       });
     }
   }
@@ -93,7 +98,7 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   for (const [table, cols] of [
-    ['invoices', ['payer_id', 'po_number']],
+    ['invoices', ['payer_id', 'po_number', 'payer_snapshot']],
     ['scheduled_services', ['payer_id', 'po_number']],
     ['customers', ['payer_id']],
   ]) {

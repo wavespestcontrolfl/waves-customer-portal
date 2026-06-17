@@ -670,6 +670,7 @@ const InvoiceService = {
       payerId: resolvedPayerId,
       poNumber: resolvedPoNumber,
       taxExempt: resolvedTaxExempt,
+      snapshot: resolvedPayerSnapshot,
     } = await PayerService.resolveForInvoice({
       database,
       customerId,
@@ -1073,6 +1074,7 @@ const InvoiceService = {
             : {}),
           ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
+          ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...serviceData,
         });
         break;
@@ -1192,10 +1194,22 @@ const InvoiceService = {
       }
     }
 
+    // A tax-exempt third-party payer zeroes tax — mirror create()'s resolution
+    // so the confirmation total matches the invoice that will actually be
+    // created (esp. for WDO report+invoice bundles billed to an exempt builder).
+    let payerTaxExempt = false;
+    try {
+      const PayerService = require("./payer");
+      const resolved = await PayerService.resolveForInvoice({
+        database, customerId, customer: cust, scheduledServiceId,
+      });
+      payerTaxExempt = !!resolved.taxExempt;
+    } catch { /* preview proceeds with the normal tax calc */ }
+
     const isCommercial =
       cust.property_type === "commercial" || cust.property_type === "business";
     let rate, taxAmount;
-    if (!isCommercial) {
+    if (!isCommercial || payerTaxExempt) {
       rate = 0;
       taxAmount = 0;
     } else {
@@ -1900,6 +1914,13 @@ const InvoiceService = {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
+
+    // Third-party Bill-To: never text the homeowner a receipt for a
+    // payer-billed invoice — the receipt page would expose the payer's
+    // payment-method last4, and AR/receipts route to the payer (email).
+    if (invoice.payer_id) {
+      return { sent: false, reason: "payer_billed" };
+    }
 
     if (invoice.receipt_sent_at && !force) {
       logger.info(

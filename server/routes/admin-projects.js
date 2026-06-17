@@ -2927,6 +2927,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       logger.error(`[projects] invoice PDF build failed for ${invoice.invoice_number}: ${err.message}`);
     }
 
+    // For a third-party-billed invoice the homeowner gets a report-ONLY email
+    // (FDACS PDF for WDO + report link, no invoice PDF / pay link); the invoice
+    // + pay link go to the payer's AP inbox. `isPayerInvoice` keys off the
+    // invoice's payer snapshot — NOT AP-email availability — so a misconfigured
+    // payer (active, no usable ap_email) still never bills the homeowner.
+    const reportAttachments = wdoPdf ? [wdoPdf.attachment] : [];
+    const isPayerInvoice = !!invoice.payer_id;
+
     const typeLabel = getProjectType(project.project_type)?.label || 'Report';
     const firstName = customer.first_name || 'there';
     const channels = {};
@@ -2940,13 +2948,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
     if (emailRecipient.email) {
       try {
-        const result = await ProjectEmail.sendProjectReportWithInvoice({
-          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-          // Only WDO attaches a report PDF (the FDACS-13645); non-WDO attaches
-          // just the invoice PDF and delivers the report as a link. Drives the
-          // template's attachments sentence so the copy matches reality.
-          reportAttached: isWdoProject,
-        });
+        const result = isPayerInvoice
+          // Payer-billed: homeowner gets the report only (FDACS PDF for WDO +
+          // report link) — never the invoice PDF or pay link.
+          ? await ProjectEmail.sendProjectReportReady({
+              project: refreshed, customer, reportUrl,
+              attachments: reportAttachments,
+              isResend: Boolean(project.sent_at || project.status === 'sent'),
+            })
+          : await ProjectEmail.sendProjectReportWithInvoice({
+              project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+              // Only WDO attaches a report PDF (the FDACS-13645); non-WDO
+              // attaches just the invoice PDF and delivers the report as a
+              // link. Drives the template's attachments sentence.
+              reportAttached: isWdoProject,
+            });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
           : { ok: false, error: projectEmailFailureMessage(result) };
@@ -3048,7 +3064,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       try {
         // Payer-billed: the homeowner still gets the report link (their
         // service) but NOT the pay link — AR routes to the payer's AP inbox.
-        const smsBody = payerBilled
+        const smsBody = isPayerInvoice
           ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
           : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
         const result = await sendCustomerMessage({
@@ -3101,11 +3117,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // (so it can't be marked sent off the back of the customer/report email),
     // and conversely the payer send standing alone is enough even if the
     // homeowner report email failed. Self-pay keeps the report-delivery rule.
-    const invoiceDelivered = payerBilled ? !!channels.payer_email?.ok : delivered;
+    const invoiceDelivered = isPayerInvoice ? !!channels.payer_email?.ok : delivered;
     if (invoiceDelivered) {
       await InvoiceService.markDeliverySent(invoice.id, {
         sms: !!channels.sms?.ok,
-        email: payerBilled ? !!channels.payer_email?.ok : !!channels.email?.ok,
+        email: isPayerInvoice ? !!channels.payer_email?.ok : !!channels.email?.ok,
         source: 'project_report_with_invoice',
         payUrl,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));

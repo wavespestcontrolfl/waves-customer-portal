@@ -2617,9 +2617,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     : "Routes this visit’s invoice to a builder / property manager instead of the customer."}{" "}
                   Manage payers in Finance &rarr; Payers.
                 </div>
-                {form.payerId && (() => {
+                {(form.payerId || customer.payerId) && (() => {
+                  // PO applies to the EFFECTIVE payer — the per-job override if
+                  // set, otherwise the customer's inherited default — so a
+                  // default-payer job can still capture a PO.
+                  const effectivePayerId = form.payerId || customer.payerId;
                   const selectedPayer = payers.find(
-                    (p) => String(p.id) === String(form.payerId),
+                    (p) => String(p.id) === String(effectivePayerId),
                   );
                   const needsPo =
                     selectedPayer?.requires_po &&

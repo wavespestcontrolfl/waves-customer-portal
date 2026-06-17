@@ -122,8 +122,35 @@ async function updatePayer(id, body) {
  * po_number comes only from the scheduled service (PO is per-job).
  * Never throws — returns { payerId: null, poNumber: null } on any problem.
  */
+// Frozen bill-to subset stored on the invoice at creation. Uses the SAME keys
+// as the payers row so the PDF / pay page / email renderers (which read
+// invoice.payer) work unchanged whether they get a live row or a snapshot.
+function payerSnapshot(payer) {
+  if (!payer) return null;
+  return {
+    display_name: payer.display_name || null,
+    company_name: payer.company_name || null,
+    ap_email: payer.ap_email || null,
+    billing_address_line1: payer.billing_address_line1 || null,
+    billing_city: payer.billing_city || null,
+    billing_state: payer.billing_state || null,
+    billing_zip: payer.billing_zip || null,
+  };
+}
+
+function parseSnapshot(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    const obj = JSON.parse(value);
+    return obj && typeof obj === 'object' ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null } = {}) {
-  const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false };
+  const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false, snapshot: null };
   try {
     let payerId = null;
     let poNumber = null;
@@ -161,7 +188,7 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
     const payer = await getPayer(payerId, database).catch(() => null);
     if (!payer || payer.active === false) return SELF_PAY;
 
-    return { payerId, poNumber, taxExempt: !!payer.tax_exempt };
+    return { payerId, poNumber, taxExempt: !!payer.tax_exempt, snapshot: payerSnapshot(payer) };
   } catch (err) {
     logger.warn(`[payer] resolveForInvoice failed (falling back to self-pay): ${err.message}`);
     return SELF_PAY;
@@ -173,11 +200,21 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
  * Mutates and returns the same invoice object. Never throws.
  */
 async function attachToInvoice(invoice, database = db) {
-  if (!invoice || !invoice.payer_id || invoice.payer) return invoice;
+  if (!invoice || invoice.payer) return invoice;
+  // Prefer the frozen bill-to snapshot taken at creation — it survives later
+  // edits/deactivation of the payer row, so an issued invoice/receipt keeps
+  // its original Bill-To and routes to the AP email it was billed to.
+  const snap = parseSnapshot(invoice.payer_snapshot);
+  if (snap) {
+    invoice.payer = snap;
+    return invoice;
+  }
+  // Legacy invoices created before payer_snapshot existed fall back to the live
+  // payer row, still guarding against a payer deactivated before a draft
+  // invoice was ever sent (no snapshot = no issued bill-to of record yet).
+  if (!invoice.payer_id) return invoice;
   try {
     const payer = await getPayer(invoice.payer_id, database);
-    // Mirror resolveForInvoice: a payer deactivated after the invoice was
-    // minted must NOT reroute delivery to its dead AP inbox.
     if (payer && payer.active !== false) invoice.payer = payer;
   } catch (err) {
     logger.warn(`[payer] attachToInvoice failed for invoice ${invoice.id}: ${err.message}`);
@@ -209,5 +246,6 @@ module.exports = {
   resolveForInvoice,
   attachToInvoice,
   payerRecipient,
-  _private: { isEmailLike, normalizeTerms },
+  payerSnapshot,
+  _private: { isEmailLike, normalizeTerms, parseSnapshot },
 };

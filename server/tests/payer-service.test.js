@@ -25,7 +25,7 @@ describe('PayerService.resolveForInvoice precedence', () => {
     const out = await PayerService.resolveForInvoice({
       database, customerId: 'c1', scheduledServiceId: 's1',
     });
-    expect(out).toEqual({ payerId: 10, poNumber: 'PO-1', taxExempt: false });
+    expect(out).toMatchObject({ payerId: 10, poNumber: 'PO-1', taxExempt: false });
   });
 
   test('falls back to the customer default payer when the job has none', async () => {
@@ -37,7 +37,7 @@ describe('PayerService.resolveForInvoice precedence', () => {
     const out = await PayerService.resolveForInvoice({
       database, customerId: 'c1', scheduledServiceId: 's1',
     });
-    expect(out).toEqual({ payerId: 20, poNumber: null, taxExempt: false });
+    expect(out).toMatchObject({ payerId: 20, poNumber: null, taxExempt: false });
   });
 
   test('surfaces taxExempt from the resolved active payer', async () => {
@@ -46,7 +46,7 @@ describe('PayerService.resolveForInvoice precedence', () => {
       payers: { id: 20, active: true, tax_exempt: true },
     });
     const out = await PayerService.resolveForInvoice({ database, customer: { id: 'c1', payer_id: 20 } });
-    expect(out).toEqual({ payerId: 20, poNumber: null, taxExempt: true });
+    expect(out).toMatchObject({ payerId: 20, poNumber: null, taxExempt: true });
   });
 
   test('scopes the per-job lookup by customer — a mismatched job is ignored, falls back to default', async () => {
@@ -71,7 +71,7 @@ describe('PayerService.resolveForInvoice precedence', () => {
     const out = await PayerService.resolveForInvoice({
       database, customerId: 'c1', scheduledServiceId: 's-other',
     });
-    expect(out).toEqual({ payerId: 20, poNumber: null, taxExempt: false });
+    expect(out).toMatchObject({ payerId: 20, poNumber: null, taxExempt: false });
   });
 
   test('an inactive payer link resolves to self-pay (null), not a dead AP inbox', async () => {
@@ -80,13 +80,13 @@ describe('PayerService.resolveForInvoice precedence', () => {
       payers: { id: 20, active: false },
     });
     const out = await PayerService.resolveForInvoice({ database, customer: { payer_id: 20 } });
-    expect(out).toEqual({ payerId: null, poNumber: null, taxExempt: false });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
   });
 
   test('no payer anywhere → self-pay', async () => {
     const database = makeDb({ customers: { payer_id: null }, payers: null });
     const out = await PayerService.resolveForInvoice({ database, customer: { payer_id: null } });
-    expect(out).toEqual({ payerId: null, poNumber: null, taxExempt: false });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
   });
 
   test('never throws — a DB failure fails soft to self-pay', async () => {
@@ -94,7 +94,7 @@ describe('PayerService.resolveForInvoice precedence', () => {
     const out = await PayerService.resolveForInvoice({
       database, customerId: 'c1', scheduledServiceId: 's1',
     });
-    expect(out).toEqual({ payerId: null, poNumber: null, taxExempt: false });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
   });
 });
 
@@ -118,5 +118,22 @@ describe('PayerService.attachToInvoice', () => {
     const inv = { id: 'i1' };
     await PayerService.attachToInvoice(inv, database);
     expect(inv.payer).toBeUndefined();
+  });
+
+  test('prefers the frozen payer_snapshot and never queries the live payer', async () => {
+    const database = jest.fn(() => { throw new Error('should not query when a snapshot exists'); });
+    const inv = {
+      id: 'i1', payer_id: 7,
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay' }));
+  });
+
+  test('parses a JSON-string snapshot', async () => {
+    const database = jest.fn(() => { throw new Error('should not query'); });
+    const inv = { id: 'i1', payer_id: 7, payer_snapshot: JSON.stringify({ company_name: 'West Bay' }) };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'West Bay' }));
   });
 });
