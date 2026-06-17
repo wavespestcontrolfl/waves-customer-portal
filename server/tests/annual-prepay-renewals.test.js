@@ -265,6 +265,52 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('reuses existing off-cadence visits instead of seeding a duplicate series', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        is_recurring: {},
+        recurring_pattern: {},
+        recurring_parent_id: {},
+        recurring_ongoing: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    // Existing quarterly route lands on the 15th of Jul/Oct; the generated
+    // targets are Jun/Sep/Dec 15 + Mar 15. Jul-15 and Oct-15 sit within half a
+    // quarter of the Jun-15/Sep-15 targets, so only the two genuinely uncovered
+    // slots (Dec-15, Mar-15) seed — no second series stacked on the existing one.
+    const rowsQuery = query({
+      rows: [
+        { id: 'svc-a', customer_id: 'customer-9', scheduled_date: '2026-07-15', service_type: 'Pest Control', status: 'pending' },
+        { id: 'svc-b', customer_id: 'customer-9', scheduled_date: '2026-10-15', service_type: 'Pest Control', status: 'pending' },
+      ],
+    });
+    const insert1 = query({ returning: [{ id: 'svc-c', scheduled_date: '2026-12-15' }] });
+    const insert2 = query({ returning: [{ id: 'svc-d', scheduled_date: '2027-03-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, insert1, insert2],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-9',
+      customer_id: 'customer-9',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+    })).resolves.toMatchObject({
+      createdCount: 2,
+      existingCount: 2,
+    });
+
+    expect(insert1.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-12-15' }));
+    expect(insert2.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+  });
+
   test('creates the monthly coverage series when cadence is monthly', async () => {
     const columnQuery = query({
       columnInfo: {

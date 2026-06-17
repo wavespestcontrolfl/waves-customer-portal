@@ -301,15 +301,37 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
     includeTerminalStatuses: true,
   });
   const existingByDate = new Map(existingRows.map((row) => [dateOnly(row.scheduled_date), row]));
+
+  // Existing in-window matching visits (e.g. the customer's pre-existing route)
+  // already satisfy coverage even when they don't land on the exact generated
+  // cadence dates. Count them toward the visit total and treat a generated date
+  // within half a cadence interval of an existing visit as already covered, so a
+  // July-1 target doesn't lay a second series on top of an existing July-15
+  // route — otherwise both rows survive and both get stamped prepaid, showing
+  // dispatch duplicate visits for the same covered service.
+  const existingDates = existingRows.map((row) => dateOnly(row.scheduled_date)).filter(Boolean);
+  const cadenceMonths = coverageCadenceMonths(coverageCadence);
+  const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
+  const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
+  const remainingToSeed = Math.max(0, coverageVisitCount - existingRows.length);
+  const datesToSeed = [];
+  for (const scheduledDate of targetDates) {
+    if (datesToSeed.length >= remainingToSeed) break;
+    if (existingByDate.has(scheduledDate)) continue;
+    const coveredByExisting = existingDates.some((existingDate) => {
+      const diff = daysUntil(existingDate, scheduledDate);
+      return diff != null && Math.abs(diff) <= slotToleranceDays;
+    });
+    if (coveredByExisting) continue;
+    datesToSeed.push(scheduledDate);
+  }
+
   const createdRows = [];
   const baseDuration = defaultCoverageDurationMinutes(coverageServiceType);
   const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
   let createdParentId = recurringParentId;
 
-  for (let index = 0; index < targetDates.length; index++) {
-    const scheduledDate = targetDates[index];
-    if (existingByDate.has(scheduledDate)) continue;
-
+  for (const scheduledDate of datesToSeed) {
     const insertData = {
       customer_id: term.customer_id,
       scheduled_date: scheduledDate,
