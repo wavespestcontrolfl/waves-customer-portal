@@ -659,6 +659,21 @@ const InvoiceService = {
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
 
+    // Resolve third-party Bill-To payer (builder / property manager / etc.):
+    // scheduled_service.payer_id ?? customer.payer_id. Snapshot onto the
+    // invoice so the bill-to is frozen on the document even if the link later
+    // changes. resolveForInvoice() fails soft to self-pay and never throws, so
+    // a payer lookup can never block invoicing — and the inserted row is
+    // unchanged for the (overwhelmingly common) self-pay case.
+    const PayerService = require("./payer");
+    const { payerId: resolvedPayerId, poNumber: resolvedPoNumber } =
+      await PayerService.resolveForInvoice({
+        database,
+        customerId,
+        customer,
+        scheduledServiceId,
+      });
+
     // Pull service record context if linked
     let serviceData = serviceDate ? { service_date: serviceDate } : {};
     if (serviceRecordId) {
@@ -1049,6 +1064,8 @@ const InvoiceService = {
           ...(scheduledServiceId
             ? { scheduled_service_id: scheduledServiceId }
             : {}),
+          ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
+          ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
           ...serviceData,
         });
         break;

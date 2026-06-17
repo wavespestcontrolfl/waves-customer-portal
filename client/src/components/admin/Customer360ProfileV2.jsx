@@ -3074,6 +3074,8 @@ export default function Customer360ProfileV2({
   const [recipientPrefsSaving, setRecipientPrefsSaving] = useState(false);
   const [recipientPrefsErr, setRecipientPrefsErr] = useState("");
   const [deletingCustomer, setDeletingCustomer] = useState(false);
+  const [payers, setPayers] = useState([]);
+  const [payerSaving, setPayerSaving] = useState(false);
   const panelRef = useRef(null);
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
@@ -3084,6 +3086,27 @@ export default function Customer360ProfileV2({
     adminFetch(`/admin/customers/${customerId}`)
       .then(setData)
       .catch(() => {});
+
+  useEffect(() => {
+    adminFetch("/admin/payers")
+      .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
+      .catch(() => setPayers([]));
+  }, []);
+
+  const savePayer = async (payerId) => {
+    setPayerSaving(true);
+    try {
+      await adminFetch(`/admin/customers/${customerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ payerId: payerId || "" }),
+      });
+      await reloadCustomer();
+    } catch {
+      /* reload reflects truth */
+    } finally {
+      setPayerSaving(false);
+    }
+  };
 
   useEffect(() => {
     commsSeqRef.current += 1;
@@ -4755,6 +4778,38 @@ export default function Customer360ProfileV2({
               <div className="mt-4">
                 {" "}
                 <SectionTitle>Contacts &amp; Recipients</SectionTitle>{" "}
+                <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                  <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
+                    Default Bill-To (third-party payer)
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select
+                      value={c.payerId ? String(c.payerId) : ""}
+                      disabled={payerSaving}
+                      onChange={(e) => savePayer(e.target.value)}
+                      className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
+                    >
+                      <option value="">Customer pays (self)</option>
+                      {payers.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.display_name}
+                          {p.company_name && p.company_name !== p.display_name
+                            ? ` — ${p.company_name}`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {payerSaving && (
+                      <span className="text-12 text-ink-tertiary">Saving…</span>
+                    )}
+                  </div>
+                  <div className="text-12 text-ink-secondary mt-1.5">
+                    Routes every invoice for this account to a builder /
+                    property manager instead of the customer. A single job can
+                    override this on the appointment. Manage payers in Finance →
+                    Payers.
+                  </div>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
                   <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
                     <div className="text-10 uppercase tracking-label text-ink-tertiary">

@@ -2919,6 +2919,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
     try {
+      await require('../services/payer').attachToInvoice(invoice);
       const invoiceForPdf = { ...invoice, customer, line_items: normalizeInvoiceLineItemsForPdf(invoice.line_items) };
       const invoiceBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
       attachments.push(pdfEmailAttachment(`invoice-${invoice.invoice_number}.pdf`, invoiceBuffer));

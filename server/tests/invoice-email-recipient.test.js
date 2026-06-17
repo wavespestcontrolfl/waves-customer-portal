@@ -20,6 +20,7 @@ const db = require('../models/db');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const sendgrid = require('../services/sendgrid-mail');
 const { shortenOrPassthrough } = require('../services/short-url');
+const { sendTemplate } = require('../services/email-template-library');
 
 const customer = {
   id: 'cust-1',
@@ -165,5 +166,69 @@ describe('invoice email recipient resolution', () => {
     expect(parsed.searchParams.get('source')).toBe('estimate');
     expect(parsed.searchParams.get('saveCard')).toBe('1');
     expect(parsed.searchParams.get('billingTerm')).toBe('prepay_annual');
+  });
+
+  function dbWithPayer(payerRow, { invoiceExtra = {}, prefs = null } = {}) {
+    return (table) => {
+      if (table === 'invoices') {
+        return query({
+          id: 'invoice-1', customer_id: 'cust-1', invoice_number: 'INV-1',
+          token: 'token-1', total: 300, line_items: [], payer_id: 7, ...invoiceExtra,
+        });
+      }
+      if (table === 'customers') return query({ ...customer, id: 'cust-1' });
+      if (table === 'notification_prefs') return query(prefs);
+      if (table === 'payers') return query(payerRow);
+      if (table === 'invoice_attachments') return countQuery({ count: 0 });
+      return query(null);
+    };
+  }
+
+  test('routes the invoice email to the payer AP inbox when the invoice carries a payer', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm1' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    // A distinct customer billing email exists — the payer must still win.
+    db.mockImplementation(dbWithPayer(
+      { id: 7, ap_email: 'ap@westbay.com', company_name: 'Homes by West Bay', active: true },
+      { prefs: { billing_email: 'lana-billing@example.com' } },
+    ));
+
+    const result = await sendInvoiceEmail('invoice-1');
+
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@westbay.com' }));
+    expect(result.recipient).toEqual(expect.objectContaining({ email: 'ap@westbay.com', role: 'payer' }));
+  });
+
+  test('an explicit operator override still wins over the payer snapshot', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm2' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    db.mockImplementation(dbWithPayer({ id: 7, ap_email: 'ap@westbay.com', active: true }));
+
+    const result = await sendInvoiceEmail('invoice-1', {
+      recipientOverride: { email: 'oneoff@example.com', name: 'One Off' },
+    });
+
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'oneoff@example.com' }));
+    expect(result.recipient).toEqual(expect.objectContaining({ email: 'oneoff@example.com' }));
+  });
+
+  test('a payer with no usable AP email falls back to the customer billing contact', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm3' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    db.mockImplementation(dbWithPayer(
+      { id: 7, ap_email: '', company_name: 'Homes by West Bay', active: true },
+      { prefs: { billing_email: 'ap@example.com', billing_contact_name: 'Accounts Payable' } },
+    ));
+
+    const result = await sendInvoiceEmail('invoice-1');
+
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@example.com' }));
+    expect(result.recipient).toEqual(expect.objectContaining({ email: 'ap@example.com', role: 'billing_contact' }));
   });
 });

@@ -76,18 +76,65 @@ function sectionLabel(doc, label, x, y) {
   return y + 14;
 }
 
-function billBlock(doc, invoice, customer, x, y) {
-  y = sectionLabel(doc, 'Billed to', x, y);
-  doc.fontSize(11).font('Helvetica-Bold').fillColor(INK)
-    .text(`${customer.first_name || ''} ${customer.last_name || ''}`.trim(), x, y);
-  y += 14;
+function addressLines(doc, x, y, { line1, city, state, zip, email } = {}) {
   doc.fontSize(10).font('Helvetica').fillColor(BODY);
-  if (customer.address_line1) { doc.text(customer.address_line1, x, y); y += 12; }
-  if (customer.city || customer.state || customer.zip) {
-    doc.text(`${customer.city || ''}${customer.city ? ', ' : ''}${customer.state || 'FL'} ${customer.zip || ''}`.trim(), x, y);
+  if (line1) { doc.text(line1, x, y); y += 12; }
+  if (city || state || zip) {
+    doc.text(`${city || ''}${city ? ', ' : ''}${state || 'FL'} ${zip || ''}`.trim(), x, y);
     y += 12;
   }
-  if (customer.email) { doc.text(customer.email, x, y); y += 12; }
+  if (email) { doc.text(email, x, y); y += 12; }
+  return y;
+}
+
+function customerName(customer) {
+  return `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || customer.company_name || '';
+}
+
+function billBlock(doc, invoice, customer, x, y) {
+  const payer = invoice.payer || null;
+
+  // Third-party Bill-To: the payer (builder / property manager / etc.) is who
+  // owes the money; the homeowner is the service ("ship-to") address. Showing
+  // both — with the PO — is what lets an AP department actually process it.
+  if (payer) {
+    y = sectionLabel(doc, 'Billed to', x, y);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(INK)
+      .text(payer.company_name || payer.display_name || 'Payer', x, y);
+    y += 14;
+    y = addressLines(doc, x, y, {
+      line1: payer.billing_address_line1,
+      city: payer.billing_city,
+      state: payer.billing_state,
+      zip: payer.billing_zip,
+      email: payer.ap_email,
+    });
+
+    y += 6;
+    y = sectionLabel(doc, 'Service address', x, y);
+    doc.fontSize(10).font('Helvetica-Bold').fillColor(INK)
+      .text(customerName(customer), x, y);
+    y += 13;
+    y = addressLines(doc, x, y, {
+      line1: customer.address_line1,
+      city: customer.city,
+      state: customer.state,
+      zip: customer.zip,
+    });
+    return y;
+  }
+
+  y = sectionLabel(doc, 'Billed to', x, y);
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(INK)
+    .text(customerName(customer), x, y);
+  y += 14;
+  y = addressLines(doc, x, y, {
+    line1: customer.address_line1,
+    city: customer.city,
+    state: customer.state,
+    zip: customer.zip,
+    email: customer.email,
+  });
   return y;
 }
 
@@ -109,6 +156,7 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
   }
   if (invoice.service_date) rows.push(['Service date', formatInvoiceDateOnly(invoice.service_date)]);
   if (invoice.service_type) rows.push(['Service', invoice.service_type]);
+  if (invoice.po_number) rows.push(['PO number', invoice.po_number]);
 
   doc.fontSize(10).font('Helvetica');
   for (const [label, value] of rows) {

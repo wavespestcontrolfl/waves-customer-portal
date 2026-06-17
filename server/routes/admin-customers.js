@@ -1774,6 +1774,7 @@ router.get('/:id', async (req, res, next) => {
       customer: {
         id: c.id, firstName: c.first_name, lastName: c.last_name,
         accountId: c.account_id,
+        payerId: c.payer_id || null,
         profileLabel: c.profile_label,
         isPrimaryProfile: !!c.is_primary_profile,
         email: c.email, phone: c.phone, secondaryPhone: c.secondary_phone,
@@ -2019,7 +2020,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
@@ -2032,6 +2033,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
+        else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
         else if (v === 'email') { updates[v] = cleanEmail(req.body[k]); }
         else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }

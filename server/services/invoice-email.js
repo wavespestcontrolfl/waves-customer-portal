@@ -19,6 +19,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatDateOnly } = require('../utils/date-only');
 const { getInvoiceEmailRecipients, getReceiptEmailRecipients } = require('./customer-contact');
+const PayerService = require('./payer');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
@@ -97,7 +98,7 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
       recipient: {
         email: overrideEmail,
         name: clean(recipientOverride?.name).slice(0, 120),
-        role: 'invoice_override',
+        role: clean(recipientOverride?.role) || 'invoice_override',
       },
     };
   }
@@ -113,7 +114,20 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     .first();
   if (!customer) return { ok: false, error: 'Customer not found' };
   const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
-  const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, options.recipientOverride);
+
+  // Third-party Bill-To reroute. When this invoice carries a payer snapshot,
+  // attach the payer (for the PDF bill-to block) and — unless the operator
+  // passed an explicit one-off override — route the email to the payer's AP
+  // inbox automatically. A payer with no usable AP email yields a null
+  // recipient, so we fall back to the customer billing contact rather than
+  // strand the invoice with no delivery path.
+  await PayerService.attachToInvoice(invoice);
+  let effectiveOverride = options.recipientOverride || null;
+  if (!effectiveOverride && invoice.payer) {
+    effectiveOverride = PayerService.payerRecipient(invoice.payer) || null;
+  }
+
+  const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, effectiveOverride);
   if (recipientError) return { ok: false, error: recipientError };
   if (!recipient?.email) return { ok: false, error: 'No invoice recipient email' };
   const recipientPayload = publicRecipient(recipient);

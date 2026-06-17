@@ -1160,6 +1160,8 @@ router.get('/', async (req, res, next) => {
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        payerId: s.payer_id || null,
+        poNumber: s.po_number || null,
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
@@ -1301,6 +1303,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
+          'scheduled_services.payer_id', 'scheduled_services.po_number',
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -1370,6 +1373,8 @@ router.get('/week', async (req, res, next) => {
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
           createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        payerId: s.payer_id || null,
+        poNumber: s.po_number || null,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
@@ -2259,6 +2264,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       primaryLinePrice,
       addons,
       createInvoice,
+      payerId, poNumber,
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
@@ -2324,6 +2330,19 @@ router.put('/:id/update-details', async (req, res, next) => {
       try {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.create_invoice_on_complete) updates.create_invoice_on_complete = !!createInvoice;
+      } catch {}
+    }
+    // Per-job third-party Bill-To override + PO. Null clears the override so
+    // the job falls back to the customer's default payer (or self-pay).
+    if (payerId !== undefined || poNumber !== undefined) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        if (cols.payer_id && payerId !== undefined) {
+          updates.payer_id = (payerId === '' || payerId == null) ? null : (parseInt(payerId, 10) || null);
+        }
+        if (cols.po_number && poNumber !== undefined) {
+          updates.po_number = poNumber ? String(poNumber).trim().slice(0, 64) : null;
+        }
       } catch {}
     }
     // Multi-line edit: an explicit `addons` array describes the full set of

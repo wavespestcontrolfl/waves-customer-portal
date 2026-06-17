@@ -392,6 +392,7 @@ app.use('/api/admin/triage', require('./routes/admin-triage'));
 app.use('/api/admin/contracts', require('./routes/admin-contracts'));
 app.use('/api/admin/document-templates', require('./routes/admin-document-templates'));
 app.use('/api/admin/invoices', require('./routes/admin-invoices'));
+app.use('/api/admin/payers', require('./routes/admin-payers'));
 app.use('/api/admin/job-forms', require('./routes/admin-job-forms'));
 app.use('/api/admin/job-costs', require('./routes/admin-job-costs'));
 app.use('/api/admin/job-expenses', require('./routes/admin-job-expenses'));

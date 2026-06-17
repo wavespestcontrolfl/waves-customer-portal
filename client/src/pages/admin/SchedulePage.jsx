@@ -783,6 +783,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     technicianId: service.technicianId || "",
     routeOrder: service.routeOrder || "",
     notes: service.notes || "",
+    // Per-job third-party Bill-To override + PO. Empty payerId = inherit the
+    // customer's default payer (or self-pay). Round-trips via ...form on save.
+    payerId: service.payerId != null ? String(service.payerId) : "",
+    poNumber: service.poNumber || "",
     // The editable primary "Price" must be the primary line price, NOT the
     // whole-visit total. When the appointment has add-on lines, estimatedPrice
     // is the combined total, so prefer the API's primary_line_price; fall back
@@ -899,6 +903,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   );
   const [customerData, setCustomerData] = useState(null);
   const [customerLoading, setCustomerLoading] = useState(false);
+  const [payers, setPayers] = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -907,6 +912,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         if (r.groups?.length) setServiceGroups(r.groups);
       } catch {
         /* keep fallback */
+      }
+    })();
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/payers");
+        if (Array.isArray(r?.payers)) setPayers(r.payers);
+      } catch {
+        /* payers optional — self-pay still works */
       }
     })();
     (async () => {
@@ -2569,6 +2582,45 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   Create invoice on completion
                 </span>{" "}
               </label>
+              <div style={{ marginTop: 14 }}>
+                <label style={labelStyle}>Bill to (third-party payer)</label>
+                <select
+                  value={form.payerId}
+                  onChange={(e) => update("payerId", e.target.value)}
+                  className="font-bold"
+                  style={inputStyle}
+                >
+                  <option value="">
+                    Customer pays (default)
+                  </option>
+                  {payers.map((p) => (
+                    <option key={p.id} value={String(p.id)}>
+                      {p.display_name}
+                      {p.company_name && p.company_name !== p.display_name
+                        ? ` — ${p.company_name}`
+                        : ""}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                  Routes this visit&rsquo;s invoice to a builder / property
+                  manager instead of the customer. Manage payers in Billing →
+                  Payers.
+                </div>
+                {form.payerId && (
+                  <div style={{ marginTop: 10 }}>
+                    <label style={labelStyle}>PO number (optional)</label>
+                    <input
+                      type="text"
+                      value={form.poNumber}
+                      onChange={(e) => update("poNumber", e.target.value)}
+                      placeholder="Purchase order #"
+                      className="font-bold"
+                      style={inputStyle}
+                    />
+                  </div>
+                )}
+              </div>
               {service.createdAt && (
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 14 }}>
                   Booked on {new Date(service.createdAt).toLocaleString()}
