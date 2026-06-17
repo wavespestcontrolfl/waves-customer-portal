@@ -115,6 +115,47 @@ function resolveRecipient(req, row) {
   };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Stable hash of the findings that drive the customer summary. Binds a diagnosis_run
+// record to its exact findings, so a stored challenge-reviewed summary can't be reused on
+// a persist with different/forged findings. Canonical: id+name+confidence+severity, sorted.
+function hashFindings(findings = []) {
+  const canon = (Array.isArray(findings) ? findings : [])
+    .map((f) => ({ finding_id: f && f.finding_id || null, name: f && f.name || null, confidence: f && f.confidence || null, severity: f && f.severity || null }))
+    .sort((a, b) => String(a.finding_id).localeCompare(String(b.finding_id)) || String(a.name).localeCompare(String(b.name)));
+  return crypto.createHash('sha256').update(JSON.stringify(canon)).digest('hex');
+}
+
+// Server-side gate: persist may restore a diagnosis_run's GPT-5.5 summary ONLY when the
+// run proves a genuinely challenge-reviewed report whose findings still match. Everything
+// here is from the DB-loaded run (server-authored), never the client.
+function shouldUseRunSummary(run, computedFindingsHash, technicianId) {
+  if (!run) return false;
+  if (run.challenge_status !== 'passed') return false;
+  if (run.perception_mode !== 'multimodal_challenged') return false;
+  if (!run.customer_summary) return false;
+  if (run.findings_hash !== computedFindingsHash) return false;
+  // Bind to the run's creator so one tech can't reuse another's run id.
+  if (run.created_by_technician_id && technicianId && run.created_by_technician_id !== technicianId) return false;
+  return true;
+}
+
+// Map the analyze findingsSource → durable perception_mode + challenge_status, derived
+// from the SERVER's own provenance (not client input).
+function runProvenanceFields(findingsSource, provenance) {
+  const challenge = provenance && provenance.challenge;
+  let perceptionMode = 'minimal';
+  if (findingsSource === 'manual') perceptionMode = 'manual';
+  else if (findingsSource === 'multimodel') perceptionMode = 'multimodal_challenged';
+  else if (findingsSource === 'challenge_degraded') perceptionMode = 'challenge_degraded';
+  else if (findingsSource === 'deterministic_fallback') perceptionMode = 'deterministic_fallback';
+  let challengeStatus = 'not_run';
+  if (challenge && challenge.passed) challengeStatus = 'passed';
+  else if (challenge && challenge.attempted) challengeStatus = 'failed';
+  return { perceptionMode, challengeStatus };
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 function asArray(value) {
@@ -556,9 +597,37 @@ router.post('/analyze', async (req, res, next) => {
     }
     const finalContract = applyAutoReleaseRepair(reportContract, releaseMode);
 
+    // Durable, server-authored provenance: one run record per analysis. Persist later
+    // loads it by id to verify (server-trusted) that a report was genuinely
+    // challenge-reviewed before restoring the GPT-5.5 summary onto the published report.
+    // Best-effort — analyze never fails on the bookkeeping insert.
+    let diagnosisRunId = null;
+    if (findingsSource !== 'manual') {
+      try {
+        const { perceptionMode, challengeStatus } = runProvenanceFields(findingsSource, provenance);
+        const [runRow] = await db('lawn_diagnostic_runs').insert({
+          created_by_technician_id: req.technicianId || req.technician?.id || null,
+          perception_mode: perceptionMode,
+          challenge_status: challengeStatus,
+          findings_source: findingsSource,
+          perception_model: provenance.perceptionModel || null,
+          challenge_model: provenance.challengeModel || null,
+          writer_model: provenance.writerModel || null,
+          prompt_version: PROMPT_VERSION,
+          findings_hash: hashFindings(finalContract.diagnosis?.findings),
+          // Only the challenge-reviewed (multimodel) summary is worth restoring at persist.
+          customer_summary: findingsSource === 'multimodel' ? (finalContract.customer_summary || null) : null,
+        }).returning(['id']);
+        diagnosisRunId = runRow?.id || null;
+      } catch (err) {
+        logger.warn(`[lawn-diagnostic] run-record insert failed (non-blocking): ${err.message}`);
+      }
+    }
+
     return res.json({
       success: true,
       persisted: false,
+      diagnosisRunId,
       // Vision actually ran when Gemini perceived (happy path) or the composite fallback
       // produced scores; manual findings and total outage report it unavailable.
       aiAvailable: findingsSource !== 'manual' && (!!provenance.perceptionModel || (photoAnalysis ? photoAnalysis.aiAvailable : false)),
@@ -617,14 +686,25 @@ router.post('/', async (req, res, next) => {
       seasonal_context: body.seasonalContext || body.seasonal_context || '',
     });
     const releaseMode = classifyReleaseMode(contract);
-    // TRUST BOUNDARY: persist rebuilds the contract server-side but CANNOT re-verify the
-    // original adversarial challenge — it has no photos to re-run perception, and client
-    // provenance is untrusted. So it does NOT re-run the polished LLM writer here: an
-    // un-challenged (deterministic-fallback) report must never gain a confident customer
-    // voice at save time, and persist can't tell a multimodel report from a fallback one
-    // by the rebuilt findings alone. The deterministic, confidence-gated summary stands.
-    // (The challenge-reviewed GPT-5.5 copy is produced + reviewed at /analyze; surfacing
-    // it on the published report would require a server-signed summary — a follow-up.)
+    // TRUST BOUNDARY: persist rebuilds the contract server-side and never trusts client
+    // provenance. The challenge-reviewed GPT-5.5 summary may be restored ONLY when a
+    // server-authored diagnosis_run record (loaded by id from the DB) proves the report
+    // was multimodal_challenged + challenge passed AND its findings_hash still matches the
+    // rebuilt findings. Otherwise the deterministic, confidence-gated summary stands — an
+    // un-challenged report never gains a confident customer voice at save time.
+    let restoredFromRun = false;
+    const diagnosisRunId = typeof body.diagnosisRunId === 'string' && UUID_RE.test(body.diagnosisRunId) ? body.diagnosisRunId : null;
+    if (diagnosisRunId) {
+      try {
+        const run = await db('lawn_diagnostic_runs').where({ id: diagnosisRunId }).first();
+        if (shouldUseRunSummary(run, hashFindings(contract.diagnosis?.findings), req.technicianId || req.technician?.id || null)) {
+          contract.customer_summary = run.customer_summary;
+          restoredFromRun = true;
+        }
+      } catch (err) {
+        logger.warn(`[lawn-diagnostic] run-record lookup failed (non-blocking): ${err.message}`);
+      }
+    }
     const sanitizedContract = applyAutoReleaseRepair(contract, releaseMode);
     const aiSummary = cleanString(body.aiSummary, 2000) || cleanString(sanitizedContract.customer_summary, 2000);
 
@@ -634,10 +714,9 @@ router.post('/', async (req, res, next) => {
       created_by_technician_id: req.technicianId || req.technician?.id || null,
       contact_snapshot: contact ? JSON.stringify(contact) : null,
       address_snapshot: address ? JSON.stringify(address) : null,
-      // Server-STAMPED provenance only — the challenge is not re-verified at persist and
-      // the writer is not re-run, so a client cannot stash a forged "challenge.passed"
-      // blob or force confident copy into the stored record.
-      ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode, provenance: { source: 'persist', writer: 'deterministic', challenge_reverified: false } }),
+      // Server-STAMPED provenance only — challenge_reverified reflects whether a verified
+      // diagnosis_run restored the GPT-5.5 summary; a client cannot forge it.
+      ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode, provenance: { source: 'persist', writer: restoredFromRun ? 'gpt-5.5-run-verified' : 'deterministic', challenge_reverified: restoredFromRun, diagnosis_run_id: restoredFromRun ? diagnosisRunId : null } }),
       report_contract: JSON.stringify(sanitizedContract),
       ai_confidence: aiConfidence,
       // Server-derived from the rebuilt contract severity; a client-supplied
@@ -779,4 +858,7 @@ module.exports._test = {
   hasSendableContact,
   canonicalSnapshot,
   resolveRecipient,
+  hashFindings,
+  shouldUseRunSummary,
+  runProvenanceFields,
 };

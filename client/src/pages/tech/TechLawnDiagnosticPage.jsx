@@ -102,7 +102,7 @@ export default function TechLawnDiagnosticPage() {
   const [address, setAddress] = useState({ line1: '', city: '', state: '', zip: '' });
   const [showProspect, setShowProspect] = useState(false);
   const [analysis, setAnalysis] = useState(null); // reportContract
-  const [meta, setMeta] = useState({ releaseMode: null, findingsSource: null, provenance: null });
+  const [meta, setMeta] = useState({ releaseMode: null, findingsSource: null, provenance: null, diagnosisRunId: null });
   const [diagnosticId, setDiagnosticId] = useState(null);
   const [sendResult, setSendResult] = useState(null);
   const [leadId, setLeadId] = useState(null);
@@ -155,7 +155,7 @@ export default function TechLawnDiagnosticPage() {
         body: JSON.stringify({ photos: photos.map((p) => ({ data: p.base64, mimeType: p.mimeType })) }),
       });
       setAnalysis(data.reportContract || null);
-      setMeta({ releaseMode: data.releaseMode || null, findingsSource: data.findingsSource || null, provenance: data.provenance || null });
+      setMeta({ releaseMode: data.releaseMode || null, findingsSource: data.findingsSource || null, provenance: data.provenance || null, diagnosisRunId: data.diagnosisRunId || null });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -180,6 +180,8 @@ export default function TechLawnDiagnosticPage() {
         photos: photos.map((p) => ({ photo_id: p.id, quality: reviewedQuality, limitations: reviewedLimitations })),
         appliedProducts: [],
         compliance: {},
+        // Carries server-issued run id → persist can restore the challenge-reviewed GPT-5.5 summary.
+        diagnosisRunId: meta?.diagnosisRunId || null,
         contact: cleanContact(),
         address: cleanAddress(),
       }),
@@ -227,7 +229,7 @@ export default function TechLawnDiagnosticPage() {
 
   const reset = () => {
     setPhotos([]); setContact({ name: '', email: '', phone: '' }); setAddress({ line1: '', city: '', state: '', zip: '' });
-    setShowProspect(false); setAnalysis(null); setMeta({ releaseMode: null, findingsSource: null, provenance: null });
+    setShowProspect(false); setAnalysis(null); setMeta({ releaseMode: null, findingsSource: null, provenance: null, diagnosisRunId: null });
     setDiagnosticId(null); setSendResult(null); setLeadId(null); setError(''); setNotice('');
   };
 

@@ -516,3 +516,39 @@ describe('lawn diagnostic send-gate helpers', () => {
     expect(inherited.address).toMatchObject({ city: 'Venice', line1: '123 Palm St' });
   });
 });
+
+describe('lawn diagnostic durable run provenance', () => {
+  const { hashFindings, shouldUseRunSummary, runProvenanceFields } = techLawnDiagnosticRouter._test;
+
+  test('hashFindings is stable, order-independent, and sensitive to finding changes', () => {
+    const a = [
+      { finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' },
+      { finding_id: 'F2', name: 'Weed pressure', confidence: 'low', severity: 'mild' },
+    ];
+    expect(hashFindings(a)).toBe(hashFindings([a[1], a[0]])); // order-independent
+    expect(hashFindings(a)).not.toBe(hashFindings([{ ...a[0], confidence: 'high' }, a[1]])); // confidence change
+    expect(hashFindings(a)).not.toBe(hashFindings([a[0]])); // dropped finding
+    expect(hashFindings([])).toBe(hashFindings([]));
+  });
+
+  test('runProvenanceFields maps findingsSource + challenge provenance to durable mode/status', () => {
+    expect(runProvenanceFields('multimodel', { challenge: { passed: true, attempted: true } }))
+      .toEqual({ perceptionMode: 'multimodal_challenged', challengeStatus: 'passed' });
+    expect(runProvenanceFields('challenge_degraded', { challenge: { passed: false, attempted: true } }))
+      .toEqual({ perceptionMode: 'challenge_degraded', challengeStatus: 'failed' });
+    expect(runProvenanceFields('deterministic_fallback', { challenge: null }))
+      .toEqual({ perceptionMode: 'deterministic_fallback', challengeStatus: 'not_run' });
+  });
+
+  test('shouldUseRunSummary unlocks the stored summary ONLY for a verified, findings-matched, challenge-passed run', () => {
+    const hash = hashFindings([{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' }]);
+    const good = { challenge_status: 'passed', perception_mode: 'multimodal_challenged', customer_summary: 'GPT-5.5 copy', findings_hash: hash, created_by_technician_id: 'tech-1' };
+    expect(shouldUseRunSummary(good, hash, 'tech-1')).toBe(true);
+    expect(shouldUseRunSummary(good, 'deadbeef', 'tech-1')).toBe(false);                       // forged/stale findings
+    expect(shouldUseRunSummary({ ...good, challenge_status: 'not_run' }, hash, 'tech-1')).toBe(false); // not challenged
+    expect(shouldUseRunSummary({ ...good, perception_mode: 'deterministic_fallback' }, hash, 'tech-1')).toBe(false);
+    expect(shouldUseRunSummary({ ...good, customer_summary: null }, hash, 'tech-1')).toBe(false);      // no stored summary
+    expect(shouldUseRunSummary(good, hash, 'tech-2')).toBe(false);                              // different tech
+    expect(shouldUseRunSummary(null, hash, 'tech-1')).toBe(false);                              // missing run
+  });
+});
