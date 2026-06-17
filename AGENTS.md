@@ -49,8 +49,10 @@ finding and warns on P1. Reviewers must return JSON matching
   `''`, removing the guard, or accepting events without verification is a
   forged-event vector.
 - **Surcharge math must come from `computeChargeAmount`.**
-  `server/services/stripe.js:39-47` is the single source of truth for the 3.99%
-  card surcharge. The dollar amount displayed to the customer, the
+  `server/services/stripe-pricing.js` (the pure, unit-tested surcharge module
+  imported by `stripe.js` — `computeChargeAmount`, `isCardMethodType`,
+  `CARD_SURCHARGE_RATE`) is the single source of truth for the 3.99% card
+  surcharge. The dollar amount displayed to the customer, the
   `amountCents` sent to Stripe (`Math.round(total * 100)`), and the
   `card_surcharge` recorded on the `payments` row must all derive from the
   same `computeChargeAmount(invoice.total, methodCategory)` call. New
@@ -58,7 +60,7 @@ finding and warns on P1. Reviewers must return JSON matching
   will drift the three numbers apart and produce reconciliation breaks.
 - **`isCardMethodType` is the surcharge classifier.** Adding a new payment
   method type (e.g. `cashapp`, `affirm`) without updating
-  `isCardMethodType` in `server/services/stripe.js:31-37` silently surcharges
+  `isCardMethodType` in `server/services/stripe-pricing.js` silently surcharges
   it as card-family. Any diff that introduces a method type elsewhere must
   also update this function.
 - **PI ↔ invoice ↔ webhook amount agreement.** `pay-v2.js` calls
@@ -84,7 +86,10 @@ finding and warns on P1. Reviewers must return JSON matching
   justification widens the leaked-token window for screenshot/sniff
   attacks. P0 unless the PR description argues for it.
 - **`scheduled_services.status` is gated by a CHECK constraint, not a
-  service helper.** Migration `20260426000004` rewrote the original
+  service helper.** Migration
+  `server/models/migrations/20260426000004_relax_scheduled_services_status_enum.js`
+  (migrations live under `server/models/migrations/`, run via
+  `--knexfile server/knexfile.js`) rewrote the original
   5-value enum to:
   `pending | confirmed | rescheduled | en_route | on_site | completed | cancelled | skipped`.
   Direct `db('scheduled_services').update({ status: ... })` is the
@@ -302,6 +307,39 @@ finding and warns on P1. Reviewers must return JSON matching
   (caption/thumbnail/permalink/timestamp), 60 req/min rate limit, 15-min
   in-memory cache + 5-min public Cache-Control, per-source graceful failure,
   never 500s — returns an empty payload on total upstream failure).
+  `/api/public/estimator/property-lookup` (write; public parcel/property lookup
+  for the estimator — no auth, no token, 5 req/hour rate limit. Takes an
+  address, returns county parcel facts, persists a lead/lookup row; no PII
+  beyond the submitted address).
+  `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
+  instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
+  limit. Persists a quote/lead and may text the quote via a Twilio short-link;
+  returns pricing only).
+  `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
+  token, public `Cache-Control`. Consumed by the Astro build and the admin blog
+  UI; no PII).
+  `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
+  canonical FDACS / license / insurance numbers — no auth, no token, public
+  `Cache-Control`. Consumed by the Astro content build; intentionally public
+  business credentials).
+  `/api/public/automation-preview/:stepId/:token` (read-only; renders an
+  automation step's HTML body with SAMPLE merge values only — no real customer
+  data — for operator preview/share. Token in path, `noindex`).
+  `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
+  target / 410 on expired / generic 404 with no enumeration leak; `noindex`).
+  `/api/public/track/:token` (read-only live service tracker; the token is the
+  only gate (`TOKEN_RE` format) plus a 120 req/min rate limit. Returns tracker
+  state and, when `track_state='en_route'`, live tech coords + ETA from Bouncie;
+  no other PII).
+  `/api/reviews/featured` (read-only public featured Google reviews for the
+  marketing site — no auth, no token, location filter + limit; reads
+  `google_reviews` only).
+  `/api/review/:token` (GET + POST; token-gated customer review flow — GET
+  returns the review-request context by token, POST submits the customer's
+  review. No auth beyond the review-request token).
+  `/api/rate` (review-gate; routes a customer's star rating from a
+  review-request link — high → the nearest GBP write-a-review URL, low →
+  private feedback capture. No auth; picks nearest GBP by geocoded address).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
