@@ -37,8 +37,10 @@ class AppointmentTagger {
       });
     }
 
-    // Check if first service for a recurring customer
-    if (service.waveguard_tier && service.waveguard_tier !== 'Bronze') {
+    // Check if first service for a recurring customer. All WaveGuard tiers
+    // get the welcome text (Bronze included) so the experience matches the
+    // estimate-converter self-accept path. Idempotent via sendNewRecurringWelcome.
+    if (service.waveguard_tier) {
       const prevCount = await db('service_records').where({ customer_id: service.customer_id }).count('* as count').first();
       if (parseInt(prevCount?.count || 0) === 0) {
         await this.triggerWelcomeSequence(service);
