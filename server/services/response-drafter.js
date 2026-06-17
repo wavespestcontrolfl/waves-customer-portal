@@ -21,8 +21,17 @@ class ResponseDrafter {
 
     const flagsSummary = (context.flags || []).map(f => `${f.severity === 'high' ? '🚨' : '⚠️'} ${f.type}: ${f.detail}`).join('\n') || 'No flags.';
 
+    // Customer voice runs on VOICE (Sonnet 4.6 — warmer, more natural). High-stakes
+    // replies escalate to FLAGSHIP (Opus 4.8): cancellation/complaint intents, or any
+    // high-severity account flag. Uses existing signals only — no new classifier.
+    const intentUpper = (intent?.intent || '').toUpperCase();
+    const highStakes = intentUpper === 'CANCEL_REQUEST'
+      || intentUpper === 'COMPLAINT'
+      || (context.flags || []).some(f => f.severity === 'high');
+    const model = highStakes ? MODELS.FLAGSHIP : MODELS.VOICE;
+
     const resp = await client.messages.create({
-      model: MODELS.FLAGSHIP, max_tokens: 500,
+      model, max_tokens: 500,
       system: `You are Adam Benetti's AI assistant for Waves Pest Control. Draft SMS replies Adam will review before sending. Write as Adam — direct, knowledgeable, friendly. Keep under 300 chars when possible. Reference actual service data. Sign off "— Adam" or "— Waves". FLAGS:\n${flagsSummary}`,
       messages: [{ role: 'user', content: `CUSTOMER: ${context.summary}\n\nLAST SERVICE: ${context.lastService ? `${context.lastService.type} on ${new Date(context.lastService.date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} — "${(context.lastService.notes || '').slice(0, 150)}"` : 'None'}\n\nNEXT: ${context.upcomingServices?.[0] ? `${context.upcomingServices[0].type} ${new Date(context.upcomingServices[0].date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : 'Nothing'}\n\nBALANCE: ${context.billing?.outstandingBalance > 0 ? `$${context.billing.outstandingBalance.toFixed(2)} overdue` : 'Current'}\n\nRECENT SMS:\n${conversation}\n\nINTENT: ${intent?.intent || 'UNKNOWN'}\n\nNEW MESSAGE: "${inboundMessage}"\n\nDraft reply as Adam:` }],
     });
