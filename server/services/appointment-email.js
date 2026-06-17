@@ -18,6 +18,7 @@
  * have unsubscribed from marketing email. Mirrors account-membership-email.js.
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
@@ -181,8 +182,11 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
       property_label: propertyLabel(customer),
       ...payload,
     };
-    // Per-recipient idempotency so a second recipient is not deduped against the first.
-    const recipientKey = idempotencyKey ? `${idempotencyKey}:${recipient.email.toLowerCase()}` : undefined;
+    // Per-recipient idempotency so a second recipient is not deduped against the
+    // first. Hash the address to a bounded token — appending a full email could
+    // exceed email_messages.idempotency_key (varchar 260) for long addresses.
+    const recipientToken = crypto.createHash('sha256').update(recipient.email.toLowerCase()).digest('hex').slice(0, 16);
+    const recipientKey = idempotencyKey ? `${idempotencyKey}:${recipientToken}` : undefined;
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey,

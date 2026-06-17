@@ -106,9 +106,9 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('service-contact bounce with NO provider-accepted sibling: still emails', async () => {
-    // The service contact +1941..7777 bounced; no other appointment SMS for this
-    // occurrence was provider-accepted (e.g. primary was blocked synchronously).
+  test('service-contact bounce emails the fallback (no delivery-inference suppression)', async () => {
+    // A service-contact bounce always drives the email fallback now — Twilio
+    // acceptance of any sibling is not proof of delivery, so we never suppress.
     const auditChain = chain({
       first: {
         channel: 'sms',
@@ -117,12 +117,11 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
         metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss4' },
       },
     });
-    const siblingChain = chain({ first: null }); // no accepted sibling
     const custReadChain = chain({ first: { id: 'c4', phone: '+19415551234', line_type: null } });
-    const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
+    const reminderChain = chain({ first: { cancelled: false, appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
 
     setDbQueues({
-      messaging_audit_log: [auditChain, siblingChain],
+      messaging_audit_log: [auditChain],
       customers: [custReadChain],
       appointment_reminders: [reminderChain],
     });
@@ -134,7 +133,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
   });
 
-  test('service-contact bounce WITH a provider-accepted sibling: skips (no duplicate email)', async () => {
+  test('cancelled appointment: a late bounce does not email stale details', async () => {
     const auditChain = chain({
       first: {
         channel: 'sms',
@@ -143,12 +142,13 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
         metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss5' },
       },
     });
-    const siblingChain = chain({ first: { id: 'accepted-row' } }); // primary was accepted
     const custReadChain = chain({ first: { id: 'c5', phone: '+19415551234', line_type: null } });
+    const reminderChain = chain({ first: { cancelled: true, appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
 
     setDbQueues({
-      messaging_audit_log: [auditChain, siblingChain],
+      messaging_audit_log: [auditChain],
       customers: [custReadChain],
+      appointment_reminders: [reminderChain],
     });
 
     await AppointmentReminders.handleUndeliveredSms({
@@ -156,8 +156,6 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     });
 
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
-    // The sibling lookup is scoped to the same notice (purpose), not just the occurrence.
-    expect(siblingChain.where).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'appointment_confirmation' }));
   });
 
   test('email fallback blocked (suppressed) raises the no-channel admin alert', async () => {

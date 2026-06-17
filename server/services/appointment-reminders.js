@@ -891,32 +891,18 @@ const AppointmentReminders = {
       if (!customer) return;
 
       const scheduledServiceId = audit.metadata?.scheduled_service_id || null;
-
-      // A bounce on a service-contact number does not always mean the customer
-      // missed the notice — another appointment text for the same occurrence may
-      // have actually reached them. But being listed as a contact does NOT prove a
-      // send was provider-accepted (sendCustomerMessage can block synchronously
-      // with no callback). So skip a non-primary bounce only when ANOTHER
-      // appointment SMS for this same occurrence was provider-accepted (sent_at
-      // set, not blocked) and isn't this very message. When nothing else was
-      // accepted, this bounce is the only delivery signal and must trigger the
-      // fallback. The primary's own bounce (to === primary) always falls through.
       const primaryDigits = lastTenDigits(customer.phone);
       const targetDigits = lastTenDigits(to);
-      if (scheduledServiceId && audit.purpose && primaryDigits && targetDigits && primaryDigits !== targetDigits) {
-        // Scope to the SAME notice (purpose): confirmation, 72h, and 24h all share
-        // the scheduled_service_id, so an earlier accepted confirmation must not
-        // count as "this 24h reminder reached someone".
-        const acceptedSibling = await db('messaging_audit_log')
-          .where({ customer_id: customerId, channel: 'sms', purpose: audit.purpose })
-          .whereRaw("metadata->>'scheduled_service_id' = ?", [String(scheduledServiceId)])
-          .whereNotNull('sent_at')
-          .whereNull('blocked_code')
-          .whereNot('provider_message_id', sid)
-          .first()
-          .catch(() => null);
-        if (acceptedSibling) return;
-      }
+
+      // We deliberately do NOT suppress the email when another sibling SMS "looks
+      // accepted". Twilio acceptance (sent_at) is not delivery, and the status
+      // webhook updates sms_log — not messaging_audit_log — so a sibling row can
+      // look accepted while it too bounced; inferring cross-channel delivery from a
+      // single callback is unreliable and previously dropped real notices. Instead
+      // we always attempt the email on a covered appointment bounce and rely on the
+      // per-occurrence email idempotency key to prevent a genuine duplicate. Worst
+      // case is a benign extra email when the customer already got the text —
+      // acceptable for a "we couldn't reach you by text" notice.
 
       // Carrier 30006 = "landline or unreachable carrier" — learn it (primary
       // phone only) so future appointment texts skip SMS and go straight to email
@@ -946,6 +932,13 @@ const AppointmentReminders = {
           .orderBy('appointment_time', 'asc')
           .first()
           .catch(() => null);
+      // If the appointment was cancelled (a cancellation callback can arrive after
+      // handleCancellation flips the row), don't email stale appointment details —
+      // the cancellation notice owns the customer message.
+      if (reminderRow?.cancelled) {
+        logger.info(`[appt-remind] Skipping email fallback for cancelled appointment ${scheduledServiceId || customerId}`);
+        return;
+      }
       if (reminderRow) {
         apptTime = new Date(reminderRow.appointment_time);
         serviceLabel = smsServiceLabelStored(reminderRow.service_type);
