@@ -54,7 +54,7 @@ function SectionTitle({ children }) {
 function StatusPill({ label }) {
   const color = STATUS_DOT[label] || COLORS.grayMid;
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 999, background: COLORS.white, border: `1px solid ${BORDER}`, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 13, color: TEXT }}>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 999, background: COLORS.white, border: `1px solid ${BORDER}`, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT }}>
       <span style={{ width: 10, height: 10, borderRadius: 999, background: color, flex: 'none' }} />
       {label}
     </span>
@@ -219,7 +219,7 @@ export default function LawnReportViewPage() {
           ) : null}
           {watchItems.length ? (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
-              <div style={{ fontSize: 13, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
+              <div style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
               <ul style={{ margin: 0, padding: '0 0 0 18px', color: BODY, fontSize: 14, lineHeight: 1.6 }}>
                 {watchItems.map((w, i) => <li key={i}>{w}</li>)}
               </ul>
@@ -230,7 +230,7 @@ export default function LawnReportViewPage() {
 
       {report.seasonal_context ? (
         <SectionCard style={{ background: COLORS.sand, border: `1px solid ${BORDER}` }}>
-          <div style={{ fontSize: 13, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Right now in Southwest Florida</div>
+          <div style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Right now in Southwest Florida</div>
           <p style={{ margin: 0, color: BODY, fontSize: 14, lineHeight: 1.55 }}>{report.seasonal_context}</p>
         </SectionCard>
       ) : null}
