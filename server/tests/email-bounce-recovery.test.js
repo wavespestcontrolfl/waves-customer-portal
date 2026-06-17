@@ -79,6 +79,10 @@ describe('decideRecoveryAction', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: true, min: 'high' }))
       .toEqual({ action: 'skip', status: 'corrected_owned_by_other' });
   });
+  test('skips when the original carried an attachment (cannot replay PDF)', () => {
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, hasAttachments: true, min: 'high' }))
+      .toEqual({ action: 'skip', status: 'has_attachments' });
+  });
   test('medium threshold accepts medium candidates', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'medium' }, suppressed: false, min: 'medium' }))
       .toEqual({ action: 'send', status: 'resent' });
@@ -252,6 +256,24 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('Suggested correction: jane@gmail.com');
   });
+
+  test('does NOT auto-replay an attachment-bearing send (routes to manual)', async () => {
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    db.mockImplementation(orderedDb({
+      first: () => null,
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec4' }] : []),
+    }));
+
+    const res = await recovery.attemptRecovery(
+      { id: 'orig4', recipient_email_snapshot: 'jane@gmial.com', template_key: 'invoice.sent', suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'], has_attachments: true },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(res).toEqual({ skipped: 'has_attachments' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('attachment');
+  });
 });
 
 // Thenable + chainable mock so `await db(...).where(...).catch(...)` resolves to rows.
@@ -306,9 +328,10 @@ describe('correctedAddressSuppressed fallback honors group suppressions (codex P
   });
 });
 
-// Thenable + chainable mock for the customers ownership query.
-function customersDb(rows) {
-  return jest.fn(() => {
+// Table-aware thenable mock for the ownership queries (customers/leads/estimates).
+function ownerDb(byTable = {}) {
+  return jest.fn((table) => {
+    const rows = byTable[table] || [];
     const chain = {};
     const result = Promise.resolve(rows);
     for (const m of ['where', 'whereRaw', 'orWhereRaw', 'select', 'modify']) chain[m] = jest.fn(() => chain);
@@ -323,23 +346,36 @@ describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
   beforeEach(() => db.mockReset());
 
   test('true when the corrected address is on file for a different customer', async () => {
-    db.mockImplementation(customersDb([{ id: 'c2' }]));
+    db.mockImplementation(ownerDb({ customers: [{ id: 'c2' }] }));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
   });
   test('false when it only matches the same customer', async () => {
-    db.mockImplementation(customersDb([{ id: 'c1' }]));
+    db.mockImplementation(ownerDb({ customers: [{ id: 'c1' }] }));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
   });
   test('false when no customer has it', async () => {
-    db.mockImplementation(customersDb([]));
+    db.mockImplementation(ownerDb({}));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
   });
-  test('lead (no own customer): any existing owner blocks', async () => {
-    db.mockImplementation(customersDb([{ id: 'c9' }]));
+  test('lead (no own customer): a matching customer blocks', async () => {
+    db.mockImplementation(ownerDb({ customers: [{ id: 'c9' }] }));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(true);
+  });
+  test('lead (no own customer): a matching OTHER lead blocks', async () => {
+    db.mockImplementation(ownerDb({ leads: [{ id: 'l1' }] }));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(true);
+  });
+  test('lead (no own customer): a matching estimate blocks', async () => {
+    db.mockImplementation(ownerDb({ estimates: [{ id: 'e1' }] }));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(true);
   });
   test('lead (no own customer): unowned address is fine', async () => {
-    db.mockImplementation(customersDb([]));
+    db.mockImplementation(ownerDb({}));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(false);
+  });
+  test('customer recovery does NOT consult leads/estimates', async () => {
+    // Only a lead/estimate row owns it, but this is a customer recovery → allowed.
+    db.mockImplementation(ownerDb({ leads: [{ id: 'l1' }], estimates: [{ id: 'e1' }] }));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
   });
 });

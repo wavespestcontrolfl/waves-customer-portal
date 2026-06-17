@@ -808,6 +808,9 @@ async function sendTemplate({
     payload_snapshot: JSON.stringify(redactedPayloadSnapshot(payload || {})),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
+    // Attachments aren't persisted in the snapshot; flag their presence so the
+    // bounce-recovery replay can route attachment-bearing sends to manual recovery.
+    has_attachments: Array.isArray(attachments) && attachments.length > 0,
   };
 
   if (!test) {

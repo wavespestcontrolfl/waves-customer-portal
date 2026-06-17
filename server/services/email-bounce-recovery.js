@@ -121,17 +121,20 @@ function recoveryIdFromMessage(message) {
  * whether the corrected address is itself suppressed, decide what to do.
  * Extracted so the gating logic is unit-testable without a DB.
  */
-function decideRecoveryAction({ candidate, suppressed, ownedByOther, min = 'high' }) {
+function decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, min = 'high' }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
     return { action: 'skip', status: 'skipped_low_confidence' };
   }
   // PRIVACY: the corrected address is on file for a DIFFERENT customer (or, for
-  // a lead with no resolvable customer, for any customer). Domain-only
-  // correction can't prove the corrected mailbox is the same person, so never
-  // auto-send another customer's invoice/report/estimate there — skip + alert.
+  // a lead with no resolvable customer, for any customer/lead/estimate).
+  // Domain-only correction can't prove the corrected mailbox is the same person,
+  // so never auto-send another party's invoice/report/estimate there.
   if (ownedByOther) return { action: 'skip', status: 'corrected_owned_by_other' };
   if (suppressed) return { action: 'skip', status: 'corrected_suppressed' };
+  // The original carried an attachment (invoice/report PDF) that isn't in the
+  // stored snapshot — a replay would reference a missing file. Route to manual.
+  if (hasAttachments) return { action: 'skip', status: 'has_attachments' };
   return { action: 'send', status: 'resent' };
 }
 
@@ -208,13 +211,25 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
 async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
   const email = String(correctedEmail || '').trim().toLowerCase();
   if (!email) return false;
-  const rows = await db('customers')
+  const customerRows = await db('customers')
     .where((q) => {
       for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
     })
     .select('id')
     .catch(() => []);
-  return rows.some((r) => String(r.id) !== String(ownCustomerId || ''));
+  if (customerRows.some((r) => String(r.id) !== String(ownCustomerId || ''))) return true;
+
+  // No resolvable owning customer (a lead/estimate send: recipientType 'lead',
+  // recipientId null). The corrected address matching ANY lead or estimate
+  // record is a cross-prospect collision we can't disambiguate — fail closed to
+  // manual recovery rather than risk replaying a quote to a different prospect.
+  if (!ownCustomerId) {
+    const leadOwned = await db('leads').whereRaw('LOWER(email) = ?', [email]).first('id').catch(() => null);
+    if (leadOwned) return true;
+    const estimateOwned = await db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).first('id').catch(() => null);
+    if (estimateOwned) return true;
+  }
+  return false;
 }
 
 /**
@@ -347,7 +362,8 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
     const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
     const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
-    const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, min: minConfidence() });
+    const hasAttachments = !!bouncedMessage.has_attachments;
+    const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, min: minConfidence() });
 
     const baseUpdate = {
       corrected_email: candidate?.corrected || null,
@@ -363,7 +379,7 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // Every skip means a service/transactional email did NOT reach the
       // customer — nudge a human to fix the address (and show the suggestion
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
-      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other'].includes(decision.status)) {
+      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other', 'has_attachments'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
       }
       logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
@@ -543,6 +559,7 @@ const UNRECOVERABLE_REASONS = {
   redelivered_bounced: 'the corrected address also bounced',
   corrected_suppressed: 'the likely correction is on the suppression list',
   corrected_owned_by_other: 'the likely correction already belongs to another customer',
+  has_attachments: 'it includes an attachment (e.g. an invoice or report PDF) that cannot be auto-resent',
   send_failed: 're-sending to the corrected address failed',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
@@ -559,7 +576,7 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
     : (UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate);
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
-  const suggestion = candidate?.corrected && (status === 'skipped_low_confidence' || status === 'send_failed')
+  const suggestion = candidate?.corrected && ['skipped_low_confidence', 'send_failed', 'has_attachments'].includes(status)
     ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
     : '';
   await adminAlertDeduped({
