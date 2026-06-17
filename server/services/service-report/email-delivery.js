@@ -283,6 +283,14 @@ async function sendLegacyServiceReportEmail({
         error_message: errorMessage(err).slice(0, 1000),
         updated_at: new Date(),
       }).catch(() => {});
+      // If a fast webhook (custom_args) already terminalized the row, SendGrid
+      // accepted the send despite this thrown/timed-out response — report success
+      // (deduped) so delivery-queue.js doesn't requeue and re-send the same report.
+      const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
+      const currentStatus = String(current?.status || '').toLowerCase();
+      if (current && currentStatus !== 'queued' && currentStatus !== 'failed') {
+        return { sent: true, deduped: true, messageId: current.provider_message_id || null, message: current };
+      }
     }
     throw err;
   }

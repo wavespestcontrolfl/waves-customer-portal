@@ -229,7 +229,7 @@ describe('attemptRecovery codex-fix behaviors', () => {
     db.mockImplementation(mockDb);
 
     const res = await recovery.attemptRecovery(
-      { id: 'orig1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'estimate.delivery', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'] },
+      { id: 'orig1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'estimate.delivery', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'], trigger_event_id: 'estimate_delivery:est-1' },
       { event: 'bounce', type: 'bounce' },
     );
 
@@ -249,6 +249,33 @@ describe('attemptRecovery codex-fix behaviors', () => {
     const pubCall = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.provider_message_id === 'pm_1');
     expect(pubCall.data.status).toBeUndefined();
     expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data.status === 'sent')).toBe(true);
+  });
+
+  test('lead-sourced recovery (non-estimate) passes the on-file gate and resends (codex #1858)', async () => {
+    // Public quote acknowledgment: recipient_type 'lead', recipient_id set, trigger
+    // 'quote_request_received:<lead>'. Pre-#1858 this always failed the gate (no
+    // customer, no estimate id) → address_no_longer_on_file. Now it scopes to the
+    // source lead row and recovers.
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_L' });
+    db.mockImplementation(orderedDb({
+      // Only the source LEAD row still holds the typo → gate passes. No customer.
+      first: (table) => (table === 'leads' ? { id: 'lead-1' } : null),
+      returning: (table) => {
+        if (table === 'email_bounce_recoveries') return [{ id: 'recL' }];
+        if (table === 'email_messages') return [{ id: 'msgL', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }];
+        return [];
+      },
+    }));
+
+    const res = await recovery.attemptRecovery(
+      { id: 'origL', recipient_email_snapshot: 'jane@gmial.com', recipient_type: 'lead', recipient_id: 'lead-1', template_key: 'quote.acknowledgment', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'], trigger_event_id: 'quote_request_received:lead-1' },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(res).toMatchObject({ resent: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled(); // not skipped/alerted
   });
 
   test('does NOT send when the corrected address belongs to another customer (privacy)', async () => {
@@ -483,7 +510,8 @@ describe('safety checks fail closed on DB error (codex round 6)', () => {
 //   - source-uniqueness (round 11) selects 'id'          → est/leadRows
 function commitDb({
   rec, estUpdate = 1, leadUpdate = 1, estRows = [], leadRows = [],
-  customerOwnerRows = [], estOwnerRows = [], leadOwnerRows = [],
+  customerOwnerRows = [], estOwnerRows = [], leadOwnerRows = [], origTriggerEvent = null,
+  origRecipientType = null, origRecipientId = null,
 } = {}) {
   const fn = jest.fn((table) => {
     const chain = {};
@@ -498,7 +526,11 @@ function commitDb({
     // Thenable so `await db(t).whereRaw(...).select(...)` resolves to rows.
     chain.then = (res, rej) => Promise.resolve(rowsFor()).then(res, rej);
     chain.catch = (rej) => Promise.resolve(rowsFor()).catch(rej);
-    chain.first = jest.fn(() => Promise.resolve(table === 'email_bounce_recoveries' ? rec : null));
+    chain.first = jest.fn(() => Promise.resolve(
+      table === 'email_bounce_recoveries' ? rec
+        : table === 'email_messages' ? ((origTriggerEvent || origRecipientType) ? { trigger_event_id: origTriggerEvent, recipient_type: origRecipientType, recipient_id: origRecipientId } : null)
+          : null,
+    ));
     chain.update = jest.fn(() => Promise.resolve(table === 'estimates' ? estUpdate : table === 'leads' ? leadUpdate : 1));
     chain.returning = jest.fn(() => Promise.resolve([]));
     return chain;
@@ -519,35 +551,22 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
       corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
-    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0, estRows: [{ id: 'e1' }], leadRows: [] }));
+    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0, origTriggerEvent: 'estimate_delivery:e1' }));
     await recovery.commitRecoveryOnDelivery({ id: 'msg9', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
   });
 
-  test('no-customer recovery does NOT rewrite an AMBIGUOUS source (codex round 11)', async () => {
+  test('no-customer recovery with NO derivable source id leaves all source rows alone (codex round 18)', async () => {
     const rec = {
       id: 'rec11', customer_id: null, customer_email_field: null,
       corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
-    // Two estimates share the same typo → ambiguous, must not corrupt either.
-    db.mockImplementation(commitDb({ rec, estRows: [{ id: 'e1' }, { id: 'e2' }], leadRows: [] }));
-    await recovery.commitRecoveryOnDelivery({ id: 'msg11', recipient_email_snapshot: 'jane@gmail.com' });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    // Committed (resend delivered) but no source field was rewritten.
-    expect(NotificationService.notifyAdmin.mock.calls[0][2]).not.toContain('estimates.customer_email');
-  });
-
-  test('no-customer recovery does NOT rewrite when the typo is split across estimate + lead (codex round 12)', async () => {
-    const rec = {
-      id: 'rec12', customer_id: null, customer_email_field: null,
-      corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
-      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
-    };
-    // 1 estimate + 1 lead = 2 matches across tables → can't prove same prospect.
+    // No origTriggerEvent → no source estimate id → must NOT touch any row that
+    // merely shares the typo (no unscoped fallback). Rows present but untouched.
     db.mockImplementation(commitDb({ rec, estRows: [{ id: 'e1' }], leadRows: [{ id: 'l1' }] }));
-    await recovery.commitRecoveryOnDelivery({ id: 'msg12', recipient_email_snapshot: 'jane@gmail.com' });
+    await recovery.commitRecoveryOnDelivery({ id: 'msg11', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
     expect(body).not.toContain('estimates.customer_email');
@@ -593,5 +612,37 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     await recovery.commitRecoveryOnDelivery({ id: 'msg14', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('notification_prefs.billing_email');
+  });
+
+  test('no-customer recovery scopes the source rewrite to the estimate from trigger_event_id (codex round 17)', async () => {
+    const rec = {
+      id: 'rec15', customer_id: null, customer_email_field: null,
+      original_message_id: 'orig-15', corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    // Source estimate id comes from the original send's trigger_event_id. Two
+    // estimates share the typo, but only the SOURCE row (est-9) must be updated.
+    db.mockImplementation(commitDb({ rec, origTriggerEvent: 'estimate_delivery:est-9', estRows: [{ id: 'est-9' }, { id: 'est-other' }], estUpdate: 1 }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg15', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    // Updated via the source-id path (not the ambiguity fallback, which would skip).
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
+  });
+
+  test('no-customer LEAD recovery rewrites leads.email scoped to the source lead (codex #1858)', async () => {
+    const rec = {
+      id: 'recL', customer_id: null, customer_email_field: null,
+      original_message_id: 'orig-L', corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    // Lead-sourced send (recipient_type 'lead' + recipient_id) → scope the rewrite to
+    // that lead row, not any prospect sharing the typo. No source estimate → only the
+    // lead path runs.
+    db.mockImplementation(commitDb({ rec, origRecipientType: 'lead', origRecipientId: 'lead-7', leadUpdate: 1, estUpdate: 0 }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msgL', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body).toContain('leads.email');
+    expect(body).not.toContain('estimates.customer_email');
   });
 });
