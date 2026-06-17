@@ -99,22 +99,31 @@ async function loadServiceWithCustomer(serviceId) {
 }
 
 // Other not-yet-terminal jobs on this tech's plate today, ordered the
-// way the route runs. Used for the "rest of route" scope.
+// way the route actually runs: COALESCE(route_order, 999) then window_start
+// (the canonical dispatch order, admin-dispatch.js).
 //
-// `fromWindowStart` scopes "rest of route" to the anchor stop and the
-// ones AFTER it — never earlier stops. The tech sheet always anchors on
-// the next stop, so this is a no-op there; but dispatch can rain-out an
-// arbitrary mid-route stop, and moving/texting appointments that fall
-// EARLIER in the day than the one the operator picked would be wrong.
-async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, fromWindowStart = null) {
+// `anchor` ({ route_order, window_start }) scopes "rest of route" to the
+// anchor stop and everything AFTER it in that order — never an earlier
+// stop. The tech sheet always anchors on the next stop, so this is a no-op
+// there; but dispatch can rain-out an arbitrary mid-route stop, and a
+// window-only bound would wrongly sweep stops that share the anchor's
+// window or sit before it under a manual route_order.
+async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null) {
   if (!technicianId) return [];
   const query = db('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: todayStr })
     .whereIn('status', MOVABLE_STATUSES)
-    .orderBy('window_start', 'asc')
-    .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type');
+    .orderByRaw('COALESCE(route_order, 999), window_start')
+    .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order');
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
-  if (fromWindowStart) query.where('window_start', '>=', fromWindowStart);
+  if (anchor) {
+    const anchorOrder = anchor.route_order == null ? 999 : anchor.route_order;
+    const anchorWindow = anchor.window_start || '00:00:00';
+    query.whereRaw(
+      "(COALESCE(route_order, 999), COALESCE(window_start, '00:00:00'::time)) >= (?::int, ?::time)",
+      [anchorOrder, anchorWindow],
+    );
+  }
   return query;
 }
 
@@ -176,7 +185,7 @@ async function getOptions(serviceId) {
     shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
   }));
 
-  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service.window_start);
+  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
 
   return {
     ok: true,
@@ -292,7 +301,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
   const todayStr = etDateString();
   let jobs;
   if (scope === 'route') {
-    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service.window_start);
+    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service);
     jobs = [service, ...rest];
   } else {
     jobs = [service];

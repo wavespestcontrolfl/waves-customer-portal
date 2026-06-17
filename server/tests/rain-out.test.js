@@ -47,8 +47,10 @@ function chain({ rows = [], ...terminal } = {}) {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNot: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
@@ -300,7 +302,7 @@ describe('rain-out service', () => {
       expect(noPhone.smsReason).toBe('no_phone');
     });
 
-    test('route scope is bounded to the anchor window — earlier stops are never swept', async () => {
+    test('route scope is bounded to the anchor route position — earlier stops are never swept', async () => {
       const { routeChain } = wireRoute();
 
       await RainOut.commit({
@@ -312,10 +314,14 @@ describe('rain-out service', () => {
         notifyCustomer: false,
       });
 
-      // SERVICE.window_start is 09:00; the "rest of route" query must be
-      // bounded by it so a dispatcher rain-out of a mid-route stop can't
-      // move/text appointments that fall earlier in the day.
-      expect(routeChain.where).toHaveBeenCalledWith('window_start', '>=', '09:00');
+      // SERVICE has no route_order (→ 999) and window_start 09:00; the
+      // "rest of route" query must be bounded by (route_order, window_start)
+      // so a dispatcher rain-out of a mid-route stop can't move/text
+      // appointments ordered before the one they picked.
+      expect(routeChain.whereRaw).toHaveBeenCalledWith(
+        expect.stringContaining('route_order'),
+        [999, '09:00'],
+      );
     });
 
     test('one stop racing to terminal does not strand the rest', async () => {

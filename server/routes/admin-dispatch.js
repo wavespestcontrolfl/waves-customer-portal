@@ -5361,9 +5361,18 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }
 
-    // Re-render any open dispatcher boards for each moved stop.
+    // Each moved stop: re-arm its appointment reminder onto the new slot and
+    // re-render any open dispatcher boards. Mirrors the /reschedule path — the
+    // rain-out sends its own "we moved you" SMS inside commit(), so cover the
+    // due windows (and mark the notice sent) only when that SMS actually went
+    // out; otherwise leave the 24h/72h reminder pending so the cron still
+    // reminds the customer on the new slot.
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
+      await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true });
+      if (moved.smsSent === true) {
+        await markRescheduleReminderNotified(moved.id);
+      }
       try {
         await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId });
       } catch (err) {
