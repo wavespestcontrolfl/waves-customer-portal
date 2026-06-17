@@ -297,9 +297,13 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
     return { createdCount: 0, targetDates, reason: 'scheduled_columns_missing' };
   }
 
-  const existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn, {
-    includeTerminalStatuses: true,
-  });
+  // Only count visits that can actually be stamped prepaid downstream:
+  // attachScheduledServices() / applyPrepaidCoverageForTerm() use the
+  // non-terminal coverage set, so a cancelled / skipped / no-show / rescheduled
+  // visit must NOT consume one of the sold coverageVisitCount slots or suppress
+  // its generated replacement — otherwise the paid term ends up with fewer
+  // covered visits than the admin sold.
+  const existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
   const existingByDate = new Map(existingRows.map((row) => [dateOnly(row.scheduled_date), row]));
 
   // Existing in-window matching visits (e.g. the customer's pre-existing route)

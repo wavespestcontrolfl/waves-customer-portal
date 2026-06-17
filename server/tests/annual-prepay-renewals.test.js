@@ -311,6 +311,49 @@ describe('annual prepay renewal helpers', () => {
     expect(insert2.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
   });
 
+  test('does not let a cancelled in-window visit consume a sold coverage slot', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        is_recurring: {},
+        recurring_pattern: {},
+        recurring_parent_id: {},
+        recurring_ongoing: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    // A cancelled Pest Control visit sits in-window. It can't be stamped prepaid
+    // downstream, so it must not reduce the seeded count or suppress a same-slot
+    // replacement — all four sold visits still seed.
+    const rowsQuery = query({
+      rows: [
+        { id: 'svc-x', customer_id: 'customer-7', scheduled_date: '2026-07-15', service_type: 'Pest Control', status: 'cancelled' },
+      ],
+    });
+    const i1 = query({ returning: [{ id: 's1', scheduled_date: '2026-06-15' }] });
+    const i2 = query({ returning: [{ id: 's2', scheduled_date: '2026-09-15' }] });
+    const i3 = query({ returning: [{ id: 's3', scheduled_date: '2026-12-15' }] });
+    const i4 = query({ returning: [{ id: 's4', scheduled_date: '2027-03-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, i1, i2, i3, i4],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-7',
+      customer_id: 'customer-7',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+    })).resolves.toMatchObject({
+      createdCount: 4,
+      existingCount: 0,
+    });
+  });
+
   test('creates the monthly coverage series when cadence is monthly', async () => {
     const columnQuery = query({
       columnInfo: {
