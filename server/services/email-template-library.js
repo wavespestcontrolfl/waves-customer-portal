@@ -883,19 +883,31 @@ async function sendTemplate({
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via
     // custom_args.email_message_id before this commit) may have already moved the
-    // row to a terminal status, and we must not regress it. Single atomic update
-    // with a guarded CASE so the status can't clobber a webhook outcome.
-    const [updated] = await db('email_messages').where({ id: message.id }).update({
-      provider_message_id: result.messageId,
-      sent_at: new Date(),
-      updated_at: new Date(),
-      status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
-    }).returning('*');
+    // row to a terminal status, and we must not regress it. Scope the write to
+    // THIS attempt's send_attempt_token: a stale queued row reclaimed for a retry
+    // (queuedRowInFlight) means this attempt was superseded, so a late-resolving
+    // sendOne must not clobber the live retry's provider id / status.
+    const [updated] = await db('email_messages')
+      .where({ id: message.id, send_attempt_token: sendAttemptToken })
+      .update({
+        provider_message_id: result.messageId,
+        sent_at: new Date(),
+        updated_at: new Date(),
+        status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
+      })
+      .returning('*');
+    if (!updated) {
+      // Superseded by a newer attempt (token changed). This attempt's send still
+      // reached SendGrid, but the row belongs to the live attempt — leave it.
+      const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
+      return { sent: true, deduped: true, superseded: true, message: current || message, rendered };
+    }
     return { sent: true, message: updated, rendered };
   } catch (err) {
     // SendGrid may have accepted the send and a webhook already terminalized the
-    // row (lost-response race) — only mark failed while still queued.
-    await db('email_messages').where({ id: message.id, status: 'queued' }).update({
+    // row (lost-response race) — only mark failed while still queued AND only for
+    // THIS attempt (a superseded attempt must not fail the live retry's row).
+    await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
       status: 'failed',
       error_message: err.message.slice(0, 1000),
       updated_at: new Date(),

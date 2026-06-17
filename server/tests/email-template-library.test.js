@@ -338,6 +338,30 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('returns a superseded result when a newer attempt reclaimed the row (codex round 14)', async () => {
+    const queuedMessage = { id: 'msg-x', status: 'queued', subject_snapshot: 'S' };
+    const liveRow = { id: 'msg-x', status: 'queued', provider_message_id: 'sg-live' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    // Token-scoped completion update affects 0 rows → this attempt was superseded.
+    const supersededUpdate = chain({ returning: [] });
+    const reread = chain({ first: liveRow });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [queueInsert, supersededUpdate, reread],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-new' });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ sent: true, deduped: true, superseded: true }));
+  });
+
   test('deduplicates membership.started categories before provider send', async () => {
     const queuedMessage = {
       id: 'msg-membership-started',
