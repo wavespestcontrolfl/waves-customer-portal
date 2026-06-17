@@ -2407,7 +2407,11 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   const [open, setOpen] = useState(false);
   const [direction, setDirection] = useState("add");
   const [amount, setAmount] = useState("");
-  const [reason, setReason] = useState("manual");
+  // Funding kind for an addition: 'prepayment' (cash received → books revenue
+  // at issuance) or 'goodwill' (courtesy, no money). A deduction is always an
+  // 'adjustment'. Method applies to a prepayment only.
+  const [fundKind, setFundKind] = useState("prepayment");
+  const [method, setMethod] = useState("cash");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -2429,18 +2433,25 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
       return;
     }
     const delta = direction === "deduct" ? -amt : amt;
+    const kind = direction === "deduct" ? "adjustment" : fundKind;
     setSaving(true);
     setErr("");
     try {
       await adminFetch(`/admin/customers/${customerId}/credits`, {
         method: "POST",
-        body: JSON.stringify({ amount: delta, reason, note: note.trim() || undefined }),
+        body: JSON.stringify({
+          amount: delta,
+          kind,
+          method: kind === "prepayment" ? method : undefined,
+          note: note.trim() || undefined,
+        }),
       });
       setOpen(false);
       setAmount("");
       setNote("");
       setDirection("add");
-      setReason("manual");
+      setFundKind("prepayment");
+      setMethod("cash");
       load();
       if (onChanged) onChanged();
     } catch (e) {
@@ -2500,17 +2511,46 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
                 />
               </label>
             </div>
-            <label className="block mb-2">
-              <span className="u-label text-ink-tertiary block mb-1">Reason</span>
-              <select
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                className={inputClass}
-              >
-                <option value="manual">Manual credit (prepay, goodwill)</option>
-                <option value="adjustment">Adjustment / correction</option>
-              </select>
-            </label>
+            {direction === "add" ? (
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <label className="block">
+                  <span className="u-label text-ink-tertiary block mb-1">Funding</span>
+                  <select
+                    value={fundKind}
+                    onChange={(e) => setFundKind(e.target.value)}
+                    className={inputClass}
+                  >
+                    <option value="prepayment">Prepayment (money received)</option>
+                    <option value="goodwill">Goodwill / courtesy (no money)</option>
+                  </select>
+                </label>
+                {fundKind === "prepayment" && (
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">Method</span>
+                    <select
+                      value={method}
+                      onChange={(e) => setMethod(e.target.value)}
+                      className={inputClass}
+                    >
+                      <option value="cash">Cash</option>
+                      <option value="check">Check</option>
+                      <option value="zelle">Zelle</option>
+                      <option value="card">Card</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+            ) : (
+              <div className="text-12 text-ink-tertiary mb-2">
+                Recorded as an adjustment / correction (no payment booked).
+              </div>
+            )}
+            <div className="text-11 text-ink-tertiary mb-2 leading-snug">
+              {direction === "add" && fundKind === "prepayment"
+                ? "Books a payment now (counts as collected revenue at receipt)."
+                : "No payment booked — does not count as revenue."}
+            </div>
             <label className="block mb-2">
               <span className="u-label text-ink-tertiary block mb-1">Note (optional)</span>
               <input

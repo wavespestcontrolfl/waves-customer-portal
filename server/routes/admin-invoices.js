@@ -1290,8 +1290,9 @@ router.get('/:id/credit-context', async (req, res, next) => {
 // POST /:id/apply-credit — draw down the customer's account credit to cover
 // this invoice in full and mark it prepaid (the prepaid / quarterly-prepay
 // flow). Account credit is the holding bucket for money paid ahead (recorded
-// via Customer 360 "Issue credit") or any goodwill/adjustment; applying it
-// here recognizes the revenue against the invoice.
+// via Customer 360 "Issue credit") or any goodwill/adjustment. Revenue is
+// recognized when cash is RECEIVED (a cash-backed prepayment books its payment
+// row at issuance), NOT here — applying credit only covers the invoice.
 //
 // Body: {
 //   waiveSetupFee?: boolean — record that the WaveGuard initial/setup fee was
@@ -1415,18 +1416,12 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         if (waiveSetupFee) updates.setup_fee_waived = true;
         await trx('invoices').where({ id }).update(updates);
 
-        // Recognize the applied amount in the payments ledger so revenue
-        // dashboards count prepaid coverage. metadata.invoice_id links it for
-        // receipt rendering + the cancelled-service auto-void money guard.
-        // No `processor` — off-gateway, matching the manual-payment convention.
-        await trx('payments').insert({
-          customer_id: locked.customer_id,
-          amount: lockedDue,
-          status: 'paid',
-          description: `Invoice ${locked.invoice_number} — account credit (prepaid)`,
-          payment_date: etDateString(),
-          metadata: JSON.stringify({ invoice_id: id, source: 'account_credit' }),
-        });
+        // No payments-ledger row here. Revenue is recognized when cash is
+        // RECEIVED — a cash-backed prepayment books its payment row at credit
+        // issuance (POST /admin/customers/:id/credits, kind=prepayment);
+        // goodwill/adjustment credit is non-cash and never booked. Booking
+        // again at application would double-count cash or tax courtesy credit
+        // as income (owner decision 2026-06-17).
 
         return { invoice: locked, cover: lockedDue, balanceAfter };
       });
