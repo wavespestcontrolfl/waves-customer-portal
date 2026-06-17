@@ -2079,7 +2079,7 @@ const InvoiceService = {
       } else if (normalizedStatus === "unpaid") {
         q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
-        q.where("invoices.status", "paid").whereNull(
+        q.whereIn("invoices.status", ["paid", "prepaid"]).whereNull(
           "invoices.receipt_sent_at",
         );
       } else if (directStatuses.has(normalizedStatus)) {

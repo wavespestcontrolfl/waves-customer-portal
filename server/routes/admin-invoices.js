@@ -9,7 +9,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
-const { assertInvoiceCollectible } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -1161,7 +1161,7 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // run a second time.
     const [updatedInvoice] = await db('invoices')
       .where({ id })
-      .whereNotIn('status', ['paid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'])
+      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
       .update({
         status: 'paid',
         paid_at: db.fn.now(),

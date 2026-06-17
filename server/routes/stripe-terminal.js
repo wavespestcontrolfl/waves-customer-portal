@@ -108,6 +108,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     const invoice = await db('invoices').where({ id: invoice_id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
+    if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
     if (invoice.status === 'processing') return res.status(409).json({ error: 'Bank payment is already processing' });
 
     const amount_cents = Math.round(Number(invoice.total) * 100);
@@ -381,7 +382,7 @@ router.post('/validate-handoff', async (req, res) => {
     // From here on the DB row is the authoritative source for invoice_id,
     // amount_cents, and tech_user_id. Stop reading from `claims` for those.
     const invoice = await db('invoices').where({ id: handoffRow.invoice_id }).first();
-    if (!invoice || ['paid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: handoffRow.invoice_id || null,
@@ -557,7 +558,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     // office, or adjusted. These checks run against the current invoice
     // state and the mint-time snapshot in handoff.amount_cents.
     const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
-    if (!invoice || ['paid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
       return res.status(409).json({
         error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
         code: 'invoice_status_changed',
