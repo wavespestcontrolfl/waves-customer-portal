@@ -50,7 +50,6 @@ import {
   Newspaper,
   Bot,
   Database,
-  DatabaseZap,
   Inbox,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
@@ -122,7 +121,6 @@ const NAV_SECTIONS = [
     section: "Agents",
     items: [
       { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
-      { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
     ],
   },
   {
