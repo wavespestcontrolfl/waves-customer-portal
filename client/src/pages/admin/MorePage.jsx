@@ -72,8 +72,13 @@ const SECTIONS = [
     items: [
       { path: "/admin/knowledge", icon: Library, label: "Knowledge Base" },
       { path: "/admin/kb", icon: Brain, label: "Claudeopedia" },
+    ],
+  },
+  {
+    section: "Agents",
+    items: [
+      { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
       { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
-      { path: "/admin/agents", icon: Bot, label: "Agents" },
     ],
   },
   {
