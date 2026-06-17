@@ -5352,6 +5352,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       target,
       alt,
       notifyCustomer: notifyCustomer !== false,
+      initiatedBy: 'admin',
     });
 
     if (!result.ok) {

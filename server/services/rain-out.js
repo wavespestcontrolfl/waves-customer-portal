@@ -301,8 +301,11 @@ async function attachReplyOptions(serviceJobId, chosen, alt) {
  *                                       order survives; day moves keep each sibling's own window.
  * @param {object} [args.alt]           alternate option offered in the SMS ({ date, window })
  * @param {boolean} [args.notifyCustomer=true]
+ * @param {string} [args.initiatedBy='tech']  actor recorded on each reschedule
+ *                                            for the audit log — 'admin' from the
+ *                                            dispatch board, 'tech' from the app.
  */
-async function commit({ serviceId, technicianId, reasonCode, scope, target, alt, notifyCustomer = true }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, alt, notifyCustomer = true, initiatedBy = 'tech' }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!WEATHER_PHRASES[reasonCode]) return { ok: false, reason: 'bad_reason' };
@@ -338,8 +341,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
     ? targetStartMin - anchorStartMin
     : 0;
 
+  // Same-day forward pushes must move tail-first: the rebooker checks the
+  // anchor's new window against the not-yet-moved next stop, so moving the
+  // anchor first would SLOT_TAKEN against a sibling about to vacate that
+  // slot. Process later stops first so each target window is already clear.
+  // Day moves land on a different (empty) date — order doesn't matter, and
+  // keeping anchor-first there fires its reply-alt SMS first.
+  const orderedJobs = isSameDay ? [...jobs].reverse() : jobs;
   const results = [];
-  for (const job of jobs) {
+  for (const job of orderedJobs) {
     let newWindow;
     if (job.id === serviceId) {
       newWindow = target.window;
@@ -359,7 +369,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
     }
 
     try {
-      await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, 'tech', { allowLive: true });
+      await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, { allowLive: true });
     } catch (err) {
       // One job racing to completed/cancelled must not strand the rest
       // of a bulk rain-out — record and continue.

@@ -172,10 +172,12 @@ describe('rain-out service', () => {
       });
 
       // Anchor 09:00→13:00 = +4h delta; sibling 11:30-13:30 → 15:30-17:30.
+      // Tail-first: the later sibling moves BEFORE the anchor so the anchor's
+      // new 13:00-15:00 slot isn't blocked by the not-yet-moved sibling.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
-        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', { allowLive: true });
-      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech', { allowLive: true });
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', { allowLive: true });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
@@ -196,6 +198,27 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(renderSmsTemplate).not.toHaveBeenCalled();
+    });
+
+    test('initiatedBy is recorded on the reschedule (admin attribution)', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        reschedule_log: [],
+      });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: false,
+        initiatedBy: 'admin',
+      });
+
+      // The dispatch path must log moves as admin-initiated, not 'tech'.
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin', { allowLive: true });
     });
 
     test('an SMS exception after the move reports moved-but-not-notified, not failure', async () => {

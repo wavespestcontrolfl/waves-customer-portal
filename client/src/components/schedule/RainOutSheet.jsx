@@ -89,11 +89,19 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      const failures = data.failedCount ? `, ${data.failedCount} failed — check dispatch` : '';
-      onDone?.(
+      const failedCount = data.failedCount || 0;
+      const summary =
         `Moved ${data.movedCount} ${data.movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}` +
-        `${notify ? ', customer texted' : ''}${failures}`,
-      );
+        `${notify ? ', customer texted' : ''}`;
+      if (failedCount > 0) {
+        // Partial success (a stop raced to terminal or slot-conflicted). The
+        // server still returns 200 when at least one moved, so keep the sheet
+        // open with the warning instead of silently closing; the parent still
+        // refreshes the board for the stops that did move.
+        setError(`${summary}. ${failedCount} stop${failedCount === 1 ? '' : 's'} could not be moved — review dispatch.`);
+        setBusy(false);
+      }
+      onDone?.({ summary, movedCount: data.movedCount, failedCount });
     } catch (err) {
       setError(err.message || 'Rain out failed');
       setBusy(false);

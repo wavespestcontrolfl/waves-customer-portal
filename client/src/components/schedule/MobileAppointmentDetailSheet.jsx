@@ -597,10 +597,15 @@ export default function MobileAppointmentDetailSheet({
         <RainOutSheet
           service={service}
           onClose={() => setShowRainOut(false)}
-          onDone={() => {
-            setShowRainOut(false);
+          onDone={(result) => {
+            // Some stops moved — refresh the board regardless.
             onRescheduled?.(service);
-            onClose?.();
+            // Only dismiss on a clean move; a partial failure keeps the
+            // RainOutSheet open showing which stops still need attention.
+            if (!result?.failedCount) {
+              setShowRainOut(false);
+              onClose?.();
+            }
           }}
         />
       )}
