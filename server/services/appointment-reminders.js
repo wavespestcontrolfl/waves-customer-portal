@@ -488,6 +488,44 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
 const AppointmentReminders = {
 
   /**
+   * Durably register a reminder row for a freshly-created visit using the
+   * caller's transaction (`conn`), so the reminder row commits atomically with
+   * the visit and never depends on a later backfill/sweep to exist. No
+   * confirmation SMS is sent (these are system-seeded visits, not customer
+   * bookings) — confirmation_sent is marked true ("not applicable") so the
+   * 72h/24h reminder pass in checkAndSendReminders() still picks the row up.
+   * Idempotent per scheduled_service_id. Callers should run this inside a
+   * SAVEPOINT (nested trx) and swallow failures so a reminder hiccup can never
+   * roll back the visit/payment it rides with. Unlike registerAppointment() this
+   * takes the caller's conn rather than opening its own transaction.
+   */
+  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source }) {
+    if (!conn || !scheduledServiceId || !customerId) return null;
+    const apptTime = parseETDateTime(appointmentTime);
+    if (isNaN(apptTime.getTime())) return null;
+    const existing = await conn('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id');
+    if (existing) return existing;
+    const now = new Date();
+    const [record] = await conn('appointment_reminders')
+      .insert({
+        scheduled_service_id: scheduledServiceId,
+        customer_id: customerId,
+        appointment_time: apptTime,
+        service_type: smsServiceLabelStored(serviceType) || serviceType || null,
+        source: source || 'system_seed',
+        confirmation_sent: true,
+        confirmation_sent_at: now,
+        reminder_72h_sent: false,
+        reminder_24h_sent: false,
+        cancelled: false,
+      })
+      .returning('*');
+    return record;
+  },
+
+  /**
    * Register an appointment for reminders.
    * Sources: 'booking_new', 'admin_manual' => insert + send confirmation (default)
    *          any other source              => insert only (no confirmation)

@@ -414,6 +414,33 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
     }
   }
 
+  // Register a durable 72h/24h reminder row for each newly-seeded visit in the
+  // SAME transaction (a SAVEPOINT, so a reminder hiccup can never roll back the
+  // prepay/payment this rides with). Every upcoming visit should get reminders,
+  // and these are created here rather than via the normal schedule flow — so
+  // register them at birth instead of relying on a backfill. Date-only
+  // placeholders default to 08:00 (matching how the scheduler reminds windowless
+  // spawns); the time self-corrects if the visit is later given a real window.
+  if (createdRows.length) {
+    const AppointmentReminders = require('./appointment-reminders');
+    for (const created of createdRows) {
+      const startHHMM = created.window_start ? String(created.window_start).slice(0, 5) : '08:00';
+      try {
+        await conn.transaction((sp) =>
+          AppointmentReminders.registerVisitReminderInTx(sp, {
+            scheduledServiceId: created.id,
+            customerId: term.customer_id,
+            appointmentTime: `${dateOnly(created.scheduled_date)}T${startHHMM}`,
+            serviceType: coverageServiceType,
+            source: 'annual_prepay_seed',
+          }),
+        );
+      } catch (err) {
+        logger.warn(`[annual-prepay] seeded-visit reminder registration skipped for ${created.id}: ${err.message}`);
+      }
+    }
+  }
+
   return {
     createdCount: createdRows.length,
     targetDates,

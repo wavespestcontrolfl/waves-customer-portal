@@ -41,6 +41,53 @@ describe('appointment reminder registration deduplication', () => {
     db.transaction = jest.fn(async (callback) => callback(db));
   });
 
+  test('registerVisitReminderInTx inserts a durable, confirmation-skipped row on the caller conn', async () => {
+    const lookup = chain({ first: jest.fn().mockResolvedValue(null) });
+    const insertRow = chain({
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'rem-1' }]),
+    });
+    const queue = [lookup, insertRow];
+    const conn = jest.fn(() => queue.shift());
+
+    const result = await AppointmentReminders.registerVisitReminderInTx(conn, {
+      scheduledServiceId: 'svc-seed-1',
+      customerId: 'cust-1',
+      appointmentTime: '2026-08-01T08:00',
+      serviceType: 'Quarterly Pest Control',
+      source: 'annual_prepay_seed',
+    });
+
+    expect(result).toEqual({ id: 'rem-1' });
+    expect(lookup.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-seed-1' });
+    // No confirmation SMS for system-seeded visits — confirmation_sent=true so the
+    // 72h/24h pass still picks it up; reminder flags start false.
+    expect(insertRow.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_service_id: 'svc-seed-1',
+      customer_id: 'cust-1',
+      source: 'annual_prepay_seed',
+      confirmation_sent: true,
+      reminder_72h_sent: false,
+      reminder_24h_sent: false,
+      cancelled: false,
+    }));
+  });
+
+  test('registerVisitReminderInTx is idempotent — returns the existing row without inserting', async () => {
+    const lookup = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-existing' }) });
+    const conn = jest.fn(() => lookup);
+
+    const result = await AppointmentReminders.registerVisitReminderInTx(conn, {
+      scheduledServiceId: 'svc-seed-1',
+      customerId: 'cust-1',
+      appointmentTime: '2026-08-01T08:00',
+      serviceType: 'Quarterly Pest Control',
+    });
+
+    expect(result).toEqual({ id: 'rem-existing' });
+    expect(lookup.insert).not.toHaveBeenCalled();
+  });
+
   test('merges same-customer same-time services without sending a second confirmation', async () => {
     const existingReminder = {
       id: 'reminder-1',
