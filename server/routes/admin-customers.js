@@ -2397,7 +2397,12 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         prepayInvoiceId: invoice.id,
         planLabel,
         monthlyRate: Math.round((amount / 12) * 100) / 100,
-        prepayAmount: amount,
+        // Store what the customer is actually billed (commercial invoices add
+        // county tax via InvoiceService.create), not the pretax request amount —
+        // applyPrepaidCoverageForTerm splits prepay_amount across the covered
+        // visits, so a pretax value would leave the tax portion uncredited and
+        // make the coverage ledger disagree with the invoice/payment total.
+        prepayAmount: Number(invoice.total),
         termStart,
         termEnd,
         coverageServiceType,
@@ -2580,7 +2585,10 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         prepayInvoiceId: updatedInvoice.id,
         planLabel,
         monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
-        prepayAmount: amount,
+        // Match the recorded payment (inserted below as updatedInvoice.total) and
+        // the coverage ledger: commercial invoices add county tax, so the pretax
+        // request amount would under-credit the prepaid visits.
+        prepayAmount: Number(updatedInvoice.total),
         termStart,
         termEnd,
         coverageServiceType,
