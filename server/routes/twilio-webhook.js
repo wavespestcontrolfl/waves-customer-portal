@@ -770,6 +770,22 @@ router.post('/status', async (req, res) => {
           to: To,
           link: '/admin/communications',
         });
+
+        // Appointment-text fallback: if this undelivered message was an appointment
+        // notification (confirmation / 72h / 24h / en-route), learn the landline on
+        // a 30006 bounce and send the email version so the customer still gets it.
+        // Best-effort, off the webhook response path — never block the 200.
+        try {
+          const AppointmentReminders = require('../services/appointment-reminders');
+          void AppointmentReminders.handleUndeliveredSms({
+            sid: MessageSid,
+            status: MessageStatus,
+            errorCode: ErrorCode,
+            to: To,
+          }).catch((e) => logger.error(`[twilio-status] appointment email fallback failed: ${e.message}`));
+        } catch (e) {
+          logger.error(`[twilio-status] appointment email fallback dispatch failed: ${e.message}`);
+        }
       }
     }
   } catch (err) {
