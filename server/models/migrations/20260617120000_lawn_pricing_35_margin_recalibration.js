@@ -94,26 +94,44 @@ async function applyBrackets(knex, brackets) {
 
 async function updateServices(knex, values) {
   if (!(await knex.schema.hasTable('services'))) return;
-  for (const { service_key, base_price } of values) {
+  // price_range_min is the catalog "from $X" floor read by admin
+  // scheduling/service-library. Scale it with the bracket curve so it never
+  // advertises a minimum the engine can now undercut (e.g. bahia basic $25/mo).
+  const hasRangeMin = await knex.schema.hasColumn('services', 'price_range_min');
+  for (const { service_key, base_price, price_range_min } of values) {
+    const update = { base_price, updated_at: knex.fn.now() };
+    if (hasRangeMin && price_range_min !== undefined) update.price_range_min = price_range_min;
     await knex('services')
       .where({ service_key })
-      .update({ base_price, updated_at: knex.fn.now() });
+      .update(update);
   }
 }
 
 async function mergeConfig(knex, data, name) {
   if (!(await knex.schema.hasTable('pricing_config'))) return;
   const hasIsActive = await knex.schema.hasColumn('pricing_config', 'is_active');
+  // Read-modify-write: this row also carries keys owned by other migrations and
+  // admin edits (e.g. the customer-facing `tiers` block from
+  // 20260615000007_lawn_basic_customer_facing_metadata). We only own the
+  // margin-floor fields, so merge our payload OVER the existing JSON instead of
+  // replacing it wholesale — otherwise this silently undoes that metadata.
+  const existing = await knex('pricing_config').where({ config_key: 'lawn_pricing_v2' }).first('data');
+  let existingData = {};
+  if (existing && existing.data != null) {
+    try { existingData = typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data; }
+    catch { existingData = {}; }
+  }
+  const mergedData = { ...existingData, ...data };
   const insertRow = {
     config_key: 'lawn_pricing_v2',
     name,
     category: 'lawn',
-    data: JSON.stringify(data),
+    data: JSON.stringify(mergedData),
     sort_order: 4,
     created_at: knex.fn.now(),
     updated_at: knex.fn.now(),
   };
-  const mergeRow = { name, data: JSON.stringify(data), updated_at: knex.fn.now() };
+  const mergeRow = { name, data: JSON.stringify(mergedData), updated_at: knex.fn.now() };
   if (hasIsActive) { insertRow.is_active = true; mergeRow.is_active = true; }
   await knex('pricing_config').insert(insertRow).onConflict('config_key').merge(mergeRow);
 }
@@ -148,7 +166,7 @@ async function insertChangelog(knex) {
       lawn_pricing_v2: { targetCollectedMarginFloor: 0.45, pricingMode: 'FORTY_FIVE_MARGIN_FLOOR' },
     }),
     after_value: JSON.stringify({ lawn_pricing_v2: LAWN_PRICING_V2 }),
-    rationale: 'Owner directive 2026-06-17: lower the recurring lawn fully loaded margin floor from 45% to 35%. The 45% market bracket curve was scaled by 0.55/0.65 ≈ 0.846 (a ~15% list reduction) and the cost-floor target dropped to 0.35 so the floor does not clamp the lower curve. Every cell was verified ≥35% fully loaded margin via the live engine. Note: with the list floor now at 35%, WaveGuard tier discounts on lawn are clamped by the 35% post-discount margin guard wherever the floor binds.',
+    rationale: 'Owner directive 2026-06-17: lower the recurring lawn fully loaded margin floor from 45% to 35%. The 45% market bracket curve was scaled by 0.55/0.65 ≈ 0.846 (a ~15% list reduction) and the cost-floor target dropped to 0.35 so the floor does not clamp the lower curve. Every cell was verified ≥35% fully loaded LIST margin via the live engine. Note: lawn is NOT covered by the post-discount margin guard (applyMarginGuard handles only tree_shrub and pest_control); lawn WaveGuard discounts apply in full, capped only by the service discount percentage cap. So a discounted lawn line can fall BELOW the 35% list floor — e.g. a Silver 10% discount on a near-floor line lands in the high-20s collected margin. This is intended given the lower list floor.',
   });
 }
 
@@ -156,10 +174,10 @@ exports.up = async function up(knex) {
   await mergeConfig(knex, LAWN_PRICING_V2, 'Lawn Pricing V2 Dense 35% Floor');
   await applyBrackets(knex, BRACKETS_35);
   await updateServices(knex, [
-    { service_key: 'lawn_care_quarterly', base_price: 30.00 },
-    { service_key: 'lawn_care_recurring', base_price: 38.00 },
-    { service_key: 'lawn_care_6week', base_price: 47.00 },
-    { service_key: 'lawn_care_monthly', base_price: 55.00 },
+    { service_key: 'lawn_care_quarterly', base_price: 30.00, price_range_min: 25.00 },
+    { service_key: 'lawn_care_recurring', base_price: 38.00, price_range_min: 30.00 },
+    { service_key: 'lawn_care_6week', base_price: 47.00, price_range_min: 25.00 },
+    { service_key: 'lawn_care_monthly', base_price: 55.00, price_range_min: 25.00 },
   ]);
   await insertAudit(knex, 0.45, 0.35);
   await insertChangelog(knex);
@@ -177,10 +195,10 @@ exports.down = async function down(knex) {
   }, 'Lawn Pricing V2 Dense 45% Floor');
   await applyBrackets(knex, BRACKETS_45);
   await updateServices(knex, [
-    { service_key: 'lawn_care_quarterly', base_price: 35.00 },
-    { service_key: 'lawn_care_recurring', base_price: 45.00 },
-    { service_key: 'lawn_care_6week', base_price: 55.00 },
-    { service_key: 'lawn_care_monthly', base_price: 65.00 },
+    { service_key: 'lawn_care_quarterly', base_price: 35.00, price_range_min: 30.00 },
+    { service_key: 'lawn_care_recurring', base_price: 45.00, price_range_min: 36.00 },
+    { service_key: 'lawn_care_6week', base_price: 55.00, price_range_min: 30.00 },
+    { service_key: 'lawn_care_monthly', base_price: 65.00, price_range_min: 30.00 },
   ]);
   await insertAudit(knex, 0.35, 0.45);
 };
