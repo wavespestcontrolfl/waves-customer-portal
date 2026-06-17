@@ -100,7 +100,13 @@ async function loadServiceWithCustomer(serviceId) {
 
 // Other not-yet-terminal jobs on this tech's plate today, ordered the
 // way the route runs. Used for the "rest of route" scope.
-async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null) {
+//
+// `fromWindowStart` scopes "rest of route" to the anchor stop and the
+// ones AFTER it — never earlier stops. The tech sheet always anchors on
+// the next stop, so this is a no-op there; but dispatch can rain-out an
+// arbitrary mid-route stop, and moving/texting appointments that fall
+// EARLIER in the day than the one the operator picked would be wrong.
+async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, fromWindowStart = null) {
   if (!technicianId) return [];
   const query = db('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: todayStr })
@@ -108,6 +114,7 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
     .orderBy('window_start', 'asc')
     .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type');
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
+  if (fromWindowStart) query.where('window_start', '>=', fromWindowStart);
   return query;
 }
 
@@ -169,7 +176,7 @@ async function getOptions(serviceId) {
     shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
   }));
 
-  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId);
+  const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service.window_start);
 
   return {
     ok: true,
@@ -285,7 +292,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
   const todayStr = etDateString();
   let jobs;
   if (scope === 'route') {
-    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId);
+    const rest = await remainingRouteJobs(technicianId, todayStr, serviceId, service.window_start);
     jobs = [service, ...rest];
   } else {
     jobs = [service];

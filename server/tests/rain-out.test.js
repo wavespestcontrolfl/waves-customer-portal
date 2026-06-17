@@ -251,10 +251,11 @@ describe('rain-out service', () => {
 
     function wireRoute() {
       const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
+      const routeChain = chain({ rows: ROUTE_JOBS });
       wireDb({
         scheduled_services: [
           chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
-          chain({ rows: ROUTE_JOBS }),
+          routeChain,
         ],
         customers: [
           chain({ first: jest.fn().mockResolvedValue({ id: 'cust-2', phone: '+19415550002', first_name: 'Sam', zip: '34203' }) }),
@@ -262,6 +263,7 @@ describe('rain-out service', () => {
         ],
         reschedule_log: [logRow, chain()],
       });
+      return { routeChain };
     }
 
     test('day move shifts all stops to the new date keeping each window; anchor gets the alt', async () => {
@@ -296,6 +298,24 @@ describe('rain-out service', () => {
       const noPhone = result.results.find((r) => r.id === 'svc-3');
       expect(noPhone.smsSent).toBe(false);
       expect(noPhone.smsReason).toBe('no_phone');
+    });
+
+    test('route scope is bounded to the anchor window — earlier stops are never swept', async () => {
+      const { routeChain } = wireRoute();
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: false,
+      });
+
+      // SERVICE.window_start is 09:00; the "rest of route" query must be
+      // bounded by it so a dispatcher rain-out of a mid-route stop can't
+      // move/text appointments that fall earlier in the day.
+      expect(routeChain.where).toHaveBeenCalledWith('window_start', '>=', '09:00');
     });
 
     test('one stop racing to terminal does not strand the rest', async () => {
