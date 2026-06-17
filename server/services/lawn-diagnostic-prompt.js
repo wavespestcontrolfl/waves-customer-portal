@@ -28,13 +28,29 @@ const MODELS = require('../config/models');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
-const { safeConditionLabel, scrubCustomerText } = require('./lawn-diagnostic-report');
+const { safeConditionLabel, scrubCustomerText, NO_VISIBLE_STRESS_FINDING } = require('./lawn-diagnostic-report');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const PROMPT_VERSION = 'lawn-diagnostic-v0.4';
+const PROMPT_VERSION = 'lawn-diagnostic-v0.5';
 const MAX_PROMPT_IMAGES = 5;
+
+// ── Multi-model pipeline config (env-overridable, no new SDK deps) ─────────────
+// Perception = Gemini Flash (vision); Challenge = Claude Opus 4.8 (the adversarial
+// reasoner — pinned independently of the app-wide FLAGSHIP, which stays Opus 4.7);
+// Writer = GPT-5.5 (OpenAI Responses API). Each is reached by direct REST / SDK,
+// mirroring the existing property-lookup / lawn-assessment integrations.
+const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash';
+const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+// Anthropic challenge model comes from the central registry (server/config/models.js),
+// never a hardcoded ID here — shares the app-wide model swap/check workflow.
+const LAWN_CHALLENGE_MODEL = MODELS.LAWN_CHALLENGE;
+const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+// Dedicated writer override — deliberately NOT chained through the global OPENAI_MODEL
+// (which other services default to a mini tier), so the lawn writer stays GPT-5.5.
+const LAWN_WRITER_MODEL = process.env.LAWN_WRITER_MODEL || 'gpt-5.5';
 
 // ── Curated SWFL St. Augustine reference (selection menu, not free-write) ──────
 const CURATED_REFERENCE = `## CURATED REFERENCE — SW Florida, primarily St. Augustine turf
@@ -192,6 +208,107 @@ Return ONLY this JSON, no markdown, no backticks, no preamble:
   ]
 }`;
 
+// ── STAGE 1: perception prompt (Gemini Flash, vision) ─────────────────────────
+// Identify VISIBLE turf issues only. No diagnosis, no named cause — a later skeptic
+// (Opus) does that. Naming a cause here is an error.
+const PERCEPTION_PROMPT = `# ROLE
+You are a careful lawn-photo OBSERVER for a Southwest Florida lawn care company
+(primarily St. Augustine turf). Report ONLY what is visually present. You do NOT
+diagnose, name a pest/disease/weed species, or assign a cause — a later step does
+that. Naming or concluding a cause here is an error.
+
+# WHAT TO REPORT (per distinct area you can see)
+- location/context: full sun, shade, along a hard edge (driveway/sidewalk), low spot.
+- color: green / yellowing (note new vs older growth if visible) / brown / blue-gray cast.
+- pattern + distribution: patch shape (irregular/circular/diffuse), edges, spread; a few
+  spots vs one section vs widespread.
+- blade/canopy detail visible: lesions, fraying, thinning, matting, weed morphology,
+  mow/scalp stripes.
+- caveats: glare, white-balance, single angle, blur, distance — anything limiting judgment.
+
+# RULES
+- Describe, never conclude: "irregular browning along the sunny driveway edge that looks
+  dry" — NOT "chinch bugs". If you cannot tell, say so; missing detail is valuable.
+- No product names, no treatment advice, no confidence scores, no customer wording.
+
+# OUTPUT
+Return ONLY this JSON, no markdown/backticks:
+{
+  "observations": [
+    {"area":"<short label>","location":"<sun|shade|edge|low spot|unknown>","color":"<...>","pattern":"<...>","distribution":"<a few spots|one section|widespread|unclear>","detail":"<blade/canopy/weed detail or 'not visible'>","caveats":"<capture limits or null>"}
+  ],
+  "overall_notes":"<one neutral sentence on overall condition + photo sufficiency>"
+}`;
+
+// ── STAGE 2: adversarial challenge prompt (Opus, text over observations) ───────
+const CHALLENGE_SYSTEM_PROMPT = `# ROLE
+You are a SKEPTICAL Southwest Florida lawn diagnostician for Waves Pest Control & Lawn
+Care. You are given a photo OBSERVER's notes (visual observations only) plus
+product/compliance context. ADVERSARIALLY test any implied diagnosis and emit honest,
+evidence-gated findings. You do NOT invent agronomy, products, label timing, or numbers —
+you SELECT from the curated reference. Your output feeds a deterministic reconciliation +
+QA layer and may be shown to a prospective customer.
+
+# OPERATING PRINCIPLES
+Accuracy over reassurance. Evidence over assumption. Honest confidence over false
+certainty. Selection over invention.
+
+# THE CHALLENGE (apply to every cause the observations could imply)
+1. What VISIBLE evidence in the observations supports this cause?
+2. What ELSE could explain the same observations (differentials / look-alikes)?
+3. What CANNOT be determined from these photos (no close-up, single angle, no water-
+   response shown, no field test)?
+Only after answering all three, gate the name.
+
+${AUTO_RELEASE_RULE}
+
+## CONFIDENCE RUBRIC (by evidence, not by model agreement)
+- high: multiple corroborating visible signals AND a field test / technician
+  verification, OR a pathognomonic pattern. Only level cleared for definitive wording.
+- moderate: a clear visible pattern consistent with one primary cause, but a credible
+  differential remains; requires the cause's Required signature (curated reference) plus
+  at least one close-up and one context shot in the observations.
+- low: suggestive only — single angle, poor light, a strong competing cause, or the
+  cause's Required signature is not visible (name = symptom at this level).
+- unknown: cannot name even the symptom; describe what little is visible only.
+NAME GATE: assign a cause NAME (chinch, large patch, gray leaf spot, a named weed, a
+specific deficiency) ONLY when that cause's Required signature is present IN THE
+OBSERVATIONS; otherwise the finding name is the SYMPTOM and confidence is low/unknown. Do
+not let season, weather, or a vision score alone promote a symptom to a named cause.
+HARD CAP: photo-only chinch, disease, or drought never exceeds moderate unless a
+confirmation result is present.
+
+## CONFLICT RESOLUTION (precedence)
+technician field test > visible photo evidence > vision score > seasonal/weather prior.
+Weather and season raise suspicion; they never confirm. If two causes cannot be separated
+from the observations, keep BOTH as a differential at lower confidence with a confirmation
+step — do not force one. Negative evidence lowers the confidence of any finding it contradicts.
+
+${CURATED_REFERENCE}
+
+${FALSE_PRECISION_RULE}
+
+# OUTPUT
+Return ONLY this JSON, no markdown, no backticks, no preamble:
+{
+  "findings": [
+    {
+      "finding_id": "F1",
+      "name": "<short condition or symptom>",
+      "confidence": "high|moderate|low|unknown",
+      "severity": "mild|moderate|severe",
+      "spread_risk": "low|moderate|high|unknown",
+      "estimated_area_affected": "<band or null>",
+      "urgency": "monitor|follow_up|immediate_callback",
+      "observed_evidence": ["<cited visual cue from the observations>"],
+      "inferred_context": ["<assumed, not seen>"],
+      "negative_evidence": ["<look-alike ruled out, or detail not visible>"],
+      "confirmation_step": "<field test or closer look that would raise confidence>",
+      "customer_wording": "<one plain, confidence-matched sentence>"
+    }
+  ]
+}`;
+
 // ── PASS B: narrative (customer summary) system prompt ────────────────────────
 const NARRATIVE_SYSTEM_PROMPT = `# ROLE
 You write the single customer_summary paragraph for a Waves Pest Control & Lawn Care
@@ -244,8 +361,8 @@ function normalizeDiagnosisJson(json = {}) {
   };
 }
 
-function buildDiagnosisContext({ visionScores, divergenceFlags, products, compliance, season, grassType } = {}) {
-  return JSON.stringify({
+function diagnosisContextObject({ visionScores, divergenceFlags, products, compliance, season, grassType } = {}) {
+  return {
     season: season || null,
     grass_type: grassType || 'st_augustine (assumed for SWFL)',
     vision_scores: visionScores || null,
@@ -258,7 +375,30 @@ function buildDiagnosisContext({ visionScores, divergenceFlags, products, compli
       label_constraints: product.product_label_constraints || null,
     })),
     compliance: compliance || {},
-  }, null, 2);
+  };
+}
+
+function buildDiagnosisContext(context = {}) {
+  return JSON.stringify(diagnosisContextObject(context), null, 2);
+}
+
+// Minimal OpenAI Responses-API text extractor (mirrors property-lookup-v2's helper).
+function extractOpenAIText(data) {
+  if (typeof data?.output_text === 'string') return data.output_text;
+  const parts = [];
+  for (const item of data?.output || []) {
+    for (const content of item?.content || []) {
+      if ((content?.type === 'output_text' || content?.type === 'text') && content.text) parts.push(content.text);
+    }
+  }
+  return parts.join('');
+}
+
+function parseLooseJson(text) {
+  if (!text) return null;
+  const clean = String(text).replace(/```json|```/g, '').trim();
+  const match = clean.match(/\{[\s\S]*\}/);
+  try { return JSON.parse(match ? match[0] : clean); } catch { return null; }
 }
 
 /**
@@ -298,6 +438,181 @@ async function runDiagnosis(context = {}) {
   } catch (err) {
     logger.error(`[lawn-diagnostic-prompt] runDiagnosis failed: ${err.message}`);
     return { ok: false, reason: 'error' };
+  }
+}
+
+/**
+ * STAGE 1 — perception (Gemini Flash). Photos → visible observations only (no cause).
+ * Returns { ok, observations, overall_notes, model, reason }. Never throws.
+ */
+async function runPerception(context = {}) {
+  if (!GEMINI_KEY) return { ok: false, reason: 'no_gemini_key' };
+  const photos = (context.photos || []).filter((photo) => photo && photo.data).slice(0, MAX_PROMPT_IMAGES);
+  if (!photos.length) return { ok: false, reason: 'no_photos' };
+
+  try {
+    const parts = [
+      ...photos.map((photo) => ({ inline_data: { mime_type: photo.mimeType || 'image/jpeg', data: photo.data } })),
+      { text: `${PERCEPTION_PROMPT}\n\nReport observations for the ${photos.length} photo(s) above. Season: ${context.season || 'unknown'}.` },
+    ];
+    const resp = await fetch(geminiUrl(LAWN_VISION_MODEL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // Room for a "thinking" Flash model to reason AND emit the observations JSON.
+      body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 2048 } }),
+    });
+    if (!resp.ok) {
+      logger.error(`[lawn-diagnostic-prompt] runPerception Gemini ${resp.status}`);
+      return { ok: false, reason: `gemini_${resp.status}` };
+    }
+    const data = await resp.json();
+    // Join ALL text parts — a thinking model can return a thought part before the answer
+    // part, so parts[0] alone would miss the JSON.
+    const text = (data?.candidates?.[0]?.content?.parts || []).map((part) => part && part.text).filter(Boolean).join('');
+    const parsed = parseLooseJson(text);
+    const observations = Array.isArray(parsed?.observations)
+      ? parsed.observations.filter((obs) => obs && typeof obs === 'object')
+      : [];
+    if (!observations.length) return { ok: false, reason: 'no_observations' };
+    return {
+      ok: true,
+      observations,
+      overall_notes: typeof parsed.overall_notes === 'string' ? parsed.overall_notes : '',
+      model: LAWN_VISION_MODEL,
+    };
+  } catch (err) {
+    logger.error(`[lawn-diagnostic-prompt] runPerception failed: ${err.message}`);
+    return { ok: false, reason: 'error' };
+  }
+}
+
+// Provenance for the adversarial layer — so a later "this report looks too generic" or
+// "a cause slipped through" question can see whether the challenge actually ran.
+function challengeMeta(extra = {}) {
+  return {
+    attempted: false,
+    model: LAWN_CHALLENGE_MODEL,
+    passed: false,
+    degraded: false,
+    failureType: null, // null | no_api | timeout | api_error | invalid_json | empty_findings | policy_refusal
+    removedFindingIds: [],
+    softenedFindingIds: [],
+    requiredConfirmationSteps: [],
+    ...extra,
+  };
+}
+
+/**
+ * Deterministic, model-free downgrade for when perception SUCCEEDED but the adversarial
+ * challenge was unavailable. Turns raw observations into a single SYMPTOM-level finding
+ * that names NO cause — "never block" must not mean "publish an un-challenged diagnosis".
+ * The customer sees symptoms + a field-check recommendation; the naming gate keeps any
+ * cause out because the finding is low-confidence and symptom-named.
+ */
+// Observation cues that indicate an actual problem (vs a healthy/green lawn). Used to
+// decide whether the degraded finding is a stress symptom or a clean "no major stress".
+const OBSERVATION_STRESS_RE = /(brown|yellow|chlor|\bthin|bare|sparse|patch|spot|lesion|weed|wilt|\bdry\b|discolor|declin|scalp|mold|mildew|fung|chinch|grub|disease|insect|damage|\bdead\b|stress|stunt|moss|thatch|burn|streak|melt)/i;
+// Strip NEGATED-absence clauses before testing for stress, so "green, uniform, no weeds
+// or lesions visible" is not misread as weeds/lesions PRESENT. Removes from a negation
+// word up to the next clause boundary; real stress in a separate clause survives.
+const NEGATED_CLAUSE_RE = /\b(no|not|without|free of|absent|none|negative for)\b[^.,;:]*/gi;
+
+function symptomFindingsFromObservations(observations = []) {
+  const list = Array.isArray(observations) ? observations.filter((obs) => obs && typeof obs === 'object') : [];
+  if (!list.length) return [];
+  const cues = list
+    .map((obs) => [obs.color, obs.pattern, obs.distribution, obs.detail].filter(Boolean).join(', '))
+    .filter(Boolean)
+    .slice(0, 6);
+  // Only call it stress when the observations actually show a problem — a healthy/green
+  // lawn (incl. "no weeds/lesions visible") must NOT become a "turf stress" finding just
+  // because the challenge stage was unavailable. No stress signal → the canonical
+  // no-visible-stress finding, which routes through the clean minimal/no-diagnosis path.
+  const hasStress = OBSERVATION_STRESS_RE.test(cues.join(' ').replace(NEGATED_CLAUSE_RE, ' '));
+  if (!hasStress) {
+    return [{
+      finding_id: 'F1',
+      name: NO_VISIBLE_STRESS_FINDING,
+      confidence: 'low',
+      severity: 'mild',
+      spread_risk: 'low',
+      estimated_area_affected: null,
+      urgency: 'monitor',
+      observed_evidence: cues,
+      inferred_context: [],
+      negative_evidence: ['adversarial review unavailable — no specific issue named from these photos'],
+      confirmation_step: 'A quick on-site check confirms there is nothing developing.',
+      customer_wording: 'The photos look generally healthy; a quick on-site check confirms there is nothing developing.',
+    }];
+  }
+  return [{
+    finding_id: 'F1',
+    name: 'Visible turf stress',
+    confidence: 'low',
+    severity: 'moderate',
+    spread_risk: 'unknown',
+    estimated_area_affected: null,
+    urgency: 'monitor',
+    observed_evidence: cues,
+    inferred_context: [],
+    negative_evidence: ['adversarial review unavailable — no specific cause is named from these photos'],
+    confirmation_step: 'A field check is recommended before naming a specific cause.',
+    customer_wording: 'The photos show areas of turf stress; several causes are possible, so a closer look is the best next step before naming one.',
+  }];
+}
+
+/**
+ * STAGE 2 — adversarial challenge (Claude Opus 4.8). Observations + context → gated
+ * findings. Returns { ok, findings, reason, challenge } where `challenge` is the
+ * provenance metadata (attempted/passed/degraded/failureType/...). Never throws.
+ */
+async function runChallenge(perception = {}, context = {}) {
+  const client = anthropicClient();
+  if (!client) {
+    return { ok: false, reason: 'no_api', findings: [], challenge: challengeMeta({ degraded: true, failureType: 'no_api' }) };
+  }
+  const observations = Array.isArray(perception.observations) ? perception.observations : [];
+  if (!observations.length) {
+    return { ok: false, reason: 'no_observations', findings: [], challenge: challengeMeta({ degraded: true, failureType: 'empty_findings' }) };
+  }
+
+  try {
+    const payload = JSON.stringify({
+      observations,
+      overall_notes: perception.overall_notes || null,
+      ...diagnosisContextObject(context),
+    }, null, 2);
+    const response = await client.messages.create({
+      model: LAWN_CHALLENGE_MODEL,
+      max_tokens: 1800,
+      system: CHALLENGE_SYSTEM_PROMPT,
+      messages: [{
+        role: 'user',
+        content: `Photo observations + context (JSON):\n${payload}\n\nChallenge each implied cause, then return the findings JSON now.`,
+      }],
+    });
+    let parsed;
+    try { parsed = parseJsonResponse(response); } catch { parsed = null; }
+    if (!parsed) {
+      const failureType = response?.stop_reason === 'refusal' ? 'policy_refusal' : 'invalid_json';
+      return { ok: false, reason: 'empty_response', findings: [], challenge: challengeMeta({ attempted: true, degraded: true, failureType }) };
+    }
+    const normalized = normalizeDiagnosisJson(parsed);
+    if (!normalized.findings.length) {
+      return { ok: false, reason: 'no_findings', findings: [], challenge: challengeMeta({ attempted: true, degraded: true, failureType: 'empty_findings' }) };
+    }
+    const requiredConfirmationSteps = normalized.findings
+      .filter((finding) => String(finding.confidence || '').toLowerCase() !== 'high' && finding.confirmation_step)
+      .map((finding) => finding.confirmation_step);
+    return {
+      ok: true,
+      findings: normalized.findings,
+      challenge: challengeMeta({ attempted: true, passed: true, requiredConfirmationSteps }),
+    };
+  } catch (err) {
+    logger.error(`[lawn-diagnostic-prompt] runChallenge failed: ${err.message}`);
+    const failureType = /abort|timeout|ETIMEDOUT/i.test(err.message || '') ? 'timeout' : 'api_error';
+    return { ok: false, reason: 'error', findings: [], challenge: challengeMeta({ attempted: true, degraded: true, failureType }) };
   }
 }
 
@@ -356,11 +671,51 @@ async function runNarrative(contract = {}, context = {}) {
   }
 }
 
+/**
+ * STAGE 3 — writer (GPT-5.5, OpenAI Responses API). Reconciled contract → the single
+ * customer_summary, from the already-sanitized/allowlisted narrative context only.
+ * Returns { ok, customer_summary, model, reason }. Never throws.
+ */
+async function runWriter(contract = {}, _context = {}) {
+  if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_openai_key' };
+  try {
+    const prompt = `${NARRATIVE_SYSTEM_PROMPT}\n\nReconciled diagnostic contract (JSON):\n${buildNarrativeContext(contract)}\n\nWrite the customer_summary now. Return ONLY {"customer_summary":"..."}.`;
+    const resp = await fetch(OPENAI_RESPONSES_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: JSON.stringify({ model: LAWN_WRITER_MODEL, input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }] }] }),
+    });
+    if (!resp.ok) {
+      logger.error(`[lawn-diagnostic-prompt] runWriter OpenAI ${resp.status}`);
+      return { ok: false, reason: `openai_${resp.status}` };
+    }
+    const data = await resp.json();
+    const parsed = parseLooseJson(extractOpenAIText(data));
+    const summary = parsed && typeof parsed.customer_summary === 'string' ? parsed.customer_summary.trim() : '';
+    if (!summary) return { ok: false, reason: 'empty_summary' };
+    return { ok: true, customer_summary: summary, model: LAWN_WRITER_MODEL };
+  } catch (err) {
+    logger.error(`[lawn-diagnostic-prompt] runWriter failed: ${err.message}`);
+    return { ok: false, reason: 'error' };
+  }
+}
+
 module.exports = {
   PROMPT_VERSION,
+  // The RESOLVED pipeline model IDs (env override or default) — single source of truth
+  // for both the pipeline and the pre-merge readiness check.
+  LAWN_PIPELINE_MODELS: { vision: LAWN_VISION_MODEL, challenge: LAWN_CHALLENGE_MODEL, writer: LAWN_WRITER_MODEL },
   DIAGNOSIS_SYSTEM_PROMPT,
+  CHALLENGE_SYSTEM_PROMPT,
+  PERCEPTION_PROMPT,
   NARRATIVE_SYSTEM_PROMPT,
   CURATED_REFERENCE,
+  // New multi-model pipeline (primary): perceive → challenge → write.
+  runPerception,
+  runChallenge,
+  runWriter,
+  symptomFindingsFromObservations,
+  // Legacy single-call passes, kept as the fallback rungs of the no-block ladder.
   runDiagnosis,
   runNarrative,
   normalizeDiagnosisJson,
