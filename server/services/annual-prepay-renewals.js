@@ -1283,10 +1283,24 @@ async function checkAndSend({ today = etDateString() } = {}) {
         const claimCol = noticeClaimColumnForDaysOut(daysOut);
         this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
       })
-      .where('term_end', target)
+      // Anchor the reminder on the effective coverage end: term_end, OR the last
+      // covered visit when that is the effective end. Finite cadences (e.g. a
+      // quarterly term seeds visits at +0/+3/+6/+9mo while term_end is +12mo) end
+      // service before term_end, so a term_end-only match would fire the reminder
+      // months after coverage actually lapsed (or skip it). Mirrors the
+      // getOpenRenewalAlerts last_scheduled_service_date trigger so the automated
+      // sender and the admin alert list agree.
+      .where(function renewalAnchorMatches() {
+        this.where('term_end', target).orWhere('last_scheduled_service_date', target);
+      })
       .select('*');
 
     for (const term of terms) {
+      // Only treat the last-visit date as the anchor when it is genuinely near
+      // term end (the effective end); a term matched solely by an early
+      // last-service date still reminds on term_end instead.
+      const onTermEnd = dateOnly(term.term_end) === target;
+      if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
       try {
         const result = await sendCustomerTermNotice(term, daysOut);
         if (result.sent) sent++;
