@@ -1053,6 +1053,10 @@ export default function LawnAssessmentPanel() {
               }}
             >
               {[
+                // Tech review stays granular so the tech can correct the
+                // underlying signals that still drive snapshot findings
+                // (disease/thatch) and tech calibration. Customers see the
+                // four consolidated categories on the report/portal.
                 { key: "turf_density", label: "Turf Density" },
                 { key: "weed_suppression", label: "Weed Suppression" },
                 { key: "color_health", label: "Color Health" },
