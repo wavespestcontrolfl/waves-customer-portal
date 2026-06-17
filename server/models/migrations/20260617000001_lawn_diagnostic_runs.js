@@ -7,9 +7,9 @@
  * the GPT-5.5 customer summary on the published report. Without a matching run record,
  * persist falls back to the deterministic, confidence-gated summary.
  *
- * Binding is on findings_hash (the prospect flow applies no products, so the summary is a
- * function of the findings) so a stale/forged persist with different findings can't reuse
- * a challenge-reviewed summary.
+ * Binding is on summary_inputs_hash — a hash of the writer's full narrative context
+ * (findings + treatment + watering + seasonal), so a stale/forged persist with different
+ * findings OR product/compliance/seasonal context can't reuse a challenge-reviewed summary.
  */
 
 exports.up = async function up(knex) {
@@ -25,9 +25,9 @@ exports.up = async function up(knex) {
     t.string('challenge_model', 80).nullable();
     t.string('writer_model', 80).nullable();
     t.string('prompt_version', 60).nullable();
-    t.string('findings_hash', 64).nullable(); // sha256 hex of the normalized findings
+    t.string('summary_inputs_hash', 64).nullable(); // sha256 hex of the writer's narrative context
     // The challenge-reviewed summary (only meaningful for multimodal_challenged + passed);
-    // persist may restore it onto the published report after verifying findings_hash.
+    // persist may restore it onto the published report after verifying summary_inputs_hash.
     t.text('customer_summary').nullable();
     t.timestamps(true, true);
 

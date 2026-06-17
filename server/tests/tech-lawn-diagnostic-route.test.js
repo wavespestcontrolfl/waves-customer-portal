@@ -518,17 +518,22 @@ describe('lawn diagnostic send-gate helpers', () => {
 });
 
 describe('lawn diagnostic durable run provenance', () => {
-  const { hashFindings, shouldUseRunSummary, runProvenanceFields } = techLawnDiagnosticRouter._test;
+  const { hashSummaryInputs, shouldUseRunSummary, runProvenanceFields } = techLawnDiagnosticRouter._test;
+  const { buildDiagnosticReportContract } = require('../services/lawn-diagnostic-report');
+  const findingsA = [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' }];
 
-  test('hashFindings is stable, order-independent, and sensitive to finding changes', () => {
-    const a = [
-      { finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' },
-      { finding_id: 'F2', name: 'Weed pressure', confidence: 'low', severity: 'mild' },
-    ];
-    expect(hashFindings(a)).toBe(hashFindings([a[1], a[0]])); // order-independent
-    expect(hashFindings(a)).not.toBe(hashFindings([{ ...a[0], confidence: 'high' }, a[1]])); // confidence change
-    expect(hashFindings(a)).not.toBe(hashFindings([a[0]])); // dropped finding
-    expect(hashFindings([])).toBe(hashFindings([]));
+  test('hashSummaryInputs binds to the writer narrative context (findings AND product/compliance)', () => {
+    const base = buildDiagnosticReportContract({ findings: findingsA });
+    expect(hashSummaryInputs(base)).toBe(hashSummaryInputs(buildDiagnosticReportContract({ findings: findingsA }))); // stable
+    // changed findings → different hash
+    expect(hashSummaryInputs(base)).not.toBe(hashSummaryInputs(buildDiagnosticReportContract({ findings: [{ ...findingsA[0], confidence: 'high' }] })));
+    // same findings but different product/compliance context (treatment + watering) → different hash
+    const withProduct = buildDiagnosticReportContract({
+      findings: findingsA,
+      products: [{ product_id: 'P1', product_name: 'X', category: 'insecticide', addresses_findings: ['F1'] }],
+      compliance: { irrigation_compliance: { assigned_days: ['Tuesday'] } },
+    });
+    expect(hashSummaryInputs(base)).not.toBe(hashSummaryInputs(withProduct));
   });
 
   test('runProvenanceFields maps findingsSource + challenge provenance to durable mode/status', () => {
@@ -540,11 +545,11 @@ describe('lawn diagnostic durable run provenance', () => {
       .toEqual({ perceptionMode: 'deterministic_fallback', challengeStatus: 'not_run' });
   });
 
-  test('shouldUseRunSummary unlocks the stored summary ONLY for a verified, findings-matched, challenge-passed run', () => {
-    const hash = hashFindings([{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' }]);
-    const good = { challenge_status: 'passed', perception_mode: 'multimodal_challenged', customer_summary: 'GPT-5.5 copy', findings_hash: hash, created_by_technician_id: 'tech-1' };
+  test('shouldUseRunSummary unlocks the stored summary ONLY for a verified, inputs-matched, challenge-passed run', () => {
+    const hash = hashSummaryInputs(buildDiagnosticReportContract({ findings: findingsA }));
+    const good = { challenge_status: 'passed', perception_mode: 'multimodal_challenged', customer_summary: 'GPT-5.5 copy', summary_inputs_hash: hash, created_by_technician_id: 'tech-1' };
     expect(shouldUseRunSummary(good, hash, 'tech-1')).toBe(true);
-    expect(shouldUseRunSummary(good, 'deadbeef', 'tech-1')).toBe(false);                       // forged/stale findings
+    expect(shouldUseRunSummary(good, 'deadbeef', 'tech-1')).toBe(false);                       // forged/stale inputs
     expect(shouldUseRunSummary({ ...good, challenge_status: 'not_run' }, hash, 'tech-1')).toBe(false); // not challenged
     expect(shouldUseRunSummary({ ...good, perception_mode: 'deterministic_fallback' }, hash, 'tech-1')).toBe(false);
     expect(shouldUseRunSummary({ ...good, customer_summary: null }, hash, 'tech-1')).toBe(false);      // no stored summary
