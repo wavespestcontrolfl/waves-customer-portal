@@ -3942,7 +3942,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Immediate/legacy review requests can be bundled into the completion SMS.
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
-    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
+    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms;

@@ -1530,6 +1530,19 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
           updated_at: trx.fn.now(),
         });
 
+        // If apply-credit had activated a linked annual-prepay term, un-pay it:
+        // drop the term back to payment_pending and clear the future-visit
+        // prepaid stamps so covered visits bill normally again. A later real
+        // payment reactivates it (renewal-decided terms are left untouched).
+        if (locked.annual_prepay_term_id) {
+          await trx('annual_prepay_terms')
+            .where({ id: locked.annual_prepay_term_id })
+            .whereNull('renewal_decision')
+            .whereNotIn('status', ['cancelled', 'canceled'])
+            .update({ status: 'payment_pending', updated_at: trx.fn.now() });
+          await AnnualPrepayRenewals.clearPrepaidStampsForTerm(locked.annual_prepay_term_id, trx);
+        }
+
         return { invoice: locked, restore, balanceAfter };
       });
     } catch (err) {
@@ -1538,6 +1551,17 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
     }
 
     const { invoice: reversed, restore, balanceAfter } = outcome;
+
+    // apply-credit completed the follow-up sequence (stopOnPayment); the invoice
+    // is collectible again, so re-arm reminders. resumeSequence reactivates an
+    // existing (completed) row; scheduleForInvoice creates one if none exists.
+    try {
+      const FollowUps = require('../services/invoice-followups');
+      await FollowUps.resumeSequence(id);
+      await FollowUps.scheduleForInvoice(id);
+    } catch (err) {
+      logger.warn(`[admin-invoices:reverse-prepaid] follow-up re-arm failed: ${err.message}`);
+    }
 
     await db('activity_log').insert({
       customer_id: reversed.customer_id,

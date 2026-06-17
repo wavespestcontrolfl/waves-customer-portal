@@ -2415,14 +2415,23 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [loadError, setLoadError] = useState(false);
 
   const load = () => {
+    setLoadError(false);
     adminFetch(`/admin/customers/${customerId}/credits`)
-      .then(setData)
-      .catch(() => {});
+      .then((d) => {
+        setData(d);
+        setLoadError(false);
+      })
+      .catch(() => setLoadError(true));
   };
   useEffect(load, [customerId]);
 
+  // Only treat the ledger as known once a fetch has succeeded. Until then
+  // (or on a load failure) we must NOT show a $0 balance + enabled form —
+  // that invites a duplicate credit against an account that already has one.
+  const loaded = data != null;
   const balance = Number(data?.balance || 0);
   const ledger = data?.ledger || [];
 
@@ -2471,18 +2480,38 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
           <div>
             <div className="u-label text-ink-secondary mb-1">Account credit</div>
             <div className="text-22 text-zinc-900 u-nums leading-none">
-              {fmtCurrency(balance)}
+              {loaded ? fmtCurrency(balance) : loadError ? "—" : "…"}
             </div>
             <div className="text-12 text-ink-tertiary mt-1">
-              Available to apply to invoices
+              {loadError && !loaded
+                ? "Balance unavailable"
+                : "Available to apply to invoices"}
             </div>
           </div>
           {canEdit && (
-            <Button size="sm" variant="secondary" onClick={() => setOpen((v) => !v)}>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!loaded}
+              onClick={() => setOpen((v) => !v)}
+            >
               {open ? "Cancel" : "Issue credit"}
             </Button>
           )}
         </div>
+
+        {loadError && !loaded && (
+          <div className="text-12 text-alert-fg mb-3 flex items-center gap-2">
+            <span>Couldn't load the credit balance.</span>
+            <button
+              type="button"
+              className="underline"
+              onClick={load}
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {open && (
           <div className="border-hairline border-zinc-200 rounded-sm p-3 mb-3 bg-zinc-50">
@@ -2596,9 +2625,9 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
               );
             })}
           </div>
-        ) : (
+        ) : loaded ? (
           <div className="text-12 text-ink-tertiary">No credit history yet</div>
-        )}
+        ) : null}
       </CardBody>
     </Card>
   );
