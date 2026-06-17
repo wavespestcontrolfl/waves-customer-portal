@@ -94,8 +94,8 @@ router.get('/:token', async (req, res, next) => {
           refundStatus: payment.refund_status || refundState,
           refundedAt: payment.refunded_at,
           remainingPaid,
-          state: data.status === 'paid' || data.status === 'prepaid'
-            ? (refundState || data.status)
+          state: data.status === 'paid'
+            ? (refundState || 'paid')
             : data.status,
         }
         : null,
@@ -112,7 +112,7 @@ router.get('/:token/pdf', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Receipt not found' });
-    if (data.status !== 'paid' && data.status !== 'prepaid') return res.status(409).json({ error: 'Receipt not available — invoice unpaid' });
+    if (data.status !== 'paid') return res.status(409).json({ error: 'Receipt not available — invoice unpaid' });
 
     const payment = await loadPaymentForInvoice(data.id, data.customer_id);
     generateReceiptPDF(data, payment, res);

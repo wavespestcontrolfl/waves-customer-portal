@@ -1069,11 +1069,12 @@ export default function PayPageV2() {
     }
   }, [navigate, token]);
 
-  // Already paid / prepaid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit)
+  // Already paid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit).
+  // Prepaid (covered by account credit) does NOT redirect — it renders its own
+  // "covered, nothing due" state below (no payment receipt for credit coverage).
   useEffect(() => {
     if (
       data?.invoice?.status === 'paid' ||
-      data?.invoice?.status === 'prepaid' ||
       data?.invoice?.status === 'processing'
     ) {
       navigate(`/receipt/${token}`, { replace: true });
@@ -1241,6 +1242,26 @@ export default function PayPageV2() {
             <SerifHeading style={{ marginBottom: 12 }}>We couldn't find that invoice</SerifHeading>
             <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
               The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
+            </p>
+          </BrandCard>
+        </div>
+      </WavesShell>
+    );
+  }
+
+  // Prepaid = covered by account credit. No payment is due and we don't show
+  // a payment receipt (the credit may be goodwill, not a cash payment) — just
+  // a friendly confirmation that nothing is owed.
+  if (data.invoice?.status === 'prepaid') {
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
+          <BrandCard>
+            <SerifHeading style={{ marginBottom: 12 }}>You're all set — nothing due</SerifHeading>
+            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+              Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
+              covered by your account credit, so there's no payment to make. Thanks for being a
+              Waves customer! Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
             </p>
           </BrandCard>
         </div>

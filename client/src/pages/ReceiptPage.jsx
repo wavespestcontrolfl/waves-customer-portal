@@ -275,7 +275,7 @@ export default function ReceiptPage() {
   const { invoice, service, customer, payment } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
-  const paid = invoice.status === 'paid' || invoice.status === 'prepaid';
+  const paid = invoice.status === 'paid';
   const processing = invoice.status === 'processing' || payment?.state === 'processing';
   const paidAt = invoice.paidAt || payment?.paymentDate;
   const invoiceMethod = String(invoice.paymentMethod || '').toLowerCase();

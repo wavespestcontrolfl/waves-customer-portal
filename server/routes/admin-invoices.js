@@ -669,7 +669,7 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
         failed.push({ invoiceId, error: 'not found' });
         continue;
       }
-      if (invoice.status !== 'paid' && invoice.status !== 'prepaid') {
+      if (invoice.status !== 'paid') {
         skipped.push({ invoiceId, reason: `status=${invoice.status}` });
         continue;
       }
@@ -1006,8 +1006,8 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoice.status !== 'paid' && invoice.status !== 'prepaid') {
-      return res.status(400).json({ error: 'Invoice is not paid — receipt can only be sent for paid or prepaid invoices' });
+    if (invoice.status !== 'paid') {
+      return res.status(400).json({ error: 'Invoice is not paid — receipt can only be sent for paid invoices' });
     }
 
     const { sendReceiptEmail } = require('../services/invoice-email');
@@ -1475,6 +1475,82 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-invoices] apply-credit failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// POST /:id/reverse-prepaid — undo a prepaid invoice: restore the consumed
+// account credit to the customer and reopen the invoice for collection. This
+// is the repair path for credit applied to the wrong invoice (a prepaid
+// invoice is otherwise non-voidable / edit-locked to protect the credit).
+//
+// Body: { note?: string }
+//
+// The cash row booked at credit issuance is intentionally left in place — the
+// money is simply held as account credit again. Reopens to `sent` (collectible
+// again). Body note is appended to the credit ledger + activity entry.
+router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body || {};
+    const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const locked = await trx('invoices').where({ id }).forUpdate().first();
+        if (!locked) {
+          const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
+        }
+        if (locked.status !== 'prepaid') {
+          const err = new Error('Only a prepaid invoice can be reversed'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+        const restore = CustomerCredit.round2(locked.credit_applied || 0);
+        if (restore <= 0) {
+          const err = new Error('No applied credit to restore'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+
+        const { balanceAfter } = await CustomerCredit.postCreditMovement({
+          customerId: locked.customer_id,
+          delta: restore,
+          source: 'adjustment',
+          invoiceId: id,
+          note: `Prepaid reversal for ${locked.invoice_number}${trimmedNote ? ` — ${trimmedNote}` : ''}`,
+          createdBy: recordedBy,
+        }, trx);
+
+        await trx('invoices').where({ id }).update({
+          status: 'sent',
+          credit_applied: 0,
+          prepaid_at: null,
+          prepaid_by: null,
+          paid_at: null,
+          setup_fee_waived: false,
+          updated_at: trx.fn.now(),
+        });
+
+        return { invoice: locked, restore, balanceAfter };
+      });
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+      throw err;
+    }
+
+    const { invoice: reversed, restore, balanceAfter } = outcome;
+
+    await db('activity_log').insert({
+      customer_id: reversed.customer_id,
+      action: 'invoice_prepaid_reversed',
+      description: `Prepaid reversed on ${reversed.invoice_number} — $${restore.toFixed(2)} credit`
+        + ` restored (balance $${balanceAfter.toFixed(2)}), invoice reopened — ${recordedBy}`
+        + (trimmedNote ? ` — ${trimmedNote.slice(0, 120)}` : ''),
+    }).catch((err) => logger.warn(`[admin-invoices:reverse-prepaid] activity_log insert failed: ${err.message}`));
+
+    const final = await db('invoices').where({ id }).first();
+    res.json({ ok: true, invoice: final, restored: restore, balance: balanceAfter });
+  } catch (err) {
+    logger.error(`[admin-invoices] reverse-prepaid failed: ${err.message}`);
     next(err);
   }
 });

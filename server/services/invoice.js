@@ -1860,7 +1860,7 @@ const InvoiceService = {
    */
   async sendReceipt(invoiceId, { force = false, recordActivity = true } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
-    if (!invoice || (invoice.status !== "paid" && invoice.status !== "prepaid"))
+    if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
 
     if (invoice.receipt_sent_at && !force) {
@@ -2079,7 +2079,7 @@ const InvoiceService = {
       } else if (normalizedStatus === "unpaid") {
         q.whereNotIn("invoices.status", INVOICE_UNCOLLECTIBLE_STATUSES);
       } else if (normalizedStatus === "needs_receipt") {
-        q.whereIn("invoices.status", ["paid", "prepaid"]).whereNull(
+        q.where("invoices.status", "paid").whereNull(
           "invoices.receipt_sent_at",
         );
       } else if (directStatuses.has(normalizedStatus)) {

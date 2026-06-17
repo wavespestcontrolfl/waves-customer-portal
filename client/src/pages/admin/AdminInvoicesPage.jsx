@@ -586,6 +586,27 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     onRefresh();
   };
 
+  const handleReversePrepaid = async (id) => {
+    if (
+      !confirm(
+        "Reverse this prepaid invoice? The applied account credit is returned to the customer and the invoice reopens for collection.",
+      )
+    )
+      return;
+    try {
+      const res = await adminFetch(`/admin/invoices/${id}/reverse-prepaid`, {
+        method: "POST",
+      });
+      showToast(
+        `Prepaid reversed · $${Number(res.restored).toFixed(2)} credit restored`,
+      );
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Reverse failed: ${err.message}`);
+    }
+  };
+
   const handleArchive = async (id) => {
     if (
       !confirm(
@@ -639,11 +660,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     "cancelled",
   ]);
   const sendableInvoices = receiptMode
-    ? invoices.filter(
-        (i) =>
-          (i.status === "paid" || i.status === "prepaid") &&
-          !i.receipt_sent_at,
-      )
+    ? invoices.filter((i) => i.status === "paid" && !i.receipt_sent_at)
     : invoices.filter((i) => invoiceSendableStatuses.has(i.status));
   const selectAllSendable = () =>
     setSelected(
@@ -925,8 +942,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                     ? JSON.parse(inv.line_items)
                     : inv.line_items || [];
                 const canSelect = receiptMode
-                  ? (inv.status === "paid" || inv.status === "prepaid") &&
-                    !inv.receipt_sent_at
+                  ? inv.status === "paid" && !inv.receipt_sent_at
                   : invoiceSendableStatuses.has(inv.status);
                 const isSelected = selected.has(inv.id);
                 const display = getDisplayStatus(inv);
@@ -1190,8 +1206,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                           {inv.status !== "void" && inv.token && (
                             <a
                               href={
-                                inv.status === "paid" ||
-                                inv.status === "prepaid"
+                                inv.status === "paid"
                                   ? `${API_BASE}/receipt/${inv.token}/pdf`
                                   : `${API_BASE}/pay/${inv.token}/invoice.pdf`
                               }
@@ -1204,8 +1219,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                                 alignItems: "center",
                               }}
                               title={
-                                inv.status === "paid" ||
-                                inv.status === "prepaid"
+                                inv.status === "paid"
                                   ? "Download the receipt PDF"
                                   : "Download the invoice PDF"
                               }
@@ -1219,6 +1233,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               style={sBtn("transparent", D.red, isMobile)}
                             >
                               Void
+                            </button>
+                          )}
+                          {inv.status === "prepaid" && (
+                            <button
+                              onClick={() => handleReversePrepaid(inv.id)}
+                              style={sBtn("transparent", D.red, isMobile)}
+                              title="Return the applied account credit to the customer and reopen this invoice"
+                            >
+                              Reverse prepaid
                             </button>
                           )}
                           {inv.status === "void" && !inv.archived_at && (
@@ -1239,9 +1262,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               Unarchive
                             </button>
                           )}
-                          {sendReceiptEnabled &&
-                            (inv.status === "paid" ||
-                              inv.status === "prepaid") && (
+                          {sendReceiptEnabled && inv.status === "paid" && (
                             <button
                               onClick={() => setReceiptModalInvoice(inv)}
                               style={sBtn(

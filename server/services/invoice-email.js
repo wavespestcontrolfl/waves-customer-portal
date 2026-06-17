@@ -259,7 +259,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     : null;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
-  if (invoice.status !== 'paid' && invoice.status !== 'prepaid') return { ok: false, error: 'Invoice not paid' };
+  if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
 
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
@@ -295,39 +295,28 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   }
 
   const first = recipient.name || customer.first_name || 'there';
-  // A `prepaid` invoice was settled from account credit, not a fresh payment
-  // (and goodwill/adjustment credit never involved any money) — so use
-  // credit-covered wording instead of "we received your payment".
-  const coveredByCredit = invoice.status === 'prepaid';
-  const heading = coveredByCredit ? 'Receipt — covered by account credit' : 'Payment received — thank you';
+  const heading = 'Payment received — thank you';
   const memoEscaped = memo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const memoHtml = memo
     ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${memoEscaped}</div>`
     : '';
-  const intro = coveredByCredit
-    ? `Hi ${first}, invoice ${invoice.invoice_number} for ${currency(invoice.total)} has been covered by your account credit — nothing further is due. A printable receipt is attached, and the online copy lives at the link below.`
-    : `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
+  const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
   const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;
   const cardText = (payment?.card_brand && payment?.card_last_four)
     ? `${payment.card_brand.toUpperCase()} ···· ${payment.card_last_four}`
     : (invoice.card_brand && invoice.card_last_four)
       ? `${invoice.card_brand.toUpperCase()} ···· ${invoice.card_last_four}`
       : null;
-  const methodRow = coveredByCredit
-    ? ['Method', 'Account credit']
-    : (cardText ? ['Method', cardText] : null);
-  const amountLabel = coveredByCredit ? 'Amount covered' : 'Amount paid';
-  const dateLabel = coveredByCredit ? 'Date' : 'Paid';
   const lines = [
     ['Invoice', invoice.invoice_number],
     invoice.service_type ? ['Service', invoice.service_type] : null,
-    [dateLabel, formatDate(invoice.paid_at)],
-    methodRow,
-    [amountLabel, currency(invoice.total), true],
+    ['Paid', formatDate(invoice.paid_at)],
+    cardText ? ['Method', cardText] : null,
+    ['Amount paid', currency(invoice.total), true],
   ].filter(Boolean);
   const html = wrapEmail({
-    preheader: `Receipt for ${invoice.invoice_number} — ${currency(invoice.total)} ${coveredByCredit ? 'covered by account credit' : 'paid'}.`,
+    preheader: `Receipt for ${invoice.invoice_number} — ${currency(invoice.total)} paid.`,
     heading,
     intro: introWithMemo,
     lines,
@@ -343,9 +332,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     memo ? `Note from Waves: ${memo}` : null,
     '',
     `Invoice: ${invoice.invoice_number}`,
-    `${dateLabel}: ${formatDate(invoice.paid_at)}`,
-    methodRow ? `Method: ${methodRow[1]}` : null,
-    `${amountLabel}: ${currency(invoice.total)}`,
+    `Paid: ${formatDate(invoice.paid_at)}`,
+    cardText ? `Method: ${cardText}` : null,
+    `Amount: ${currency(invoice.total)}`,
     '',
     `View receipt online: ${receiptUrl}`,
     '',
