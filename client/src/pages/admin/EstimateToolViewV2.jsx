@@ -4897,14 +4897,6 @@ export default function EstimateToolViewV2({
               {form.svcDethatch && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="grid grid-cols-2 gap-3">
-                    <FieldV2 label="Lawn Sq Ft Used">
-                      <input
-                        type="text"
-                        readOnly
-                        value={`${Math.round(effectiveTurfSqFt || 0).toLocaleString()} sf`}
-                        className={cn(INPUT_CLS, "bg-white text-ink-secondary")}
-                      />
-                    </FieldV2>
                     <FieldV2 label="Grass Type / Track">
                       <SelectV2
                         k="grassType"
