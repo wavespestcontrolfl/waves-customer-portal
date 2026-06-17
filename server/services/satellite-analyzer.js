@@ -17,7 +17,8 @@ const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
-const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL
+  || (process.env.GATE_GEMINI_VISION_PRIMARY === 'true' ? MODELS.GEMINI_VISION_BEST : 'gemini-2.5-flash');
 
 const VISION_PROMPT = `Analyze this satellite/aerial image of a residential property in Southwest Florida. Estimate the following measurements and features as accurately as possible from the image.
 
