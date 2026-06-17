@@ -196,6 +196,40 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('does not overwrite a manual cash/Zelle prepaid stamp when activating coverage', async () => {
+    const rows = [
+      // Independently prepaid (cash) and already linked to this term by
+      // attachScheduledServices — its real out-of-band payment must survive.
+      { id: 'svc-1', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'pending', prepaid_amount: 75, prepaid_method: 'cash', annual_prepay_term_id: 'term-1' },
+      { id: 'svc-2', customer_id: 'customer-1', scheduled_date: '2026-09-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+    ];
+    const columnQuery = query({
+      columnInfo: {
+        prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {},
+      },
+    });
+    const rowsQuery = query({ rows });
+    const updateTwo = query({ returning: [{ id: 'svc-2' }] });
+    // Only svc-2 should be stamped; if the guard failed and svc-1 were restamped,
+    // the second update would hit an empty queue and throw.
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, updateTwo] });
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm({
+      id: 'term-1',
+      customer_id: 'customer-1',
+      prepay_amount: 400,
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 2,
+    });
+
+    expect(result.stampedCount).toBe(1);
+    expect(updateTwo.update).toHaveBeenCalledWith(expect.objectContaining({
+      prepaid_method: 'annual_prepay_invoice',
+    }));
+  });
+
   test('creates the quarterly coverage series when no matching visits already exist', async () => {
     const columnQuery = query({
       columnInfo: {

@@ -556,8 +556,16 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     if (
       row.prepaid_amount != null
       && Number(row.prepaid_amount) > 0
-      && row.annual_prepay_term_id
-      && String(row.annual_prepay_term_id) !== String(term.id)
+      && (
+        // Already covered by a DIFFERENT annual-prepay term.
+        (row.annual_prepay_term_id && String(row.annual_prepay_term_id) !== String(term.id))
+        // OR independently prepaid (cash/Zelle/etc.) through the regular schedule
+        // route — attachScheduledServices may have linked it to this term, but its
+        // stamp is a real out-of-band payment. Don't overwrite the method, or the
+        // void/unflag cleanup (method-scoped) would later clear an already-collected
+        // visit and completion billing would re-invoice it.
+        || (row.prepaid_method && row.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD)
+      )
     ) {
       continue;
     }
