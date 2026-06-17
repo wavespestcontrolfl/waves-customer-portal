@@ -666,9 +666,11 @@ function classifyReleaseMode(contract = {}) {
 
 // Condition nouns that must never appear as a "confirmed/active" claim in customer
 // copy. Shared by the adjective-form and predicate-form passes so the two stay in
-// sync — the predicate form previously omitted fungus/drought/multi-word diseases,
-// letting "fungus is confirmed" / "large patch is confirmed" slip through.
-const CONFIRMABLE_CONDITION = 'chinch(?:\\s*bugs?)?|fungus|fungal|disease|large patch|brown patch|gray leaf spot|grey leaf spot|dollar spot|drought|grubs?|insect|infestation';
+// sync. LOCKSTEP CONTRACT: this list + SUMMARY_CAUSE_RE + the public test's
+// GOVERNED_CAUSE must all cover the cause-mapped CONDITION_LABELS entries — when a new
+// cause label is added, update every one (else "<new cause> is confirmed" slips through
+// the moderate+ summary that the low-confidence gate never touches).
+const CONFIRMABLE_CONDITION = 'chinch(?:\\s*bugs?)?|fungus|fungal|disease|large patch|brown patch|gray leaf spot|grey leaf spot|leaf spot|dollar spot|mold|mildew|drought|water stress|grubs?|army\\s?worms?|sod\\s?webworms?|caterpillars?|worms?|insect|pest|infestation';
 
 // Downgrade any over-confident pest/disease/drought wording to suggestive form.
 // Safety net for LLM-authored copy; deterministic copy never says "confirmed".

@@ -491,6 +491,17 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(scrubCustomerText('Large patch is confirmed here.')).toMatch(/most consistent with/i);
   });
 
+  test('confirmed-language scrubber stays in lockstep with the cause labels (caterpillar/worm/mold/mildew/leaf spot)', () => {
+    // These name governed causes too, so a moderate+ "<cause> is confirmed" claim must
+    // also be downgraded — the noun list can't lag the condition labels. Phrasings put
+    // the cause noun directly before "is/are confirmed" (the predicate-form pattern).
+    for (const claim of ['Powdery mildew is confirmed', 'Mold is confirmed', 'Caterpillars are confirmed', 'Sod webworm is confirmed', 'Leaf spot is confirmed']) {
+      expect(scrubCustomerText(`${claim} in the photographed area.`)).not.toMatch(/\bconfirmed\b/i);
+    }
+    // adjective form too
+    expect(scrubCustomerText('We saw active caterpillar damage.')).toMatch(/suspected caterpillar/i);
+  });
+
   test('scrubCustomerText strips emails, phone numbers, and links from egress copy', () => {
     const out = scrubCustomerText('Reach me at tech@waves.com or 941-555-1234, see https://x.co/abc.');
     expect(out).not.toMatch(/@waves\.com/);
