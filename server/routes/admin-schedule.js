@@ -1389,6 +1389,11 @@ router.get('/week', async (req, res, next) => {
           skipWeekends: !!s.skip_weekends,
           weekendShift: s.weekend_shift || null,
           sourceEstimateId: s.source_estimate_id || null,
+          // The day endpoint stamps scheduledDate on each service; the week
+          // payload historically left it on the day wrapper only. Carry it
+          // onto the service too so the mobile detail sheet (date display +
+          // rain-out gating) behaves identically in week view.
+          scheduledDate: dateStr,
         };
       }));
 

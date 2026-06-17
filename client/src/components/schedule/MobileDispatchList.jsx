@@ -390,7 +390,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatm
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
+export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -413,7 +413,9 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
         setError(e.message || 'Failed to load week');
         setLoading(false);
       });
-  }, [mode, weekStart]);
+    // refreshKey bumps when a parent mutation (e.g. a rain-out that moves a
+    // stop to another day) invalidates the cached week list.
+  }, [mode, weekStart, refreshKey]);
 
   if (mode === 'day') {
     return (

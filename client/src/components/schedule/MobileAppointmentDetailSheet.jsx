@@ -18,6 +18,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { TIMEZONE } from '../../lib/timezone';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
+import RainOutSheet from './RainOutSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -110,12 +111,14 @@ export default function MobileAppointmentDetailSheet({
   onBookNext,
   onCancelled,
   onNoShow,
+  onRescheduled,
 }) {
   const [note, setNote] = useState(service?.notes || '');
   const [savingNote, setSavingNote] = useState(false);
   const [noteSavedAt, setNoteSavedAt] = useState(null);
   const [actionBusy, setActionBusy] = useState('');
   const [showCustomer, setShowCustomer] = useState(false);
+  const [showRainOut, setShowRainOut] = useState(false);
   const [estimateSource, setEstimateSource] = useState(null);
 
   useEffect(() => {
@@ -183,6 +186,12 @@ export default function MobileAppointmentDetailSheet({
   const canCompleteService = ['en_route', 'on_site', 'pending', 'confirmed', 'rescheduled'].includes(
     String(service?.status || '').toLowerCase(),
   );
+  // Rain-out is a same-day "weather is hitting the route now" action — the
+  // server 409s any job dated to a future day, so only surface it on a
+  // movable stop scheduled for today (ET).
+  const etTodayStr = new Date().toLocaleDateString('en-CA', { timeZone: TIMEZONE });
+  const jobDateStr = String(service?.scheduledDate || '').split('T')[0];
+  const canRainOut = jobDateStr === etTodayStr && canCompleteService;
 
   const saveNote = async () => {
     if (!noteDirty) return true;
@@ -548,6 +557,17 @@ export default function MobileAppointmentDetailSheet({
           >
             {actionBusy === 'noshow' ? 'Saving…' : 'Mark as no-show'}
           </button>
+          {canRainOut && (
+            <button
+              type="button"
+              onClick={() => setShowRainOut(true)}
+              disabled={!!actionBusy}
+              className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 u-focus-ring disabled:opacity-50"
+              style={{ padding: '14px 20px', fontSize: 16 }}
+            >
+              ⛈️ Rain out
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onBookNext?.(service)}
@@ -566,6 +586,27 @@ export default function MobileAppointmentDetailSheet({
         <MobileCustomerDetailSheet
           customerId={service.customerId}
           onClose={() => setShowCustomer(false)}
+        />
+      )}
+
+      {/* Rain-out sheet — moves this visit (or the rest of the assigned
+          tech's route) off the weather and texts the customer. On commit
+          the appointment leaves the current view, so refresh the board
+          and dismiss this detail sheet. */}
+      {showRainOut && service.id && (
+        <RainOutSheet
+          service={service}
+          onClose={() => setShowRainOut(false)}
+          onDone={(result) => {
+            // Some stops moved — refresh the board regardless.
+            onRescheduled?.(service);
+            // Only dismiss on a clean move; a partial failure keeps the
+            // RainOutSheet open showing which stops still need attention.
+            if (!result?.failedCount) {
+              setShowRainOut(false);
+              onClose?.();
+            }
+          }}
         />
       )}
     </div>,
