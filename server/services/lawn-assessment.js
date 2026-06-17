@@ -23,12 +23,10 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
-// Gemini vision scorer model. Flag-gated upgrade to the registry's best
-// (gemini-3.5-flash); default stays gemini-2.5-flash until GATE_GEMINI_VISION_PRIMARY
-// is flipped. Fan-out/averaging logic is unchanged — only the model ID moves.
-const GEMINI_VISION_MODEL = process.env.GATE_GEMINI_VISION_PRIMARY === 'true'
-  ? MODELS.GEMINI_VISION_BEST
-  : 'gemini-2.5-flash';
+// Gemini vision scorer model — live default is the registry's best
+// (gemini-3.5-flash); override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
+// Fan-out/averaging logic is unchanged — only the model ID moves.
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 
 const VISION_PROMPT = `You are a lawn health assessment tool for a professional lawn care company in Southwest Florida. Analyze the provided lawn photo and return ONLY a JSON object with the following scores. Base your analysis on what is visible in the photo. The primary turf type in this region is St. Augustine grass.
 

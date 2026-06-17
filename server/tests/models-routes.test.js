@@ -16,6 +16,7 @@ describe('models registry — cross-provider routing', () => {
     expect(M.PROVIDER).toMatchObject({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini' });
     expect(M.ROUTES.leadClassify).toEqual({ provider: M.PROVIDER.OPENAI, model: M.OPENAI_BEST });
     expect(M.ROUTES.knowledgeAnswer).toEqual({ provider: M.PROVIDER.OPENAI, model: M.OPENAI_BEST });
+    expect(M.ROUTES.estimateAssistant).toEqual({ provider: M.PROVIDER.OPENAI, model: M.OPENAI_BEST });
   });
 
   test('cross-provider defaults (env or fallback)', () => {

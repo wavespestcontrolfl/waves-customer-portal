@@ -3,7 +3,7 @@ const MODELS = require('../config/models');
 const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 const { loadEstimateAiSupportContext } = require('./estimate-ai-context');
-const { shadowCompare, textAgreement } = require('./model-comparison-log');
+const { dispatch } = require('./llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -850,6 +850,23 @@ function extractAnthropicText(response = {}) {
     .trim();
 }
 
+function buildAssistantUserContent(question, context) {
+  return `Customer question:\n${question}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`;
+}
+
+// Live model — GPT-5.5 (ROUTES.estimateAssistant). Prose answer (jsonMode:false);
+// on any miss returns null so answerEstimateQuestion falls back to Claude.
+async function answerWithOpenAI(question, context) {
+  const r = await dispatch(MODELS.ROUTES.estimateAssistant, {
+    system: SYSTEM_PROMPT,
+    text: buildAssistantUserContent(question, context),
+    jsonMode: false,
+    maxTokens: 420,
+  });
+  if (!r.ok || !r.text) return null;
+  return cleanAssistantAnswer(r.text) || null;
+}
+
 async function answerWithAnthropic(question, context) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -859,7 +876,7 @@ async function answerWithAnthropic(question, context) {
     system: SYSTEM_PROMPT,
     messages: [{
       role: 'user',
-      content: `Customer question:\n${question}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`,
+      content: buildAssistantUserContent(question, context),
     }],
   });
   return extractAnthropicText(response);
@@ -907,31 +924,18 @@ async function answerEstimateQuestion({
     };
   }
 
+  // Live model — GPT-5.5. On any miss, fall back to Claude (WORKHORSE), then the
+  // deterministic template — the customer always gets an answer.
+  try {
+    const openAiAnswer = await answerWithOpenAI(cleanQuestion, context);
+    if (openAiAnswer) return { answer: openAiAnswer, source: 'openai' };
+  } catch (err) {
+    logger.warn(`[estimate-assistant] OpenAI answer failed: ${err.message}`);
+  }
+
   try {
     const aiAnswer = await answerWithAnthropic(cleanQuestion, context);
-    if (aiAnswer) {
-      // Shadow-only (GATE_SHADOW_ESTIMATE_OPENAI): run the OpenAI candidate on the SAME
-      // prompt and log live-vs-candidate to ai_model_comparisons. Fire-and-forget AFTER
-      // the live answer is ready — never adds latency to the customer response, never
-      // replaces it. Mirrors answerWithAnthropic's user content exactly.
-      if (process.env.GATE_SHADOW_ESTIMATE_OPENAI === 'true') {
-        void shadowCompare({
-          featureKey: 'estimate_assistant',
-          entityType: 'estimate',
-          entityId: estimate?.id || null,
-          live: { provider: 'anthropic', model: process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE, output: aiAnswer },
-          candidateRoute: MODELS.ROUTES.estimateAssistant,
-          candidatePayload: {
-            system: SYSTEM_PROMPT,
-            text: `Customer question:\n${cleanQuestion}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`,
-            jsonMode: false,
-            maxTokens: 420,
-          },
-          compare: textAgreement,
-        });
-      }
-      return { answer: aiAnswer, source: 'anthropic' };
-    }
+    if (aiAnswer) return { answer: aiAnswer, source: 'anthropic' };
   } catch (err) {
     logger.warn(`[estimate-assistant] AI answer failed: ${err.message}`);
   }
