@@ -12,18 +12,9 @@
 
 import { ArrowLeft } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { getStripe } from '../../lib/stripeLoader';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-function loadStripeJs(publishableKey) {
-  return new Promise((resolve) => {
-    if (window.Stripe) return resolve(window.Stripe(publishableKey));
-    const script = document.createElement('script');
-    script.src = 'https://js.stripe.com/v3/';
-    script.onload = () => resolve(window.Stripe(publishableKey));
-    document.head.appendChild(script);
-  });
-}
 
 export default function MobileManualCardSheet({
   desktopVisible = false,
@@ -62,7 +53,7 @@ export default function MobileManualCardSheet({
         const setup = await setupRes.json();
         if (cancelled) return;
 
-        const stripe = await loadStripeJs(setup.publishableKey);
+        const stripe = await getStripe(setup.publishableKey);
         if (cancelled) return;
         stripeRef.current = stripe;
 

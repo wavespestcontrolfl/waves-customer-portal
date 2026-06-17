@@ -90,6 +90,7 @@ import {
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
+import { getStripe } from '../lib/stripeLoader';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -101,25 +102,6 @@ function shouldDefaultSaveCard(search = '') {
   } catch {
     return false;
   }
-}
-
-// ── Stripe SDK loader (loads once, caches) ─────────────────────────
-let stripePromise = null;
-function getStripe(publishableKey) {
-  if (stripePromise) return stripePromise;
-  stripePromise = new Promise((resolve, reject) => {
-    if (window.Stripe) {
-      resolve(window.Stripe(publishableKey));
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = 'https://js.stripe.com/v3/';
-    script.async = true;
-    script.onload = () => resolve(window.Stripe(publishableKey));
-    script.onerror = () => reject(new Error('Failed to load Stripe'));
-    document.head.appendChild(script);
-  });
-  return stripePromise;
 }
 
 function paymentErrorPayload(err, extra = {}) {
@@ -346,6 +328,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [elementError, setElementError] = useState(null);
+  // Stripe.js failed to load (network/blocker). The shared loader already
+  // auto-retries; this surfaces a one-tap Retry once those are exhausted so the
+  // customer never has to reload the whole page to recover.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadNonce, setLoadNonce] = useState(0);
   const [selectedMethod, setSelectedMethod] = useState('card');
   // Initial fallback uses the same two-step rounding as server
   // computeChargeAmount so the customer's first paint matches the
@@ -440,6 +427,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   useEffect(() => {
     if (!publishableKey || !clientSecret) return;
     let cancelled = false;
+    if (loadFailed) setLoadFailed(false);
 
     (async () => {
       try {
@@ -598,6 +586,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       } catch (err) {
         if (!cancelled) {
           const message = err.message || 'Failed to initialize payment form';
+          setLoadFailed(true);
           onError?.(message);
           reportPaymentError(token, paymentErrorPayload(err, {
             phase: 'payment_form_init',
@@ -611,7 +600,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [publishableKey, clientSecret]);
+  }, [publishableKey, clientSecret, loadNonce]);
 
   const isCardFamily = selectedMethod !== 'us_bank_account';
   const pct = '3';
@@ -802,6 +791,41 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     { value: 'card', title: 'Card or wallet', detail: 'Up to 3% credit card surcharge', icon: 'card' },
     { value: 'us_bank_account', title: 'Bank account', detail: 'No added fee', icon: 'building' },
   ];
+
+  if (loadFailed) {
+    return (
+      <div style={{
+        display: 'grid',
+        gap: 12,
+        padding: 16,
+        borderRadius: 8,
+        background: '#FFF7ED',
+        border: '1px solid #FED7AA',
+        textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--text)' }}>
+          We couldn’t load the secure payment form. This is usually a brief network hiccup.
+        </div>
+        <button
+          type="button"
+          onClick={() => { onError?.(null); setLoadFailed(false); setLoadNonce((n) => n + 1); }}
+          style={{
+            justifySelf: 'center',
+            padding: '10px 20px',
+            borderRadius: 8,
+            border: 'none',
+            background: 'var(--brand, #0a6cff)',
+            color: '#fff',
+            fontSize: 14,
+            fontWeight: 500,
+            cursor: 'pointer',
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>

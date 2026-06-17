@@ -47,6 +47,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import api from '../../utils/api';
 import { etDateString, addETDays } from '../../lib/timezone';
+import { getStripe } from '../../lib/stripeLoader';
 import {
   buildSetupIntentReturnUrl,
   clearReturnedSetupIntent,
@@ -68,16 +69,6 @@ const PORTAL_BILLING = {
   body: '#3F4A65',
   muted: '#6B7280',
 };
-
-function loadStripeJs(publishableKey) {
-  return new Promise((resolve) => {
-    if (window.Stripe) return resolve(window.Stripe(publishableKey));
-    const script = document.createElement('script');
-    script.src = 'https://js.stripe.com/v3/';
-    script.onload = () => resolve(window.Stripe(publishableKey));
-    document.head.appendChild(script);
-  });
-}
 
 const AUTOPAY_CARD_STYLE = {
   background: PORTAL_BILLING.surface,
@@ -320,7 +311,7 @@ export default function AutopayCard({ onStateChange }) {
     setStripeReady(false);
     try {
       const setupData = await api.createSetupIntent('card_or_bank');
-      const stripe = await loadStripeJs(setupData.publishableKey);
+      const stripe = await getStripe(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
       elementsRef.current = elements;

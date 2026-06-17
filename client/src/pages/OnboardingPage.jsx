@@ -11,6 +11,7 @@ import {
 } from '../components/brand';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { etDateString } from '../lib/timezone';
+import { getStripe } from '../lib/stripeLoader';
 import {
   buildSetupIntentReturnUrl,
   clearReturnedSetupIntent,
@@ -27,24 +28,6 @@ const STEPS = [
   { label: 'Visit', icon: 'calendar' },
   { label: 'Done', icon: 'checkCircle' },
 ];
-
-let stripePromise = null;
-function loadStripeJs(publishableKey) {
-  if (stripePromise) return stripePromise;
-  stripePromise = new Promise((resolve, reject) => {
-    if (window.Stripe) {
-      resolve(window.Stripe(publishableKey));
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = 'https://js.stripe.com/v3/';
-    script.async = true;
-    script.onload = () => resolve(window.Stripe(publishableKey));
-    script.onerror = () => reject(new Error('Failed to load Stripe'));
-    document.head.appendChild(script);
-  });
-  return stripePromise;
-}
 
 async function apiFetch(path, opts = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -645,7 +628,7 @@ export default function OnboardingPage() {
       try {
         setStripeFatalError(false);
         const setupData = await apiFetch(`/onboarding/${token}/setup-intent`, { method: 'POST' });
-        const stripe = await loadStripeJs(setupData.publishableKey);
+        const stripe = await getStripe(setupData.publishableKey);
         stripeRef.current = stripe;
         const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
         elementsRef.current = elements;
