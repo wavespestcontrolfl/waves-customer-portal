@@ -1385,6 +1385,16 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         } catch (err) {
           err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
         }
+        // A customer could have opened /pay/:token/setup between our pre-lock
+        // PI triage and this row lock, minting a NEW PaymentIntent (its own
+        // lock released by now). If the invoice's PI changed from the one we
+        // triaged/cancelled, refuse — the operator retries and the new PI gets
+        // triaged. Without this, we'd consume credit while a live client
+        // secret could still charge the card.
+        if ((locked.stripe_payment_intent_id || null) !== (openPiId || null)) {
+          const err = new Error('A new payment session started for this invoice — retry applying credit');
+          err.statusCode = 409; err.isOperational = true; throw err;
+        }
         const lockedTotal = CustomerCredit.round2(locked.total || 0);
         const lockedDue = CustomerCredit.round2(lockedTotal - CustomerCredit.round2(locked.credit_applied || 0));
         if (lockedDue <= 0) {

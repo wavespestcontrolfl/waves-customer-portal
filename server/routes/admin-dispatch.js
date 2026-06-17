@@ -3674,7 +3674,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     try {
       if (!recapReviewOnly) {
         const existingPaid = await db('invoices')
-          .where({ service_record_id: record.id, status: 'paid' })
+          .where({ service_record_id: record.id })
+          .whereIn('status', ['paid', 'prepaid'])
           .first();
         if (existingPaid) alreadyPaid = true;
       }
@@ -3718,7 +3719,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 }
               )
             : null;
-          if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
+          if (['paid', 'prepaid'].includes(existingCompletionInvoice.status)) alreadyPaid = true;
           else invoiceCreated = true;
         }
       }
@@ -3842,7 +3843,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .forUpdate()
           .first();
         if (!lockedInvoice) return invoiceRow;
-        if (lockedInvoice.status === 'paid') return lockedInvoice;
+        if (['paid', 'prepaid'].includes(lockedInvoice.status)) return lockedInvoice;
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) return lockedInvoice;
         const existingCredit = await trx('payments')
