@@ -31,6 +31,21 @@ const RECOVERY_CATEGORY = 'bounce_recovery';
 // held the bounced address. Hardcoded constant — safe to interpolate into SQL.
 const CUSTOMER_EMAIL_FIELDS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
 
+// Templates known to carry binary attachments (invoice/receipt/report PDFs).
+// The has_attachments flag is authoritative for go-forward sends, but rows
+// predating that column (migration default false) or any direct inserter that
+// forgets to stamp it would otherwise be replayed body-only. Treating these
+// template keys as attachment-bearing fails CLOSED → manual recovery, never a
+// body-only replay of a PDF email. Keep in sync with the attachment senders.
+const ATTACHMENT_TEMPLATE_KEYS = new Set([
+  'invoice.sent',
+  'invoice.receipt',
+  'service.report_ready',
+  'service.report_ready.legacy',
+  'project.report_ready',
+  'project.report_with_invoice',
+]);
+
 function recoveryEnabled() {
   return String(process.env.EMAIL_BOUNCE_RECOVERY || '').toLowerCase() !== 'off';
 }
@@ -362,7 +377,10 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
     const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
     const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
-    const hasAttachments = !!bouncedMessage.has_attachments;
+    // Fail closed: the stored flag OR a known attachment-bearing template (covers
+    // pre-flag rows and any direct inserter that didn't stamp has_attachments).
+    const hasAttachments = !!bouncedMessage.has_attachments
+      || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
     const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, min: minConfidence() });
 
     const baseUpdate = {

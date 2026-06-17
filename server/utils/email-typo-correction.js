@@ -132,14 +132,21 @@ function splitEmail(email) {
 function closestKnownDomain(domain) {
   let best = null;
   let bestDist = Infinity;
+  let tie = false;
   for (const known of KNOWN_DOMAINS) {
     const dist = damerauLevenshtein(domain, known);
     if (dist < bestDist) {
       bestDist = dist;
       best = known;
+      tie = false;
+    } else if (dist === bestDist) {
+      tie = true;
     }
   }
-  return { domain: best, distance: bestDist };
+  // `tie` = the minimum distance is shared by more than one provider, so the
+  // nearest match is ambiguous (e.g. "mail.com" is distance 1 from both
+  // gmail.com and ymail.com).
+  return { domain: best, distance: bestDist, tie };
 }
 
 /**
@@ -189,8 +196,11 @@ function correctEmailDomain(email) {
 
   // Rule 3 — fuzzy match the whole domain to the nearest known provider.
   // Damerau distance 1 (incl. transposition) is high; distance 2 is medium.
-  const { domain: nearest, distance } = closestKnownDomain(domain);
-  if (nearest && nearest !== domain) {
+  // Require the nearest match to be UNIQUE: a tie (e.g. "mail.com" equidistant
+  // from gmail.com and ymail.com) is ambiguous and must not auto-resend a
+  // transactional snapshot to a guessed mailbox.
+  const { domain: nearest, distance, tie } = closestKnownDomain(domain);
+  if (nearest && nearest !== domain && !tie) {
     if (distance === 1) return build(nearest, 'domain_typo', 'high');
     if (distance === 2) return build(nearest, 'domain_typo', 'medium');
   }

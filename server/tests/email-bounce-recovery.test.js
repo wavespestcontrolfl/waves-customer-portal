@@ -274,6 +274,23 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('attachment');
   });
+
+  test('fails closed on a known attachment template even when has_attachments is unset (legacy row)', async () => {
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    db.mockImplementation(orderedDb({
+      first: () => null,
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec5' }] : []),
+    }));
+
+    const res = await recovery.attemptRecovery(
+      // Legacy direct-inserter row: attachment-bearing template, flag not stamped.
+      { id: 'orig5', recipient_email_snapshot: 'jane@gmial.com', template_key: 'service.report_ready.legacy', suppression_group_key_snapshot: 'service_operational', categories: ['service_report_v1'], has_attachments: false },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(res).toEqual({ skipped: 'has_attachments' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
 });
 
 // Thenable + chainable mock so `await db(...).where(...).catch(...)` resolves to rows.

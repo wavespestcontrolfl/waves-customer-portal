@@ -75,6 +75,11 @@ describe('email-typo-correction: correctEmailDomain', () => {
     expect(r.corrected).toBe('jhon.doee@gmail.com');
   });
 
+  test('rejects an ambiguous (tied) nearest match — never guesses', () => {
+    // mail.com is Damerau distance 1 from BOTH gmail.com and ymail.com.
+    expect(correctEmailDomain('jane@mail.com')).toBeNull();
+  });
+
   test('two-edit domain typos are medium confidence (gated out by default)', () => {
     // 'gmaul' -> 'gmail' is one substitution; build a genuine 2-edit case.
     const r = correctEmailDomain('jane@gnaul.com'); // g[n]a[u]l -> gmail = 2 subs

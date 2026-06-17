@@ -189,6 +189,10 @@ async function sendLegacyServiceReportEmail({
       subject_snapshot: email.subject,
       html_snapshot: email.html,
       text_snapshot: email.text,
+      // Direct inserter (bypasses sendTemplate) — stamp the attachment flag so
+      // bounce recovery routes a bounced PDF report to manual instead of a
+      // body-only replay. See server/services/email-bounce-recovery.js.
+      has_attachments: Array.isArray(attachments) && attachments.length > 0,
       categories: JSON.stringify(['service_report_v1']),
       idempotency_key: idempotencyKey,
       queued_at: new Date(),
