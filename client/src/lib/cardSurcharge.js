@@ -4,7 +4,7 @@
 // Debit, prepaid, unknown-funding, and ACH = no surcharge.
 // Mirror of stripe-pricing.js CONFIGURED_COST_BPS (290 bps) — keep in sync.
 
-const DEFAULT_CARD_SURCHARGE_RATE = 0.029;
+export const DEFAULT_CARD_SURCHARGE_RATE = 0.029;
 
 export function shouldSurcharge(funding) {
   return funding === 'credit';
