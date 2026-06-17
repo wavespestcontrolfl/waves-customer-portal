@@ -13,6 +13,10 @@ const DEFAULT_ALERT_DAYS = 30;
 const LAST_SERVICE_GRACE_DAYS = 14;
 const LAST_SERVICE_TERM_END_LOOKBACK_DAYS = 120;
 const NOTICE_CLAIM_TTL_MS = 15 * 60 * 1000;
+// prepaid_method written when annual-prepay coverage stamps a visit. Stamp
+// cleanup filters on this so it never clears an independent cash/Zelle/etc.
+// prepayment made through the regular schedule prepay route.
+const ANNUAL_PREPAY_PREPAID_METHOD = 'annual_prepay_invoice';
 const INVOICE_CANCELLED_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
 const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
 const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
@@ -561,7 +565,7 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     const visitAmount = slices[index] ?? slices[0] ?? 0;
     const updates = {
       prepaid_amount: visitAmount,
-      prepaid_method: 'annual_prepay_invoice',
+      prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD,
       prepaid_note: `Annual prepaid ${coverageServiceType} (${index + 1} of ${coverageVisitCount})`,
       prepaid_at: row.prepaid_at || now,
     };
@@ -600,10 +604,13 @@ async function clearPrepaidStampsForTerm(termId, conn = db) {
   if (cols.prepaid_note) updates.prepaid_note = null;
   if (cols.updated_at) updates.updated_at = new Date();
   try {
-    const cleared = await conn('scheduled_services')
+    const q = conn('scheduled_services')
       .where({ annual_prepay_term_id: termId })
-      .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
-      .update(updates);
+      .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
+    // Only clear stamps that annual prepay set — a visit manually marked prepaid
+    // (cash/Zelle) through the regular schedule route keeps its independent stamp.
+    if (cols.prepaid_method) q.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
+    const cleared = await q.update(updates);
     return Array.isArray(cleared) ? cleared.length : cleared;
   } catch (err) {
     logger.warn(`[annual-prepay] clear prepaid stamps skipped for term ${termId}: ${err.message}`);
@@ -981,11 +988,14 @@ async function createTermForAnnualPrepay({
             if (scCols.prepaid_method) stampClear.prepaid_method = null;
             if (scCols.prepaid_at) stampClear.prepaid_at = null;
             if (scCols.prepaid_note) stampClear.prepaid_note = null;
-            await conn('scheduled_services')
+            const stampQuery = conn('scheduled_services')
               .where({ annual_prepay_term_id: existing.id })
               .andWhere(detachOutOfWindow)
-              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
-              .update(stampClear);
+              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
+            // Only clear annual-prepay stamps; preserve an independent cash/Zelle
+            // prepayment made on the visit through the regular schedule route.
+            if (scCols.prepaid_method) stampQuery.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
+            await stampQuery.update(stampClear);
           }
           await conn('scheduled_services')
             .where({ annual_prepay_term_id: existing.id })

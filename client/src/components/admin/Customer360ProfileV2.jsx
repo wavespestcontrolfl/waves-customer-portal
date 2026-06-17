@@ -2787,6 +2787,14 @@ function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], ann
     || !termEnd
     || termEnd <= termStart
     || !dueDate;
+  // Commercial invoices add county tax to this pre-tax line item (residential is
+  // tax-free), so label the field as pre-tax and preview the tax-inclusive total
+  // the customer will actually be billed — mirrors the record-collected modal.
+  const isCommercialCustomer =
+    customer?.property?.type === "commercial" || customer?.property?.type === "business";
+  const estTaxInclusiveTotal = isCommercialCustomer && Number(amount) > 0
+    ? Math.round(Number(amount) * 1.07 * 100) / 100
+    : Number(amount);
 
   const handleStartChange = (value) => {
     setTermStart(value);
@@ -2951,7 +2959,9 @@ function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], ann
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Invoice amount</div>
+            <div className="u-label text-ink-secondary mb-1">
+              {isCommercialCustomer ? "Pre-tax service amount" : "Invoice amount"}
+            </div>
             <input
               type="number"
               min="0"
@@ -2963,6 +2973,12 @@ function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], ann
             {perVisit > 0 && (
               <div className="text-11 text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
+              </div>
+            )}
+            {isCommercialCustomer && Number(amount) > 0 && (
+              <div className="text-11 text-ink-secondary mt-1">
+                Commercial: ~7% county sales tax is added — customer is invoiced
+                ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>

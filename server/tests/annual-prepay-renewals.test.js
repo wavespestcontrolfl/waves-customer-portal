@@ -294,6 +294,8 @@ describe('annual prepay renewal helpers', () => {
     // visits are excluded so already-serviced work isn't re-billed.
     expect(updateQuery.where).toHaveBeenCalledWith({ annual_prepay_term_id: 'term-1' });
     expect(updateQuery.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['completed']));
+    // Only annual-prepay stamps are cleared; an independent cash/Zelle prepay stamp survives.
+    expect(updateQuery.where).toHaveBeenCalledWith('prepaid_method', 'annual_prepay_invoice');
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       prepaid_amount: null,
       prepaid_method: null,
