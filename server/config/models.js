@@ -42,8 +42,9 @@
  * any tier via its env var with no code change.
  *
  * NOTE: the cross-provider "best-model" routing (OpenAI GPT-5.5 / Gemini 3.5
- * Flash for parts of the stack) is owner-in-progress and NOT live — those
- * models are intentionally absent here until they ship.
+ * Flash for parts of the stack) is owner-in-progress. The models exist at the
+ * providers; what's pending is wiring + eval in OUR stack, so they're
+ * intentionally absent from this registry for now.
  */
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || 'claude-opus-4-8';
