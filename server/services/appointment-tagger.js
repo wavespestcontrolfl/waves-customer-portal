@@ -37,10 +37,13 @@ class AppointmentTagger {
       });
     }
 
-    // Check if first service for a recurring customer. All WaveGuard tiers
-    // get the welcome text (Bronze included) so the experience matches the
-    // estimate-converter self-accept path. Idempotent via sendNewRecurringWelcome.
-    if (service.waveguard_tier) {
+    // Welcome text on the customer's first RECURRING service. All WaveGuard
+    // tiers are included (Bronze too) so the experience matches the
+    // estimate-converter self-accept path; the is_recurring guard keeps the
+    // auto_new_recurring text off one-time/standalone first appointments
+    // (onServiceScheduled runs for those jobs as well). Idempotent via
+    // sendNewRecurringWelcome.
+    if (service.waveguard_tier && service.is_recurring) {
       const prevCount = await db('service_records').where({ customer_id: service.customer_id }).count('* as count').first();
       if (parseInt(prevCount?.count || 0) === 0) {
         await this.triggerWelcomeSequence(service);

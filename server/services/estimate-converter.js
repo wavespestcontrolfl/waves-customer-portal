@@ -1416,24 +1416,36 @@ const EstimateConverter = {
     }
 
     // Welcome SMS for new recurring signups — unified across every accept
-    // path (public self-accept, manual Mark Won). Previously this text only
-    // fired when an admin scheduled the recurring appointment, so customers
-    // who self-accepted online got the membership email but no welcome text.
-    // sendNewRecurringWelcome is idempotent (sms_sequences guard), so it
-    // won't double-send if the admin-schedule path also runs. wasNewRecurringSignup
-    // gates it to genuinely new customers; all tiers are included (Bronze too).
-    if (opts.skipWelcomeSms !== true && !suppressRecurringConversion && wasNewRecurringSignup) {
-      void sendNewRecurringWelcome({
-        customer: {
-          id: customerId,
-          first_name: customer.first_name,
-          last_name: customer.last_name,
-          phone: customer.phone,
-        },
-        scheduledServiceId: firstScheduledServiceId,
-        recurringPattern: acceptedPlanFrequency || inferredFrequencyKey || null,
-        entryPoint: 'estimate_converter_welcome',
-      }).catch((err) => logger.warn(`[estimate-converter] welcome SMS failed for customer ${customerId}: ${err.message}`));
+    // path (public self-accept, manual Mark Won, annual prepay). Previously
+    // this text only fired when an admin scheduled the recurring appointment,
+    // so customers who self-accepted online got the membership email but no
+    // welcome text. sendNewRecurringWelcome is idempotent (sms_sequences
+    // guard), so it won't double-send if the admin-schedule path also runs.
+    // wasNewRecurringSignup gates it to genuinely new customers; all tiers are
+    // included (Bronze too).
+    const welcomeSms = (opts.skipWelcomeSms !== true && !suppressRecurringConversion && wasNewRecurringSignup)
+      ? {
+          customer: {
+            id: customerId,
+            first_name: customer.first_name,
+            last_name: customer.last_name,
+            phone: customer.phone,
+          },
+          scheduledServiceId: firstScheduledServiceId,
+          recurringPattern: acceptedPlanFrequency || inferredFrequencyKey || null,
+          entryPoint: 'estimate_converter_welcome',
+        }
+      : null;
+
+    // Only send inline when we own the connection. When a caller runs the
+    // conversion inside its own transaction (opts.database), the customer /
+    // notification_prefs rows may be uncommitted — sendCustomerMessage reads
+    // them through the global pool and would block as NO_CONSENT_RECORD, and a
+    // later rollback would strand the SMS + audit side effects. Those callers
+    // get `welcomeSms` back in the result and fire it after commit.
+    if (welcomeSms && !usingCallerDatabase) {
+      void sendNewRecurringWelcome(welcomeSms)
+        .catch((err) => logger.warn(`[estimate-converter] welcome SMS failed for customer ${customerId}: ${err.message}`));
     }
 
     return {
@@ -1450,6 +1462,7 @@ const EstimateConverter = {
       draftInvoicePayUrl,
       invoiceDelivery,
       membershipEmail,
+      welcomeSms,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
