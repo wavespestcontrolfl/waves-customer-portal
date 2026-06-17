@@ -234,6 +234,13 @@ function toDate(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+// A token for the specific appointment instance (time), so a reschedule that
+// re-arms the same scheduled_service_id produces a new idempotency key and the
+// updated email is not deduped against the prior send.
+function apptStamp(apptTime) {
+  return apptTime ? String(apptTime.getTime()) : 'na';
+}
+
 async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, idempotencyKey } = {}) {
   const apptTime = toDate(appointmentTime);
   return sendTemplate({
@@ -246,7 +253,7 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
       appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
     },
-    idempotencyKey: idempotencyKey || `appointment.confirmation:${scheduledServiceId || customerId}`,
+    idempotencyKey: idempotencyKey || `appointment.confirmation:${scheduledServiceId || customerId}:${apptStamp(apptTime)}`,
     categories: ['appointment_confirmation'],
     triggerEventId: `appointment.confirmation:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },
@@ -274,7 +281,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     templateKey,
     eventType: templateKey,
     payload,
-    idempotencyKey: idempotencyKey || `${templateKey}:${scheduledServiceId || customerId}`,
+    idempotencyKey: idempotencyKey || `${templateKey}:${scheduledServiceId || customerId}:${apptStamp(apptTime)}`,
     categories: [is72 ? 'appointment_reminder_72h' : 'appointment_reminder_24h'],
     triggerEventId: `${templateKey}:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },

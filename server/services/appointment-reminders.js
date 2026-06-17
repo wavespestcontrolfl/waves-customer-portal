@@ -903,9 +903,12 @@ const AppointmentReminders = {
       // fallback. The primary's own bounce (to === primary) always falls through.
       const primaryDigits = lastTenDigits(customer.phone);
       const targetDigits = lastTenDigits(to);
-      if (scheduledServiceId && primaryDigits && targetDigits && primaryDigits !== targetDigits) {
+      if (scheduledServiceId && audit.purpose && primaryDigits && targetDigits && primaryDigits !== targetDigits) {
+        // Scope to the SAME notice (purpose): confirmation, 72h, and 24h all share
+        // the scheduled_service_id, so an earlier accepted confirmation must not
+        // count as "this 24h reminder reached someone".
         const acceptedSibling = await db('messaging_audit_log')
-          .where({ customer_id: customerId, channel: 'sms' })
+          .where({ customer_id: customerId, channel: 'sms', purpose: audit.purpose })
           .whereRaw("metadata->>'scheduled_service_id' = ?", [String(scheduledServiceId)])
           .whereNotNull('sent_at')
           .whereNull('blocked_code')

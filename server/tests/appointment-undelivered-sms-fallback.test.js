@@ -156,6 +156,8 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     });
 
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    // The sibling lookup is scoped to the same notice (purpose), not just the occurrence.
+    expect(siblingChain.where).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'appointment_confirmation' }));
   });
 
   test('email fallback blocked (suppressed) raises the no-channel admin alert', async () => {

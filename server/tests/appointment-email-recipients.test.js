@@ -42,6 +42,9 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     expect(res.ok).toBe(true);
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'sue@service.com' }));
+    // Idempotency key carries the appointment instance so a reschedule resends.
+    const call = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(call.idempotencyKey).toContain(String(new Date('2026-06-22T14:00:00.000Z').getTime()));
   });
 
   test('falls back to the primary email when the service contact has no email', async () => {
