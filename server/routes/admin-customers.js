@@ -740,6 +740,17 @@ function addMonthsDateOnly(value, months) {
 }
 
 function defaultAnnualPrepayTermStart(activeTerm, today = etDateString()) {
+  // Mirror the client default (Customer360ProfileV2 defaultAnnualPrepayStart) on
+  // the server so a direct/API call without termStart can't bypass it: a
+  // payment_pending term is sent-but-unpaid, so a new term must cover that same
+  // window (its term_start) rather than advancing to term_end + 1. Advancing past
+  // an unpaid term would slip past lockAndAssertNoAnnualPrepayOverlap (which
+  // counts payment_pending) and stack a second paid term beyond the open invoice;
+  // anchoring at term_start keeps the new start inside the pending window so the
+  // overlap guard rejects the duplicate with 409 until the invoice is resolved.
+  if (activeTerm && activeTerm.status === 'payment_pending') {
+    return dateOnlyForApi(activeTerm.term_start || activeTerm.termStart) || today;
+  }
   const termEnd = dateOnlyForApi(activeTerm?.term_end || activeTerm?.termEnd);
   if (termEnd && termEnd >= today) return addDaysDateOnly(termEnd, 1);
   return today;
