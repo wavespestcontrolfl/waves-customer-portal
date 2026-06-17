@@ -6436,6 +6436,14 @@ router.put('/:token/accept', async (req, res, next) => {
         logger.error(`[estimate-accept] Follow-up reminder registration failed for ${appointment.id}: ${e.message}`);
       }
     }
+    // Annual-prepay conversion runs inside the accept transaction, so the
+    // converter defers the new-recurring welcome SMS rather than send it
+    // against uncommitted customer rows. Fire it here, post-commit.
+    if (annualPrepayConversion?.welcomeSms) {
+      const { sendNewRecurringWelcome } = require('../services/new-recurring-welcome-sms');
+      void sendNewRecurringWelcome(annualPrepayConversion.welcomeSms)
+        .catch((e) => logger.error(`[estimate-accept] welcome SMS failed for customer ${customerId}: ${e.message}`));
+    }
     if (customerId) {
       try {
         await markLinkedLeadEstimateAccepted({
