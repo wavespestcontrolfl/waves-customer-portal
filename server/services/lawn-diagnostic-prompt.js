@@ -28,7 +28,7 @@ const MODELS = require('../config/models');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
-const { safeConditionLabel, scrubCustomerText } = require('./lawn-diagnostic-report');
+const { safeConditionLabel, scrubCustomerText, NO_VISIBLE_STRESS_FINDING } = require('./lawn-diagnostic-report');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -512,6 +512,10 @@ function challengeMeta(extra = {}) {
 // Observation cues that indicate an actual problem (vs a healthy/green lawn). Used to
 // decide whether the degraded finding is a stress symptom or a clean "no major stress".
 const OBSERVATION_STRESS_RE = /(brown|yellow|chlor|\bthin|bare|sparse|patch|spot|lesion|weed|wilt|\bdry\b|discolor|declin|scalp|mold|mildew|fung|chinch|grub|disease|insect|damage|\bdead\b|stress|stunt|moss|thatch|burn|streak|melt)/i;
+// Strip NEGATED-absence clauses before testing for stress, so "green, uniform, no weeds
+// or lesions visible" is not misread as weeds/lesions PRESENT. Removes from a negation
+// word up to the next clause boundary; real stress in a separate clause survives.
+const NEGATED_CLAUSE_RE = /\b(no|not|without|free of|absent|none|negative for)\b[^.,;:]*/gi;
 
 function symptomFindingsFromObservations(observations = []) {
   const list = Array.isArray(observations) ? observations.filter((obs) => obs && typeof obs === 'object') : [];
@@ -521,13 +525,14 @@ function symptomFindingsFromObservations(observations = []) {
     .filter(Boolean)
     .slice(0, 6);
   // Only call it stress when the observations actually show a problem — a healthy/green
-  // lawn must NOT become a customer-visible "turf stress" finding just because the
-  // challenge stage was unavailable. No stress signal → the clean "no major stress" path.
-  const hasStress = OBSERVATION_STRESS_RE.test(cues.join(' '));
+  // lawn (incl. "no weeds/lesions visible") must NOT become a "turf stress" finding just
+  // because the challenge stage was unavailable. No stress signal → the canonical
+  // no-visible-stress finding, which routes through the clean minimal/no-diagnosis path.
+  const hasStress = OBSERVATION_STRESS_RE.test(cues.join(' ').replace(NEGATED_CLAUSE_RE, ' '));
   if (!hasStress) {
     return [{
       finding_id: 'F1',
-      name: 'No major visible stress',
+      name: NO_VISIBLE_STRESS_FINDING,
       confidence: 'low',
       severity: 'mild',
       spread_risk: 'low',

@@ -67,7 +67,7 @@ const {
   canonicalSnapshot,
   resolveRecipient,
 } = techLawnDiagnosticRouter._test;
-const { safeConditionLabel } = require('../services/lawn-diagnostic-report');
+const { safeConditionLabel, NO_VISIBLE_STRESS_FINDING } = require('../services/lawn-diagnostic-report');
 const lawnPrompt = require('../services/lawn-diagnostic-prompt'); // the mocked module (per-test overrides)
 const { LAWN_CHALLENGE } = require('../config/models'); // registry = single source of truth for the Anthropic id
 
@@ -448,12 +448,18 @@ describe('tech lawn diagnostic analyze route', () => {
     expect(lawnPrompt.symptomFindingsFromObservations([])).toEqual([]);
   });
 
-  test('symptomFindingsFromObservations: a healthy/green observation does NOT become a stress finding', () => {
+  test('symptomFindingsFromObservations: healthy / negated-cue observations route to the clean no-stress sentinel', () => {
     const healthy = lawnPrompt.symptomFindingsFromObservations([{ color: 'green', pattern: 'uniform', detail: 'dense healthy canopy' }]);
     expect(healthy).toHaveLength(1);
-    expect(healthy[0].name).toMatch(/no major visible stress/i);
+    // Named the canonical sentinel → classifyReleaseMode routes it to the minimal/clean path.
+    expect(healthy[0].name).toBe(NO_VISIBLE_STRESS_FINDING);
     expect(healthy[0].severity).toBe('mild');
     expect(safeConditionLabel(healthy[0].name, healthy[0].confidence)).toBe('no major visible stress');
+    // Negated absence cues ("no weeds or lesions visible") must not trip the stress regex.
+    const negated = lawnPrompt.symptomFindingsFromObservations([{ color: 'green', pattern: 'uniform', detail: 'no weeds or lesions visible' }]);
+    expect(negated[0].name).toBe(NO_VISIBLE_STRESS_FINDING);
+    // A real problem still downgrades to symptom-level stress.
+    expect(lawnPrompt.symptomFindingsFromObservations([{ color: 'browning', detail: 'irregular patch' }])[0].name).toMatch(/turf stress/i);
   });
 });
 

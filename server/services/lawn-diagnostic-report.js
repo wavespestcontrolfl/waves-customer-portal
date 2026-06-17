@@ -625,7 +625,12 @@ function safeCustomerSummary(summary, confidence) {
 // pest or disease; states what was checked and what to watch.
 const MINIMAL_SAFE_SUMMARY = 'This lawn check is complete. The photos provided did not show enough detail to call out a specific pest or disease, so we are not naming one from these images. The best next step is a quick on-site look; in the meantime, keep to your normal watering schedule and watch for any area that spreads, thins, or does not recover.';
 
-const NO_FINDING_KEY = normalizeKey('No major visible lawn stress signal');
+// Canonical "we looked and saw no defensible issue" finding name. classifyReleaseMode
+// maps it to the clean minimal/no-diagnosis path. Exported so degraded-path producers
+// (e.g. the multi-model perception→symptom downgrade) name a healthy finding identically
+// — single source of truth, no drift.
+const NO_VISIBLE_STRESS_FINDING = 'No major visible lawn stress signal';
+const NO_FINDING_KEY = normalizeKey(NO_VISIBLE_STRESS_FINDING);
 
 // Auto-release safety ladder. The report ALWAYS releases; this only classifies
 // how conservative the customer copy must be. Precedence (most → least
@@ -828,4 +833,5 @@ module.exports = {
   safeCustomerSummary,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
+  NO_VISIBLE_STRESS_FINDING,
 };
