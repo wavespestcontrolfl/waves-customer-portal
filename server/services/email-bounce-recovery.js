@@ -154,13 +154,22 @@ async function correctedAddressSuppressed(bouncedMessage, correctedEmail) {
   } catch (err) {
     logger.warn(`[bounce-recovery] suppression check fell back: ${err.message}`);
   }
-  const row = await db('email_suppressions')
+  // Fallback when the template can't be resolved (e.g. a legacy template_key):
+  // mirror emailLib.activeSuppressionFor's GROUP-aware semantics using the
+  // stream snapshot, so a group-level unsubscribe/manual suppression on the
+  // corrected address still blocks the resend (not just global suppressions).
+  const groupKey = String(bouncedMessage.suppression_group_key_snapshot || '').trim() || null;
+  const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
+  const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(correctedEmail).trim().toLowerCase()])
     .where({ status: 'active' })
-    .whereIn('suppression_type', ['bounce', 'spam_complaint', 'do_not_email'])
-    .first()
-    .catch(() => null);
-  return !!row;
+    .catch(() => []);
+  const isGlobal = (r) => globalTypes.has(String(r.suppression_type || '').toLowerCase());
+  // transactional_required bypasses group opt-outs but never global ones.
+  if (groupKey === 'transactional_required') {
+    return rows.some(isGlobal);
+  }
+  return rows.some((r) => !r.group_key || (groupKey && r.group_key === groupKey) || isGlobal(r));
 }
 
 /** Resolve the customer + which email column held the bounced address. */

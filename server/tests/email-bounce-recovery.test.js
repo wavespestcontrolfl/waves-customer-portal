@@ -158,6 +158,10 @@ function orderedDb(resolvers = {}) {
     chain.first = jest.fn(() => Promise.resolve(resolvers.first ? resolvers.first(table) : null));
     chain.returning = jest.fn(() => Promise.resolve(resolvers.returning ? resolvers.returning(table) : []));
     chain.update = jest.fn((data) => { calls.push({ table, data }); return Promise.resolve(resolvers.update ? resolvers.update(table, data) : 1); });
+    // Thenable so `await db(...).where(...).catch(...)` (suppression fallback) resolves to rows.
+    const rowsFor = () => (resolvers.rows ? resolvers.rows(table) : []);
+    chain.then = (res, rej) => Promise.resolve(rowsFor()).then(res, rej);
+    chain.catch = (rej) => Promise.resolve(rowsFor()).catch(rej);
     return chain;
   });
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
@@ -221,5 +225,57 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('Suggested correction: jane@gmail.com');
+  });
+});
+
+// Thenable + chainable mock so `await db(...).where(...).catch(...)` resolves to rows.
+function suppressionDb(rows) {
+  return jest.fn(() => {
+    const chain = {};
+    const result = Promise.resolve(rows);
+    for (const m of ['whereRaw', 'where', 'whereIn', 'whereNot', 'andWhere', 'orWhereRaw', 'modify']) {
+      chain[m] = jest.fn(() => chain);
+    }
+    chain.then = (res, rej) => result.then(res, rej);
+    chain.catch = (rej) => result.catch(rej);
+    chain.first = jest.fn(() => Promise.resolve(rows[0] || null));
+    return chain;
+  });
+}
+
+describe('correctedAddressSuppressed fallback honors group suppressions (codex P1)', () => {
+  beforeEach(() => {
+    db.mockReset();
+    emailLib.loadTemplateByKey.mockReset();
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined); // force the fallback path
+  });
+
+  const msg = (stream) => ({ template_key: 'service.report_ready.legacy', suppression_group_key_snapshot: stream });
+
+  test('blocks when an active group suppression matches the message stream', async () => {
+    db.mockImplementation(suppressionDb([{ group_key: 'service_operational', suppression_type: 'unsubscribe' }]));
+    await expect(recovery.correctedAddressSuppressed(msg('service_operational'), 'jane@gmail.com')).resolves.toBe(true);
+  });
+
+  test('does NOT block when the suppression is for a different group', async () => {
+    db.mockImplementation(suppressionDb([{ group_key: 'marketing_newsletter', suppression_type: 'unsubscribe' }]));
+    await expect(recovery.correctedAddressSuppressed(msg('service_operational'), 'jane@gmail.com')).resolves.toBe(false);
+  });
+
+  test('global suppressions always block', async () => {
+    db.mockImplementation(suppressionDb([{ group_key: null, suppression_type: 'bounce' }]));
+    await expect(recovery.correctedAddressSuppressed(msg('service_operational'), 'jane@gmail.com')).resolves.toBe(true);
+  });
+
+  test('transactional_required bypasses group opt-outs but not global ones', async () => {
+    db.mockImplementation(suppressionDb([{ group_key: 'service_operational', suppression_type: 'unsubscribe' }]));
+    await expect(recovery.correctedAddressSuppressed(msg('transactional_required'), 'jane@gmail.com')).resolves.toBe(false);
+    db.mockImplementation(suppressionDb([{ group_key: null, suppression_type: 'do_not_email' }]));
+    await expect(recovery.correctedAddressSuppressed(msg('transactional_required'), 'jane@gmail.com')).resolves.toBe(true);
+  });
+
+  test('no active suppression → not blocked', async () => {
+    db.mockImplementation(suppressionDb([]));
+    await expect(recovery.correctedAddressSuppressed(msg('service_operational'), 'jane@gmail.com')).resolves.toBe(false);
   });
 });
