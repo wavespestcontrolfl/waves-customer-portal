@@ -494,7 +494,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           buttonType:  { applePay: 'buy',   googlePay: 'buy' },
           buttonHeight: 52,
           paymentMethodOrder: ['applePay', 'googlePay', 'link'],
-          paymentMethods: { googlePay: 'always' },
+          // 'auto' (Stripe default) — let Stripe gate each wallet on real
+          // device/browser eligibility. Forcing googlePay 'always' rendered the
+          // Google Pay button on iOS, where its popup flow is blocked and the
+          // tap dead-ends on Google's OR_BIBED_15 "pop-ups may be turned off"
+          // error. Apple Pay (native, eligible) is unaffected.
+          paymentMethods: { googlePay: 'auto' },
         });
 
         express.on('ready', async () => {
