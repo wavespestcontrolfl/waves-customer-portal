@@ -12,7 +12,14 @@ const {
   classifyReleaseMode,
   applyAutoReleaseRepair,
 } = require('../services/lawn-diagnostic-report');
-const { runDiagnosis, runNarrative, PROMPT_VERSION } = require('../services/lawn-diagnostic-prompt');
+const {
+  runPerception,
+  runChallenge,
+  runWriter,
+  runNarrative,
+  symptomFindingsFromObservations,
+  PROMPT_VERSION,
+} = require('../services/lawn-diagnostic-prompt');
 const { etParts } = require('../utils/datetime-et');
 
 const MAX_ANALYZE_PHOTOS = 5;
@@ -453,46 +460,66 @@ router.post('/analyze', async (req, res, next) => {
       return res.status(400).json({ error: 'At least one photo with image data is required when diagnostic findings are not supplied' });
     }
 
-    const photoAnalysis = await analyzePhotos(photos);
-
     const products = await enrichAppliedProducts(appliedProducts);
+    const season = lawnAssessment.getSeason(etParts(new Date()).month);
 
-    // Findings priority: manual supplied > LLM diagnosis (PASS A) > deterministic
-    // vision fallback > minimal-safe (total vision/LLM outage). Never blocks — a
-    // provider/key failure degrades to a minimal report, it does not 502.
+    // Findings ladder — NEVER BLOCKS, but never publishes an UN-CHALLENGED diagnosis.
+    //   manual ............... tech-supplied findings win.
+    //   multimodel (L1) ...... Gemini perceive + Opus 4.8 challenge → diagnosis-level.
+    //   challenge_degraded (L2) perception ok but challenge unavailable → SYMPTOM-only
+    //                          (deterministic downgrade; names no cause, field-check copy).
+    //   deterministic (L4) ... perception unusable → Claude+Gemini composite findings.
+    //   minimal .............. nothing usable → no-diagnosis report.
+    // The Claude+Gemini composite is the fallback only (analyzePhotos runs lazily), so
+    // the happy path uses Gemini for vision and never touches Claude vision.
     let findings;
     let findingsSource;
     let fallbackReason = null;
+    let photoAnalysis = null;
+    const provenance = { challenge: null, perceptionModel: null, challengeModel: null, writerModel: null };
+
     if (suppliedFindings.length) {
       findings = suppliedFindings;
       findingsSource = 'manual';
     } else {
-      const llm = await runDiagnosis({
-        photos,
-        visionScores: photoAnalysis.adjustedScores,
-        divergenceFlags: photoAnalysis.divergenceFlags,
-        products,
-        compliance,
-        season: photoAnalysis.season,
-        grassType: photoAnalysis.composite?.grass_type,
-      });
-      if (llm.ok && llm.findings.length) {
-        findings = llm.findings;
-        findingsSource = 'llm';
-      } else if (photoAnalysis.composite) {
-        findings = buildFindingsFromVision({
-          composite: photoAnalysis.composite,
-          adjustedScores: photoAnalysis.adjustedScores,
-          divergenceFlags: photoAnalysis.divergenceFlags,
-        });
-        findingsSource = 'deterministic_fallback';
-        fallbackReason = llm.reason || null;
-      } else {
-        // Total outage: no LLM and no vision scores to derive findings from.
-        // Degrade to a minimal-safe report (no diagnosis) rather than failing.
-        findings = [];
-        findingsSource = 'minimal_fallback';
-        fallbackReason = llm.reason || 'vision_unavailable';
+      const perception = await runPerception({ photos, season, products, compliance });
+      if (perception.ok) provenance.perceptionModel = perception.model;
+      const challenge = perception.ok
+        ? await runChallenge(perception, { products, compliance, season })
+        : { ok: false, reason: `no_perception:${perception.reason || 'unknown'}`, findings: [], challenge: null };
+      provenance.challenge = challenge.challenge || null;
+
+      if (challenge.ok && challenge.findings.length) {
+        findings = challenge.findings;
+        findingsSource = 'multimodel';
+        provenance.challengeModel = challenge.challenge?.model || null;
+      } else if (perception.ok) {
+        // Observations exist but the adversarial layer didn't pass — downgrade to
+        // symptom-only deterministically (no model, no cause names).
+        const symptom = symptomFindingsFromObservations(perception.observations);
+        if (symptom.length) {
+          findings = symptom;
+          findingsSource = 'challenge_degraded';
+          fallbackReason = challenge.challenge?.failureType || challenge.reason || null;
+        }
+      }
+
+      if (!findings) {
+        // Perception/observations unusable: deterministic composite, then minimal-safe.
+        photoAnalysis = await analyzePhotos(photos);
+        if (photoAnalysis.composite) {
+          findings = buildFindingsFromVision({
+            composite: photoAnalysis.composite,
+            adjustedScores: photoAnalysis.adjustedScores,
+            divergenceFlags: photoAnalysis.divergenceFlags,
+          });
+          findingsSource = 'deterministic_fallback';
+          fallbackReason = fallbackReason || (perception.ok ? 'observations_unusable' : perception.reason);
+        } else {
+          findings = [];
+          findingsSource = 'minimal_fallback';
+          fallbackReason = fallbackReason || perception.reason || 'vision_unavailable';
+        }
       }
     }
 
@@ -509,29 +536,42 @@ router.post('/analyze', async (req, res, next) => {
       seasonal_context: req.body.seasonalContext || req.body.seasonal_context || '',
     });
 
-    // Auto-release: classify, write the summary in one LLM voice (PASS B) when the
-    // diagnosis came from the model and is defensible, then repair/degrade unsafe
-    // copy. The report always releases in one of four modes.
+    // Auto-release: classify, then write the summary. The polished LLM writer (GPT-5.5)
+    // runs ONLY for the fully-challenged multimodel path; every degraded/fallback path
+    // keeps the deterministic, symptom-only summary so an un-challenged report never
+    // gets a confident customer voice. Then repair/degrade unsafe copy.
     const releaseMode = classifyReleaseMode(reportContract);
-    if (findingsSource === 'llm' && releaseMode !== 'minimal') {
-      const narrative = await runNarrative(reportContract, { season: photoAnalysis.season });
-      if (narrative.ok) reportContract.customer_summary = narrative.customer_summary;
+    if (findingsSource === 'multimodel' && releaseMode !== 'minimal') {
+      const writer = await runWriter(reportContract, { season });
+      if (writer.ok) {
+        reportContract.customer_summary = writer.customer_summary;
+        provenance.writerModel = writer.model;
+      } else {
+        const narrative = await runNarrative(reportContract, { season });
+        if (narrative.ok) {
+          reportContract.customer_summary = narrative.customer_summary;
+          provenance.writerModel = narrative.model || 'anthropic-fallback';
+        }
+      }
     }
     const finalContract = applyAutoReleaseRepair(reportContract, releaseMode);
 
     return res.json({
       success: true,
       persisted: false,
-      aiAvailable: photoAnalysis.aiAvailable,
+      // Vision actually ran when Gemini perceived (happy path) or the composite fallback
+      // produced scores; manual findings and total outage report it unavailable.
+      aiAvailable: findingsSource !== 'manual' && (!!provenance.perceptionModel || (photoAnalysis ? photoAnalysis.aiAvailable : false)),
       promptVersion: PROMPT_VERSION,
       findingsSource,
       fallbackReason,
       releaseMode,
+      provenance,
       photoCount: photos.length,
-      analyzedPhotoCount: photoAnalysis.validResults.length,
-      composite: photoAnalysis.adjustedScores,
-      rawComposite: photoAnalysis.composite,
-      divergenceFlags: photoAnalysis.divergenceFlags,
+      analyzedPhotoCount: photoAnalysis ? photoAnalysis.validResults.length : photos.filter((photo) => photo.data).length,
+      composite: photoAnalysis ? photoAnalysis.adjustedScores : null,
+      rawComposite: photoAnalysis ? photoAnalysis.composite : null,
+      divergenceFlags: photoAnalysis ? photoAnalysis.divergenceFlags : [],
       reportContract: finalContract,
     });
   } catch (err) {
@@ -577,14 +617,22 @@ router.post('/', async (req, res, next) => {
       seasonal_context: body.seasonalContext || body.seasonal_context || '',
     });
     const releaseMode = classifyReleaseMode(contract);
-    // Mirror /analyze: re-run the narrative pass server-side on the authoritative
-    // rebuilt contract so the published summary matches what the tech reviewed
-    // (and stays server-generated, not client-trusted). Best-effort; the
-    // deterministic summary stands if the model is unavailable.
-    if (releaseMode !== 'minimal') {
+    const provenance = (body.provenance && typeof body.provenance === 'object') ? body.provenance
+      : (aiAnalysis.provenance && typeof aiAnalysis.provenance === 'object' ? aiAnalysis.provenance : null);
+    const challengePassed = !!(provenance && provenance.challenge && provenance.challenge.passed === true);
+    // Re-run the polished writer (GPT-5.5 → Anthropic fallback) server-side on the
+    // authoritative rebuilt contract ONLY when the original analysis was fully challenged
+    // (multimodel). Degraded/fallback reports keep the deterministic, symptom-only
+    // summary — an un-challenged report is never re-voiced with a confident LLM.
+    // Best-effort; the deterministic summary stands if the model is unavailable.
+    if (releaseMode !== 'minimal' && challengePassed) {
       try {
-        const narrative = await runNarrative(contract, { season: body.seasonalContext || body.seasonal_context || '' });
-        if (narrative.ok) contract.customer_summary = narrative.customer_summary;
+        const writer = await runWriter(contract, {});
+        if (writer.ok) contract.customer_summary = writer.customer_summary;
+        else {
+          const narrative = await runNarrative(contract, {});
+          if (narrative.ok) contract.customer_summary = narrative.customer_summary;
+        }
       } catch { /* keep deterministic summary */ }
     }
     const sanitizedContract = applyAutoReleaseRepair(contract, releaseMode);
@@ -596,7 +644,7 @@ router.post('/', async (req, res, next) => {
       created_by_technician_id: req.technicianId || req.technician?.id || null,
       contact_snapshot: contact ? JSON.stringify(contact) : null,
       address_snapshot: address ? JSON.stringify(address) : null,
-      ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode }),
+      ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode, provenance: provenance || null }),
       report_contract: JSON.stringify(sanitizedContract),
       ai_confidence: aiConfidence,
       // Server-derived from the rebuilt contract severity; a client-supplied

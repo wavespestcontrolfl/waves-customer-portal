@@ -6,14 +6,30 @@
 const {
   PROMPT_VERSION,
   DIAGNOSIS_SYSTEM_PROMPT,
+  CHALLENGE_SYSTEM_PROMPT,
+  PERCEPTION_PROMPT,
   NARRATIVE_SYSTEM_PROMPT,
   CURATED_REFERENCE,
   normalizeDiagnosisJson,
 } = require('../services/lawn-diagnostic-prompt');
 
-describe('lawn-diagnostic prompt v0.4 naming gate', () => {
-  test('prompt version is bumped to v0.4', () => {
-    expect(PROMPT_VERSION).toBe('lawn-diagnostic-v0.4');
+describe('lawn-diagnostic prompt v0.5 naming gate', () => {
+  test('prompt version is bumped to v0.5', () => {
+    expect(PROMPT_VERSION).toBe('lawn-diagnostic-v0.5');
+  });
+
+  test('perception prompt observes only — it forbids naming/concluding a cause', () => {
+    expect(PERCEPTION_PROMPT).toMatch(/Report ONLY what is visually present/);
+    expect(PERCEPTION_PROMPT).toMatch(/do NOT\s+diagnose, name a pest\/disease\/weed species, or assign a cause/);
+    expect(PERCEPTION_PROMPT).toMatch(/Describe, never conclude/);
+  });
+
+  test('challenge prompt is adversarial and enforces the NAME GATE on the observations', () => {
+    expect(CHALLENGE_SYSTEM_PROMPT).toMatch(/SKEPTICAL/);
+    expect(CHALLENGE_SYSTEM_PROMPT).toMatch(/What ELSE could explain/);
+    expect(CHALLENGE_SYSTEM_PROMPT).toMatch(/What CANNOT be determined/);
+    expect(CHALLENGE_SYSTEM_PROMPT).toMatch(/NAME GATE:/);
+    expect(CHALLENGE_SYSTEM_PROMPT).toMatch(/Required signature is present IN THE\s+OBSERVATIONS/);
   });
 
   test('curated reference states a hard naming gate with per-cause Required evidence', () => {

@@ -23,13 +23,21 @@ jest.mock('../middleware/admin-auth', () => ({
     ['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'Staff access required' })
   ),
 }));
-// Force the deterministic fallback in /analyze tests regardless of ANTHROPIC_API_KEY,
-// so pre-push/CI never depends on the live model returning specific findings.
-jest.mock('../services/lawn-diagnostic-prompt', () => ({
-  runDiagnosis: jest.fn().mockResolvedValue({ ok: false, reason: 'no_api' }),
-  runNarrative: jest.fn().mockResolvedValue({ ok: false, reason: 'no_api' }),
-  PROMPT_VERSION: 'lawn-diagnostic-test',
-}));
+// Force the deterministic/fallback path in /analyze tests regardless of API keys, so
+// pre-push/CI never depends on a live model. The pure helpers (symptomFindingsFrom-
+// Observations, normalizeDiagnosisJson, etc.) stay real via requireActual; only the
+// three model-calling stages + the legacy passes are stubbed (default: not-ok).
+jest.mock('../services/lawn-diagnostic-prompt', () => {
+  const actual = jest.requireActual('../services/lawn-diagnostic-prompt');
+  return {
+    ...actual,
+    runPerception: jest.fn().mockResolvedValue({ ok: false, reason: 'no_gemini_key' }),
+    runChallenge: jest.fn().mockResolvedValue({ ok: false, reason: 'no_api', findings: [], challenge: { attempted: false, model: 'opus', passed: false, degraded: true, failureType: 'no_api', removedFindingIds: [], softenedFindingIds: [], requiredConfirmationSteps: [] } }),
+    runWriter: jest.fn().mockResolvedValue({ ok: false, reason: 'no_openai_key' }),
+    runNarrative: jest.fn().mockResolvedValue({ ok: false, reason: 'no_api' }),
+    PROMPT_VERSION: 'lawn-diagnostic-test',
+  };
+});
 jest.mock('../services/lawn-assessment', () => ({
   analyzePhoto: (...args) => mockAnalyzePhoto(...args),
   mapToDisplayScores: (composite) => ({
@@ -60,6 +68,7 @@ const {
   resolveRecipient,
 } = techLawnDiagnosticRouter._test;
 const { safeConditionLabel } = require('../services/lawn-diagnostic-report');
+const lawnPrompt = require('../services/lawn-diagnostic-prompt'); // the mocked module (per-test overrides)
 
 function appServer() {
   const app = express();
@@ -384,6 +393,58 @@ describe('tech lawn diagnostic analyze route', () => {
       expect(body.reportContract.customer_summary).toMatch(/most consistent|photos show/i);
       expect(mockAnalyzePhoto).toHaveBeenCalledWith('base64-photo', 'image/jpeg');
     });
+  });
+
+  test('multimodel path: perception + Opus challenge drive findings and the GPT-5.5 writer runs', async () => {
+    lawnPrompt.runPerception.mockResolvedValueOnce({ ok: true, model: 'gemini-3.5-flash', overall_notes: 'ok', observations: [{ area: 'front', color: 'browning', pattern: 'irregular patch', distribution: 'one section', detail: 'crown intact' }] });
+    lawnPrompt.runChallenge.mockResolvedValueOnce({ ok: true, findings: [{ finding_id: 'F1', name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', observed_evidence: ['sunny-edge browning'], confirmation_step: 'float test' }], challenge: { attempted: true, model: 'claude-opus-4-8', passed: true, degraded: false, failureType: null, removedFindingIds: [], softenedFindingIds: [], requiredConfirmationSteps: ['float test'] } });
+    lawnPrompt.runWriter.mockResolvedValueOnce({ ok: true, model: 'gpt-5.5', customer_summary: "The photos show signs most consistent with chinch pressure; today's visit targeted it." });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/tech/lawn-diagnostic/analyze`, {
+        method: 'POST', headers: { Authorization: 'Bearer tech-1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos: [{ data: 'x', mimeType: 'image/jpeg' }] }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.findingsSource).toBe('multimodel');
+      expect(body.provenance).toMatchObject({ perceptionModel: 'gemini-3.5-flash', challengeModel: 'claude-opus-4-8', writerModel: 'gpt-5.5' });
+      expect(body.provenance.challenge.passed).toBe(true);
+      expect(body.aiAvailable).toBe(true);
+      expect(lawnPrompt.runWriter).toHaveBeenCalled();
+      // Gemini is the only vision touch on the happy path — the Claude+Gemini composite never runs.
+      expect(mockAnalyzePhoto).not.toHaveBeenCalled();
+      expect(body.reportContract.customer_summary).toMatch(/chinch/i);
+    });
+  });
+
+  test('challenge unavailable: degrades to SYMPTOM-only, names no cause, skips the writer, records provenance', async () => {
+    lawnPrompt.runPerception.mockResolvedValueOnce({ ok: true, model: 'gemini-3.5-flash', overall_notes: 'limited', observations: [{ area: 'front', color: 'browning', pattern: 'irregular', distribution: 'one section', detail: 'not visible' }] });
+    // runChallenge stays on the default stub → ok:false with degraded provenance.
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/tech/lawn-diagnostic/analyze`, {
+        method: 'POST', headers: { Authorization: 'Bearer tech-1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos: [{ data: 'x', mimeType: 'image/jpeg' }] }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.findingsSource).toBe('challenge_degraded');
+      expect(body.provenance.challenge).toMatchObject({ passed: false, degraded: true });
+      // un-challenged → no named cause anywhere in the contract; the finding is a symptom.
+      expect(JSON.stringify(body.reportContract).toLowerCase()).not.toContain('chinch');
+      expect(body.reportContract.diagnosis.findings[0].name).toMatch(/turf stress/i);
+      // the polished writer never runs for a degraded report, and the Claude composite isn't needed.
+      expect(lawnPrompt.runWriter).not.toHaveBeenCalled();
+      expect(mockAnalyzePhoto).not.toHaveBeenCalled();
+    });
+  });
+
+  test('symptomFindingsFromObservations: one low-confidence symptom finding, never a cause', () => {
+    const out = lawnPrompt.symptomFindingsFromObservations([{ color: 'browning', pattern: 'irregular patch', detail: 'crown chewed' }]);
+    expect(out).toHaveLength(1);
+    expect(out[0].confidence).toBe('low');
+    expect(out[0].name).toMatch(/turf stress/i);
+    expect(safeConditionLabel(out[0].name, out[0].confidence)).not.toMatch(/chinch|fungal|large patch/i);
+    expect(lawnPrompt.symptomFindingsFromObservations([])).toEqual([]);
   });
 });
 
