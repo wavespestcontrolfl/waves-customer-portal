@@ -84,10 +84,12 @@ const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash'
 const ROUTES = Object.freeze({
   leadClassify:    Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // lead-triage.js (GATE_OPENAI_LEAD_TRIAGE)
   knowledgeAnswer: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // knowledge-bridge.js (GATE_OPENAI_KNOWLEDGE)
+  // Phase 2 — SHADOW-ONLY: run alongside the live model, logged to ai_model_comparisons;
+  // these routes never drive customer output or call routing until the data earns a flip.
+  estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // estimate-assistant.js (GATE_SHADOW_ESTIMATE_OPENAI)
+  callExtract:       Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // call-recording-processor.js (GATE_SHADOW_CALLEXTRACT_OPENAI)
   // ── PLANNED — not yet wired ──────────────────────────────────────────
-  // callExtract:       { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 2; currently Gemini in call-recording-processor.js
-  // estimateAssistant: { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 2 shadow-first (money-adjacent)
-  // taxCategorize:     { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 2; needs web-search tool parity
+  // taxCategorize:     { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 3; needs OpenAI tool-use loop + web-search parity
   // mondayBriefing:    { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Managed Agent — rebuild required; stays on Anthropic
   // contentStrategy:   { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // SEO advisor swappable; backlink half is an agent
 });

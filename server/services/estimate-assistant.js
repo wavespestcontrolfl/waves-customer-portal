@@ -3,6 +3,7 @@ const MODELS = require('../config/models');
 const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 const { loadEstimateAiSupportContext } = require('./estimate-ai-context');
+const { shadowCompare, textAgreement } = require('./model-comparison-log');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -908,7 +909,29 @@ async function answerEstimateQuestion({
 
   try {
     const aiAnswer = await answerWithAnthropic(cleanQuestion, context);
-    if (aiAnswer) return { answer: aiAnswer, source: 'anthropic' };
+    if (aiAnswer) {
+      // Shadow-only (GATE_SHADOW_ESTIMATE_OPENAI): run the OpenAI candidate on the SAME
+      // prompt and log live-vs-candidate to ai_model_comparisons. Fire-and-forget AFTER
+      // the live answer is ready — never adds latency to the customer response, never
+      // replaces it. Mirrors answerWithAnthropic's user content exactly.
+      if (process.env.GATE_SHADOW_ESTIMATE_OPENAI === 'true') {
+        void shadowCompare({
+          featureKey: 'estimate_assistant',
+          entityType: 'estimate',
+          entityId: estimate?.id || null,
+          live: { provider: 'anthropic', model: process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE, output: aiAnswer },
+          candidateRoute: MODELS.ROUTES.estimateAssistant,
+          candidatePayload: {
+            system: SYSTEM_PROMPT,
+            text: `Customer question:\n${cleanQuestion}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`,
+            jsonMode: false,
+            maxTokens: 420,
+          },
+          compare: textAgreement,
+        });
+      }
+      return { answer: aiAnswer, source: 'anthropic' };
+    }
   } catch (err) {
     logger.warn(`[estimate-assistant] AI answer failed: ${err.message}`);
   }
