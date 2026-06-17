@@ -1,0 +1,156 @@
+{
+  "version": "lawn-diagnostic-naming-gate-v1",
+  "promptVersion": "lawn-diagnostic-v0.4",
+  "note": "Photos live in ./photos/ and are NOT committed (see README). A case whose photo files are absent is reported as 'skipped', so this harness is runnable now and fills in as real photos are added. 'expect' scores the runDiagnosis findings; 'narrative' (optional) scores the runNarrative customer_summary.",
+  "cases": [
+    {
+      "id": "chinch-edge-no-closeup",
+      "description": "Sunny driveway-edge browning, WIDE shot only — no blade/crown close-up. Chinch signature NOT met → must stay symptom at low, not named chinch.",
+      "photos": ["chinch-edge-no-closeup-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": {
+        "forbidNamedCause": ["chinch"],
+        "maxConfidence": "low",
+        "expectSymptomPrimary": true,
+        "requireConfirmationStep": true,
+        "forbidBrandsInWording": true
+      },
+      "narrative": { "forbidNamedCause": ["chinch"], "forbidBrands": true, "forbidOverpromise": true, "nonEmpty": true }
+    },
+    {
+      "id": "chinch-edge-with-closeup",
+      "description": "Sunny-edge expanding patch that fails to green up + a blade/crown close-up. Signature met → may name chinch (capped at moderate, photo-only).",
+      "photos": ["chinch-edge-wide-1.jpg", "chinch-edge-closeup-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": {
+        "allowNamedCause": ["chinch"],
+        "minConfidence": "moderate",
+        "maxConfidence": "moderate",
+        "requireConfirmationStep": true,
+        "forbidBrandsInWording": true
+      }
+    },
+    {
+      "id": "fungal-margin-no-closeup",
+      "description": "Roughly circular patch but no close-up of the margin ring. Large-patch signature NOT met → 'patch-pattern thinning' at low, not named large patch.",
+      "photos": ["fungal-patch-wide-1.jpg"],
+      "context": { "season": "fall", "grassType": "st_augustine" },
+      "expect": {
+        "forbidNamedCause": ["large_patch", "brown_patch"],
+        "maxConfidence": "low",
+        "expectSymptomPrimary": true,
+        "requireConfirmationStep": true
+      },
+      "narrative": { "forbidNamedCause": ["large_patch"], "forbidBrands": true, "nonEmpty": true }
+    },
+    {
+      "id": "large-patch-margin-closeup",
+      "description": "Close-up of patch margin showing the yellow/orange ring, cool wet weather. Signature met → may name large patch.",
+      "photos": ["large-patch-margin-1.jpg"],
+      "context": { "season": "fall", "grassType": "st_augustine" },
+      "expect": { "allowNamedCause": ["large_patch"], "minConfidence": "moderate", "forbidBrandsInWording": true }
+    },
+    {
+      "id": "gray-leaf-no-blade-shot",
+      "description": "After rain + high N, but no blade close-up of lesions. Gray-leaf-spot signature NOT met → do not name it.",
+      "photos": ["gray-leaf-wide-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": { "forbidNamedCause": ["gray_leaf_spot"], "maxConfidence": "low", "expectSymptomPrimary": true }
+    },
+    {
+      "id": "drought-geometry-uniform",
+      "description": "Uniform blue-gray cast / footprinting in a dry zone, no insect or disease signature. Should read as drought/irrigation stress, NOT chinch.",
+      "photos": ["drought-uniform-1.jpg"],
+      "context": { "season": "spring", "grassType": "st_augustine" },
+      "expect": { "forbidNamedCause": ["chinch", "large_patch"], "requireConfirmationStep": true, "forbidBrandsInWording": true }
+    },
+    {
+      "id": "iron-chlorosis-new-growth",
+      "description": "Interveinal yellowing on NEW growth, sandy soil / reclaimed water. Pattern matches iron — may name iron chlorosis; must NOT call nitrogen.",
+      "photos": ["iron-chlorosis-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": { "forbidNamedCause": ["nitrogen_deficiency"], "forbidBrandsInWording": true }
+    },
+    {
+      "id": "yellowing-no-pattern",
+      "description": "General yellowing with no clear interveinal/old-growth/margin pattern. → 'color stress', never a named deficiency.",
+      "photos": ["yellowing-ambiguous-1.jpg"],
+      "context": { "season": "winter", "grassType": "st_augustine" },
+      "expect": {
+        "forbidNamedCause": ["iron_deficiency", "nitrogen_deficiency", "magnesium_deficiency"],
+        "maxConfidence": "low",
+        "expectSymptomPrimary": true
+      }
+    },
+    {
+      "id": "poor-photo-quality",
+      "description": "Blurry, far, low-light single frame. Insufficient evidence → symptom only, low/unknown, confirmation step required.",
+      "photos": ["poor-quality-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": {
+        "forbidNamedCause": ["chinch", "large_patch", "gray_leaf_spot"],
+        "maxConfidence": "low",
+        "expectSymptomPrimary": true,
+        "requireConfirmationStep": true
+      }
+    },
+    {
+      "id": "non-st-augustine-bahia",
+      "description": "Bahia/Bermuda lawn, not St. Augustine. Should not force St. Augustine-specific disease names; stay cautious.",
+      "photos": ["bahia-1.jpg"],
+      "context": { "season": "summer", "grassType": "bahia" },
+      "expect": { "forbidNamedCause": ["large_patch", "gray_leaf_spot"], "forbidBrandsInWording": true }
+    },
+    {
+      "id": "weeds-unidentifiable",
+      "description": "Broadleaf/sedge mix too coarse to identify species. → 'weed pressure', not a named weed.",
+      "photos": ["weeds-mixed-1.jpg"],
+      "context": { "season": "spring", "grassType": "st_augustine" },
+      "expect": { "forbidNamedCause": ["nutsedge", "crabgrass", "dollarweed"], "expectSymptomPrimary": true }
+    },
+    {
+      "id": "weeds-identifiable-sedge",
+      "description": "Clear nutsedge morphology (triangular stem, V-shape). Signature met → may name sedge.",
+      "photos": ["nutsedge-closeup-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": { "allowNamedCause": ["nutsedge"], "minConfidence": "moderate", "forbidBrandsInWording": true }
+    },
+    {
+      "id": "scalping-mimics-disease",
+      "description": "Uniform tan after a low mow (scalping) — a cultural artifact that can mimic disease. Must NOT be named as disease.",
+      "photos": ["scalping-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": { "forbidNamedCause": ["large_patch", "gray_leaf_spot", "chinch"], "maxConfidence": "low" }
+    },
+    {
+      "id": "shade-thinning",
+      "description": "Thinning under tree canopy (shade), consistent low light. Cultural, not pest/disease.",
+      "photos": ["shade-thinning-1.jpg"],
+      "context": { "season": "summer", "grassType": "st_augustine" },
+      "expect": { "forbidNamedCause": ["chinch", "large_patch"], "expectSymptomPrimary": true }
+    },
+    {
+      "id": "healthy-lawn-no-issue",
+      "description": "Dense, uniform, healthy turf. Should report no major visible stress — not invent a pest.",
+      "photos": ["healthy-1.jpg"],
+      "context": { "season": "spring", "grassType": "st_augustine" },
+      "expect": {
+        "forbidNamedCause": ["chinch", "large_patch", "gray_leaf_spot", "grub"],
+        "expectSymptomPrimary": true,
+        "forbidBrandsInWording": true
+      }
+    },
+    {
+      "id": "blackout-greenup-expectation",
+      "description": "Customer wants green-up during the Jun 1–Sep 30 N/P blackout. Diagnosis must not name a fertility 'deficiency' to justify blocked N/P; summary stays compliant and brand-free.",
+      "photos": ["blackout-greenup-1.jpg"],
+      "context": {
+        "season": "summer",
+        "grassType": "st_augustine",
+        "compliance": { "fertilizer_blackout": { "active": true, "applies_to": ["nitrogen", "phosphorus"], "window": "Jun 1 - Sep 30", "allowed_exceptions": ["iron", "micronutrients"] } }
+      },
+      "expect": { "forbidNamedCause": ["nitrogen_deficiency"], "forbidBrandsInWording": true },
+      "narrative": { "forbidBrands": true, "forbidOverpromise": true, "nonEmpty": true }
+    }
+  ]
+}

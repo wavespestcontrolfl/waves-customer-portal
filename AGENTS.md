@@ -272,6 +272,18 @@ finding and warns on P1. Reviewers must return JSON matching
   policies, PaymentIntent idempotent per estimate+amount with
   metadata-pinned purpose/estimate id; dark behind
   ESTIMATE_DEPOSIT_REQUIRED).
+  `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
+  32-hex token format gate, 60 req/min rate limit, privacy headers
+  `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
+  diagnostics, strictly whitelisted customer-safe payload — no internal
+  scores, raw AI, product names, label constraints, reconciliation/QA
+  internals, or tech notes — generic 404 for missing/draft/expired/malformed),
+  `/api/public/lawn-diagnostic/:token/quote-request` (write; same token gate
+  + sent/unexpired requirement + generic 404, 10 req/min limit, strict body
+  validation before coercion — name plus a valid email or phone — links one
+  lead per diagnostic via an atomic `whereNull('lead_id')` guard returning 409
+  on repeat, no raw PII logging, never mutates diagnostic scoring or any
+  customer/assessment table).
   `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
   no auth, no DB writes, no PII — returns a deterministic Florida
   pest-pressure model keyed only on a curated city slug / FL ZIP plus

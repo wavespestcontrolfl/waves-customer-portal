@@ -1,6 +1,10 @@
 # Lawn Diagnostic — implementation plan
 
-**Status:** Planning (approved 2026-05-28). Not yet built.
+**Status:** Planning (approved 2026-05-28). v0.2 report contract scaffold, diagnostic
+tables migration, and analyze-only tech route added 2026-06-15. v0.3 added the LLM
+diagnosis + narrative layer and replaced the human-review gate with a no-block
+auto-release ladder (2026-06-15 — see "v0.3" section below). Persist/send/public report
+routes and UI still not built.
 **Owner:** Adam.
 
 ## What this is
@@ -100,7 +104,7 @@ All tech routes mount **`adminAuthenticate` then `requireTechOrAdmin`** (both, i
 order — `requireTechOrAdmin` only works after `adminAuthenticate` populates `req.techRole`;
 used alone it 403s every request). Mirror `server/routes/tech-track.js:52` /
 `admin-lawn-assessment.js:327-328`.
-- `POST /api/tech/lawn-diagnostic/analyze` — analyze-only, no persistence (internal feedback).
+- `POST /api/tech/lawn-diagnostic/analyze` — analyze-only, no persistence (internal feedback). Added in this PR.
 - `POST /api/tech/lawn-diagnostic` — create/persist a draft.
 - `POST /api/tech/lawn-diagnostic/:id/send` — capture contact, mint token, render report. Gate: contact required.
 - `POST /api/tech/lawn-diagnostic/:id/lead` — save as lead (optional).
@@ -118,6 +122,168 @@ New public report page (customer-facing warm tone, not admin monochrome).
 Current engine is average + divergence flags (`divergence_flags` on >20pt Claude/Gemini
 gaps), **no stored confidence**. Add `ai_confidence` from inter-model agreement; gate the
 send path on it (low confidence → "review before sending"). Optional for v1.
+
+## v0.2 diagnostic report contract
+
+The report generator is no longer just "diagnose → customer copy." It now has a
+deterministic contract layer before prose generation:
+
+```text
+PASS 0: VALIDATE INPUTS
+  photo quality, missing views, product-label availability, compliance completeness
+
+PASS 1: DIAGNOSE
+  finding IDs, differential posture, observed/inferred/negative evidence, confidence,
+  severity, spread risk, affected area, urgency, confirmation step
+
+PASS 2: RECONCILE
+  product IDs mapped to finding IDs, preventive vs corrective classification,
+  untreated-condition and unsupported-application flags
+
+PASS 3: TRANSLATE
+  customer-safe wording, watering sequence, seasonal expectations, watch items
+
+PASS 4: QA / SAFETY CHECK
+  label conflicts, fertilizer-blackout conflicts, missing assigned irrigation days,
+  overconfident photo-only claims, valid structured output
+```
+
+Top-level output shape:
+
+```json
+{
+  "input_assessment": {},
+  "diagnosis": {},
+  "treatment_rationale": [],
+  "reconciliation_flags": [],
+  "watering": {},
+  "seasonal_context": "",
+  "expectations": {},
+  "watch_items": [],
+  "customer_summary": "",
+  "internal_quality_flags": [],
+  "human_review_required": false
+}
+```
+
+### Input assessment gate
+
+Every diagnostic report must explicitly state whether the inputs are adequate:
+
+```json
+{
+  "photo_quality": "adequate | limited | poor",
+  "photo_limitations": [
+    "No close-up blade image",
+    "No view of patch margin"
+  ],
+  "missing_inputs": [
+    "product post-application irrigation directive missing for P1",
+    "assigned irrigation days missing"
+  ],
+  "human_review_required": true,
+  "human_review_reason": "Photo quality is limited. Missing inputs: assigned irrigation days missing."
+}
+```
+
+Low-quality photos, missing close-ups, missing label constraints, missing assigned
+irrigation days, or low diagnostic confidence require human review before sending.
+
+### Product-label constraints are DB-authoritative
+
+`products_catalog` is the source of truth for post-application rules. The model may
+select customer wording from the contract, but it must not invent label-specific
+watering, mowing, rainfast, reentry, kid/pet, or timing instructions.
+
+Canonical normalized shape:
+
+```json
+{
+  "product_id": "P1",
+  "source": "product_db",
+  "source_version": "2026-06-14",
+  "post_app_irrigation": "hold 48h",
+  "rainfast_hours": 4,
+  "mowing_restriction": "no mowing 24h",
+  "reentry_note": "after dry",
+  "confidence": "db_authoritative",
+  "requires_label_review": false
+}
+```
+
+If label constraints are missing, the system may only give low-risk general guidance
+and must set `requires_label_review: true`. Inferred guidance is never presented as
+label-authoritative.
+
+### Compliance granularity
+
+Fertilizer blackout rules must identify what they apply to. A blackout for N/P does
+not automatically prohibit fungicide, insecticide, iron, micronutrients, or other
+non-N/P treatments.
+
+```json
+{
+  "fertilizer_blackout": {
+    "active": true,
+    "applies_to": ["nitrogen", "phosphorus"],
+    "window": "Jun 1 - Sep 30",
+    "allowed_exceptions": ["iron", "micronutrients"],
+    "source": "compliance_module"
+  },
+  "irrigation_compliance": {
+    "max_days_per_week": 2,
+    "assigned_days": ["Wednesday", "Saturday"],
+    "allowed_time_windows": ["before 10am", "after 4pm"],
+    "restriction_summary_customer": "You may water Wednesday and Saturday only, before 10am or after 4pm."
+  }
+}
+```
+
+Watering restrictions are a ceiling, not a target. The post-application label
+directive wins first; only after that should customer copy return to the assigned
+irrigation schedule.
+
+### Structured reconciliation flags
+
+Flags must be machine-readable so dispatch, CRM, QA, and customer rendering can route
+them differently:
+
+```json
+{
+  "type": "untreated_condition | unsupported_application | preventive_application | follow_up_needed",
+  "severity": "low | medium | high",
+  "finding_id": "F2",
+  "product_id": "P1",
+  "finding": "Possible fungal margin",
+  "issue": "Condition shown in the diagnostic findings is not mapped to an applied product today.",
+  "recommended_action": "Schedule follow-up inspection within 7 days.",
+  "customer_visible": true,
+  "customer_wording": "We saw one area that may need a second look if it continues to spread."
+}
+```
+
+Customer wording must not outrun confidence. Photo-only chinch, disease, or drought
+judgments use "most consistent with..." or "signs consistent with..." plus a concrete
+confirmation step, never "confirmed" unless a field test or technician verification
+is present.
+
+### Initial test matrix
+
+The first Jest coverage lives in `server/tests/lawn-diagnostic-report.test.js` and
+locks down:
+
+1. Limited photos + missing product-label irrigation require human review.
+2. DB-authoritative 48-hour irrigation holds override assigned watering days.
+3. N/P blackout conflicts flag fertilizer but not fungicide or allowed iron.
+4. Product IDs map to finding IDs; untreated conditions become structured flags.
+5. Preventive applications stay preventive and do not imply a visible confirmed issue.
+
+Expand this to 15-25 fixtures before wiring routes: chinch/no insecticide,
+fungal-margin/herbicide-only, drought geometry/preventive insecticide, blackout
+green-up expectations, conflicting product labels, granular before rain, no irrigation
+system, reclaimed water/iron chlorosis, poor photos, non-St. Augustine turf, large
+patch season, gray leaf spot after rain/high N, multi-product label constraints, and
+customer copy that must not expose FRAC/IRAC/HRAC.
 
 ## Hard gates (server-enforced)
 1. `send` requires contact info (name + email or address) → 422 otherwise.
@@ -244,3 +410,132 @@ identical blackout.
 ## Non-goals
 Existing customer lawn assessment system untouched. Projects untouched. No baselines, no
 customer history, no promotion-to-baseline, no auto-customer-creation.
+
+## v0.3 — no-block diagnosis + narrative prompt (built 2026-06-15)
+
+The v0.2 contract layer (`lawn-diagnostic-report.js`) was fully deterministic: vision
+scores → threshold findings (`buildFindingsFromVision`) → templated `customer_summary`.
+v0.3 adds an LLM diagnosis + narrative layer **and removes the human-review gate** in
+favor of an auto-release safety ladder. Decision (Adam, 2026-06-15): **never block,
+degrade.** No manual-review queue, no stuck reports.
+
+### Architecture
+Two focused LLM passes wrap the deterministic contract, which stays as the
+reconciliation/QA spine and the fallback:
+
+```
+analyzePhotos (vision scores)
+  → PASS A runDiagnosis()      photos + scores + product/compliance → structured findings
+  → buildDiagnosticReportContract()   PASS 2-4 deterministic (reconcile, watering, QA)
+  → classifyReleaseMode()      standard | conservative | label_limited | minimal
+  → PASS B runNarrative()      reconciled contract → customer_summary (skipped if minimal)
+  → applyAutoReleaseRepair()   flag-driven scrub / degrade
+  → release  (always)
+```
+
+Files: `server/services/lawn-diagnostic-prompt.js` (new — both prompts, `runDiagnosis`,
+`runNarrative`, `normalizeDiagnosisJson`, `PROMPT_VERSION='lawn-diagnostic-v0.3'`);
+`lawn-diagnostic-report.js` (+ `classifyReleaseMode`, `applyAutoReleaseRepair`,
+`buildMinimalSafeReport`, `MINIMAL_SAFE_SUMMARY`); `routes/tech-lawn-diagnostic.js`
+(`/analyze` rewired). Diagnosis uses `MODELS.VISION` (multimodal + temperature), narrative
+uses `MODELS.FLAGSHIP`.
+
+### No human-review gate (the v0.2 reversal)
+`human_review_required` was a JSON field inside `report_contract` jsonb (migration
+`20260615000001:19`), **not a column** — neutralizing it needed no migration. It is now
+pinned `false` in both `assessInputSufficiency` and `buildDiagnosticReportContract`, kept
+only for backward compatibility, and the prompts are told never to request review. The
+field is deprecated; `requires_label_review` is kept and reinterpreted as non-blocking
+(it already drives `label_limited`) — rename to `label_guidance_limited` is a future item.
+
+### Auto-release safety ladder (`classifyReleaseMode`, internal-only)
+Precedence, most → least restrictive: **minimal > conservative > label_limited > standard.**
+(Diagnosis-honesty degradation outranks label-data degradation because watering-timing
+omission is independently guaranteed by `buildWateringPlan` regardless of mode.)
+- `minimal` — no usable photos, or no defensible diagnosis. Names no pest/disease.
+- `conservative` — confidence < high, limited photos, or an untreated finding. Symptom-first.
+- `label_limited` — sound diagnosis but label/watering data not authoritative, or a
+  compliance conflict. Exact timing omitted.
+- `standard` — evidence and label data sufficient.
+
+`release_mode` is returned in the `/analyze` envelope (`releaseMode`, `findingsSource`,
+`fallbackReason`, `promptVersion`) and is for routing/logging only — **never** placed in
+`report_contract` (the customer payload). No new column; persist later under
+`ai_analysis._internal` if needed.
+
+### Repair-not-route (`applyAutoReleaseRepair`)
+Flag-driven (applies every applicable fix regardless of the mode label):
+- `photo_confirmation_honesty` flag → downgrade "confirmed/active chinch" → "suspected".
+- label gap / `watering_label_conflict` → strip exact hour/day timing, sub general guidance.
+- `fertilizer_blackout_conflict` → remove N/P fertility copy, add the blackout line.
+- gutted/empty summary, or `minimal` mode → `MINIMAL_SAFE_SUMMARY` (no diagnosis).
+Repairs are recorded on `repairs_applied` (internal).
+
+### Two no-block paths
+- **Mechanical failure** (no API key, parse fail, model error) → deterministic
+  `buildFindingsFromVision` / `buildCustomerSummary`, then classified + repaired.
+- **Evidence weakness** (LLM succeeded, inputs poor) → LLM self-degrades per the
+  AUTO-RELEASE rule, then `applyAutoReleaseRepair` polishes.
+
+### The 6 prompt-quality mechanisms (in `DIAGNOSIS_SYSTEM_PROMPT` / `NARRATIVE_SYSTEM_PROMPT`)
+Confidence rubric (evidence-based, photo-only pest/disease/drought caps at moderate),
+minimum-evidence table (curated SWFL conditions), conflict-resolution precedence
+(field test > photo > vision score > weather prior), false-precision constraints (bands
+not %, ranges not day-counts, no label numbers unless db_authoritative, no brand/MOA
+codes), customer-summary realism pass (write last, reconciliation-honest, confidence-
+matched, skeptical-homeowner check), stronger photo interpretation (artifact awareness,
+dual-shot rule, cue→evidence mapping).
+
+### Tests
+`lawn-diagnostic-report.test.js` extended with the auto-release ladder + repair fixtures;
+the three v0.2 `human_review_required: true` assertions migrated to `false` +
+`classifyReleaseMode`. `tech-lawn-diagnostic-route.test.js` manual-findings assertion
+migrated to `findingsSource: 'manual'` / `releaseMode: 'conservative'`.
+
+### Still open
+Curated reference is an inline condensed copy of the verified sources; compiling it from
+`facts-bank` at build time is a follow-up. PASS B is a second LLM call (acceptable for a
+low-volume prospecting tool); collapse to one call if latency matters. `requires_label_review`
+rename deferred.
+
+## v1 backend API (built 2026-06-15)
+
+The analyze route was step 1; the persist → send → public chain is now built (backend
+only — photo S3 persistence and the React tech UI + public `/lawn-report/:token` page are
+deferred; the public page's satellite hero is address-based so it does not need stored photos).
+
+Routes (all never-block, all on the existing `tech-lawn-diagnostic.js` router unless noted):
+- `POST /api/tech/lawn-diagnostic` — persist an analyzed diagnostic as a draft
+  (`status='analyzed'`). **Rebuilds the contract server-side** from the analyze inputs
+  (`findings` + re-enriched `products` + `compliance` → `buildDiagnosticReportContract` →
+  classify → repair); never trusts a client-built `reportContract`, so the stored,
+  later-published copy has authoritative watering/label gating and a server-computed,
+  reconciliation-aware summary. Stores `report_contract`, `ai_analysis` (+ `release_mode`),
+  contact/address snapshots, overall_score, ai_summary, ai_confidence.
+- `POST /api/tech/lawn-diagnostic/:id/send` — **hard gate**: `hasSendableContact` (name +
+  email or address) → 422 otherwise. Mints a 32-hex `report_token`
+  (`crypto.randomBytes(16)`), sets `report_expires_at` (30d), flips `mode='prospect'`,
+  `status='sent'`. Returns `{ token, url: '/lawn-report/:token', expiresAt }`.
+- `POST /api/tech/lawn-diagnostic/:id/lead` — optional save-as-lead; idempotent
+  (`lead_id` short-circuit + atomic `whereNull('lead_id')` guard, race re-reads).
+- `server/routes/public-lawn-diagnostic.js` (new, mounted `/api/public/lawn-diagnostic`):
+  - `GET /:token` — `FULL_TOKEN_RE` gate, 60/min limit, privacy headers
+    (`no-store`/`noindex`/`no-referrer`), only `status='sent'` + unexpired, generic 404.
+    Returns `buildPublicLawnReport` — a strict allowlist (summary, primary_finding,
+    confidence, findings[name/confidence/severity/customer_note], watering customer copy,
+    expectations, watch_items, seasonal_context, first_name, city, overall_status label).
+    **Never** internal scores, raw AI, product names, label constraints, reconciliation/QA
+    internals, tech notes, or the street line.
+  - `POST /:token/quote-request` — 10/min limit, `validateQuoteRequest` strict-before-coercion
+    (name + valid email or phone; rejects null/''/false/[]), links one lead per diagnostic via
+    atomic `whereNull('lead_id')` → 409 on repeat. No raw PII logged.
+
+Both public routes added to the **AGENTS.md** public-by-token allowlist (P0 gate) with contracts.
+Tests: `lawn-diagnostic-public.test.js` (whitelisting no-leak, strict validation, token-gate
+404s, one-shot 409) + send-gate helper units in the route test. 54 lawn-diagnostic tests green.
+
+### v1 still to build
+Photo S3 persistence into `lawn_diagnostic_photos` (best-effort, for findings thumbnails);
+the `/tech/*` Lawn Diagnostic UI (D palette: capture → diagnosis → save/send/lead/archive);
+the public `/lawn-report/:token` React page (clone `EstimateViewPage`, satellite hero, plain
+findings, grass-type context, fix-it plan, quote CTA). v1.5: SMS/email link delivery.

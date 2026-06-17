@@ -31,6 +31,7 @@
     "twilio:inbound:audit": "node scripts/twilio/audit-inbound-routing.js",
     "twilio:inbound:set-url": "node scripts/twilio/set-inbound-voice-url.js",
     "smoke:lead-estimate-automation": "node server/scripts/smoke-lead-estimate-automation.js",
+    "eval:lawn-diagnostic": "node server/scripts/run-lawn-diagnostic-eval.js",
     "agent:export-fixtures": "node server/scripts/export-agent-decision-fixtures.js",
     "agent:export-reply-fixtures": "node server/scripts/export-reply-training-fixtures.js",
     "agent:evaluate-fixtures": "node server/scripts/evaluate-agent-decision-fixtures.js",
