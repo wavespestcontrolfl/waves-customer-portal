@@ -18,6 +18,11 @@
  * runs it strict only when keys are present.
  */
 
+// Load the repo-root .env BEFORE anything resolves model IDs / provider keys, so a local
+// `npm run check:lawn-models` validates the configured lawn models — not defaults/missing
+// keys. (Under `railway run` the env is already injected; dotenv is then a harmless no-op.)
+require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
+
 const { LAWN_PIPELINE_MODELS } = require('../services/lawn-diagnostic-prompt');
 
 // ── Pure helpers (exported for unit tests; no network) ────────────────────────
