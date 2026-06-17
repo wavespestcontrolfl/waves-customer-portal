@@ -18,8 +18,11 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
 // Live default is the registry's best Gemini vision model (gemini-3.5-flash);
-// override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
+// override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. On any miss
+// analyzeWithGemini retries the prior model (gemini-2.5-flash) so a live-model
+// entitlement/availability issue never costs us the Gemini analyzer.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
+const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
 
 const VISION_PROMPT = `Analyze this satellite/aerial image of a residential property in Southwest Florida. Estimate the following measurements and features as accurately as possible from the image.
 
@@ -194,40 +197,55 @@ class SatelliteAnalyzer {
     }
   }
 
+  // Single attempt against one Gemini model. Returns parsed analysis, or null on
+  // any miss (HTTP error / empty output / unparseable JSON) so the caller can retry.
+  async geminiAttempt(model, imageBase64s) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            ...imageBase64s.map((imageBase64) => ({ inlineData: { mimeType: 'image/png', data: imageBase64 } })),
+            { text: VISION_PROMPT },
+          ],
+        }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 1000 },
+      }),
+    });
+
+    if (!response.ok) {
+      logger.error(`Gemini API ${response.status} (${model}): ${response.statusText}`);
+      return null;
+    }
+
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) return null;
+
+    return JSON.parse(text.replace(/```json|```/g, '').trim());
+  }
+
   async analyzeWithGemini(imageBase64s) {
     if (!GEMINI_KEY) return null;
 
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${GEMINI_KEY}`;
+    // Live model first, then the prior model on any miss (skip the retry if an
+    // override has pinned both to the same id).
+    const models = GEMINI_VISION_FALLBACK_MODEL && GEMINI_VISION_FALLBACK_MODEL !== GEMINI_VISION_MODEL
+      ? [GEMINI_VISION_MODEL, GEMINI_VISION_FALLBACK_MODEL]
+      : [GEMINI_VISION_MODEL];
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              ...imageBase64s.map((imageBase64) => ({ inlineData: { mimeType: 'image/png', data: imageBase64 } })),
-              { text: VISION_PROMPT },
-            ],
-          }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 1000 },
-        }),
-      });
-
-      if (!response.ok) {
-        logger.error(`Gemini API ${response.status}: ${response.statusText}`);
-        return null;
+    for (const model of models) {
+      try {
+        const parsed = await this.geminiAttempt(model, imageBase64s);
+        if (parsed) return parsed;
+      } catch (err) {
+        logger.error(`Gemini vision failed (${model}): ${err.message}`);
       }
-
-      const data = await response.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) return null;
-
-      return JSON.parse(text.replace(/```json|```/g, '').trim());
-    } catch (err) {
-      logger.error(`Gemini vision failed: ${err.message}`);
-      return null;
     }
+    return null;
   }
 
   /**
