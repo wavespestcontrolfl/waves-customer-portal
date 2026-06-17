@@ -439,13 +439,21 @@ describe('tech lawn diagnostic analyze route', () => {
     });
   });
 
-  test('symptomFindingsFromObservations: one low-confidence symptom finding, never a cause', () => {
+  test('symptomFindingsFromObservations: low-confidence symptom for stress, never a cause', () => {
     const out = lawnPrompt.symptomFindingsFromObservations([{ color: 'browning', pattern: 'irregular patch', detail: 'crown chewed' }]);
     expect(out).toHaveLength(1);
     expect(out[0].confidence).toBe('low');
     expect(out[0].name).toMatch(/turf stress/i);
     expect(safeConditionLabel(out[0].name, out[0].confidence)).not.toMatch(/chinch|fungal|large patch/i);
     expect(lawnPrompt.symptomFindingsFromObservations([])).toEqual([]);
+  });
+
+  test('symptomFindingsFromObservations: a healthy/green observation does NOT become a stress finding', () => {
+    const healthy = lawnPrompt.symptomFindingsFromObservations([{ color: 'green', pattern: 'uniform', detail: 'dense healthy canopy' }]);
+    expect(healthy).toHaveLength(1);
+    expect(healthy[0].name).toMatch(/no major visible stress/i);
+    expect(healthy[0].severity).toBe('mild');
+    expect(safeConditionLabel(healthy[0].name, healthy[0].confidence)).toBe('no major visible stress');
   });
 });
 

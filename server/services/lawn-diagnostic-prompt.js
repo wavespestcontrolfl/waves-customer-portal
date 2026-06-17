@@ -509,6 +509,10 @@ function challengeMeta(extra = {}) {
  * The customer sees symptoms + a field-check recommendation; the naming gate keeps any
  * cause out because the finding is low-confidence and symptom-named.
  */
+// Observation cues that indicate an actual problem (vs a healthy/green lawn). Used to
+// decide whether the degraded finding is a stress symptom or a clean "no major stress".
+const OBSERVATION_STRESS_RE = /(brown|yellow|chlor|\bthin|bare|sparse|patch|spot|lesion|weed|wilt|\bdry\b|discolor|declin|scalp|mold|mildew|fung|chinch|grub|disease|insect|damage|\bdead\b|stress|stunt|moss|thatch|burn|streak|melt)/i;
+
 function symptomFindingsFromObservations(observations = []) {
   const list = Array.isArray(observations) ? observations.filter((obs) => obs && typeof obs === 'object') : [];
   if (!list.length) return [];
@@ -516,6 +520,26 @@ function symptomFindingsFromObservations(observations = []) {
     .map((obs) => [obs.color, obs.pattern, obs.distribution, obs.detail].filter(Boolean).join(', '))
     .filter(Boolean)
     .slice(0, 6);
+  // Only call it stress when the observations actually show a problem — a healthy/green
+  // lawn must NOT become a customer-visible "turf stress" finding just because the
+  // challenge stage was unavailable. No stress signal → the clean "no major stress" path.
+  const hasStress = OBSERVATION_STRESS_RE.test(cues.join(' '));
+  if (!hasStress) {
+    return [{
+      finding_id: 'F1',
+      name: 'No major visible stress',
+      confidence: 'low',
+      severity: 'mild',
+      spread_risk: 'low',
+      estimated_area_affected: null,
+      urgency: 'monitor',
+      observed_evidence: cues,
+      inferred_context: [],
+      negative_evidence: ['adversarial review unavailable — no specific issue named from these photos'],
+      confirmation_step: 'A quick on-site check confirms there is nothing developing.',
+      customer_wording: 'The photos look generally healthy; a quick on-site check confirms there is nothing developing.',
+    }];
+  }
   return [{
     finding_id: 'F1',
     name: 'Visible turf stress',
