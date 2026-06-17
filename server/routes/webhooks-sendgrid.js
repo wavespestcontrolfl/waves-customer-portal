@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const bounceRecovery = require('../services/email-bounce-recovery');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
@@ -258,20 +259,39 @@ async function handleEvent(ev) {
     return;
   }
   if (emailMessage) {
-    await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
+    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
+    // Bounce recovery runs AFTER the event transaction commits (it does a
+    // network re-send) and only when the event was newly processed (so a
+    // SendGrid redelivery of the same event can't re-trigger it). Best-effort —
+    // never let recovery break webhook ack.
+    if (processedNew) {
+      try {
+        if (bounceRecovery.isHardBounceEvent(ev)) {
+          await bounceRecovery.attemptRecovery(emailMessage, ev);
+        } else if (String(ev.event || '').toLowerCase() === 'delivered' && bounceRecovery.isRecoveryMessage(emailMessage)) {
+          await bounceRecovery.commitRecoveryOnDelivery(emailMessage);
+        }
+      } catch (err) {
+        logger.error(`[sendgrid-webhook] bounce recovery failed for ${messageId}: ${err.message}`);
+      }
+    }
     return;
   }
   // Untracked send — ignore.
   return;
 }
 
+// Returns true when this call actually processed the event (handler ran), false
+// when it was a deduped redelivery. Callers use this to fire post-commit side
+// effects (e.g. bounce recovery) exactly once per event.
 async function processWebhookEvent(ev, messageId, email, handler) {
   const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
   if (!eventId) {
     await handler(db);
-    return;
+    return true;
   }
 
+  let processed = false;
   await db.transaction(async (trx) => {
     const inserted = await trx('sendgrid_webhook_events')
       .insert({
@@ -295,7 +315,9 @@ async function processWebhookEvent(ev, messageId, email, handler) {
         processed_at: new Date(),
         updated_at: new Date(),
       });
+    processed = true;
   });
+  return processed;
 }
 
 /**
