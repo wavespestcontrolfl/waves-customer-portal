@@ -3934,8 +3934,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
         codePrefix: invoiceShortCodePrefix(invoice),
       });
-      // Treat already-paid pre-mint as the same SMS branch as prepaid.
-      if (invoice.status === 'paid') alreadyPaid = true;
+      // Treat already-paid / prepaid pre-mint as the same SMS branch.
+      if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
       else invoiceCreated = true;
     }
 
@@ -4111,7 +4111,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const usePaidCompletionTemplate = alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
-          || String(invoice?.status || '').toLowerCase() === 'paid';
+          || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase());
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,

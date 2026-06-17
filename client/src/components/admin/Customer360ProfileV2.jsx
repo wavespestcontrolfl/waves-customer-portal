@@ -2428,10 +2428,11 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   };
   useEffect(load, [customerId]);
 
-  // Only treat the ledger as known once a fetch has succeeded. Until then
-  // (or on a load failure) we must NOT show a $0 balance + enabled form —
-  // that invites a duplicate credit against an account that already has one.
-  const loaded = data != null;
+  // Only treat the ledger as known once a fetch has succeeded AND the latest
+  // fetch didn't fail. A failed refresh (even after a prior success) flips back
+  // to not-loaded so the panel shows "Balance unavailable" + disables the form
+  // — never a stale balance with an enabled form (would invite duplicate credit).
+  const loaded = data != null && !loadError;
   const balance = Number(data?.balance || 0);
   const ledger = data?.ledger || [];
 

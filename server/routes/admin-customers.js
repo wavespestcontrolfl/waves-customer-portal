@@ -595,7 +595,7 @@ function applyCustomerListFilters(query, filters) {
   return query;
 }
 
-async function auditCustomerMutation(req, action, customerId, metadata = {}, critical = false) {
+async function auditCustomerMutation(req, action, customerId, metadata = {}, critical = false, trx = null) {
   await recordAuditEvent({
     actor_type: 'technician',
     actor_id: req.technicianId || null,
@@ -606,6 +606,7 @@ async function auditCustomerMutation(req, action, customerId, metadata = {}, cri
     ip_address: req.ip,
     user_agent: req.get('user-agent') || null,
     critical,
+    trx,
   });
 }
 
@@ -2789,20 +2790,25 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
             metadata: JSON.stringify({ source: 'account_credit_prepayment', method }),
           });
         }
+
+        // Critical audit inside the same transaction as the money movement —
+        // if it fails, the whole thing rolls back, so a retry can't duplicate
+        // the credit/revenue (the operator never sees a committed-but-errored
+        // state).
+        await auditCustomerMutation(req, 'customer.credit.adjust', req.params.id, {
+          amount: CustomerCredit.round2(delta),
+          kind,
+          method: kind === 'prepayment' ? method : null,
+          balance_after: movement.balanceAfter,
+          note: trimmedNote,
+        }, true, trx);
+
         return movement;
       });
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
       throw err;
     }
-
-    await auditCustomerMutation(req, 'customer.credit.adjust', req.params.id, {
-      amount: CustomerCredit.round2(delta),
-      kind,
-      method: kind === 'prepayment' ? method : null,
-      balance_after: result.balanceAfter,
-      note: trimmedNote,
-    }, true);
 
     await db('activity_log').insert({
       customer_id: req.params.id,

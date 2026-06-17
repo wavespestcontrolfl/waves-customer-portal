@@ -1360,6 +1360,12 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       } catch (e) {
         return res.status(409).json({ error: `Open payment session ${openPiId} could not be verified (${e.message}); resolve it before applying credit` });
       }
+      // Null = Stripe unconfigured/unreachable — we can't prove the PI is dead,
+      // so fail closed rather than consume credit while a client secret could
+      // still settle (the webhook treats prepaid as terminal and would skip it).
+      if (!pi) {
+        return res.status(409).json({ error: `Open payment session ${openPiId} could not be verified (payment service unavailable); resolve it before applying credit` });
+      }
       if (pi && PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
         return res.status(409).json({ error: `A payment is already in flight (${pi.status}); wait for it to settle or refund it before applying credit` });
       }
@@ -1540,7 +1546,9 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
             .whereNull('renewal_decision')
             .whereNotIn('status', ['cancelled', 'canceled'])
             .update({ status: 'payment_pending', updated_at: trx.fn.now() });
-          await AnnualPrepayRenewals.clearPrepaidStampsForTerm(locked.annual_prepay_term_id, trx);
+          // throwOnError → if stamp cleanup fails, the whole reversal rolls
+          // back rather than restoring credit while visits stay stamped free.
+          await AnnualPrepayRenewals.clearPrepaidStampsForTerm(locked.annual_prepay_term_id, trx, { throwOnError: true });
         }
 
         return { invoice: locked, restore, balanceAfter };

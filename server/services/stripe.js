@@ -2075,6 +2075,9 @@ const StripeService = {
           if (existingPayment) return existingPayment;
           throw new Error('Invoice already paid');
         }
+        if (lockedInvoice.status === 'prepaid') {
+          throw new Error('Invoice is already prepaid');
+        }
         if (lockedInvoice.status === 'processing'
           && String(lockedInvoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
           throw new Error('Bank payment is already processing');
