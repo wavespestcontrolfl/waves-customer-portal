@@ -4,6 +4,8 @@ const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 const { loadEstimateAiSupportContext } = require('./estimate-ai-context');
 const { shadowCompare, textAgreement } = require('./model-comparison-log');
+const { getLiveProvider } = require('./live-provider');
+const { dispatch } = require('./llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -850,19 +852,34 @@ function extractAnthropicText(response = {}) {
     .trim();
 }
 
+function estimateUserText(question, context) {
+  return `Customer question:\n${question}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`;
+}
+
+const ESTIMATE_ANTHROPIC_MODEL = () => process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE;
+
 async function answerWithAnthropic(question, context) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const response = await client.messages.create({
-    model: process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE,
+    model: ESTIMATE_ANTHROPIC_MODEL(),
     max_tokens: 420,
     system: SYSTEM_PROMPT,
-    messages: [{
-      role: 'user',
-      content: `Customer question:\n${question}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`,
-    }],
+    messages: [{ role: 'user', content: estimateUserText(question, context) }],
   });
   return extractAnthropicText(response);
+}
+
+// OpenAI live path (used only when estimate_assistant is promoted). Same prompt;
+// clean the text the same way as the Anthropic path for parity.
+async function answerWithOpenAI(question, context) {
+  const r = await dispatch(MODELS.ROUTES.estimateAssistant, {
+    system: SYSTEM_PROMPT,
+    text: estimateUserText(question, context),
+    jsonMode: false,
+    maxTokens: 420,
+  });
+  return r && r.ok && r.text ? cleanAssistantAnswer(r.text) : null;
 }
 
 async function answerEstimateQuestion({
@@ -907,30 +924,51 @@ async function answerEstimateQuestion({
     };
   }
 
+  // Resolve the live provider (default 'anthropic'; 'openai' only after promotion).
+  const liveProvider = await getLiveProvider('estimate_assistant');
   try {
-    const aiAnswer = await answerWithAnthropic(cleanQuestion, context);
+    let aiAnswer = null;
+    let producedBy = null;
+    if (liveProvider === 'openai') {
+      aiAnswer = await answerWithOpenAI(cleanQuestion, context);
+      if (aiAnswer) producedBy = 'openai';
+      if (!aiAnswer) { // candidate failed → fall back to Anthropic (never an outage)
+        aiAnswer = await answerWithAnthropic(cleanQuestion, context);
+        if (aiAnswer) producedBy = 'anthropic';
+      }
+    } else {
+      aiAnswer = await answerWithAnthropic(cleanQuestion, context);
+      if (aiAnswer) producedBy = 'anthropic';
+    }
+
     if (aiAnswer) {
-      // Shadow-only (GATE_SHADOW_ESTIMATE_OPENAI): run the OpenAI candidate on the SAME
-      // prompt and log live-vs-candidate to ai_model_comparisons. Fire-and-forget AFTER
-      // the live answer is ready — never adds latency to the customer response, never
-      // replaces it. Mirrors answerWithAnthropic's user content exactly.
+      // Shadow the NON-live provider (role-swap) and log live-vs-candidate to
+      // ai_model_comparisons. Fire-and-forget AFTER the answer is ready — never
+      // adds customer latency, never replaces the answer.
       if (process.env.GATE_SHADOW_ESTIMATE_OPENAI === 'true') {
+        const candidateRoute = producedBy === 'openai'
+          ? { provider: 'anthropic', model: ESTIMATE_ANTHROPIC_MODEL() }
+          : MODELS.ROUTES.estimateAssistant;
         void shadowCompare({
           featureKey: 'estimate_assistant',
           entityType: 'estimate',
           entityId: estimate?.id || null,
-          live: { provider: 'anthropic', model: process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE, output: aiAnswer },
-          candidateRoute: MODELS.ROUTES.estimateAssistant,
+          live: {
+            provider: producedBy,
+            model: producedBy === 'openai' ? MODELS.ROUTES.estimateAssistant.model : ESTIMATE_ANTHROPIC_MODEL(),
+            output: aiAnswer,
+          },
+          candidateRoute,
           candidatePayload: {
             system: SYSTEM_PROMPT,
-            text: `Customer question:\n${cleanQuestion}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`,
+            text: estimateUserText(cleanQuestion, context),
             jsonMode: false,
             maxTokens: 420,
           },
           compare: textAgreement,
         });
       }
-      return { answer: aiAnswer, source: 'anthropic' };
+      return { answer: aiAnswer, source: producedBy };
     }
   } catch (err) {
     logger.warn(`[estimate-assistant] AI answer failed: ${err.message}`);

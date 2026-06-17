@@ -84,6 +84,20 @@ function sanitizeBuiltNotification(built = {}) {
 
 // priority: 'urgent' (red, double vibrate), 'high' (amber), 'normal' (teal), 'low' (gray)
 const TRIGGER_REGISTRY = {
+  // Fired by the model-comparison judge (server/services/model-comparison-judge.js)
+  // when a shadow candidate first clears its promotion readiness bar ("won").
+  // Deduped upstream (model_promotion_alerts) so it fires once, not every nightly run.
+  model_ready_for_promotion: {
+    label: 'Shadow model ready to promote',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: `${p.candidateModel || 'Candidate model'} is ready to take over ${p.featureLabel || p.featureKey || 'a feature'}`,
+      body: `Cleared the readiness bar (${p.winRate != null ? Math.round(p.winRate * 100) + '% win+tie' : 'eligible'}, ${p.judged || 0} judged). Review and promote.`.slice(0, 220),
+      link: '/admin/agents',
+    }),
+  },
   // Fired by server/services/property-lookup-canary.js when a golden parcel
   // stops parsing — a county PAO layout change silently degrading estimator
   // accuracy until fixed.

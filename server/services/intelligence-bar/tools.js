@@ -243,6 +243,26 @@ time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
       required: ['customer_id', 'message'],
     },
   },
+  {
+    name: 'get_model_readiness',
+    description: `Cross-provider model-shadow readiness scorecard. For each feature (estimate_assistant, call_extraction): judged comparison count, candidate (OpenAI) win+tie rate, recent unsafe count, whether it has cleared the promotion bar, and blockers if not. Read-only.
+Use for: "is gpt-5.5 ready to take over estimates?", "model readiness", "shadow scorecard", "which models can we promote?"`,
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'promote_model_provider',
+    description: `Make a feature's LIVE model the candidate provider (e.g. GPT-5.5 for estimate_assistant). The server re-checks the readiness bar and REFUSES if not met; the prior provider stays as automatic fallback. Reversible (promote to the baseline provider to revert). Owner action — requires confirmation.
+Use for: "promote gpt-5.5 for estimate assistant", "make openai live for call extraction", "revert estimate assistant to anthropic"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        feature_key: { type: 'string', enum: ['estimate_assistant', 'call_extraction'], description: 'Which feature to flip' },
+        provider: { type: 'string', enum: ['anthropic', 'openai', 'gemini'], description: 'Provider to make live (use the baseline to revert)' },
+        reason: { type: 'string', description: 'Why (audited)' },
+      },
+      required: ['feature_key', 'provider'],
+    },
+  },
 ];
 
 
@@ -265,6 +285,8 @@ async function executeTool(toolName, input) {
       case 'reschedule_appointment': return await rescheduleAppointment(input);
       case 'cancel_appointment': return await cancelAppointment(input);
       case 'draft_sms': return await draftSms(input);
+      case 'get_model_readiness': return await getModelReadiness(input);
+      case 'promote_model_provider': return await promoteModelProvider(input);
       default:
         return { error: `Unknown tool: ${toolName}` };
     }
@@ -1051,5 +1073,74 @@ async function draftSms(input) {
   };
 }
 
+// ─── Cross-provider model readiness + promotion (Phase 3) ───────
+// Lazy requires avoid any load-order coupling with the model-comparison services.
+async function getModelReadiness() {
+  const { computeReadiness } = require('../model-comparison-graduation');
+  const { getLiveProvider } = require('../live-provider');
+  const readiness = await computeReadiness({});
+  const features = [];
+  for (const [feature_key, r] of readiness) {
+    let liveProvider = r.currentProvider;
+    try { liveProvider = await getLiveProvider(feature_key); } catch { /* keep baseline */ }
+    features.push({
+      feature_key,
+      live_provider: liveProvider,
+      baseline_provider: r.currentProvider,
+      candidate_provider: r.candidateProvider,
+      candidate_model: r.candidateModel,
+      judged: r.judged,
+      win_rate: r.winRate,
+      recent_unsafe: r.recentUnsafe,
+      eligible_to_promote: r.eligible,
+      blockers: r.blockers,
+    });
+  }
+  return { features };
+}
+
+async function promoteModelProvider(input) {
+  const featureKey = String(input.feature_key || '');
+  const provider = String(input.provider || '');
+  const { FEATURE_BASELINE, evaluatePromotionEligibility } = require('../model-comparison-graduation');
+  const { getLiveProvider, setLiveProvider } = require('../live-provider');
+  if (!FEATURE_BASELINE[featureKey]) return { error: `Unknown feature_key: ${featureKey}` };
+  if (!['anthropic', 'openai', 'gemini'].includes(provider)) return { error: `Invalid provider: ${provider}` };
+
+  const current = await getLiveProvider(featureKey).catch(() => FEATURE_BASELINE[featureKey]);
+  const isRevert = provider === FEATURE_BASELINE[featureKey];
+
+  // Preview (no server-attached confirmed): show exactly what changes + the
+  // readiness verdict. Never mutates.
+  if (input.confirmed !== true) {
+    const eligibility = isRevert ? { eligible: true, blockers: [] } : await evaluatePromotionEligibility({ featureKey });
+    return {
+      preview: true,
+      feature_key: featureKey,
+      from_provider: current,
+      to_provider: provider,
+      is_revert_to_baseline: isRevert,
+      eligible: eligibility.eligible,
+      blockers: eligibility.blockers || [],
+      judged: eligibility.judged,
+      note: isRevert
+        ? 'PREVIEW — reverting to the baseline provider is always allowed. Approve to apply.'
+        : (eligibility.eligible
+          ? 'PREVIEW — this feature cleared the readiness bar. Approve to make the candidate live (prior provider stays as fallback).'
+          : 'PREVIEW — this feature has NOT cleared the readiness bar; promotion will be REFUSED on confirm. See blockers.'),
+    };
+  }
+
+  // Commit — setLiveProvider re-checks eligibility server-side for non-reverts.
+  const result = await setLiveProvider({ featureKey, provider, actor: 'intelligence_bar', reason: input.reason || null });
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.reason === 'not_eligible' ? 'Promotion refused — readiness bar not met.' : result.reason,
+      blockers: result.blockers || [],
+    };
+  }
+  return { ok: true, feature_key: featureKey, live_provider: provider, note: `${featureKey} now serves ${provider} (prior provider retained as fallback).` };
+}
 
 module.exports = { TOOLS, executeTool };

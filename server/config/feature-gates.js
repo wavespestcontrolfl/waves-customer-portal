@@ -67,6 +67,10 @@ const gates = {
   // customer-visible effect; prod opt-in per house pattern.
   shadowJudge: isProd ? process.env.GATE_SHADOW_JUDGE === 'true' : true,
 
+  // Nightly LLM judge over ai_model_comparisons (cross-provider shadow pairs);
+  // scores candidate vs live + fires the deduped "won" alert. No customer effect.
+  modelJudge: isProd ? process.env.GATE_MODEL_JUDGE === 'true' : true,
+
   // SMS Suggest Mode (brand-voice loop, Phase D) — intents flipped to
   // 'suggest' in sms_intent_modes surface their house-voice draft as an
   // Agent Review card in the comms composer. A human still reads, edits,

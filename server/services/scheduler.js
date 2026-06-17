@@ -653,6 +653,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Nightly cross-provider judge: scores ai_model_comparisons shadow pairs
+  // (live vs candidate) and fires the deduped "won" alert when a feature clears
+  // its readiness bar. Batch-capped; unjudged rows retry next night (anti-join).
+  cron.schedule('25 4 * * *', async () => {
+    if (!isEnabled('modelJudge')) return;
+    logger.info('Running: Model-comparison judge');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { judgeModelComparisons } = require('./model-comparison-judge');
+      await runExclusive('model-judge', () => judgeModelComparisons());
+    } catch (err) {
+      logger.error(`Model-comparison judge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 4:10AM ET — Recover claimed Agent Review decisions + expire stale
   // composer suggestions (brand-voice loop, Phase D). Recovery is NOT gated:

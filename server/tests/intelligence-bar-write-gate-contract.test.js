@@ -96,6 +96,7 @@ const WRITE_TWO_STEP = [
   'assign_technician',
   'move_stops_to_day',
   'swap_tech_assignments',
+  'promote_model_provider',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -169,6 +170,7 @@ const LEGACY_BARE_WRITES = [
 // (cancel_and_reschedule_far_out) belong here — they return content for the
 // operator, the corresponding send/submit tool is the write.
 const READ_ONLY = [
+  'get_model_readiness',
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',
   'find_schedule_gaps', 'get_day_summary', 'get_zone_density', 'find_available_slots',
@@ -366,6 +368,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],
     ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: [STOPS[0].id], new_date: '2026-06-12' }],
     ['schedule-tools', 'executeScheduleTool', 'swap_tech_assignments', { date: '2026-06-11', tech_a_name: 'Adam', tech_b_name: 'Jose' }],
+    // Non-baseline provider so the executor reaches the readiness/preview branch
+    // (reads only; fail-closed under the mock) rather than the revert shortcut.
+    ['tools', 'executeTool', 'promote_model_provider', { feature_key: 'estimate_assistant', provider: 'openai' }],
   ];
 
   test('harness sanity: the recording db actually records mutations', async () => {
