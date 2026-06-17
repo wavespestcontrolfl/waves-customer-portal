@@ -218,6 +218,12 @@ describe('attemptRecovery codex-fix behaviors', () => {
     // P2: the send carries a custom arg so a fast webhook can resolve the row
     // before provider_message_id is committed.
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ customArgs: { email_message_id: 'msg1' } }));
+    // round 10: the provider-id write must NOT also set status (so a fast
+    // delivery/bounce webhook that already terminalized the row isn't regressed);
+    // status is advanced separately, guarded on still-'queued'.
+    const pubCall = mockDb._calls.find((c) => c.table === 'email_messages' && c.data.provider_message_id === 'pm_1');
+    expect(pubCall.data.status).toBeUndefined();
+    expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data.status === 'sent')).toBe(true);
   });
 
   test('does NOT send when the corrected address belongs to another customer (privacy)', async () => {

@@ -338,12 +338,20 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // provider_message_id is committed below.
       customArgs: { email_message_id: String(message.id) },
     });
+    // Always record the provider id + send time. These are safe regardless of
+    // any concurrent webhook.
     await db('email_messages').where({ id: message.id }).update({
-      status: 'sent',
       provider_message_id: result.messageId,
       sent_at: new Date(),
       updated_at: new Date(),
     });
+    // Advance to 'sent' ONLY if still 'queued' — a fast delivery/bounce webhook
+    // (resolvable via custom_args.email_message_id before this commit) may have
+    // already moved the row to a terminal status, and we must not regress it.
+    await db('email_messages')
+      .where({ id: message.id, status: 'queued' })
+      .update({ status: 'sent', updated_at: new Date() })
+      .catch(() => {});
     return { ok: true, messageRowId: message.id };
   } catch (err) {
     await db('email_messages').where({ id: message.id }).update({
