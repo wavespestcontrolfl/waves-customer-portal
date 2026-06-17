@@ -161,12 +161,12 @@ async function insertChangelog(knex) {
   if (existing) return;
   await knex('pricing_changelog').insert({
     ...CHANGELOG_IDENTITY,
-    affected_services: JSON.stringify(['lawn_care', 'waveguard_bundle_totals']),
+    affected_services: JSON.stringify(['lawn_care', 'one_time_lawn', 'waveguard_bundle_totals']),
     before_value: JSON.stringify({
       lawn_pricing_v2: { targetCollectedMarginFloor: 0.45, pricingMode: 'FORTY_FIVE_MARGIN_FLOOR' },
     }),
     after_value: JSON.stringify({ lawn_pricing_v2: LAWN_PRICING_V2 }),
-    rationale: 'Owner directive 2026-06-17: lower the recurring lawn fully loaded margin floor from 45% to 35%. The 45% market bracket curve was scaled by 0.55/0.65 ≈ 0.846 (a ~15% list reduction) and the cost-floor target dropped to 0.35 so the floor does not clamp the lower curve. Every cell was verified ≥35% fully loaded LIST margin via the live engine. Note: lawn is NOT covered by the post-discount margin guard (applyMarginGuard handles only tree_shrub and pest_control); lawn WaveGuard discounts apply in full, capped only by the service discount percentage cap. So a discounted lawn line can fall BELOW the 35% list floor — e.g. a Silver 10% discount on a near-floor line lands in the high-20s collected margin. This is intended given the lower list floor.',
+    rationale: 'Owner directive 2026-06-17: lower the recurring lawn fully loaded margin floor from 45% to 35%. The 45% market bracket curve was scaled by 0.55/0.65 ≈ 0.846 (a ~15% list reduction) and the cost-floor target dropped to 0.35 so the floor does not clamp the lower curve. Every cell was verified ≥35% fully loaded LIST margin via the live engine. Note: lawn is NOT covered by the post-discount margin guard (applyMarginGuard handles only tree_shrub and pest_control); lawn WaveGuard discounts apply in full, capped only by the service discount percentage cap. So a discounted lawn line can fall BELOW the 35% list floor — e.g. a Silver 10% discount on a near-floor line lands in the high-20s collected margin. This is intended given the lower list floor. One-time lawn (priceOneTimeLawn) derives its base from the recurring per-app rate, so it drops ~15% with this reprice as well — confirmed in scope by the owner; one-time keeps a healthy margin via its 1.5x standalone multiplier, and the onetime_lawn config (floor/multipliers) is intentionally left unchanged.',
   });
 }
 
