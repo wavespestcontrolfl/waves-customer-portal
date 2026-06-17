@@ -563,6 +563,34 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   };
 }
 
+// When a paid prepay invoice is voided/refunded the term flips to 'cancelled',
+// but its not-yet-completed covered visits keep the per-visit prepaid_amount
+// stamp that suppresses completion billing — so they'd be serviced free even
+// though coverage was cancelled. Clear the stamps on those future visits so they
+// bill normally again. Completed/terminal visits (PREPAID_UPDATE_EXCLUDED_STATUSES)
+// are left untouched — already serviced and not billable here. The term link is
+// kept for audit; billing-skip keys on prepaid_amount, which is now null.
+async function clearPrepaidStampsForTerm(termId, conn = db) {
+  if (!termId) return 0;
+  const cols = await scheduledServiceColumns();
+  if (!cols.annual_prepay_term_id || !cols.prepaid_amount) return 0;
+  const updates = { prepaid_amount: null };
+  if (cols.prepaid_method) updates.prepaid_method = null;
+  if (cols.prepaid_at) updates.prepaid_at = null;
+  if (cols.prepaid_note) updates.prepaid_note = null;
+  if (cols.updated_at) updates.updated_at = new Date();
+  try {
+    const cleared = await conn('scheduled_services')
+      .where({ annual_prepay_term_id: termId })
+      .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
+      .update(updates);
+    return Array.isArray(cleared) ? cleared.length : cleared;
+  } catch (err) {
+    logger.warn(`[annual-prepay] clear prepaid stamps skipped for term ${termId}: ${err.message}`);
+    return 0;
+  }
+}
+
 async function refreshTermSnapshot(termOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
@@ -682,6 +710,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         .update({ status: 'cancelled', updated_at: new Date() })
         .returning('*');
       current = updated || term;
+      // A true void/refund (no renewal decision) cancels coverage — drop the
+      // per-visit prepaid stamps so future covered visits bill normally. A
+      // renewal-lapse (renewal_decision set) keeps its paid window, so the
+      // whereNull guard leaves `updated` undefined and we don't clear.
+      if (updated && updated.status === 'cancelled') {
+        await clearPrepaidStampsForTerm(term.id, conn);
+      }
     }
 
     if (ACTIVE_STATUSES.includes(current.status)) {
@@ -1313,6 +1348,7 @@ module.exports = {
     normalizeCoverageVisitCount,
     defaultCoverageDurationMinutes,
     ensureCoverageRowsForTerm,
+    clearPrepaidStampsForTerm,
     resetCachesForTests,
   },
 };

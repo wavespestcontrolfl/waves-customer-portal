@@ -767,6 +767,7 @@ function mapAnnualPrepayTerm(term) {
     prepayInvoiceNumber: term.prepay_invoice_number,
     prepayInvoiceStatus: term.prepay_invoice_status,
     prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
+    prepayInvoiceSubtotal: term.prepay_invoice_subtotal != null ? Number(term.prepay_invoice_subtotal) : null,
     planLabel: term.plan_label,
     monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
     prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
@@ -1618,6 +1619,7 @@ router.get('/:id', async (req, res, next) => {
             'inv.invoice_number as prepay_invoice_number',
             'inv.status as prepay_invoice_status',
             'inv.total as prepay_invoice_total',
+            'inv.subtotal as prepay_invoice_subtotal',
             'ss.service_type as last_scheduled_service_type',
           )
           .orderBy('apt.term_end', 'desc')

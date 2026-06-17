@@ -273,6 +273,35 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('clears prepaid stamps on non-completed visits when a void/refund cancels a term', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        status: {},
+        prepaid_amount: {},
+        prepaid_method: {},
+        prepaid_at: {},
+        prepaid_note: {},
+        annual_prepay_term_id: {},
+        updated_at: {},
+      },
+    });
+    const updateQuery = query({ rows: 2 });
+    setDbQueues({ scheduled_services: [columnQuery, updateQuery] });
+
+    await _private.clearPrepaidStampsForTerm('term-1', db);
+
+    // Only the cancelled term's still-open visits are cleared; completed/terminal
+    // visits are excluded so already-serviced work isn't re-billed.
+    expect(updateQuery.where).toHaveBeenCalledWith({ annual_prepay_term_id: 'term-1' });
+    expect(updateQuery.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['completed']));
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      prepaid_amount: null,
+      prepaid_method: null,
+      prepaid_at: null,
+      prepaid_note: null,
+    }));
+  });
+
   test('reuses existing off-cadence visits instead of seeding a duplicate series', async () => {
     const columnQuery = query({
       columnInfo: {

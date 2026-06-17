@@ -371,6 +371,19 @@ function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPl
   return options;
 }
 
+// The amount field POSTs a PRE-TAX service amount, but a term's stored
+// prepayAmount is the tax-inclusive invoice total for commercial prepays (the
+// per-visit coverage credit is applied after tax). When renewing/defaulting from
+// an existing term, prefer the linked invoice's pre-tax subtotal so the next
+// invoice isn't taxed twice; fall back to prepayAmount for terms with no recorded
+// subtotal (e.g. residential, where subtotal === total, or legacy rows).
+function annualPrepayPretaxBase(term) {
+  if (!term) return 0;
+  const subtotal = Number(term.prepayInvoiceSubtotal);
+  if (subtotal > 0) return subtotal;
+  return Number(term.prepayAmount) || 0;
+}
+
 function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence, activeTerm = null, prepaidPlans = []) {
   const matchingActiveTerm = activeTerm && activeTerm.status === "active" && annualPrepayLabelsMatch(
     activeTerm.coverageServiceType || activeTerm.planLabel || "",
@@ -378,7 +391,8 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
   )
     ? activeTerm
     : null;
-  if (matchingActiveTerm?.prepayAmount > 0) return Number(matchingActiveTerm.prepayAmount);
+  const matchingActiveBase = annualPrepayPretaxBase(matchingActiveTerm);
+  if (matchingActiveBase > 0) return matchingActiveBase;
 
   const activeTermMatch = Array.isArray(customer?.annualPrepayTerms)
     ? customer.annualPrepayTerms.find((term) => {
@@ -386,7 +400,8 @@ function inferAnnualPrepaySuggestedAmount(customer, serviceType, coverageCadence
       return term?.status === "active" && annualPrepayLabelsMatch(termLabel, serviceType);
     })
     : null;
-  if (activeTermMatch?.prepayAmount > 0) return Number(activeTermMatch.prepayAmount);
+  const activeTermMatchBase = annualPrepayPretaxBase(activeTermMatch);
+  if (activeTermMatchBase > 0) return activeTermMatchBase;
 
   const matchingPlan = Array.isArray(prepaidPlans) && prepaidPlans.length > 0
     ? prepaidPlans.find((plan) => annualPrepayLabelsMatch(plan?.serviceType, serviceType))
