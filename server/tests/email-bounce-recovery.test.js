@@ -483,7 +483,7 @@ describe('safety checks fail closed on DB error (codex round 6)', () => {
 //   - source-uniqueness (round 11) selects 'id'          → est/leadRows
 function commitDb({
   rec, estUpdate = 1, leadUpdate = 1, estRows = [], leadRows = [],
-  customerOwnerRows = [], estOwnerRows = [], leadOwnerRows = [],
+  customerOwnerRows = [], estOwnerRows = [], leadOwnerRows = [], origTriggerEvent = null,
 } = {}) {
   const fn = jest.fn((table) => {
     const chain = {};
@@ -498,7 +498,11 @@ function commitDb({
     // Thenable so `await db(t).whereRaw(...).select(...)` resolves to rows.
     chain.then = (res, rej) => Promise.resolve(rowsFor()).then(res, rej);
     chain.catch = (rej) => Promise.resolve(rowsFor()).catch(rej);
-    chain.first = jest.fn(() => Promise.resolve(table === 'email_bounce_recoveries' ? rec : null));
+    chain.first = jest.fn(() => Promise.resolve(
+      table === 'email_bounce_recoveries' ? rec
+        : table === 'email_messages' ? (origTriggerEvent ? { trigger_event_id: origTriggerEvent } : null)
+          : null,
+    ));
     chain.update = jest.fn(() => Promise.resolve(table === 'estimates' ? estUpdate : table === 'leads' ? leadUpdate : 1));
     chain.returning = jest.fn(() => Promise.resolve([]));
     return chain;
@@ -593,5 +597,20 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     await recovery.commitRecoveryOnDelivery({ id: 'msg14', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('notification_prefs.billing_email');
+  });
+
+  test('no-customer recovery scopes the source rewrite to the estimate from trigger_event_id (codex round 17)', async () => {
+    const rec = {
+      id: 'rec15', customer_id: null, customer_email_field: null,
+      original_message_id: 'orig-15', corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    // Source estimate id comes from the original send's trigger_event_id. Two
+    // estimates share the typo, but only the SOURCE row (est-9) must be updated.
+    db.mockImplementation(commitDb({ rec, origTriggerEvent: 'estimate_delivery:est-9', estRows: [{ id: 'est-9' }, { id: 'est-other' }], estUpdate: 1 }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg15', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    // Updated via the source-id path (not the ambiguity fallback, which would skip).
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
   });
 });
