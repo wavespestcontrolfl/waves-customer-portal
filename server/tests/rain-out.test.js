@@ -324,6 +324,31 @@ describe('rain-out service', () => {
       );
     });
 
+    test('day-move siblings with HH:MM:SS DB windows are trimmed to HH:MM', async () => {
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [
+            { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30:00', window_end: '13:30:00', customer_id: 'cust-2', service_type: 'Lawn Care' },
+          ] }),
+        ],
+      });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: false,
+      });
+
+      // DB TIME comes back 'HH:MM:SS'; it must be trimmed so the strict
+      // reminder helper re-arms the sibling onto its real window, not 08:00.
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech', { allowLive: true });
+    });
+
     test('one stop racing to terminal does not strand the rest', async () => {
       wireRoute();
       SmartRebooker.reschedule

@@ -58,6 +58,14 @@ function hhmmToMinutes(value) {
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
 }
 
+// Postgres TIME columns come back as 'HH:MM:SS'; the rest of the rain-out
+// flow and the reminder/SMS helpers speak 'HH:MM'. Trim, preserving null.
+function toHHMM(value) {
+  if (value == null) return value;
+  const m = String(value).match(/^(\d{1,2}):(\d{2})/);
+  return m ? `${pad2(parseInt(m[1], 10))}:${m[2]}` : value;
+}
+
 function displayTime(hhmm) {
   const minutes = hhmmToMinutes(hhmm);
   if (minutes == null) return hhmm;
@@ -113,14 +121,18 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
   const query = db('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: todayStr })
     .whereIn('status', MOVABLE_STATUSES)
-    .orderByRaw('COALESCE(route_order, 999), window_start')
+    .orderByRaw('COALESCE(route_order, 999), window_start NULLS LAST')
     .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order');
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
     const anchorOrder = anchor.route_order == null ? 999 : anchor.route_order;
-    const anchorWindow = anchor.window_start || '00:00:00';
+    // window_start sorts NULLS LAST, so a null ("anytime") window is the
+    // GREATEST time. Map nulls to 24:00:00 on both sides so an anytime stop
+    // after the anchor stays in "rest of route", and a timed stop before an
+    // anytime anchor stays out — consistent with the ORDER BY above.
+    const anchorWindow = anchor.window_start || '24:00:00';
     query.whereRaw(
-      "(COALESCE(route_order, 999), COALESCE(window_start, '00:00:00'::time)) >= (?::int, ?::time)",
+      "(COALESCE(route_order, 999), COALESCE(window_start, '24:00:00'::time)) >= (?::int, ?::time)",
       [anchorOrder, anchorWindow],
     );
   }
@@ -339,8 +351,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
         : target.window;
     } else {
       // Day move for the rest of the route: same new date, keep each
-      // job's own window so the route's running order survives.
-      newWindow = { start: job.window_start, end: job.window_end };
+      // job's own window so the route's running order survives. DB TIME
+      // values are 'HH:MM:SS'; trim to 'HH:MM' so the downstream reminder
+      // helper (normalizeHHMM is strict) doesn't reject them and re-arm the
+      // reminder to a default time.
+      newWindow = { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
     }
 
     try {
