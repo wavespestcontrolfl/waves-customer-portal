@@ -73,11 +73,14 @@ function fetchModels() {
 
   console.log('\n──────────────────────────────────────────────────────');
   console.log('Currently in use (server/config/models.js):');
-  console.log(`  FLAGSHIP   = ${MODELS.FLAGSHIP}`);
-  console.log(`  WORKHORSE  = ${MODELS.WORKHORSE}`);
-  console.log(`  FAST       = ${MODELS.FAST}`);
+  // Validate every exported tier so a new one (e.g. VOICE) can't slip past the
+  // checker. DEFAULT is an alias of FLAGSHIP, so skip it. Derived from the module
+  // rather than hardcoded so this never drifts when a tier is added/removed.
+  const TIERS = Object.keys(MODELS).filter((k) => k !== 'DEFAULT');
+  const labelWidth = Math.max(...TIERS.map((t) => t.length));
+  TIERS.forEach((t) => console.log(`  ${t.padEnd(labelWidth)}  = ${MODELS[t]}`));
 
-  const inUse = new Set([MODELS.FLAGSHIP, MODELS.WORKHORSE, MODELS.FAST]);
+  const inUse = new Set(TIERS.map((t) => MODELS[t]));
   const missing = [...inUse].filter((id) => !models.some((m) => m.id === id));
   if (missing.length > 0) {
     console.log('\nWARNING — these IDs in config are NOT in the API list (typo or retired?):');
@@ -88,7 +91,7 @@ function fetchModels() {
   if (newer.length > 0) {
     console.log('\nNewer/alternative models you could try:');
     newer.forEach((m) => console.log(`  ${m.id}  (${m.display_name || m.id})`));
-    console.log('\nTo swap:  set MODEL_FLAGSHIP / MODEL_WORKHORSE / MODEL_FAST in Railway, restart.');
+    console.log(`\nTo swap:  set ${TIERS.map((t) => `MODEL_${t}`).join(' / ')} in Railway, restart.`);
   } else {
     console.log('\nYou are already on the latest.');
   }
