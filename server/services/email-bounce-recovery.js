@@ -247,15 +247,27 @@ function sourceEstimateIdFromTriggerEvent(triggerEventId) {
   return s.split(':').pop() || null;
 }
 
+// Lead-sourced transactional sends (e.g. the public quote acknowledgment,
+// server/routes/public-quote.js) carry recipient_type 'lead' + recipient_id =
+// lead.id. That id lets a no-customer recovery scope its on-file gate + commit to
+// the ACTUAL source lead row rather than any prospect that merely shares the typo.
+function sourceLeadIdFromMessage(message) {
+  if (String(message?.recipient_type || '').toLowerCase() === 'lead' && message?.recipient_id) {
+    return message.recipient_id;
+  }
+  return null;
+}
+
 /**
  * Is the BOUNCED address still on file? When a bounce arrives late and an operator
  * has already changed/corrected the address, the bounce is for a stale address and
  * we must not auto-resend a correction of it. True if a customer column still holds
- * it (match.field), or the SOURCE estimate (when its id is known) does, or — as a
- * fallback — any estimate/lead (scoped to the customer when known). Fails CLOSED on
- * a read error: if we can't confirm the address is still on file, route to manual.
+ * it (match.field), or the SOURCE estimate / SOURCE lead (when its id is known)
+ * does, or — as a fallback — any estimate/lead (scoped to the customer when known).
+ * Fails CLOSED on a read error: if we can't confirm the address is still on file,
+ * route to manual.
  */
-async function bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId = null) {
+async function bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId = null, sourceLeadId = null) {
   if (match?.field) return true;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return false;
@@ -264,6 +276,14 @@ async function bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId =
     // being edited should gate this recovery, not an unrelated prospect's typo.
     if (sourceEstimateId) {
       const row = await db('estimates').where({ id: sourceEstimateId }).whereRaw('LOWER(customer_email) = ?', [email]).first('id');
+      return !!row;
+    }
+    // Same scoping for a lead-sourced recovery (non-estimate, e.g. the public quote
+    // acknowledgment): gate on the ACTUAL source lead row, never a prospect sharing
+    // the typo. Without this a lead bounce would always fail the gate (no customer,
+    // no estimate id) and never auto-recover.
+    if (sourceLeadId) {
+      const row = await db('leads').where({ id: sourceLeadId }).whereRaw('LOWER(email) = ?', [email]).first('id');
       return !!row;
     }
     // Otherwise only a CUSTOMER-scoped lookup is safe. An unscoped no-customer
@@ -500,7 +520,8 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     // source estimate (from the send's trigger_event_id) so an unrelated prospect
     // sharing the typo can't keep this recovery alive.
     const sourceEstimateId = match?.customerId ? null : sourceEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
-    const addressOnFile = candidate ? await bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId) : true;
+    const sourceLeadId = match?.customerId ? null : sourceLeadIdFromMessage(bouncedMessage);
+    const addressOnFile = candidate ? await bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId, sourceLeadId) : true;
     // Fail closed: the stored flag OR a known attachment-bearing template (covers
     // pre-flag rows and any direct inserter that didn't stamp has_attachments).
     const hasAttachments = !!bouncedMessage.has_attachments
@@ -692,17 +713,20 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         if (Number(estAffected) > 0) updatedFields.push('estimates.customer_email');
         if (Number(leadAffected) > 0) updatedFields.push('leads.email');
       } else {
-        // No-customer (prospect): rewrite ONLY the ACTUAL source estimate, identified
-        // by the original send's trigger_event_id. We do NOT fall back to an unscoped
-        // address match — that could overwrite a different prospect that merely shares
-        // the typo. (The pre-send on-file gate is scoped the same way, so a no-source
-        // recovery never reaches here.)
+        // No-customer (prospect): rewrite ONLY the ACTUAL source row, identified by
+        // the original send — the source estimate (trigger_event_id) or the source
+        // lead (recipient_type 'lead' + recipient_id). We do NOT fall back to an
+        // unscoped address match — that could overwrite a different prospect that
+        // merely shares the typo. (The pre-send on-file gate is scoped the same way,
+        // so a no-source recovery never reaches here.)
         let sourceEstimateId = null;
+        let sourceLeadId = null;
         try {
-          const orig = await db('email_messages').where({ id: rec.original_message_id }).first('trigger_event_id');
+          const orig = await db('email_messages').where({ id: rec.original_message_id }).first('trigger_event_id', 'recipient_type', 'recipient_id');
           sourceEstimateId = sourceEstimateIdFromTriggerEvent(orig?.trigger_event_id);
+          sourceLeadId = sourceLeadIdFromMessage(orig);
         } catch (err) {
-          logger.warn(`[bounce-recovery] source estimate lookup failed: ${err.message}`);
+          logger.warn(`[bounce-recovery] source lookup failed: ${err.message}`);
         }
         if (sourceEstimateId) {
           const ok = await db('estimates').where({ id: sourceEstimateId })
@@ -710,8 +734,14 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
             .update({ customer_email: correctedEmail, updated_at: new Date() })
             .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
           if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
+        } else if (sourceLeadId) {
+          const ok = await db('leads').where({ id: sourceLeadId })
+            .whereRaw('LOWER(email) = ?', [bouncedEmail])
+            .update({ email: correctedEmail, updated_at: new Date() })
+            .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
+          if (Number(ok) > 0) updatedFields.push('leads.email');
         } else {
-          logger.warn(`[bounce-recovery] no source estimate id for no-customer recovery ${rec.id} — source left unchanged`);
+          logger.warn(`[bounce-recovery] no source id for no-customer recovery ${rec.id} — source left unchanged`);
         }
       }
     }

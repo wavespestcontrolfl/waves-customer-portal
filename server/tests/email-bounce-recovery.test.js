@@ -251,6 +251,33 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data.status === 'sent')).toBe(true);
   });
 
+  test('lead-sourced recovery (non-estimate) passes the on-file gate and resends (codex #1858)', async () => {
+    // Public quote acknowledgment: recipient_type 'lead', recipient_id set, trigger
+    // 'quote_request_received:<lead>'. Pre-#1858 this always failed the gate (no
+    // customer, no estimate id) → address_no_longer_on_file. Now it scopes to the
+    // source lead row and recovers.
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_L' });
+    db.mockImplementation(orderedDb({
+      // Only the source LEAD row still holds the typo → gate passes. No customer.
+      first: (table) => (table === 'leads' ? { id: 'lead-1' } : null),
+      returning: (table) => {
+        if (table === 'email_bounce_recoveries') return [{ id: 'recL' }];
+        if (table === 'email_messages') return [{ id: 'msgL', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }];
+        return [];
+      },
+    }));
+
+    const res = await recovery.attemptRecovery(
+      { id: 'origL', recipient_email_snapshot: 'jane@gmial.com', recipient_type: 'lead', recipient_id: 'lead-1', template_key: 'quote.acknowledgment', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'], trigger_event_id: 'quote_request_received:lead-1' },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(res).toMatchObject({ resent: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled(); // not skipped/alerted
+  });
+
   test('does NOT send when the corrected address belongs to another customer (privacy)', async () => {
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);
     db.mockImplementation(orderedDb({
@@ -484,6 +511,7 @@ describe('safety checks fail closed on DB error (codex round 6)', () => {
 function commitDb({
   rec, estUpdate = 1, leadUpdate = 1, estRows = [], leadRows = [],
   customerOwnerRows = [], estOwnerRows = [], leadOwnerRows = [], origTriggerEvent = null,
+  origRecipientType = null, origRecipientId = null,
 } = {}) {
   const fn = jest.fn((table) => {
     const chain = {};
@@ -500,7 +528,7 @@ function commitDb({
     chain.catch = (rej) => Promise.resolve(rowsFor()).catch(rej);
     chain.first = jest.fn(() => Promise.resolve(
       table === 'email_bounce_recoveries' ? rec
-        : table === 'email_messages' ? (origTriggerEvent ? { trigger_event_id: origTriggerEvent } : null)
+        : table === 'email_messages' ? ((origTriggerEvent || origRecipientType) ? { trigger_event_id: origTriggerEvent, recipient_type: origRecipientType, recipient_id: origRecipientId } : null)
           : null,
     ));
     chain.update = jest.fn(() => Promise.resolve(table === 'estimates' ? estUpdate : table === 'leads' ? leadUpdate : 1));
@@ -599,5 +627,22 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     // Updated via the source-id path (not the ambiguity fallback, which would skip).
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
+  });
+
+  test('no-customer LEAD recovery rewrites leads.email scoped to the source lead (codex #1858)', async () => {
+    const rec = {
+      id: 'recL', customer_id: null, customer_email_field: null,
+      original_message_id: 'orig-L', corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    // Lead-sourced send (recipient_type 'lead' + recipient_id) → scope the rewrite to
+    // that lead row, not any prospect sharing the typo. No source estimate → only the
+    // lead path runs.
+    db.mockImplementation(commitDb({ rec, origRecipientType: 'lead', origRecipientId: 'lead-7', leadUpdate: 1, estUpdate: 0 }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msgL', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body).toContain('leads.email');
+    expect(body).not.toContain('estimates.customer_email');
   });
 });
