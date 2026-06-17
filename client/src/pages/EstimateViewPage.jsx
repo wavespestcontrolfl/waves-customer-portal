@@ -746,7 +746,7 @@ function MembershipCard({ membership }) {
 // a portal user yet, so this is a direct-explore invitation: it links to the
 // portal and shows what they can do there. Warm customer-facing tone per the
 // design brief; rendered for recurring plans only. Features listed here mirror
-// real portal tabs (Visits, Billing, Request, notification prefs, Refer,
+// real portal tabs (Visits, Billing, Request, on-location contacts, Refer,
 // Documents) — keep them in sync with PortalPage so we never advertise a
 // surface that does not exist.
 const PORTAL_SHOWCASE_URL = 'https://portal.wavespestcontrol.com';
@@ -755,7 +755,7 @@ const PORTAL_SHOWCASE_FEATURES = [
   ['Upcoming visits', 'See every scheduled service and reschedule in a tap.'],
   ['Billing & autopay', 'View invoices, pay online, and turn on autopay.'],
   ['Request service', 'Ask for a re-service or add a service anytime.'],
-  ['Notifications', 'Choose how and when we reach you about each visit.'],
+  ['Loop in your family', 'Add a spouse, partner, or tenant to get appointment texts too.'],
   ['Refer & earn', 'Give $25, get $25 for every friend you send our way.'],
   ['Documents', 'Service reports, invoices, and agreements in one place.'],
 ];
