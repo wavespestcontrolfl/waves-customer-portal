@@ -15,7 +15,7 @@ const router = express.Router();
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { scrubCustomerText, safeConditionLabel, safeCustomerSummary } = require('../services/lawn-diagnostic-report');
+const { scrubCustomerText, safeConditionLabel, safeCustomerSummary, lowerConfidence } = require('../services/lawn-diagnostic-report');
 const { etParts } = require('../utils/datetime-et');
 
 const FULL_TOKEN_RE = /^[a-f0-9]{32}$/;
@@ -73,6 +73,49 @@ function safeFindingNote(name, confidence) {
   return confidence === 'high'
     ? `We saw ${lower}.`
     : `We saw signs consistent with ${lower}.`;
+}
+
+// First name shown on the unauthenticated report. normalizeContact accepts arbitrary
+// strings, so a stale/malformed snapshot could stash a street line or "Dana Prospect
+// notes" here. Derive a single name token (letters + hyphen/apostrophe) rather than
+// trusting the regex scrub — anything else (digits, appended notes, extra words) is
+// dropped, not published.
+function safePublicFirstName(value) {
+  if (typeof value !== 'string') return null;
+  const token = value.trim().split(/\s+/)[0] || '';
+  const cleaned = token.replace(/[^\p{L}'-]/gu, '').slice(0, 40);
+  return cleaned && /\p{L}/u.test(cleaned) ? cleaned : null;
+}
+
+// SWFL service-area cities/communities (Manatee / Sarasota / Charlotte). The public
+// report greets a prospect with their city, so the field is allowlisted at egress: a
+// stored value like "Venice gate code BLUE" is not in the set and is omitted entirely,
+// rather than relying on the scrubber to catch an appended note. Cosmetic-only — an
+// unrecognized city simply doesn't render.
+const PUBLIC_CITY_ALLOWLIST = new Set([
+  // Manatee
+  'bradenton', 'bradenton beach', 'west bradenton', 'anna maria', 'holmes beach',
+  'palmetto', 'ellenton', 'parrish', 'lakewood ranch', 'myakka city', 'cortez',
+  'longboat key', 'memphis', 'whitfield', 'bayshore gardens', 'samoset', 'oneco',
+  'rubonia', 'terra ceia', 'duette',
+  // Sarasota
+  'sarasota', 'south sarasota', 'sarasota springs', 'gulf gate estates', 'gulf gate',
+  'fruitville', 'bee ridge', 'vamo', 'southgate', 'kensington park', 'the meadows',
+  'lake sarasota', 'venice', 'north venice', 'south venice', 'venice gardens',
+  'nokomis', 'osprey', 'siesta key', 'laurel', 'englewood', 'north port', 'plantation',
+  'warm mineral springs',
+  // Charlotte
+  'punta gorda', 'port charlotte', 'charlotte harbor', 'rotonda', 'rotonda west',
+  'cleveland', 'harbour heights', 'solana', 'grove city', 'placida', 'cape haze',
+  'manasota key',
+]);
+
+function safePublicCity(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!PUBLIC_CITY_ALLOWLIST.has(normalized)) return null;
+  // Title-case the allowlisted value for display (the set is the only source of truth).
+  return normalized.replace(/\b\p{L}/gu, (ch) => ch.toUpperCase());
 }
 
 // safeConditionLabel (the allowlist that maps any stored finding name → a fixed
@@ -143,26 +186,45 @@ function buildPublicLawnReport(diagnostic = {}) {
     || (typeof contact.name === 'string' ? contact.name.trim().split(/\s+/)[0] : null)
     || null;
 
+  // Gate the hero summary + primary label by the MORE CONSERVATIVE of the top-level
+  // diagnosis confidence and the matching primary finding's own confidence. A stale or
+  // inconsistent contract (diagnosis.confidence 'high' but the primary finding 'low')
+  // must not publish a named pest in the hero just because the top-level value is high.
+  const primaryRow = Array.isArray(diagnosis.findings)
+    ? diagnosis.findings.find((f) => f && f.name === diagnosis.primary_finding)
+    : null;
+  const heroConfidence = lowerConfidence(diagnosis.confidence, primaryRow && primaryRow.confidence);
+
+  // Cause-specific expectations are published only when a confidence-gated public
+  // finding still names that cause. `findings[].name` is already downgraded to a generic
+  // symptom below moderate, so a stale/low stored expectation bucket can't leak
+  // disease/insect/weed copy past the naming gate. turf_recovery is generic.
+  const gatedNames = findings.map((f) => (f.name || '').toLowerCase()).join(' ');
+  const hasWeedCause = /weed/.test(gatedNames);
+  const hasFungusCause = /fung/.test(gatedNames);
+  const hasInsectCause = /chinch|caterpillar|grub|insect/.test(gatedNames);
+
   return {
-    // Snapshots are only trimmed at capture, so scrub at egress too — a malformed
-    // client could stash a street line / phone / note in first_name or city.
-    first_name: typeof firstName === 'string' ? (scrubCustomerText(firstName.slice(0, 80)) || null) : null,
-    city: typeof address.city === 'string' ? (scrubCustomerText(address.city.slice(0, 80)) || null) : null,
+    // Snapshots accept arbitrary strings at capture, so derive/allowlist at egress — a
+    // malformed client could stash a street line, note, or gate code in first_name/city.
+    first_name: safePublicFirstName(firstName),
+    city: safePublicCity(address.city),
     overall_status: overallStatusLabel(diagnostic.overall_score),
-    // Confidence-gated: a low/unknown report never names a cause in the hero summary.
-    summary: safeCustomerSummary(contract.customer_summary, diagnosis.confidence),
+    // Confidence-gated (finding-level): a low/unknown report never names a cause here.
+    summary: safeCustomerSummary(contract.customer_summary, heroConfidence),
     // Allowlisted, confidence-gated label, never the raw stored primary_finding.
-    primary_finding: diagnosis.primary_finding ? safeConditionLabel(diagnosis.primary_finding, diagnosis.confidence) : null,
-    confidence: clampEnum(diagnosis.confidence, CONFIDENCE_VALUES),
+    primary_finding: diagnosis.primary_finding ? safeConditionLabel(diagnosis.primary_finding, heroConfidence) : null,
+    // The conservative hero confidence, so the badge can't contradict a downgraded label.
+    confidence: clampEnum(heroConfidence, CONFIDENCE_VALUES),
     findings,
     watering: {
       customer_sequence: scrubCustomerText(watering.customer_sequence) || null,
       restriction_summary: scrubCustomerText(ongoing.restriction_summary_customer) || null,
     },
     expectations: {
-      weeds: scrubCustomerText(expectations.weeds) || null,
-      fungus: scrubCustomerText(expectations.fungus) || null,
-      insects: scrubCustomerText(expectations.insects) || null,
+      weeds: hasWeedCause ? (scrubCustomerText(expectations.weeds) || null) : null,
+      fungus: hasFungusCause ? (scrubCustomerText(expectations.fungus) || null) : null,
+      insects: hasInsectCause ? (scrubCustomerText(expectations.insects) || null) : null,
       turf_recovery: scrubCustomerText(expectations.turf_recovery) || null,
     },
     // Server-generated from scrubbed finding names — NOT contract.watch_items,

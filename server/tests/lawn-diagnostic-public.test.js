@@ -215,6 +215,63 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(JSON.stringify(report)).not.toMatch(/float test|cut-and-pull|confirm active/i);
     expect(report.watch_items).toEqual(["We'll keep an eye on chinch bug activity and how it responds."]);
   });
+
+  test('allowlists name and city at egress — appended notes / gate codes never publish', () => {
+    const diag = sentDiagnostic({
+      contact_snapshot: JSON.stringify({ first_name: 'Dana Prospect notes', email: 'dana@example.com' }),
+      address_snapshot: JSON.stringify({ city: 'Venice gate code BLUE', state: 'FL' }),
+    });
+    const report = buildPublicLawnReport(diag);
+    expect(report.first_name).toBe('Dana');     // single name token only
+    expect(report.city).toBeNull();             // not an allowlisted SWFL city → omitted
+    expect(JSON.stringify(report)).not.toMatch(/gate code|notes/i);
+  });
+
+  test('accepts multi-word allowlisted cities (title-cased from the allowlist)', () => {
+    const report = buildPublicLawnReport(sentDiagnostic({
+      address_snapshot: JSON.stringify({ city: 'north port', state: 'FL' }),
+    }));
+    expect(report.city).toBe('North Port');
+  });
+
+  test('hero copy uses the more conservative of diagnosis vs primary-finding confidence', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          // stale/inconsistent: top-level says high, but the matching finding is low.
+          primary_finding: 'Chinch bug pressure',
+          confidence: 'high',
+          findings: [{ name: 'Chinch bug pressure', confidence: 'low', severity: 'moderate' }],
+        },
+        watering: {},
+        customer_summary: 'The pattern is most consistent with chinch pressure.',
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    // The low primary finding governs — no pest named in the hero despite top-level high.
+    expect(report.primary_finding).toBe('general lawn stress');
+    expect(report.summary.toLowerCase()).not.toContain('chinch');
+    expect(report.confidence).toBe('low');
+  });
+
+  test('cause-specific expectations are suppressed below moderate confidence at egress', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Possible fungal activity',
+          confidence: 'low',
+          findings: [{ name: 'Possible fungal activity', confidence: 'low', severity: 'moderate' }],
+        },
+        // A stale stored bucket that must NOT publish for a low-confidence finding.
+        expectations: { fungus: 'Disease treatments are aimed at stopping spread first.' },
+        watering: {},
+        customer_summary: 'An area worth keeping an eye on.',
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    expect(report.expectations.fungus).toBeNull();
+    expect(JSON.stringify(report)).not.toMatch(/disease treatments/i);
+  });
 });
 
 describe('validateQuoteRequest', () => {

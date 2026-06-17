@@ -43,6 +43,16 @@ function confidenceRank(value) {
   return CONFIDENCE_ORDER[normalizeKey(value)] || 0;
 }
 
+// Return the more conservative (lower-ranked) of two confidence values. Used at the
+// public egress to gate hero copy by BOTH the diagnosis-level and the matching
+// finding-level confidence, so a stale/high top-level value can't out-rank a low
+// finding and publish a named pest.
+function lowerConfidence(a, b) {
+  if (a == null) return b == null ? null : b;
+  if (b == null) return a;
+  return confidenceRank(a) <= confidenceRank(b) ? a : b;
+}
+
 function normalizeSeverity(value) {
   const key = normalizeKey(value);
   if (['low', 'minor', 'mild'].includes(key)) return 'mild';
@@ -476,7 +486,14 @@ function runQaSafetyCheck({ products = [], findings = [], compliance = {}, water
 }
 
 function buildExpectations(findings = []) {
-  const names = findings.map((finding) => normalizeKey(finding.name)).join(' ');
+  // Cause-specific expectations (disease/insect/weed) may only be published for findings
+  // that clear the v0.4 naming gate (moderate+). Low/unknown findings stay symptom-only,
+  // so their raw names never drive a named-cause expectation line. turf_recovery is
+  // generic and always safe to include.
+  const names = findings
+    .filter((finding) => confidenceRank(finding.confidence) >= CONFIDENCE_ORDER.moderate)
+    .map((finding) => normalizeKey(finding.name))
+    .join(' ');
   return {
     weeds: names.includes('weed') ? 'Visible weed response often takes 10-14 days and may need follow-up depending on weed type.' : null,
     fungus: names.includes('fung') || names.includes('large_patch') ? 'Disease treatments are aimed at stopping spread first; browned turf must regrow over time.' : null,
@@ -524,6 +541,9 @@ const CONDITION_LABELS = [
 const CAUSE_LABELS = new Set([
   'chinch bug activity', 'caterpillar activity', 'grub activity',
   'large patch (fungal) activity', 'gray leaf spot', 'dollar spot', 'fungal activity',
+  // Drought is a governed cause (PHOTO_ONLY_UNCERTAIN / CONFIRMABLE_CONDITION treat it
+  // as photo-unconfirmable) — a low/unknown finding must not publish "drought stress".
+  'drought stress',
 ]);
 const GENERIC_STRESS_LABEL = 'general lawn stress';
 
@@ -581,7 +601,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 }
 
 // Cause terms that must never appear in a low/unknown-confidence customer summary.
-const SUMMARY_CAUSE_RE = /\b(chinch|large patch|brown patch|gr[ae]y leaf|dollar spot|rhizoctonia|take[-\s]?all|fungus|fungal|grub|armyworm|sod\s?webworm|nutsedge|crabgrass|dollarweed|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch|large patch|brown patch|gr[ae]y leaf|dollar spot|rhizoctonia|take[-\s]?all|fungus|fungal|grub|armyworm|sod\s?webworm|nutsedge|crabgrass|dollarweed|drought|water stress|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -800,5 +820,6 @@ module.exports = {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
 };

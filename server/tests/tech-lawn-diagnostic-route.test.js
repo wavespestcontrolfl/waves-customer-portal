@@ -56,6 +56,7 @@ const {
   normalizeContact,
   hasSendableContact,
   contactName,
+  canonicalSnapshot,
 } = techLawnDiagnosticRouter._test;
 const { safeConditionLabel } = require('../services/lawn-diagnostic-report');
 
@@ -405,5 +406,19 @@ describe('lawn diagnostic send-gate helpers', () => {
     expect(hasSendableContact({ name: 'Dana' }, { city: 'Venice', state: 'FL' })).toBe(true);
     expect(hasSendableContact(null, { line1: '123 Palm St' })).toBe(false);
     expect(hasSendableContact({ email: 'dana@example.com' }, null)).toBe(false);
+  });
+
+  test('canonicalSnapshot drives token rotation: stable for unchanged recipients, differs on edits', () => {
+    // Key-order independent + ignores null/'' fields → a true idempotent resend keeps
+    // the token (equal canonical), while an edited name/city rotates it (differs).
+    const a = { first_name: 'Dana', email: 'dana@example.com', phone: null };
+    const reordered = { email: 'dana@example.com', first_name: 'Dana', phone: '' };
+    expect(canonicalSnapshot(a)).toBe(canonicalSnapshot(reordered));
+    // Changed recipient → different canonical (route rotates the report token).
+    expect(canonicalSnapshot(a)).not.toBe(canonicalSnapshot({ ...a, first_name: 'Casey' }));
+    expect(canonicalSnapshot({ city: 'Venice' })).not.toBe(canonicalSnapshot({ city: 'North Port' }));
+    // Null / non-object inputs collapse to a stable empty marker.
+    expect(canonicalSnapshot(null)).toBe('');
+    expect(canonicalSnapshot(undefined)).toBe(canonicalSnapshot(null));
   });
 });

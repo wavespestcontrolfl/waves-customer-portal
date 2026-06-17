@@ -8,6 +8,7 @@ const {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
 } = require('../services/lawn-diagnostic-report');
 
@@ -551,6 +552,38 @@ describe('lawn diagnostic auto-release ladder', () => {
     // moderate+ may name the cause; a symptom-only low summary is left alone
     expect(safeCustomerSummary(named, 'moderate')).toContain('chinch');
     expect(safeCustomerSummary('An area is worth keeping an eye on.', 'low')).toMatch(/keeping an eye/);
+  });
+
+  test('drought is gated as a named cause below moderate confidence (label + summary)', () => {
+    // drought is a governed, photo-unconfirmable cause — low/unknown must not name it.
+    expect(safeConditionLabel('Drought stress along the south edge', 'low')).toBe('general lawn stress');
+    expect(safeConditionLabel('Water stress / drought', 'unknown')).toBe('general lawn stress');
+    // moderate+ may name it.
+    expect(safeConditionLabel('Drought stress', 'moderate')).toBe('drought stress');
+    // the hero summary scrub now covers drought/water-stress wording too.
+    expect(safeCustomerSummary('Signs are most consistent with drought stress.', 'low').toLowerCase()).not.toContain('drought');
+    expect(safeCustomerSummary('The lawn shows water stress at the margins.', 'low').toLowerCase()).not.toContain('water stress');
+  });
+
+  test('buildExpectations only emits cause-specific guidance for moderate+ findings', () => {
+    const lowFungus = buildDiagnosticReportContract({
+      findings: [{ name: 'Possible fungal activity', confidence: 'low', severity: 'moderate' }],
+    });
+    expect(lowFungus.expectations.fungus).toBeNull();
+    expect(lowFungus.expectations.turf_recovery).toBeTruthy();
+
+    const modFungus = buildDiagnosticReportContract({
+      findings: [{ name: 'Large patch fungal disease', confidence: 'moderate', severity: 'moderate' }],
+    });
+    expect(modFungus.expectations.fungus).toMatch(/disease treatments/i);
+  });
+
+  test('lowerConfidence returns the more conservative value', () => {
+    expect(lowerConfidence('high', 'low')).toBe('low');
+    expect(lowerConfidence('low', 'high')).toBe('low');
+    expect(lowerConfidence('moderate', null)).toBe('moderate');
+    expect(lowerConfidence(null, 'high')).toBe('high');
+    expect(lowerConfidence(null, null)).toBeNull();
   });
 
   test('watering restriction copy is built from structured days, never the raw client string', () => {

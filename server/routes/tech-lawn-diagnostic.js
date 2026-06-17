@@ -63,6 +63,19 @@ function normalizeAddress(address) {
   return Object.values(out).some((v) => v != null && v !== '') ? out : null;
 }
 
+// Stable, key-order-independent string for comparing two recipient snapshots (ignores
+// null/'' fields). Used to decide whether a resend changed the recipient — if it did,
+// the token must rotate so the original link doesn't start showing the new name/city.
+function canonicalSnapshot(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  const sorted = {};
+  Object.keys(obj).sort().forEach((key) => {
+    const val = obj[key];
+    if (val != null && val !== '') sorted[key] = val;
+  });
+  return JSON.stringify(sorted);
+}
+
 function contactName(contact) {
   if (!contact) return null;
   return contact.name
@@ -598,12 +611,21 @@ router.post('/:id/send', async (req, res, next) => {
     const mintedToken = crypto.randomBytes(16).toString('hex');
     const freshExpiry = new Date(Date.now() + REPORT_TTL_DAYS * 24 * 60 * 60 * 1000);
 
-    // Atomic mint/rotate. Keep the existing token + expiry ONLY when it is still
-    // active (true idempotent resend); otherwise rotate to a fresh token + expiry
-    // so an old expired /lawn-report link is never reactivated. The row lock
-    // serializes concurrent sends (the second re-evaluates against the first's
-    // committed active token and keeps it), and we return the stored values.
+    // Rotate the token whenever the resend changes the recipient snapshot. Keeping the
+    // existing token under an edited contact/address would let the original link
+    // recipient see the newly-entered name/city (and tie a quote to the changed
+    // snapshot). A changed recipient forces a fresh token + expiry; the old link 404s.
+    const recipientChanged =
+      canonicalSnapshot(contact) !== canonicalSnapshot(parseJsonObject(row.contact_snapshot, null))
+      || canonicalSnapshot(address) !== canonicalSnapshot(parseJsonObject(row.address_snapshot, null));
+
+    // Atomic mint/rotate. Keep the existing token + expiry ONLY for a true idempotent
+    // resend: still-active token AND unchanged recipient. Otherwise rotate to a fresh
+    // token + expiry, so neither an old expired link is reactivated nor a changed
+    // recipient inherits the prior link. The row lock serializes concurrent sends (the
+    // second re-evaluates against the first's committed active token and keeps it).
     const ACTIVE_TOKEN = 'report_token IS NOT NULL AND report_expires_at IS NOT NULL AND report_expires_at > now()';
+    const KEEP_EXISTING = recipientChanged ? 'false' : ACTIVE_TOKEN;
     const [saved] = await db('lawn_diagnostics')
       .where({ id: row.id })
       .update({
@@ -611,8 +633,8 @@ router.post('/:id/send', async (req, res, next) => {
         status: 'sent',
         contact_snapshot: JSON.stringify(contact),
         address_snapshot: address ? JSON.stringify(address) : row.address_snapshot,
-        report_token: db.raw(`CASE WHEN ${ACTIVE_TOKEN} THEN report_token ELSE ? END`, [mintedToken]),
-        report_expires_at: db.raw(`CASE WHEN ${ACTIVE_TOKEN} THEN report_expires_at ELSE ? END`, [freshExpiry]),
+        report_token: db.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_token ELSE ? END`, [mintedToken]),
+        report_expires_at: db.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_expires_at ELSE ? END`, [freshExpiry]),
         last_sent_at: db.fn.now(),
         updated_at: db.fn.now(),
       })
@@ -695,4 +717,5 @@ module.exports._test = {
   normalizeAddress,
   contactName,
   hasSendableContact,
+  canonicalSnapshot,
 };
