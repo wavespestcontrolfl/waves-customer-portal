@@ -120,12 +120,14 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
 
     const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
     const categoryLabel = category.replace(/_/g, ' ');
-    const descPreview = cleanDescription.slice(0, 100);
     const photoCount = photoData.length;
     const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
 
     // Internal admin alert only. Service requests should surface in the admin
-    // notification feed, not text the office number.
+    // notification feed, not text the office number. The notification is now
+    // the primary triage surface (there is no dedicated Requests page), so the
+    // full request description goes in the body — it's capped at 500 chars by
+    // the create-request validation above.
     try {
       const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
       await NotificationService.notifyAdmin(
@@ -135,7 +137,7 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
           `Subject: ${cleanSubject}` +
           (locationLabel ? `\nLocation: ${locationLabel}` : '') +
           (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
-          (descPreview ? `\n\n"${descPreview}${cleanDescription.length > 100 ? '...' : ''}"` : ''),
+          (cleanDescription ? `\n\n"${cleanDescription}"` : ''),
         {
           icon: validUrgency === 'urgent' ? '🚨' : '🏠',
           link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,

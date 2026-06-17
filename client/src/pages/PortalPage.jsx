@@ -10204,6 +10204,7 @@ function MyRequestsCard() {
   const RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
   const recent = requests
     .filter(r => {
+      if (r.status === 'resolved') return false; // dropped once the office marks it handled
       const created = new Date(r.createdAt).getTime();
       return Number.isFinite(created) && Date.now() - created < RECENT_WINDOW_MS;
     })

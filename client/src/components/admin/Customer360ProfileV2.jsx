@@ -81,6 +81,7 @@ import {
   cn,
 } from "../ui";
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
+import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -4366,6 +4367,7 @@ export default function Customer360ProfileV2({
                   ))}
                 </div>
               )}
+              <CustomerRequestsPanel customerId={customerId} />
               {upcomingScheduled.length > 0 && (
                 <div className="mt-5">
                   {" "}
