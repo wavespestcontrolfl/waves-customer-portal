@@ -36,11 +36,18 @@ const WORKHORSE = process.env.MODEL_WORKHORSE || 'claude-opus-4-7';
 const FAST      = process.env.MODEL_FAST      || 'claude-opus-4-7';
 const VISION    = process.env.MODEL_VISION    || 'claude-sonnet-4-6';
 
+// Lawn-diagnostic adversarial-challenge reasoner. Pinned independently of FLAGSHIP
+// (which stays Opus 4.7) so the lawn pipeline can run Opus 4.8 without moving the whole
+// app. Lives here (not in the service) so every Anthropic ID stays in the central
+// registry. Override via MODEL_LAWN_CHALLENGE (registry convention) or LAWN_CHALLENGE_MODEL.
+const LAWN_CHALLENGE = process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8';
+
 module.exports = {
   FLAGSHIP,
   WORKHORSE,
   FAST,
   VISION,
+  LAWN_CHALLENGE,
   // Backwards-compatible default export for quick imports
   DEFAULT: FLAGSHIP,
 };

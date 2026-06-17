@@ -17,7 +17,7 @@ const { LAWN_PIPELINE_MODELS } = require('../services/lawn-diagnostic-prompt');
 describe('lawn model readiness check', () => {
   test('exports the RESOLVED pipeline models (env override or default)', () => {
     expect(LAWN_PIPELINE_MODELS.vision).toBe(process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash');
-    expect(LAWN_PIPELINE_MODELS.challenge).toBe(process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8');
+    expect(LAWN_PIPELINE_MODELS.challenge).toBe(process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8');
     // Writer is decoupled from the global OPENAI_MODEL on purpose.
     expect(LAWN_PIPELINE_MODELS.writer).toBe(process.env.LAWN_WRITER_MODEL || 'gpt-5.5');
   });

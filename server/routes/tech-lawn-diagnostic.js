@@ -617,21 +617,23 @@ router.post('/', async (req, res, next) => {
       seasonal_context: body.seasonalContext || body.seasonal_context || '',
     });
     const releaseMode = classifyReleaseMode(contract);
-    const provenance = (body.provenance && typeof body.provenance === 'object') ? body.provenance
-      : (aiAnalysis.provenance && typeof aiAnalysis.provenance === 'object' ? aiAnalysis.provenance : null);
-    const challengePassed = !!(provenance && provenance.challenge && provenance.challenge.passed === true);
-    // Re-run the polished writer (GPT-5.5 → Anthropic fallback) server-side on the
-    // authoritative rebuilt contract ONLY when the original analysis was fully challenged
-    // (multimodel). Degraded/fallback reports keep the deterministic, symptom-only
-    // summary — an un-challenged report is never re-voiced with a confident LLM.
-    // Best-effort; the deterministic summary stands if the model is unavailable.
-    if (releaseMode !== 'minimal' && challengePassed) {
+    // TRUST BOUNDARY: persist rebuilds the contract server-side and CANNOT re-verify the
+    // original adversarial challenge, so it NEVER trusts client-supplied provenance for
+    // control flow or storage. The writer re-runs only when the SERVER-rebuilt diagnosis
+    // is itself diagnosis-grade (a moderate+ primary finding) — safe regardless, because
+    // the writer's input is the confidence-gated, allowlisted narrative context, so it
+    // can't name a cause the rebuilt findings don't support. Best-effort; the
+    // deterministic summary stands if the model is unavailable.
+    const primaryFinding = (contract.diagnosis?.findings || []).find((finding) => finding && finding.name === contract.diagnosis?.primary_finding);
+    const diagnosisGrade = ['moderate', 'high'].includes(String(primaryFinding?.confidence || '').toLowerCase());
+    let writerModel = null;
+    if (releaseMode !== 'minimal' && diagnosisGrade) {
       try {
         const writer = await runWriter(contract, {});
-        if (writer.ok) contract.customer_summary = writer.customer_summary;
+        if (writer.ok) { contract.customer_summary = writer.customer_summary; writerModel = writer.model; }
         else {
           const narrative = await runNarrative(contract, {});
-          if (narrative.ok) contract.customer_summary = narrative.customer_summary;
+          if (narrative.ok) { contract.customer_summary = narrative.customer_summary; writerModel = narrative.model || 'anthropic-fallback'; }
         }
       } catch { /* keep deterministic summary */ }
     }
@@ -644,7 +646,9 @@ router.post('/', async (req, res, next) => {
       created_by_technician_id: req.technicianId || req.technician?.id || null,
       contact_snapshot: contact ? JSON.stringify(contact) : null,
       address_snapshot: address ? JSON.stringify(address) : null,
-      ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode, provenance: provenance || null }),
+      // Server-STAMPED provenance only — the challenge is not re-verified at persist, so
+      // a client cannot stash a forged "challenge.passed" blob in the stored record.
+      ai_analysis: JSON.stringify({ ...aiAnalysis, release_mode: releaseMode, provenance: { source: 'persist', writer_model: writerModel, challenge_reverified: false } }),
       report_contract: JSON.stringify(sanitizedContract),
       ai_confidence: aiConfidence,
       // Server-derived from the rebuilt contract severity; a client-supplied

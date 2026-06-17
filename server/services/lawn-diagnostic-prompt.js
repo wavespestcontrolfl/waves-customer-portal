@@ -44,7 +44,9 @@ const MAX_PROMPT_IMAGES = 5;
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash';
 const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
-const LAWN_CHALLENGE_MODEL = process.env.LAWN_CHALLENGE_MODEL || 'claude-opus-4-8';
+// Anthropic challenge model comes from the central registry (server/config/models.js),
+// never a hardcoded ID here — shares the app-wide model swap/check workflow.
+const LAWN_CHALLENGE_MODEL = MODELS.LAWN_CHALLENGE;
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 // Dedicated writer override — deliberately NOT chained through the global OPENAI_MODEL
 // (which other services default to a mini tier), so the lawn writer stays GPT-5.5.

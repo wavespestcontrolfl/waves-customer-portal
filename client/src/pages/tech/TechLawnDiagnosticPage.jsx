@@ -180,9 +180,6 @@ export default function TechLawnDiagnosticPage() {
         photos: photos.map((p) => ({ photo_id: p.id, quality: reviewedQuality, limitations: reviewedLimitations })),
         appliedProducts: [],
         compliance: {},
-        // Forward provenance so the server can re-run the GPT-5.5 writer on the rebuilt
-        // contract ONLY when the original analysis was fully challenged (multimodel).
-        provenance: meta?.provenance || null,
         contact: cleanContact(),
         address: cleanAddress(),
       }),
