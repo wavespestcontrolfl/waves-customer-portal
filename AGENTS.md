@@ -335,15 +335,15 @@ finding and warns on P1. Reviewers must return JSON matching
   target / 410 on expired / generic 404 with no enumeration leak; `noindex`).
   `/api/public/track/:token` (read-only live service tracker; the
   `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
-  rate limit. Returns the customer property block — first name, service address
-  (line1/line2), lat/lng — and, when `track_state='en_route'`, live tech coords
-  + ETA from Bouncie. In the `complete` state the summary ALSO hands out
-  secondary bearer tokens — `serviceReportToken` (`report_view_token`),
-  `invoiceToken`, a `/rate/:token` review URL, a top-level `prepToken` (when a
-  linked prep guide exists), and TTL-presigned service-photo URLs — so the
-  track token effectively fans out to the report / receipt / rate / prep
-  surfaces. Treat the track token and any change to the completion payload as
-  security-critical).
+  rate limit. In ANY state it returns the customer property block — first name,
+  service address (line1/line2), lat/lng — and a top-level `prepToken` (set
+  whenever a linked project has a `prep_token`, NOT gated on state) that fans
+  out to `/prep/:token`. `en_route` additionally returns live tech coords + ETA
+  from Bouncie. The `complete` summary additionally hands out secondary bearer
+  tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
+  `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
+  to the report / receipt / rate surfaces. Treat the track token and any change
+  to its payload, in any state, as security-critical).
   `/api/reviews/featured` (read-only public featured Google reviews for the
   marketing site — no auth, no token, location filter + limit; reads
   `google_reviews` only).
