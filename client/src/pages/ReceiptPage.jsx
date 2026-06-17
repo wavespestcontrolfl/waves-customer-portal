@@ -616,7 +616,10 @@ export default function ReceiptPage() {
               <SummaryRow label="Deposit paid at acceptance" value={`− ${fmtCurrency(depositCreditTotal)}`} />
             )}
             {payment?.surchargeAmountCents > 0 && (
-              <SummaryRow label="Credit card surcharge (3%)" value={fmtCurrency(payment.surchargeAmountCents / 100)} />
+              <SummaryRow
+                label={`Credit card surcharge${payment.surchargeRateBps > 0 ? ` (${Number((payment.surchargeRateBps / 100).toFixed(2))}%)` : ''}`}
+                value={fmtCurrency(payment.surchargeAmountCents / 100)}
+              />
             )}
             <SummaryRow label={processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(payment?.amount || invoice.total)} strong />
 
