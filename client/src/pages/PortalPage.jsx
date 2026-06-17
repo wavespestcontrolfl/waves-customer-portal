@@ -8,6 +8,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
+import { getStripe } from '../lib/stripeLoader';
 import {
   buildSetupIntentReturnUrl,
   clearReturnedSetupIntent,
@@ -3074,16 +3075,6 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // =========================================================================
 // BILLING TAB
 // =========================================================================
-function loadStripeJs(publishableKey) {
-  return new Promise((resolve) => {
-    if (window.Stripe) return resolve(window.Stripe(publishableKey));
-    const script = document.createElement('script');
-    script.src = 'https://js.stripe.com/v3/';
-    script.onload = () => resolve(window.Stripe(publishableKey));
-    document.head.appendChild(script);
-  });
-}
-
 function BillingTab({ customer }) {
   const [payments, setPayments] = useState([]);
   const [balance, setBalance] = useState(null);
@@ -3168,7 +3159,7 @@ function BillingTab({ customer }) {
     setStripeReady(false);
     try {
       const setupData = await api.createSetupIntent('card');
-      const stripe = await loadStripeJs(setupData.publishableKey);
+      const stripe = await getStripe(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
       elementsRef.current = elements;

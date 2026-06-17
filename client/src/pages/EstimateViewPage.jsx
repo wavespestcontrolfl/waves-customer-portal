@@ -38,6 +38,7 @@ import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
+import { loadStripeSdk } from '../lib/stripeLoader';
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1411,23 +1412,6 @@ function ExistingAppointmentCard({ appointment }) {
   );
 }
 
-// Stripe.js loader for the acceptance-deposit modal. Mirrors PayPageV2's
-// pattern — script injected on demand, single shared promise.
-let depositStripeJsPromise = null;
-function loadStripeJs() {
-  if (window.Stripe) return Promise.resolve(window.Stripe);
-  if (depositStripeJsPromise) return depositStripeJsPromise;
-  depositStripeJsPromise = new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'https://js.stripe.com/v3/';
-    s.async = true;
-    s.onload = () => resolve(window.Stripe);
-    s.onerror = () => { depositStripeJsPromise = null; reject(new Error('stripe.js failed to load')); };
-    document.head.appendChild(s);
-  });
-  return depositStripeJsPromise;
-}
-
 // Acceptance-deposit Payment Element modal (flat $49/$99, PR #1660).
 // `intent` is the POST /deposit-intent response: clientSecret, amount,
 // requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
@@ -1442,7 +1426,7 @@ function DepositModal({ intent, onSuccess, onCancel }) {
 
   useEffect(() => {
     let cancelled = false;
-    loadStripeJs().then((StripeCtor) => {
+    loadStripeSdk().then((StripeCtor) => {
       if (cancelled || !mountRef.current) return;
       const stripe = StripeCtor(intent.publishableKey);
       const elements = stripe.elements({
