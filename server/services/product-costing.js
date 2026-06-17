@@ -67,18 +67,52 @@ const VOLUME_DISPLAY = [
   { unit: 'gal', sub: 3785.41 },
 ];
 
+function isWeightOrVolumeUnit(u) {
+  return u === 'oz' || u === 'ounce' || WEIGHT_TO_GRAM[u] != null || VOLUME_TO_ML[u] != null;
+}
+
+// Parse a pack-size string into { amount, unit } in one weight/volume unit,
+// tolerating packaging descriptors ("18 lb pail", "21 oz can"), multi-word units
+// ("32 fl oz"), and pack multipliers ("4 x 30g tubes", "4 tubes / 30 g").
+// Returns null for count-based / unknown packs (bait stations, traps).
+function parsePackSize(quantity) {
+  const raw = String(quantity || '').toLowerCase().trim();
+  if (!raw) return null;
+
+  // First "<number> <known unit>" pair, skipping descriptors and leading counts.
+  let amount = null;
+  let unit = null;
+  const pairRe = /([\d.]+)\s*([a-z]+(?:\s+[a-z]+)*)?/g;
+  let m;
+  while ((m = pairRe.exec(raw)) !== null) {
+    if (!m[2]) continue;
+    const words = m[2].trim().split(/\s+/);
+    const oneWord = normalizeUnit(words[0]);
+    const twoWord = words[1] ? normalizeUnit(`${words[0]} ${words[1]}`) : null;
+    let u = null;
+    if (isWeightOrVolumeUnit(oneWord)) u = oneWord;
+    else if (twoWord && isWeightOrVolumeUnit(twoWord)) u = twoWord;
+    if (u) { amount = Number(m[1]); unit = u; break; }
+  }
+  if (amount == null || !Number.isFinite(amount) || amount <= 0) return null;
+
+  // Leading pack count: "4 x 30g" or "4 tubes / 30 g" multiplies the matched size.
+  const mult = raw.match(/^\s*([\d.]+)\s*x\s*[\d.]/)
+    || raw.match(/^\s*([\d.]+)\s+[a-z]+\s*\/\s*[\d.]/);
+  const count = mult && Number(mult[1]) > 0 ? Number(mult[1]) : 1;
+
+  return { amount: amount * count, unit };
+}
+
 // Given a pack price + a size string ("4 lb", "1 gal", "32 oz"), return the
 // price expressed per unit across the matching measurement family. Plain "oz"
 // is ambiguous — treated as weight unless the product is flagged liquid.
 function unitPriceBreakdown(price, quantity, opts = {}) {
   const p = Number(price);
-  if (!Number.isFinite(p) || p <= 0 || !quantity) return null;
-  const match = String(quantity).toLowerCase().trim().match(/^([\d.]+)\s*(.*)/);
-  if (!match) return null;
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  const unit = normalizeUnit(match[2]);
-  if (!unit) return null;
+  if (!Number.isFinite(p) || p <= 0) return null;
+  const parsed = parsePackSize(quantity);
+  if (!parsed) return null;
+  const { amount, unit } = parsed;
 
   let family;
   let totalBase; // grams or millilitres in the whole package

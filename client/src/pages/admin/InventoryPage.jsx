@@ -2970,17 +2970,24 @@ function ExpandedProduct({
                 {vp.quantity && (
                   <span style={{ color: D.muted }}>{vp.quantity}</span>
                 )}
-                {formatUnitPriceList(vp.unitPrices) && (
-                  <span
-                    style={{
-                      color: D.muted,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 11,
-                    }}
-                  >
-                    {formatUnitPriceList(vp.unitPrices)}
-                  </span>
-                )}
+                {(() => {
+                  const unitLabel =
+                    formatUnitPriceList(vp.unitPrices) ||
+                    (vp.normalizedUnitPrice != null && vp.normalizedUnit
+                      ? formatUnitCost(vp.normalizedUnitPrice, vp.normalizedUnit)
+                      : null);
+                  return unitLabel ? (
+                    <span
+                      style={{
+                        color: D.muted,
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontSize: 11,
+                      }}
+                    >
+                      {unitLabel}
+                    </span>
+                  ) : null;
+                })()}
                 {vp.sourceType && (
                   <span style={sBadge(`${D.teal}14`, D.muted)}>
                     {String(vp.sourceType).replace(/_/g, " ")}
