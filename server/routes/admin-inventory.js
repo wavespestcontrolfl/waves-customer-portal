@@ -328,7 +328,10 @@ function mapProduct(product, vendorPricing = []) {
   const isLiquid = looksLiquidProduct(product);
   const enrichedPricing = vendorPricing.map((vp) => ({
     ...vp,
-    unitPrices: unitPriceBreakdown(vp.price, vp.quantity, { isLiquid })?.units || null,
+    unitPrices: unitPriceBreakdown(vp.price, vp.quantity, {
+      isLiquid,
+      referencePerOz: vp.normalizedUnitPrice,
+    })?.units || null,
   }));
   const bestRow = enrichedPricing.find((vp) => vp.isBest) || enrichedPricing[0] || null;
   const unitPrices = bestRow?.unitPrices

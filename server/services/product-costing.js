@@ -55,29 +55,42 @@ const VOLUME_TO_ML = {
   pt: 473.176, pint: 473.176, qt: 946.353, quart: 946.353,
   gal: 3785.41, gallon: 3785.41,
 };
-// Units to express each family in (sub-units per 1 display unit).
-const WEIGHT_DISPLAY = [
-  { unit: 'g', sub: 1 },
-  { unit: 'oz', sub: 28.3495 },
-  { unit: 'lb', sub: 453.592 },
-];
-const VOLUME_DISPLAY = [
-  { unit: 'fl-oz', sub: 29.5735 },
-  { unit: 'qt', sub: 946.353 },
-  { unit: 'gal', sub: 3785.41 },
-];
-
 function isWeightOrVolumeUnit(u) {
   return u === 'oz' || u === 'ounce' || WEIGHT_TO_GRAM[u] != null || VOLUME_TO_ML[u] != null;
 }
 
+// Resolve a unit from one or two leading words ("oz", "fl oz"), tolerating a
+// trailing packaging descriptor ("lb pail" -> "lb"). Returns a normalized key
+// or null.
+function resolveUnitToken(text) {
+  const words = String(text || '').trim().split(/\s+/);
+  if (!words[0]) return null;
+  const oneWord = normalizeUnit(words[0]);
+  if (isWeightOrVolumeUnit(oneWord)) return oneWord;
+  const twoWord = words[1] ? normalizeUnit(`${words[0]} ${words[1]}`) : null;
+  if (twoWord && isWeightOrVolumeUnit(twoWord)) return twoWord;
+  return null;
+}
+
 // Parse a pack-size string into { amount, unit } in one weight/volume unit,
 // tolerating packaging descriptors ("18 lb pail", "21 oz can"), multi-word units
-// ("32 fl oz"), and pack multipliers ("4 x 30g tubes", "4 tubes / 30 g").
-// Returns null for count-based / unknown packs (bait stations, traps).
+// ("32 fl oz"), simple fractions ("1/2 gal"), and pack multipliers
+// ("4 x 30g tubes", "4 tubes / 30 g"). Returns null for count-based / unknown
+// packs (bait stations, traps) and for fractions we can't read.
 function parsePackSize(quantity) {
   const raw = String(quantity || '').toLowerCase().trim();
   if (!raw) return null;
+
+  // Simple fraction: "1/2 gal", "3/4 lb". Resolve before pair-scanning, which
+  // would otherwise mistake the denominator for the amount.
+  const frac = raw.match(/^([\d.]+)\s*\/\s*([\d.]+)\s*([a-z].*)$/);
+  if (frac) {
+    const num = Number(frac[1]);
+    const den = Number(frac[2]);
+    const unit = resolveUnitToken(frac[3]);
+    if (unit && num > 0 && den > 0) return { amount: num / den, unit };
+    return null;
+  }
 
   // First "<number> <known unit>" pair, skipping descriptors and leading counts.
   let amount = null;
@@ -86,12 +99,7 @@ function parsePackSize(quantity) {
   let m;
   while ((m = pairRe.exec(raw)) !== null) {
     if (!m[2]) continue;
-    const words = m[2].trim().split(/\s+/);
-    const oneWord = normalizeUnit(words[0]);
-    const twoWord = words[1] ? normalizeUnit(`${words[0]} ${words[1]}`) : null;
-    let u = null;
-    if (isWeightOrVolumeUnit(oneWord)) u = oneWord;
-    else if (twoWord && isWeightOrVolumeUnit(twoWord)) u = twoWord;
+    const u = resolveUnitToken(m[2]);
     if (u) { amount = Number(m[1]); unit = u; break; }
   }
   if (amount == null || !Number.isFinite(amount) || amount <= 0) return null;
@@ -104,42 +112,62 @@ function parsePackSize(quantity) {
   return { amount: amount * count, unit };
 }
 
+// Measurement family of a unit. Plain "oz"/"ounce" is dimensionally ambiguous
+// (dry weight vs fluid ounce); only call it volume on a positive liquid signal,
+// never assume weight — return 'ambiguous' so callers show a single $/oz.
+function unitFamily(unit, opts = {}) {
+  if (!unit) return null;
+  if (unit === 'oz' || unit === 'ounce') return opts.isLiquid ? 'volume' : 'ambiguous';
+  if (WEIGHT_TO_GRAM[unit] != null) return 'weight';
+  if (VOLUME_TO_ML[unit] != null) return 'volume';
+  return null;
+}
+
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
+
+// Expand an authoritative $/oz-equivalent price across its family's display
+// units. 'ambiguous' (plain oz) stays a single $/oz — no dry/fluid claim.
+function expandUnitPrice(perOz, family) {
+  if (!Number.isFinite(perOz) || perOz <= 0) return null;
+  if (family === 'weight') {
+    return [
+      { unit: 'g', pricePerUnit: round6(perOz / 28.3495) },
+      { unit: 'oz', pricePerUnit: round6(perOz) },
+      { unit: 'lb', pricePerUnit: round6(perOz * 16) },
+    ];
+  }
+  if (family === 'volume') {
+    return [
+      { unit: 'fl-oz', pricePerUnit: round6(perOz) },
+      { unit: 'qt', pricePerUnit: round6(perOz * 32) },
+      { unit: 'gal', pricePerUnit: round6(perOz * 128) },
+    ];
+  }
+  if (family === 'ambiguous') return [{ unit: 'oz', pricePerUnit: round6(perOz) }];
+  return null;
+}
+
 // Given a pack price + a size string ("4 lb", "1 gal", "32 oz"), return the
-// price expressed per unit across the matching measurement family. Plain "oz"
-// is ambiguous — treated as weight unless the product is flagged liquid.
+// price expressed per unit across the matching measurement family.
+// opts.referencePerOz: an authoritative pipeline $/oz price — if the pack-size-
+// derived value disagrees with it (e.g. an approved price update left a stale
+// quantity in place), return null so callers fall back to the trusted value.
 function unitPriceBreakdown(price, quantity, opts = {}) {
   const p = Number(price);
   if (!Number.isFinite(p) || p <= 0) return null;
   const parsed = parsePackSize(quantity);
   if (!parsed) return null;
-  const { amount, unit } = parsed;
+  const family = unitFamily(parsed.unit, opts);
+  if (!family) return null;
+  const totalOz = convertToOz(parsed.amount, parsed.unit);
+  if (!(totalOz > 0)) return null;
+  const perOz = p / totalOz; // $ per oz-equivalent, matching the pipeline's basis
 
-  let family;
-  let totalBase; // grams or millilitres in the whole package
-  let displaySet;
-  if (unit === 'oz' || unit === 'ounce') {
-    if (opts.isLiquid) {
-      family = 'volume'; totalBase = amount * VOLUME_TO_ML.fl_oz; displaySet = VOLUME_DISPLAY;
-    } else {
-      family = 'weight'; totalBase = amount * WEIGHT_TO_GRAM.oz; displaySet = WEIGHT_DISPLAY;
-    }
-  } else if (WEIGHT_TO_GRAM[unit] != null) {
-    family = 'weight'; totalBase = amount * WEIGHT_TO_GRAM[unit]; displaySet = WEIGHT_DISPLAY;
-  } else if (VOLUME_TO_ML[unit] != null) {
-    family = 'volume'; totalBase = amount * VOLUME_TO_ML[unit]; displaySet = VOLUME_DISPLAY;
-  } else {
-    return null; // count / unknown unit — no weight/volume breakdown
-  }
-  if (!(totalBase > 0)) return null;
+  const ref = Number(opts.referencePerOz);
+  if (Number.isFinite(ref) && ref > 0 && Math.abs(perOz - ref) / ref > 0.1) return null;
 
-  const perBase = p / totalBase; // $ per gram or per millilitre
-  return {
-    family,
-    units: displaySet.map((d) => ({
-      unit: d.unit,
-      pricePerUnit: Math.round(perBase * d.sub * 1e6) / 1e6,
-    })),
-  };
+  const units = expandUnitPrice(perOz, family);
+  return units ? { family, units } : null;
 }
 
 function calcLandedCost(price, shipping, taxRate) {
