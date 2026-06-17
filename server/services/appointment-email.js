@@ -21,7 +21,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getPrimaryContact } = require('./customer-contact');
+const { getPrimaryContact, getAppointmentContacts, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
@@ -75,8 +75,38 @@ async function loadCustomer(customerId) {
       'state',
       'zip',
       'profile_label',
+      // Service-contact slots so the email fallback can reach the same recipients
+      // the appointment SMS targets (getAppointmentContacts reads these).
+      ...SERVICE_CONTACT_COLUMNS,
     )
     .first();
+}
+
+// Resolve the email recipients for an appointment notice. Mirrors the SMS
+// recipients: the appointment contacts (service contacts and/or primary, per
+// getAppointmentContacts + notification_prefs.appointment_notify_primary), using
+// each contact's own email (service_contact_email, falling back to the primary
+// email inside getAppointmentContacts). De-duplicated by address. When there are
+// no appointment phone contacts at all (e.g. email-only customer), falls back to
+// the primary customer email so they still get the notice.
+async function resolveRecipients(customer) {
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  const contacts = getAppointmentContacts(customer, prefs || {});
+  const seen = new Set();
+  const recipients = [];
+  for (const c of contacts) {
+    const email = clean(c.email);
+    const key = email.toLowerCase();
+    if (isEmailLike(email) && !seen.has(key)) {
+      seen.add(key);
+      recipients.push({ email, name: c.name });
+    }
+  }
+  if (!recipients.length) {
+    const primary = getPrimaryContact(customer);
+    if (isEmailLike(primary.email)) recipients.push({ email: clean(primary.email), name: primary.name });
+  }
+  return recipients;
 }
 
 async function logEmailAttempt({ customerId, templateKey, eventType, status, providerMessageId = null, sentAt = null, failureReason = null, metadata = {} }) {
@@ -106,75 +136,84 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
 }
 
 /**
- * Send a templated appointment email to the customer's primary contact.
+ * Send a templated appointment email to the appointment contacts (the same
+ * recipients the appointment SMS targets — service contacts and/or primary, each
+ * using their own email). Fans out to every distinct address.
  * Returns:
- *   { ok: true, messageId }                        — sent
+ *   { ok: true, messageId }                        — sent to at least one recipient
  *   { ok: false, skipped: true, reason }           — no customer / no email on file
- *   { ok: false, blocked: true, reason }           — suppressed / not sent
+ *   { ok: false, blocked: true, reason }           — all recipients suppressed
  *   { ok: false, error }                           — threw
  */
 async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {} }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
-  const contact = getPrimaryContact(customer);
-  if (!isEmailLike(contact.email)) {
+  const recipients = await resolveRecipients(customer);
+  if (!recipients.length) {
     await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'missing_email', metadata });
     return { ok: false, skipped: true, reason: 'missing_email' };
   }
 
-  const firstName = firstToken(contact.name) || firstToken(customer.first_name) || 'there';
-  const finalPayload = {
-    first_name: firstName,
-    customer_name: fullName(customer),
-    customer_portal_url: portalTabUrl('visits'),
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
-    company_email: CONTACT_EMAIL,
-    property_label: propertyLabel(customer),
-    ...payload,
-  };
+  const builtCategories = [
+    eventType.split('.')[0],
+    eventType.replace(/[^a-zA-Z0-9_-]/g, '_'),
+    ...categories,
+  ];
 
-  try {
-    const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey,
-      to: contact.email,
-      payload: finalPayload,
-      recipientType: 'customer',
-      recipientId: customer.id,
-      triggerEventId: triggerEventId || `${eventType}:${customer.id}`,
-      idempotencyKey,
-      categories: [
-        eventType.split('.')[0],
-        eventType.replace(/[^a-zA-Z0-9_-]/g, '_'),
-        ...categories,
-      ],
-      suppressionGroupKey: TRANSACTIONAL_GROUP,
-    });
-
-    if (result.deduped) {
-      return { ok: !!result.sent, deduped: true, blocked: !!result.blocked, messageId: result.message?.provider_message_id || null };
+  const outcomes = [];
+  for (const recipient of recipients) {
+    const firstName = firstToken(recipient.name) || firstToken(customer.first_name) || 'there';
+    const finalPayload = {
+      first_name: firstName,
+      customer_name: fullName(customer),
+      customer_portal_url: portalTabUrl('visits'),
+      company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+      company_email: CONTACT_EMAIL,
+      property_label: propertyLabel(customer),
+      ...payload,
+    };
+    // Per-recipient idempotency so a second recipient is not deduped against the first.
+    const recipientKey = idempotencyKey ? `${idempotencyKey}:${recipient.email.toLowerCase()}` : undefined;
+    try {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey,
+        to: recipient.email,
+        payload: finalPayload,
+        recipientType: 'customer',
+        recipientId: customer.id,
+        triggerEventId: triggerEventId || `${eventType}:${customer.id}`,
+        idempotencyKey: recipientKey,
+        categories: builtCategories,
+        suppressionGroupKey: TRANSACTIONAL_GROUP,
+      });
+      outcomes.push(result);
+      if (!result.deduped) {
+        const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
+        await logEmailAttempt({
+          customerId: customer.id,
+          templateKey,
+          eventType,
+          status,
+          providerMessageId: result.message?.provider_message_id || null,
+          sentAt: result.message?.sent_at || null,
+          failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
+          metadata,
+        });
+      }
+    } catch (err) {
+      outcomes.push({ error: err.message });
+      await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'failed', failureReason: err.message, metadata });
+      logger.error(`[appointment-email] ${eventType} failed for ${customer.id}: ${err.message}`);
     }
-
-    const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
-    await logEmailAttempt({
-      customerId: customer.id,
-      templateKey,
-      eventType,
-      status,
-      providerMessageId: result.message?.provider_message_id || null,
-      sentAt: result.message?.sent_at || null,
-      failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
-      metadata,
-    });
-
-    return result.sent
-      ? { ok: true, messageId: result.message?.provider_message_id || null }
-      : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
-  } catch (err) {
-    await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'failed', failureReason: err.message, metadata });
-    logger.error(`[appointment-email] ${eventType} failed for ${customer.id}: ${err.message}`);
-    return { ok: false, error: err.message };
   }
+
+  const sent = outcomes.find((o) => o?.sent);
+  if (sent) return { ok: true, messageId: sent.message?.provider_message_id || null };
+  if (outcomes.some((o) => o?.blocked)) return { ok: false, blocked: true, reason: 'suppressed' };
+  const errored = outcomes.find((o) => o?.error);
+  if (errored) return { ok: false, error: errored.error };
+  return { ok: false, reason: outcomes.find((o) => o?.reason)?.reason || 'email_not_sent' };
 }
 
 function toDate(value) {
@@ -252,5 +291,5 @@ module.exports = {
   sendAppointmentConfirmationEmail,
   sendAppointmentReminderEmail,
   sendTechEnRouteEmail,
-  _private: { sendTemplate, loadCustomer, isEmailLike, propertyLabel },
+  _private: { sendTemplate, loadCustomer, resolveRecipients, isEmailLike, propertyLabel },
 };
