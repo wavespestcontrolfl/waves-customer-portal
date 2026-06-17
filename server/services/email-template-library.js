@@ -874,15 +874,22 @@ async function sendTemplate({
       // SendGrid returns no X-Message-Id). See email-bounce-recovery.js.
       customArgs: { email_message_id: message.id },
     });
+    // Record provider id + send time, and advance status to 'sent' ONLY while
+    // still 'queued' — a fast delivery/bounce webhook (resolvable via
+    // custom_args.email_message_id before this commit) may have already moved the
+    // row to a terminal status, and we must not regress it. Single atomic update
+    // with a guarded CASE so the status can't clobber a webhook outcome.
     const [updated] = await db('email_messages').where({ id: message.id }).update({
-      status: 'sent',
       provider_message_id: result.messageId,
       sent_at: new Date(),
       updated_at: new Date(),
+      status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
     }).returning('*');
     return { sent: true, message: updated, rendered };
   } catch (err) {
-    await db('email_messages').where({ id: message.id }).update({
+    // SendGrid may have accepted the send and a webhook already terminalized the
+    // row (lost-response race) — only mark failed while still queued.
+    await db('email_messages').where({ id: message.id, status: 'queued' }).update({
       status: 'failed',
       error_message: err.message.slice(0, 1000),
       updated_at: new Date(),

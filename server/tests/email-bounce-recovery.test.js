@@ -446,6 +446,11 @@ describe('safety checks fail closed on DB error (codex round 6)', () => {
   test('correctedAddressOwnedByOther → owned (true) when the lookup errors', async () => {
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
   });
+
+  test('bouncedAddressStillOnFile → not on file (false) when the lookup errors', async () => {
+    // No customer-field match + estimate/lead lookup errors → fail closed to manual.
+    await expect(recovery.bouncedAddressStillOnFile('jane@gmial.com', { customerId: 'c1', field: null })).resolves.toBe(false);
+  });
 });
 
 // Lead/estimate recoveries must fix the SOURCE address on delivery, not just resend (codex round 7).
@@ -497,6 +502,21 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     // Committed (resend delivered) but no source field was rewritten.
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).not.toContain('estimates.customer_email');
+  });
+
+  test('no-customer recovery does NOT rewrite when the typo is split across estimate + lead (codex round 12)', async () => {
+    const rec = {
+      id: 'rec12', customer_id: null, customer_email_field: null,
+      corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    // 1 estimate + 1 lead = 2 matches across tables → can't prove same prospect.
+    db.mockImplementation(commitDb({ rec, estRows: [{ id: 'e1' }], leadRows: [{ id: 'l1' }] }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg12', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body).not.toContain('estimates.customer_email');
+    expect(body).not.toContain('leads.email');
   });
 
   test('also fixes the estimate source for a CUSTOMER-owned recovery (codex round 9)', async () => {

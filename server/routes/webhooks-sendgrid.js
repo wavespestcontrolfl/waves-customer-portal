@@ -249,25 +249,33 @@ async function handleEvent(ev) {
       })
       .first()
     : null;
-  // Fallback: bounce-recovery sends carry custom_args.email_message_id, echoed
-  // on every event. If the X-Message-Id isn't bound yet (the recovery delivery
-  // webhook can race the post-send provider_message_id write), resolve the row
-  // by that id and backfill provider_message_id so later events hit the fast path.
+  // Fallback: tracked sends carry custom_args.email_message_id, echoed on every
+  // event. If the X-Message-Id isn't bound yet (a webhook can race the post-send
+  // provider_message_id write), resolve the row by that id and backfill it.
+  // IMPORTANT: only accept the fallback for an UNBOUND row, or one already bound
+  // to THIS event's message id. A retry reuses the same email_messages.id with a
+  // new provider id, so a delayed event from a prior attempt (different message
+  // id) must NOT mutate the current row or trigger recovery.
   if (!emailMessage && !newsletterDelivery && !automationSend && ev.email_message_id) {
-    emailMessage = await db('email_messages')
+    const candidate = await db('email_messages')
       .where({ id: String(ev.email_message_id) })
       .modify((q) => {
         if (email) q.whereRaw('LOWER(recipient_email_snapshot) = ?', [String(email).toLowerCase()]);
       })
       .first()
       .catch(() => null);
-    if (emailMessage && messageId && !emailMessage.provider_message_id) {
-      await db('email_messages')
-        .where({ id: emailMessage.id })
-        .whereNull('provider_message_id')
-        .update({ provider_message_id: messageId, updated_at: new Date() })
-        .catch(() => {});
-      emailMessage = { ...emailMessage, provider_message_id: messageId };
+    const boundElsewhere = candidate?.provider_message_id
+      && String(candidate.provider_message_id) !== String(messageId || '');
+    if (candidate && !boundElsewhere) {
+      emailMessage = candidate;
+      if (messageId && !emailMessage.provider_message_id) {
+        await db('email_messages')
+          .where({ id: emailMessage.id })
+          .whereNull('provider_message_id')
+          .update({ provider_message_id: messageId, updated_at: new Date() })
+          .catch(() => {});
+        emailMessage = { ...emailMessage, provider_message_id: messageId };
+      }
     }
   }
 

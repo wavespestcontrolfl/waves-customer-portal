@@ -36,6 +36,8 @@ function setDbQueues(queues) {
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
+  // sendTemplate guards the post-send status with a CASE expression.
+  db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
 }
 
 function serviceTemplate(overrides = {}) {
@@ -988,8 +990,10 @@ describe('email template library rendering', () => {
       subject: 'Your estimate expires June 12',
     }));
     expect(sentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'sent',
       provider_message_id: 'sg-1',
+      // status is advanced via a guarded CASE (only from 'queued') so a fast
+      // delivery/bounce webhook can't be regressed to 'sent'.
+      status: expect.objectContaining({ __raw: expect.stringContaining("CASE WHEN status = 'queued'") }),
     }));
     expect(result).toEqual(expect.objectContaining({
       sent: true,

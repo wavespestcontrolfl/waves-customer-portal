@@ -231,8 +231,8 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
  * has already changed/corrected the address, the bounce is for a stale address and
  * we must not auto-resend a correction of it. True if a customer column still holds
  * it (match.field) or a source estimate/lead does (scoped to the customer when
- * known). Fails OPEN on a read error: this is a staleness check, not a privacy one,
- * and the suppression/ownership guards (which fail closed) still gate the send.
+ * known). Fails CLOSED on a read error: if we can't confirm the address is still
+ * on file, route to manual rather than risk resending to a since-changed mailbox.
  */
 async function bouncedAddressStillOnFile(bouncedEmail, match) {
   if (match?.field) return true;
@@ -248,8 +248,8 @@ async function bouncedAddressStillOnFile(bouncedEmail, match) {
     if (await estQ.first('id')) return true;
     if (await leadQ.first('id')) return true;
   } catch (err) {
-    logger.warn(`[bounce-recovery] on-file check failed — proceeding: ${err.message}`);
-    return true;
+    logger.warn(`[bounce-recovery] on-file check failed — treating as not on file: ${err.message}`);
+    return false;
   }
   return false;
 }
@@ -609,25 +609,24 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         if (Number(leadAffected) > 0) updatedFields.push('leads.email');
       } else {
         // No-customer (lead/prospect): no source id to scope by, so only rewrite
-        // when the bounced address uniquely identifies ONE record — otherwise two
-        // unrelated prospects could share the typo and we'd corrupt the other.
+        // when the bounced address uniquely identifies ONE record ACROSS both
+        // tables — a typo appearing once in estimates AND once in leads can't be
+        // proven to be the same prospect, so we leave both alone.
         const estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]).select('id').catch(() => []);
-        if (estRows.length === 1) {
+        const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]).select('id').catch(() => []);
+        const totalMatches = estRows.length + leadRows.length;
+        if (totalMatches === 1 && estRows.length === 1) {
           const ok = await db('estimates').where({ id: estRows[0].id })
             .update({ customer_email: correctedEmail, updated_at: new Date() })
             .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
           if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
-        } else if (estRows.length > 1) {
-          logger.warn(`[bounce-recovery] ambiguous estimate source (${estRows.length} rows share the typo) — left unchanged`);
-        }
-        const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]).select('id').catch(() => []);
-        if (leadRows.length === 1) {
+        } else if (totalMatches === 1 && leadRows.length === 1) {
           const ok = await db('leads').where({ id: leadRows[0].id })
             .update({ email: correctedEmail, updated_at: new Date() })
             .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
           if (Number(ok) > 0) updatedFields.push('leads.email');
-        } else if (leadRows.length > 1) {
-          logger.warn(`[bounce-recovery] ambiguous lead source (${leadRows.length} rows share the typo) — left unchanged`);
+        } else if (totalMatches > 1) {
+          logger.warn(`[bounce-recovery] ambiguous source (${estRows.length} estimate(s) + ${leadRows.length} lead(s) share the typo) — left unchanged`);
         }
       }
     }
@@ -765,5 +764,6 @@ module.exports = {
   resolveCustomerEmailField,
   correctedAddressSuppressed,
   correctedAddressOwnedByOther,
+  bouncedAddressStillOnFile,
   CUSTOMER_EMAIL_FIELDS,
 };

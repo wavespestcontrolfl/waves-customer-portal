@@ -251,18 +251,26 @@ async function sendLegacyServiceReportEmail({
       ...(message?.id ? { customArgs: { email_message_id: message.id } } : {}),
     });
     if (ledgerAvailable && message?.id) {
-      const rows = await db('email_messages').where({ id: message.id }).update({
-        status: 'sent',
+      // Always record provider id + send time; advance to 'sent' only while still
+      // 'queued' so a fast delivery/bounce webhook (resolvable via custom_args
+      // before this commit) isn't regressed.
+      await db('email_messages').where({ id: message.id }).update({
         provider_message_id: result.messageId,
         sent_at: new Date(),
         updated_at: new Date(),
-      }).returning('*');
-      message = rows?.[0] || message;
+      });
+      await db('email_messages').where({ id: message.id, status: 'queued' }).update({
+        status: 'sent',
+        updated_at: new Date(),
+      });
+      message = (await db('email_messages').where({ id: message.id }).first()) || message;
     }
     return { sent: true, messageId: result.messageId || null, message };
   } catch (err) {
     if (ledgerAvailable && message?.id) {
-      await db('email_messages').where({ id: message.id }).update({
+      // Only mark failed while still queued — a webhook may have terminalized the
+      // row if SendGrid accepted the send despite a lost HTTP response.
+      await db('email_messages').where({ id: message.id, status: 'queued' }).update({
         status: 'failed',
         error_message: errorMessage(err).slice(0, 1000),
         updated_at: new Date(),
