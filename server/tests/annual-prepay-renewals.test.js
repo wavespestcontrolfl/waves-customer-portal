@@ -302,6 +302,46 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('seeds annual-prepay visits with a pre-tax billable price + invoice-on-complete', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        estimated_price: {},
+        create_invoice_on_complete: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    const invoiceQuery = query({ first: { subtotal: 400, total: 428 } });
+    const insert1 = query({ returning: [{ id: 'svc-1', scheduled_date: '2026-06-15' }] });
+    const insert2 = query({ returning: [{ id: 'svc-2', scheduled_date: '2026-09-15' }] });
+    const insert3 = query({ returning: [{ id: 'svc-3', scheduled_date: '2026-12-15' }] });
+    const insert4 = query({ returning: [{ id: 'svc-4', scheduled_date: '2027-03-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, insert1, insert2, insert3, insert4],
+      invoices: [invoiceQuery],
+    });
+
+    await _private.ensureCoverageRowsForTerm({
+      id: 'term-1',
+      customer_id: 'customer-1',
+      prepay_invoice_id: 'inv-1',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+    });
+
+    // 400 pre-tax subtotal / 4 visits = 100 per visit; flagged to bill only if
+    // coverage is later voided (the prepaid stamp suppresses it while intact).
+    expect(invoiceQuery.first).toHaveBeenCalled();
+    expect(insert1.insert).toHaveBeenCalledWith(expect.objectContaining({
+      estimated_price: 100,
+      create_invoice_on_complete: true,
+    }));
+  });
+
   test('reuses existing off-cadence visits instead of seeding a duplicate series', async () => {
     const columnQuery = query({
       columnInfo: {

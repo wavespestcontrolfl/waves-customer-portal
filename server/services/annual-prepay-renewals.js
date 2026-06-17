@@ -341,6 +341,24 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
   const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
   let createdParentId = recurringParentId;
 
+  // Give seeded visits a billable pre-tax per-visit price (from the prepay
+  // invoice subtotal) and flag create_invoice_on_complete, so that if the prepay
+  // is later voided/refunded and the prepaid stamp is cleared, completion billing
+  // has a price to invoice — prepay customers often have monthly_rate 0, which
+  // would otherwise leave these generated visits completing unbilled. While
+  // coverage is intact the prepaid stamp (>= this pre-tax price) still suppresses
+  // the invoice, so this never double-bills a covered visit.
+  let seededVisitPrice = null;
+  if (cols.estimated_price && term?.prepay_invoice_id) {
+    try {
+      const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total');
+      const base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      if (base > 0) seededVisitPrice = Math.round((base / coverageVisitCount) * 100) / 100;
+    } catch (err) {
+      logger.warn(`[annual-prepay] seeded visit price lookup skipped: ${err.message}`);
+    }
+  }
+
   for (const scheduledDate of datesToSeed) {
     const insertData = {
       customer_id: term.customer_id,
@@ -365,6 +383,8 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
     if (cols.window_end) insertData.window_end = null;
     if (cols.technician_id) insertData.technician_id = null;
     if (cols.customer_notes) insertData.customer_notes = null;
+    if (cols.estimated_price && seededVisitPrice != null) insertData.estimated_price = seededVisitPrice;
+    if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = true;
 
     const [created] = await conn('scheduled_services').insert(insertData).returning('*');
     if (!created) continue;
@@ -946,12 +966,30 @@ async function createTermForAnnualPrepay({
       if (scCols.annual_prepay_term_id) {
         const winStart = dateOnly(updates.term_start || existing.term_start);
         const winEnd = dateOnly(updates.term_end || existing.term_end);
+        function detachOutOfWindow() {
+          this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
+        }
         try {
+          // Completion billing keys on prepaid_amount independently of the term
+          // link, so a now-out-of-window FUTURE visit would still be treated as
+          // prepaid and skip invoicing unless its stamp is cleared too. Clear the
+          // stamps on the non-completed out-of-window visits first (while they're
+          // still findable by term id); completed/terminal visits keep their
+          // historical stamp.
+          if (scCols.prepaid_amount) {
+            const stampClear = { prepaid_amount: null, updated_at: new Date() };
+            if (scCols.prepaid_method) stampClear.prepaid_method = null;
+            if (scCols.prepaid_at) stampClear.prepaid_at = null;
+            if (scCols.prepaid_note) stampClear.prepaid_note = null;
+            await conn('scheduled_services')
+              .where({ annual_prepay_term_id: existing.id })
+              .andWhere(detachOutOfWindow)
+              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
+              .update(stampClear);
+          }
           await conn('scheduled_services')
             .where({ annual_prepay_term_id: existing.id })
-            .andWhere(function detachOutOfWindow() {
-              this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
-            })
+            .andWhere(detachOutOfWindow)
             .update({ annual_prepay_term_id: null, updated_at: new Date() });
         } catch (err) {
           logger.warn(`[annual-prepay] scheduled service detach skipped: ${err.message}`);
