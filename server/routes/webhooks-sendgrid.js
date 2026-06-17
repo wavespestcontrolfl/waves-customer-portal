@@ -285,6 +285,15 @@ async function handleEvent(ev) {
         .catch(() => 0);
       if (Number(bound) > 0) {
         emailMessage = { ...candidate, provider_message_id: messageId };
+      } else {
+        // 0 rows: either the row was superseded (token changed) OR the sender bound
+        // the SAME provider_message_id concurrently between our read and write.
+        // Reread and accept only if it is now bound to THIS event's message id, so a
+        // genuine hard bounce isn't dropped — but a superseded/other-id row still is.
+        const reread = await db('email_messages').where({ id: candidate.id }).first().catch(() => null);
+        if (reread && String(reread.provider_message_id || '') === String(messageId || '')) {
+          emailMessage = reread;
+        }
       }
     }
   }
