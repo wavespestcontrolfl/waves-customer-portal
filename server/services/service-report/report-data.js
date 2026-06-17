@@ -1255,7 +1255,11 @@ function resolveStressDamage(row = {}) {
 
 function calculateLawnOverallScore(row = {}) {
   const explicit = lawnScoreValue(row.overall_score);
-  if (explicit != null) return explicit;
+  // Trust a stored overall only when it was computed under the four-category
+  // model (rows that have stress_damage). Legacy rows keep an overall from the
+  // old five-signal weighting, so recompute them to match the four displayed
+  // bars (Density/Weed/Color/Stress) instead of hidden fungus/thatch weights.
+  if (explicit != null && row.stress_damage != null) return explicit;
   const turf = Number(row.turf_density) || 0;
   const weeds = Number(row.weed_suppression) || 0;
   const color = Number(row.color_health) || 0;

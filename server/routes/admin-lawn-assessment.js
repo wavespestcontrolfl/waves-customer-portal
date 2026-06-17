@@ -1000,19 +1000,20 @@ router.post('/confirm', async (req, res, next) => {
       fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
       thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
     };
-    // Recompute Stress/Damage from the FINAL (possibly tech-corrected) fungus +
-    // thatch plus the AI insect/drought/mechanical floor persisted at /assess.
-    // This reflects tech corrections to the underlying signals and derives a
-    // value for pre-stress_damage rows (worst of fungus/thatch) — never 0.
+    // Stress/Damage = worst of the tech-corrected fungus + thatch and the AI
+    // worst-spot floor stored at /assess (which already folds in insect/drought/
+    // mechanical and the worst per-photo disease/thatch). A tech correcting the
+    // overall fungus/thatch can push it lower; the AI worst-spot floor holds so
+    // a trouble spot isn't lost. Pre-stress_damage rows (null floor) fall back
+    // to worst-of(fungus, thatch) — never 0.
     {
-      const fl = (v) => (Number.isFinite(Number(v)) ? Number(v) : 95);
-      const aiStress = parseJsonObject(assessment.adjusted_scores, {})?.stress_components || {};
+      const aiFloor = Number.isFinite(Number(assessment.stress_damage))
+        ? Number(assessment.stress_damage)
+        : 95;
       finalScores.stress_damage = Math.min(
         Number(finalScores.fungus_control),
         Number(finalScores.thatch_level),
-        fl(aiStress.insect),
-        fl(aiStress.drought),
-        fl(aiStress.mechanical),
+        aiFloor,
       );
     }
 

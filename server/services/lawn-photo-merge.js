@@ -67,15 +67,23 @@ function majorityVote(values, fallback = null) {
 // Stress/Damage is defined as the worst signal, so a localized severe insect/
 // drought/mechanical reading can't be averaged away by two healthy overviews.
 const SEVERITY_RANK = { none: 0, minor: 1, moderate: 2, severe: 3 };
-function worstSeverity(values, fallback = null) {
+const THATCH_RANK = { low: 0, moderate: 1, high: 2 };
+
+// Pick the worst (highest-ranked) value across photos, using the supplied rank
+// map. Skips unknown/nullish values; returns fallback when none are usable.
+function worstByRank(values, rank, fallback = null) {
   let worst = fallback;
   let worstRank = -1;
   for (const v of (Array.isArray(values) ? values : [])) {
-    const r = SEVERITY_RANK[v];
+    const r = rank[v];
     if (r == null) continue;
     if (r > worstRank) { worstRank = r; worst = v; }
   }
   return worst;
+}
+
+function worstSeverity(values, fallback = null) {
+  return worstByRank(values, SEVERITY_RANK, fallback);
 }
 
 // Merge per-photo composite results into one assessment composite. A single
@@ -115,6 +123,20 @@ function mergePhotoComposites(validResults = []) {
       results[0].composite[field],
     );
   }
+  // Carry the WORST disease/thatch across photos for Stress/Damage only. The
+  // majority fungal_activity/thatch_visibility above stay intact for the Lawn
+  // Diagnostic protocol + snapshot findings; these worst_* values let
+  // computeStressDamageDisplay keep a trouble-spot photo from being averaged
+  // away on the customer-facing consolidated score.
+  merged.worst_fungal_activity = worstSeverity(
+    results.map(r => r.composite.fungal_activity),
+    merged.fungal_activity,
+  );
+  merged.worst_thatch_visibility = worstByRank(
+    results.map(r => r.composite.thatch_visibility),
+    THATCH_RANK,
+    merged.thatch_visibility,
+  );
   merged.observations = results.map(r => r.composite.observations).filter(Boolean)[0] || '';
   merged.overwatering_signal = results.some(r => r.composite?.overwatering_signal === true);
   // Grass type: majority vote across photos, falling back to the first detected.

@@ -48,7 +48,10 @@ function lawnStressDamage(row = {}) {
 // (Density 0.30 / Weed 0.25 / Color 0.25 / Stress 0.20) so legacy rows without
 // a stored overall_score match the four displayed bars and the service report.
 function lawnOverall(row = {}) {
-  if (row.overall_score != null) return row.overall_score;
+  // Trust a stored overall only when it was computed under the four-category
+  // model (rows with stress_damage). Legacy rows keep an old five-signal
+  // overall, so recompute them to match the four displayed bars.
+  if (row.overall_score != null && row.stress_damage != null) return row.overall_score;
   return Math.round(
     (row.turf_density || 0) * 0.30 +
     (row.weed_suppression || 0) * 0.25 +
