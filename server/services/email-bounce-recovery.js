@@ -237,27 +237,45 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
   return { customerId: customer.id, field };
 }
 
+// The estimate id is encoded in the send's trigger_event_id (e.g.
+// 'estimate_delivery:<id>' / 'estimate_followup_<stage>:<id>'), so a no-customer
+// recovery can scope its gate + commit to the ACTUAL source estimate rather than
+// any row that happens to share the typo.
+function sourceEstimateIdFromTriggerEvent(triggerEventId) {
+  const s = String(triggerEventId || '');
+  if (!/^estimate/.test(s) || !s.includes(':')) return null;
+  return s.split(':').pop() || null;
+}
+
 /**
  * Is the BOUNCED address still on file? When a bounce arrives late and an operator
  * has already changed/corrected the address, the bounce is for a stale address and
  * we must not auto-resend a correction of it. True if a customer column still holds
- * it (match.field) or a source estimate/lead does (scoped to the customer when
- * known). Fails CLOSED on a read error: if we can't confirm the address is still
- * on file, route to manual rather than risk resending to a since-changed mailbox.
+ * it (match.field), or the SOURCE estimate (when its id is known) does, or — as a
+ * fallback — any estimate/lead (scoped to the customer when known). Fails CLOSED on
+ * a read error: if we can't confirm the address is still on file, route to manual.
  */
-async function bouncedAddressStillOnFile(bouncedEmail, match) {
+async function bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId = null) {
   if (match?.field) return true;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return false;
   try {
-    const estQ = db('estimates').whereRaw('LOWER(customer_email) = ?', [email]);
-    const leadQ = db('leads').whereRaw('LOWER(email) = ?', [email]);
-    if (match?.customerId) {
-      estQ.where({ customer_id: match.customerId });
-      leadQ.where({ customer_id: match.customerId });
+    // Scope to the actual source estimate when we can identify it — only that row
+    // being edited should gate this recovery, not an unrelated prospect's typo.
+    if (sourceEstimateId) {
+      const row = await db('estimates').where({ id: sourceEstimateId }).whereRaw('LOWER(customer_email) = ?', [email]).first('id');
+      return !!row;
     }
-    if (await estQ.first('id')) return true;
-    if (await leadQ.first('id')) return true;
+    // Otherwise only a CUSTOMER-scoped lookup is safe. An unscoped no-customer
+    // lookup could match an unrelated prospect that merely shares the typo, which
+    // would keep a stale recovery alive — so for a no-customer recovery with no
+    // derivable source id we fail closed (route to manual).
+    if (match?.customerId) {
+      const estQ = db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).where({ customer_id: match.customerId });
+      const leadQ = db('leads').whereRaw('LOWER(email) = ?', [email]).where({ customer_id: match.customerId });
+      if (await estQ.first('id')) return true;
+      if (await leadQ.first('id')) return true;
+    }
   } catch (err) {
     logger.warn(`[bounce-recovery] on-file check failed — treating as not on file: ${err.message}`);
     return false;
@@ -478,7 +496,11 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
     const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
     const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
-    const addressOnFile = candidate ? await bouncedAddressStillOnFile(bouncedEmail, match) : true;
+    // For no-customer (prospect) recoveries, scope the on-file gate to the actual
+    // source estimate (from the send's trigger_event_id) so an unrelated prospect
+    // sharing the typo can't keep this recovery alive.
+    const sourceEstimateId = match?.customerId ? null : sourceEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
+    const addressOnFile = candidate ? await bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId) : true;
     // Fail closed: the stored flag OR a known attachment-bearing template (covers
     // pre-flag rows and any direct inserter that didn't stamp has_attachments).
     const hasAttachments = !!bouncedMessage.has_attachments
@@ -670,41 +692,26 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         if (Number(estAffected) > 0) updatedFields.push('estimates.customer_email');
         if (Number(leadAffected) > 0) updatedFields.push('leads.email');
       } else {
-        // No-customer (lead/prospect): no source id to scope by, so only rewrite
-        // when the bounced address uniquely identifies ONE record ACROSS both
-        // tables — a typo appearing once in estimates AND once in leads can't be
-        // proven to be the same prospect, so we leave both alone.
-        let estRows;
-        let leadRows;
+        // No-customer (prospect): rewrite ONLY the ACTUAL source estimate, identified
+        // by the original send's trigger_event_id. We do NOT fall back to an unscoped
+        // address match — that could overwrite a different prospect that merely shares
+        // the typo. (The pre-send on-file gate is scoped the same way, so a no-source
+        // recovery never reaches here.)
+        let sourceEstimateId = null;
         try {
-          estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]).select('id');
-          leadRows = await db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]).select('id');
+          const orig = await db('email_messages').where({ id: rec.original_message_id }).first('trigger_event_id');
+          sourceEstimateId = sourceEstimateIdFromTriggerEvent(orig?.trigger_event_id);
         } catch (err) {
-          // Fail closed: a failed lookup must not read as "zero matches" and let
-          // a single match on the other table slip through as unique.
-          logger.warn(`[bounce-recovery] source uniqueness lookup failed — left unchanged: ${err.message}`);
-          estRows = null;
-          leadRows = null;
+          logger.warn(`[bounce-recovery] source estimate lookup failed: ${err.message}`);
         }
-        if (estRows && leadRows) {
-          const totalMatches = estRows.length + leadRows.length;
-          if (totalMatches === 1 && estRows.length === 1) {
-            // Re-guard on the bounced address: don't clobber an operator edit made
-            // between the select and this update.
-            const ok = await db('estimates').where({ id: estRows[0].id })
-              .whereRaw('LOWER(customer_email) = ?', [bouncedEmail])
-              .update({ customer_email: correctedEmail, updated_at: new Date() })
-              .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
-            if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
-          } else if (totalMatches === 1 && leadRows.length === 1) {
-            const ok = await db('leads').where({ id: leadRows[0].id })
-              .whereRaw('LOWER(email) = ?', [bouncedEmail])
-              .update({ email: correctedEmail, updated_at: new Date() })
-              .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
-            if (Number(ok) > 0) updatedFields.push('leads.email');
-          } else if (totalMatches > 1) {
-            logger.warn(`[bounce-recovery] ambiguous source (${estRows.length} estimate(s) + ${leadRows.length} lead(s) share the typo) — left unchanged`);
-          }
+        if (sourceEstimateId) {
+          const ok = await db('estimates').where({ id: sourceEstimateId })
+            .whereRaw('LOWER(customer_email) = ?', [bouncedEmail])
+            .update({ customer_email: correctedEmail, updated_at: new Date() })
+            .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
+          if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
+        } else {
+          logger.warn(`[bounce-recovery] no source estimate id for no-customer recovery ${rec.id} — source left unchanged`);
         }
       }
     }

@@ -80,6 +80,18 @@ describe('email-typo-correction: correctEmailDomain', () => {
     expect(correctEmailDomain('jane@mail.com')).toBeNull();
   });
 
+  test('short real domains one edit from a provider are medium (not auto-sent)', () => {
+    // he.com→me.com, box.net→cox.net, line.com→live.com are 1 edit but ambiguous
+    // (the input is a real different domain) → must drop below the high/auto bar.
+    for (const addr of ['jane@he.com', 'jane@box.net', 'jane@line.com']) {
+      const r = correctEmailDomain(addr);
+      if (r) expect(r.confidence).toBe('medium');
+      expect(meetsConfidence(r && r.confidence, 'high')).toBe(false);
+    }
+    // Long-provider typos still auto-send (high).
+    expect(correctEmailDomain('jane@gmial.com')).toMatchObject({ confidence: 'high' });
+  });
+
   test('two-edit domain typos are medium confidence (gated out by default)', () => {
     // 'gmaul' -> 'gmail' is one substitution; build a genuine 2-edit case.
     const r = correctEmailDomain('jane@gnaul.com'); // g[n]a[u]l -> gmail = 2 subs
