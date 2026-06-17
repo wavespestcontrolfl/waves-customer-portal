@@ -495,7 +495,9 @@ describe('lawn diagnostic auto-release ladder', () => {
     // These name governed causes too, so a moderate+ "<cause> is confirmed" claim must
     // also be downgraded — the noun list can't lag the condition labels. Phrasings put
     // the cause noun directly before "is/are confirmed" (the predicate-form pattern).
-    for (const claim of ['Powdery mildew is confirmed', 'Mold is confirmed', 'Caterpillars are confirmed', 'Sod webworm is confirmed', 'Leaf spot is confirmed']) {
+    for (const claim of ['Powdery mildew is confirmed', 'Mold is confirmed', 'Caterpillars are confirmed', 'Sod webworm is confirmed', 'Leaf spot is confirmed',
+      // plural predicate forms must downgrade too
+      'Leaf spots are confirmed', 'Dollar spots are confirmed', 'Grubs are confirmed', 'Large patches are confirmed']) {
       expect(scrubCustomerText(`${claim} in the photographed area.`)).not.toMatch(/\bconfirmed\b/i);
     }
     // adjective form too
@@ -579,7 +581,9 @@ describe('lawn diagnostic auto-release ladder', () => {
   test('safeCustomerSummary gate stays in lockstep with the cause-mapped condition labels', () => {
     // caterpillar/worm + leaf spot/mold/mildew map to governed cause labels too, so a
     // low-confidence summary naming them must also degrade to symptom-only.
-    for (const phrase of ['caterpillar activity', 'army worm damage', 'sod webworm', 'powdery mildew', 'mold growth', 'leaf spot']) {
+    for (const phrase of ['caterpillar activity', 'army worm damage', 'sod webworm', 'powdery mildew', 'mold growth', 'leaf spot',
+      // plural forms must gate too
+      'grubs', 'leaf spots', 'dollar spots', 'large patches', 'caterpillars']) {
       const out = safeCustomerSummary(`Most consistent with ${phrase} in the photographed area.`, 'low');
       expect(out).toMatch(/closer look/i);
     }
