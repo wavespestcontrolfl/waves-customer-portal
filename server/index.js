@@ -421,7 +421,6 @@ app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
-app.use('/api/admin/requests', require('./routes/admin-requests'));
 app.use('/api/admin/wiki', require('./routes/admin-wiki'));
 app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));

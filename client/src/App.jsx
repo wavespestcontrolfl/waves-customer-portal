@@ -101,7 +101,6 @@ import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
-import AdminRequestsPage from './pages/admin/RequestsPage';
 import AdminDispatchPage from './pages/admin/AdminDispatchPage';
 import AdminInventoryPage from './pages/admin/InventoryPage';
 import AdminRevenuePage from './pages/admin/RevenuePage';
@@ -323,7 +322,6 @@ export default function App() {
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
             <Route path="communications" element={<AdminCommunicationsPage />} />
             <Route path="reviews" element={<AdminReviewsPage />} />
-            <Route path="requests" element={<AdminRequestsPage />} />
             <Route path="ads" element={<Navigate to="/admin/ppc" replace />} />
             <Route path="ppc" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading PPC...</div>}><AdminAdsPage /></Suspense>} />
             <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
