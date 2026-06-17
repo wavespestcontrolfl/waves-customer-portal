@@ -158,7 +158,6 @@ const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
 const AutonomousContentReviewPage = lazyWithRetry(() => import('./pages/admin/AutonomousContentReviewPage'));
 const ContentRegistryPage = lazyWithRetry(() => import('./pages/admin/ContentRegistryPage'));
-const DataHygienePage = lazyWithRetry(() => import('./pages/admin/DataHygienePage'));
 const AgentsHubPage = lazyWithRetry(() => import('./pages/admin/AgentsHubPage'));
 const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
@@ -329,7 +328,7 @@ export default function App() {
             <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
             <Route path="content-engine" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading content engine...</div>}><AutonomousContentReviewPage /></Suspense>} />
             <Route path="content-registry" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading content registry...</div>}><ContentRegistryPage /></Suspense>} />
-            <Route path="data-hygiene" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading data hygiene...</div>}><DataHygienePage /></Suspense>} />
+            <Route path="data-hygiene" element={<Navigate to="/admin/agents?tab=hygiene" replace />} />
             <Route path="agents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading agents...</div>}><AgentsHubPage /></Suspense>} />
             <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
             <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />

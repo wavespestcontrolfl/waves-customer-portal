@@ -23,7 +23,6 @@ import {
   LogOut,
   ExternalLink,
   ChevronRight,
-  DatabaseZap,
   Bot,
   Sprout,
 } from "lucide-react";
@@ -78,7 +77,6 @@ const SECTIONS = [
     section: "Agents",
     items: [
       { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
-      { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
     ],
   },
   {
