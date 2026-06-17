@@ -78,13 +78,16 @@ async function checkGemini(model) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: PROMPT('gemini') }] }],
-        generationConfig: { temperature: 0, maxOutputTokens: 30 },
+        // Generous budget so a "thinking" Flash model can reason AND still emit the JSON.
+        generationConfig: { temperature: 0, maxOutputTokens: 512 },
       }),
     });
     const latencyMs = Date.now() - started;
     if (!resp.ok) return { ok: false, status: resp.status, latencyMs, failureType: classifyGemini(resp.status), detail: (await resp.text()).slice(0, 200) };
     const data = await resp.json();
-    const parsed = looseJson(data?.candidates?.[0]?.content?.parts?.[0]?.text);
+    // Join ALL text parts — a thinking model returns a thought part before the answer.
+    const text = (data?.candidates?.[0]?.content?.parts || []).map((part) => part && part.text).filter(Boolean).join('');
+    const parsed = looseJson(text);
     return parsed?.ok === true
       ? { ok: true, status: 200, latencyMs }
       : { ok: false, status: 200, latencyMs, failureType: 'unexpected_response', detail: 'reachable but did not return the expected JSON' };

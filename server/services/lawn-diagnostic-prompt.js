@@ -456,14 +456,18 @@ async function runPerception(context = {}) {
     const resp = await fetch(geminiUrl(LAWN_VISION_MODEL), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 1200 } }),
+      // Room for a "thinking" Flash model to reason AND emit the observations JSON.
+      body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.2, maxOutputTokens: 2048 } }),
     });
     if (!resp.ok) {
       logger.error(`[lawn-diagnostic-prompt] runPerception Gemini ${resp.status}`);
       return { ok: false, reason: `gemini_${resp.status}` };
     }
     const data = await resp.json();
-    const parsed = parseLooseJson(data?.candidates?.[0]?.content?.parts?.[0]?.text);
+    // Join ALL text parts — a thinking model can return a thought part before the answer
+    // part, so parts[0] alone would miss the JSON.
+    const text = (data?.candidates?.[0]?.content?.parts || []).map((part) => part && part.text).filter(Boolean).join('');
+    const parsed = parseLooseJson(text);
     const observations = Array.isArray(parsed?.observations)
       ? parsed.observations.filter((obs) => obs && typeof obs === 'object')
       : [];
