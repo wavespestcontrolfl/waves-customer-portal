@@ -11,19 +11,19 @@
       }
     },
     "out": {
-      "perApp": 90,
-      "annual": 540,
-      "monthly": 45,
+      "perApp": 76,
+      "annual": 456,
+      "monthly": 38,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 45,
-      "marketAnnual": 540
+      "marketMonthly": 38,
+      "marketAnnual": 456
     }
   },
   {
@@ -38,19 +38,19 @@
       }
     },
     "out": {
-      "perApp": 73.33,
-      "annual": 660,
-      "monthly": 55,
+      "perApp": 62.67,
+      "annual": 564,
+      "monthly": 47,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 55,
-      "marketAnnual": 660
+      "marketMonthly": 47,
+      "marketAnnual": 564
     }
   },
   {
@@ -65,19 +65,19 @@
       }
     },
     "out": {
-      "perApp": 65,
-      "annual": 780,
-      "monthly": 65,
+      "perApp": 55,
+      "annual": 660,
+      "monthly": 55,
       "freq": 12,
       "tier": "premium",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 65,
-      "marketAnnual": 780
+      "marketMonthly": 55,
+      "marketAnnual": 660
     }
   },
   {
@@ -92,19 +92,19 @@
       }
     },
     "out": {
-      "perApp": 90,
-      "annual": 540,
-      "monthly": 45,
+      "perApp": 76,
+      "annual": 456,
+      "monthly": 38,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 45,
-      "marketAnnual": 540
+      "marketMonthly": 38,
+      "marketAnnual": 456
     }
   },
   {
@@ -119,19 +119,19 @@
       }
     },
     "out": {
-      "perApp": 76,
-      "annual": 684,
-      "monthly": 57,
+      "perApp": 64,
+      "annual": 576,
+      "monthly": 48,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
-      "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingBasis": "TABLE_INTERPOLATION",
+      "pricingSource": "MARKET_TABLE",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 56,
-      "marketAnnual": 672
+      "marketMonthly": 48,
+      "marketAnnual": 576
     }
   },
   {
@@ -146,19 +146,19 @@
       }
     },
     "out": {
-      "perApp": 76,
-      "annual": 912,
-      "monthly": 76,
+      "perApp": 64,
+      "annual": 768,
+      "monthly": 64,
       "freq": 12,
       "tier": "premium",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 76,
-      "marketAnnual": 912
+      "marketMonthly": 64,
+      "marketAnnual": 768
     }
   },
   {
@@ -173,19 +173,19 @@
       }
     },
     "out": {
-      "perApp": 92,
-      "annual": 552,
-      "monthly": 46,
+      "perApp": 78,
+      "annual": 468,
+      "monthly": 39,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 46,
-      "marketAnnual": 552
+      "marketMonthly": 39,
+      "marketAnnual": 468
     }
   },
   {
@@ -200,19 +200,19 @@
       }
     },
     "out": {
-      "perApp": 93,
-      "annual": 837,
-      "monthly": 69.75,
+      "perApp": 79,
+      "annual": 711,
+      "monthly": 59.25,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 66,
-      "marketAnnual": 792
+      "marketMonthly": 56,
+      "marketAnnual": 672
     }
   },
   {
@@ -227,19 +227,19 @@
       }
     },
     "out": {
-      "perApp": 96,
-      "annual": 1152,
-      "monthly": 96,
+      "perApp": 81,
+      "annual": 972,
+      "monthly": 81,
       "freq": 12,
       "tier": "premium",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 96,
-      "marketAnnual": 1152
+      "marketMonthly": 81,
+      "marketAnnual": 972
     }
   },
   {
@@ -254,19 +254,19 @@
       }
     },
     "out": {
-      "perApp": 110,
-      "annual": 660,
-      "monthly": 55,
+      "perApp": 94,
+      "annual": 564,
+      "monthly": 47,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 55,
-      "marketAnnual": 660
+      "marketMonthly": 47,
+      "marketAnnual": 564
     }
   },
   {
@@ -281,19 +281,19 @@
       }
     },
     "out": {
-      "perApp": 114,
-      "annual": 1026,
-      "monthly": 85.5,
+      "perApp": 96,
+      "annual": 864,
+      "monthly": 72,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 80,
-      "marketAnnual": 960
+      "marketMonthly": 68,
+      "marketAnnual": 816
     }
   },
   {
@@ -308,19 +308,19 @@
       }
     },
     "out": {
-      "perApp": 118,
-      "annual": 1416,
-      "monthly": 118,
+      "perApp": 100,
+      "annual": 1200,
+      "monthly": 100,
       "freq": 12,
       "tier": "premium",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 118,
-      "marketAnnual": 1416
+      "marketMonthly": 100,
+      "marketAnnual": 1200
     }
   },
   {
@@ -335,19 +335,19 @@
       }
     },
     "out": {
-      "perApp": 146,
-      "annual": 876,
-      "monthly": 73,
+      "perApp": 124,
+      "annual": 744,
+      "monthly": 62,
       "freq": 6,
       "tier": "standard",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 73,
-      "marketAnnual": 876
+      "marketMonthly": 62,
+      "marketAnnual": 744
     }
   },
   {
@@ -362,19 +362,19 @@
       }
     },
     "out": {
-      "perApp": 154,
-      "annual": 1386,
-      "monthly": 115.5,
+      "perApp": 131,
+      "annual": 1179,
+      "monthly": 98.25,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 109,
-      "marketAnnual": 1308
+      "marketMonthly": 92,
+      "marketAnnual": 1104
     }
   },
   {
@@ -389,19 +389,19 @@
       }
     },
     "out": {
-      "perApp": 162,
-      "annual": 1944,
-      "monthly": 162,
+      "perApp": 137,
+      "annual": 1644,
+      "monthly": 137,
       "freq": 12,
       "tier": "premium",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 162,
-      "marketAnnual": 1944
+      "marketMonthly": 137,
+      "marketAnnual": 1644
     }
   },
   {
@@ -416,19 +416,19 @@
       }
     },
     "out": {
-      "perApp": 100,
-      "annual": 600,
-      "monthly": 50,
+      "perApp": 84,
+      "annual": 504,
+      "monthly": 42,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
+      "marketMonthly": 42,
+      "marketAnnual": 504
     }
   },
   {
@@ -443,19 +443,19 @@
       }
     },
     "out": {
-      "perApp": 80,
-      "annual": 720,
-      "monthly": 60,
+      "perApp": 68,
+      "annual": 612,
+      "monthly": 51,
       "freq": 9,
       "tier": "enhanced",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 60,
-      "marketAnnual": 720
+      "marketMonthly": 51,
+      "marketAnnual": 612
     }
   },
   {
@@ -470,19 +470,19 @@
       }
     },
     "out": {
-      "perApp": 75,
-      "annual": 900,
-      "monthly": 75,
+      "perApp": 63,
+      "annual": 756,
+      "monthly": 63,
       "freq": 12,
       "tier": "premium",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 75,
-      "marketAnnual": 900
+      "marketMonthly": 63,
+      "marketAnnual": 756
     }
   },
   {
@@ -497,19 +497,19 @@
       }
     },
     "out": {
-      "perApp": 100,
-      "annual": 600,
-      "monthly": 50,
+      "perApp": 84,
+      "annual": 504,
+      "monthly": 42,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
+      "marketMonthly": 42,
+      "marketAnnual": 504
     }
   },
   {
@@ -524,19 +524,19 @@
       }
     },
     "out": {
-      "perApp": 80,
-      "annual": 720,
-      "monthly": 60,
+      "perApp": 68,
+      "annual": 612,
+      "monthly": 51,
       "freq": 9,
       "tier": "enhanced",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 60,
-      "marketAnnual": 720
+      "marketMonthly": 51,
+      "marketAnnual": 612
     }
   },
   {
@@ -551,19 +551,19 @@
       }
     },
     "out": {
-      "perApp": 78,
-      "annual": 936,
-      "monthly": 78,
+      "perApp": 66,
+      "annual": 792,
+      "monthly": 66,
       "freq": 12,
       "tier": "premium",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 78,
-      "marketAnnual": 936
+      "marketMonthly": 66,
+      "marketAnnual": 792
     }
   },
   {
@@ -578,19 +578,19 @@
       }
     },
     "out": {
-      "perApp": 100,
-      "annual": 600,
-      "monthly": 50,
+      "perApp": 84,
+      "annual": 504,
+      "monthly": 42,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
+      "marketMonthly": 42,
+      "marketAnnual": 504
     }
   },
   {
@@ -605,19 +605,19 @@
       }
     },
     "out": {
-      "perApp": 93,
-      "annual": 837,
-      "monthly": 69.75,
+      "perApp": 78,
+      "annual": 702,
+      "monthly": 58.5,
       "freq": 9,
       "tier": "enhanced",
       "track": "bermuda",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 67,
-      "marketAnnual": 804
+      "marketMonthly": 57,
+      "marketAnnual": 684
     }
   },
   {
@@ -632,19 +632,19 @@
       }
     },
     "out": {
-      "perApp": 97,
-      "annual": 1164,
-      "monthly": 97,
+      "perApp": 82,
+      "annual": 984,
+      "monthly": 82,
       "freq": 12,
       "tier": "premium",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 97,
-      "marketAnnual": 1164
+      "marketMonthly": 82,
+      "marketAnnual": 984
     }
   },
   {
@@ -659,19 +659,19 @@
       }
     },
     "out": {
-      "perApp": 112,
-      "annual": 672,
-      "monthly": 56,
+      "perApp": 94,
+      "annual": 564,
+      "monthly": 47,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 56,
-      "marketAnnual": 672
+      "marketMonthly": 47,
+      "marketAnnual": 564
     }
   },
   {
@@ -686,19 +686,19 @@
       }
     },
     "out": {
-      "perApp": 113,
-      "annual": 1017,
-      "monthly": 84.75,
+      "perApp": 95,
+      "annual": 855,
+      "monthly": 71.25,
       "freq": 9,
       "tier": "enhanced",
       "track": "bermuda",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 82,
-      "marketAnnual": 984
+      "marketMonthly": 69,
+      "marketAnnual": 828
     }
   },
   {
@@ -713,19 +713,19 @@
       }
     },
     "out": {
-      "perApp": 120,
-      "annual": 1440,
-      "monthly": 120,
+      "perApp": 102,
+      "annual": 1224,
+      "monthly": 102,
       "freq": 12,
       "tier": "premium",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 120,
-      "marketAnnual": 1440
+      "marketMonthly": 102,
+      "marketAnnual": 1224
     }
   },
   {
@@ -740,19 +740,19 @@
       }
     },
     "out": {
-      "perApp": 148,
-      "annual": 888,
-      "monthly": 74,
+      "perApp": 126,
+      "annual": 756,
+      "monthly": 63,
       "freq": 6,
       "tier": "standard",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 74,
-      "marketAnnual": 888
+      "marketMonthly": 63,
+      "marketAnnual": 756
     }
   },
   {
@@ -767,19 +767,19 @@
       }
     },
     "out": {
-      "perApp": 153,
-      "annual": 1377,
-      "monthly": 114.75,
+      "perApp": 129,
+      "annual": 1161,
+      "monthly": 96.75,
       "freq": 9,
       "tier": "enhanced",
       "track": "bermuda",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 111,
-      "marketAnnual": 1332
+      "marketMonthly": 94,
+      "marketAnnual": 1128
     }
   },
   {
@@ -794,19 +794,19 @@
       }
     },
     "out": {
-      "perApp": 165,
-      "annual": 1980,
-      "monthly": 165,
+      "perApp": 140,
+      "annual": 1680,
+      "monthly": 140,
       "freq": 12,
       "tier": "premium",
       "track": "bermuda",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 165,
-      "marketAnnual": 1980
+      "marketMonthly": 140,
+      "marketAnnual": 1680
     }
   },
   {
@@ -821,19 +821,19 @@
       }
     },
     "out": {
-      "perApp": 100,
-      "annual": 600,
-      "monthly": 50,
+      "perApp": 84,
+      "annual": 504,
+      "monthly": 42,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
+      "marketMonthly": 42,
+      "marketAnnual": 504
     }
   },
   {
@@ -848,19 +848,19 @@
       }
     },
     "out": {
-      "perApp": 80,
-      "annual": 720,
-      "monthly": 60,
+      "perApp": 68,
+      "annual": 612,
+      "monthly": 51,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 60,
-      "marketAnnual": 720
+      "marketMonthly": 51,
+      "marketAnnual": 612
     }
   },
   {
@@ -875,19 +875,19 @@
       }
     },
     "out": {
-      "perApp": 75,
-      "annual": 900,
-      "monthly": 75,
+      "perApp": 63,
+      "annual": 756,
+      "monthly": 63,
       "freq": 12,
       "tier": "premium",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 75,
-      "marketAnnual": 900
+      "marketMonthly": 63,
+      "marketAnnual": 756
     }
   },
   {
@@ -902,19 +902,19 @@
       }
     },
     "out": {
-      "perApp": 100,
-      "annual": 600,
-      "monthly": 50,
+      "perApp": 84,
+      "annual": 504,
+      "monthly": 42,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
+      "marketMonthly": 42,
+      "marketAnnual": 504
     }
   },
   {
@@ -929,19 +929,19 @@
       }
     },
     "out": {
-      "perApp": 80,
-      "annual": 720,
-      "monthly": 60,
+      "perApp": 68,
+      "annual": 612,
+      "monthly": 51,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 60,
-      "marketAnnual": 720
+      "marketMonthly": 51,
+      "marketAnnual": 612
     }
   },
   {
@@ -956,19 +956,19 @@
       }
     },
     "out": {
-      "perApp": 78,
-      "annual": 936,
-      "monthly": 78,
+      "perApp": 66,
+      "annual": 792,
+      "monthly": 66,
       "freq": 12,
       "tier": "premium",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 78,
-      "marketAnnual": 936
+      "marketMonthly": 66,
+      "marketAnnual": 792
     }
   },
   {
@@ -983,19 +983,19 @@
       }
     },
     "out": {
-      "perApp": 100,
-      "annual": 600,
-      "monthly": 50,
+      "perApp": 84,
+      "annual": 504,
+      "monthly": 42,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
+      "marketMonthly": 42,
+      "marketAnnual": 504
     }
   },
   {
@@ -1010,19 +1010,19 @@
       }
     },
     "out": {
-      "perApp": 95,
-      "annual": 855,
-      "monthly": 71.25,
+      "perApp": 81,
+      "annual": 729,
+      "monthly": 60.75,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 68,
-      "marketAnnual": 816
+      "marketMonthly": 58,
+      "marketAnnual": 696
     }
   },
   {
@@ -1037,19 +1037,19 @@
       }
     },
     "out": {
-      "perApp": 98,
-      "annual": 1176,
-      "monthly": 98,
+      "perApp": 83,
+      "annual": 996,
+      "monthly": 83,
       "freq": 12,
       "tier": "premium",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 98,
-      "marketAnnual": 1176
+      "marketMonthly": 83,
+      "marketAnnual": 996
     }
   },
   {
@@ -1064,19 +1064,19 @@
       }
     },
     "out": {
-      "perApp": 113,
-      "annual": 678,
-      "monthly": 56.5,
+      "perApp": 96,
+      "annual": 576,
+      "monthly": 48,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 56,
-      "marketAnnual": 672
+      "marketMonthly": 47,
+      "marketAnnual": 564
     }
   },
   {
@@ -1091,19 +1091,19 @@
       }
     },
     "out": {
-      "perApp": 116,
-      "annual": 1044,
-      "monthly": 87,
+      "perApp": 98,
+      "annual": 882,
+      "monthly": 73.5,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 83,
-      "marketAnnual": 996
+      "marketMonthly": 70,
+      "marketAnnual": 840
     }
   },
   {
@@ -1118,19 +1118,19 @@
       }
     },
     "out": {
-      "perApp": 121,
-      "annual": 1452,
-      "monthly": 121,
+      "perApp": 102,
+      "annual": 1224,
+      "monthly": 102,
       "freq": 12,
       "tier": "premium",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 121,
-      "marketAnnual": 1452
+      "marketMonthly": 102,
+      "marketAnnual": 1224
     }
   },
   {
@@ -1145,19 +1145,19 @@
       }
     },
     "out": {
-      "perApp": 151,
-      "annual": 906,
-      "monthly": 75.5,
+      "perApp": 128,
+      "annual": 768,
+      "monthly": 64,
       "freq": 6,
       "tier": "standard",
       "track": "zoysia",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 75,
-      "marketAnnual": 900
+      "marketMonthly": 63,
+      "marketAnnual": 756
     }
   },
   {
@@ -1172,19 +1172,19 @@
       }
     },
     "out": {
-      "perApp": 158,
-      "annual": 1422,
-      "monthly": 118.5,
+      "perApp": 134,
+      "annual": 1206,
+      "monthly": 100.5,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 112,
-      "marketAnnual": 1344
+      "marketMonthly": 95,
+      "marketAnnual": 1140
     }
   },
   {
@@ -1199,19 +1199,19 @@
       }
     },
     "out": {
-      "perApp": 167,
-      "annual": 2004,
-      "monthly": 167,
+      "perApp": 141,
+      "annual": 1692,
+      "monthly": 141,
       "freq": 12,
       "tier": "premium",
       "track": "zoysia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 167,
-      "marketAnnual": 2004
+      "marketMonthly": 141,
+      "marketAnnual": 1692
     }
   },
   {
@@ -1226,19 +1226,19 @@
       }
     },
     "out": {
-      "perApp": 80,
-      "annual": 480,
-      "monthly": 40,
+      "perApp": 68,
+      "annual": 408,
+      "monthly": 34,
       "freq": 6,
       "tier": "standard",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 40,
-      "marketAnnual": 480
+      "marketMonthly": 34,
+      "marketAnnual": 408
     }
   },
   {
@@ -1253,19 +1253,19 @@
       }
     },
     "out": {
-      "perApp": 66.67,
-      "annual": 600,
-      "monthly": 50,
+      "perApp": 56,
+      "annual": 504,
+      "monthly": 42,
       "freq": 9,
       "tier": "enhanced",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
+      "marketMonthly": 42,
+      "marketAnnual": 504
     }
   },
   {
@@ -1273,6 +1273,87 @@
     "in": {
       "property": {
         "turfSf": 3000
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "premium"
+      }
+    },
+    "out": {
+      "perApp": 51,
+      "annual": 612,
+      "monthly": 51,
+      "freq": 12,
+      "tier": "premium",
+      "track": "bahia",
+      "pricingBasis": "TABLE_INTERPOLATION",
+      "pricingSource": "MARKET_TABLE",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 51,
+      "marketAnnual": 612
+    }
+  },
+  {
+    "label": "bahia/standard/4250/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "standard"
+      }
+    },
+    "out": {
+      "perApp": 68,
+      "annual": 408,
+      "monthly": 34,
+      "freq": 6,
+      "tier": "standard",
+      "track": "bahia",
+      "pricingBasis": "TABLE_INTERPOLATION",
+      "pricingSource": "MARKET_TABLE",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 34,
+      "marketAnnual": 408
+    }
+  },
+  {
+    "label": "bahia/enhanced/4250/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
+      },
+      "options": {
+        "track": "bahia",
+        "tier": "enhanced"
+      }
+    },
+    "out": {
+      "perApp": 57.33,
+      "annual": 516,
+      "monthly": 43,
+      "freq": 9,
+      "tier": "enhanced",
+      "track": "bahia",
+      "pricingBasis": "TABLE_INTERPOLATION",
+      "pricingSource": "MARKET_TABLE",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
+      "customQuoteFlag": false,
+      "marginFloorOk": true,
+      "marketMonthly": 43,
+      "marketAnnual": 516
+    }
+  },
+  {
+    "label": "bahia/premium/4250/DENSE",
+    "in": {
+      "property": {
+        "turfSf": 4250
       },
       "options": {
         "track": "bahia",
@@ -1288,7 +1369,7 @@
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
       "marketMonthly": 60,
@@ -1296,10 +1377,10 @@
     }
   },
   {
-    "label": "bahia/standard/4250/DENSE",
+    "label": "bahia/standard/6000/DENSE",
     "in": {
       "property": {
-        "turfSf": 4250
+        "turfSf": 6000
       },
       "options": {
         "track": "bahia",
@@ -1307,26 +1388,26 @@
       }
     },
     "out": {
-      "perApp": 80,
-      "annual": 480,
-      "monthly": 40,
+      "perApp": 72,
+      "annual": 432,
+      "monthly": 36,
       "freq": 6,
       "tier": "standard",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 40,
-      "marketAnnual": 480
+      "marketMonthly": 36,
+      "marketAnnual": 432
     }
   },
   {
-    "label": "bahia/enhanced/4250/DENSE",
+    "label": "bahia/enhanced/6000/DENSE",
     "in": {
       "property": {
-        "turfSf": 4250
+        "turfSf": 6000
       },
       "options": {
         "track": "bahia",
@@ -1334,26 +1415,26 @@
       }
     },
     "out": {
-      "perApp": 68,
-      "annual": 612,
-      "monthly": 51,
+      "perApp": 69.33,
+      "annual": 624,
+      "monthly": 52,
       "freq": 9,
       "tier": "enhanced",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 51,
-      "marketAnnual": 612
+      "marketMonthly": 52,
+      "marketAnnual": 624
     }
   },
   {
-    "label": "bahia/premium/4250/DENSE",
+    "label": "bahia/premium/6000/DENSE",
     "in": {
       "property": {
-        "turfSf": 4250
+        "turfSf": 6000
       },
       "options": {
         "track": "bahia",
@@ -1361,26 +1442,26 @@
       }
     },
     "out": {
-      "perApp": 71,
-      "annual": 852,
-      "monthly": 71,
+      "perApp": 74,
+      "annual": 888,
+      "monthly": 74,
       "freq": 12,
       "tier": "premium",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 71,
-      "marketAnnual": 852
+      "marketMonthly": 74,
+      "marketAnnual": 888
     }
   },
   {
-    "label": "bahia/standard/6000/DENSE",
+    "label": "bahia/standard/8000/DENSE",
     "in": {
       "property": {
-        "turfSf": 6000
+        "turfSf": 8000
       },
       "options": {
         "track": "bahia",
@@ -1396,92 +1477,11 @@
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
       "marketMonthly": 42,
       "marketAnnual": 504
-    }
-  },
-  {
-    "label": "bahia/enhanced/6000/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 6000
-      },
-      "options": {
-        "track": "bahia",
-        "tier": "enhanced"
-      }
-    },
-    "out": {
-      "perApp": 81.33,
-      "annual": 732,
-      "monthly": 61,
-      "freq": 9,
-      "tier": "enhanced",
-      "track": "bahia",
-      "pricingBasis": "TABLE_INTERPOLATION",
-      "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 61,
-      "marketAnnual": 732
-    }
-  },
-  {
-    "label": "bahia/premium/6000/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 6000
-      },
-      "options": {
-        "track": "bahia",
-        "tier": "premium"
-      }
-    },
-    "out": {
-      "perApp": 87,
-      "annual": 1044,
-      "monthly": 87,
-      "freq": 12,
-      "tier": "premium",
-      "track": "bahia",
-      "pricingBasis": "TABLE_INTERPOLATION",
-      "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 87,
-      "marketAnnual": 1044
-    }
-  },
-  {
-    "label": "bahia/standard/8000/DENSE",
-    "in": {
-      "property": {
-        "turfSf": 8000
-      },
-      "options": {
-        "track": "bahia",
-        "tier": "standard"
-      }
-    },
-    "out": {
-      "perApp": 100,
-      "annual": 600,
-      "monthly": 50,
-      "freq": 6,
-      "tier": "standard",
-      "track": "bahia",
-      "pricingBasis": "TABLE_INTERPOLATION",
-      "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
-      "customQuoteFlag": false,
-      "marginFloorOk": true,
-      "marketMonthly": 50,
-      "marketAnnual": 600
     }
   },
   {
@@ -1496,19 +1496,19 @@
       }
     },
     "out": {
-      "perApp": 97.33,
-      "annual": 876,
-      "monthly": 73,
+      "perApp": 82.67,
+      "annual": 744,
+      "monthly": 62,
       "freq": 9,
       "tier": "enhanced",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 73,
-      "marketAnnual": 876
+      "marketMonthly": 62,
+      "marketAnnual": 744
     }
   },
   {
@@ -1523,19 +1523,19 @@
       }
     },
     "out": {
-      "perApp": 107,
-      "annual": 1284,
-      "monthly": 107,
+      "perApp": 91,
+      "annual": 1092,
+      "monthly": 91,
       "freq": 12,
       "tier": "premium",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 107,
-      "marketAnnual": 1284
+      "marketMonthly": 91,
+      "marketAnnual": 1092
     }
   },
   {
@@ -1550,19 +1550,19 @@
       }
     },
     "out": {
-      "perApp": 132,
-      "annual": 792,
-      "monthly": 66,
+      "perApp": 112,
+      "annual": 672,
+      "monthly": 56,
       "freq": 6,
       "tier": "standard",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 66,
-      "marketAnnual": 792
+      "marketMonthly": 56,
+      "marketAnnual": 672
     }
   },
   {
@@ -1577,19 +1577,19 @@
       }
     },
     "out": {
-      "perApp": 130.67,
-      "annual": 1176,
-      "monthly": 98,
+      "perApp": 110.67,
+      "annual": 996,
+      "monthly": 83,
       "freq": 9,
       "tier": "enhanced",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 98,
-      "marketAnnual": 1176
+      "marketMonthly": 83,
+      "marketAnnual": 996
     }
   },
   {
@@ -1604,19 +1604,19 @@
       }
     },
     "out": {
-      "perApp": 145,
-      "annual": 1740,
-      "monthly": 145,
+      "perApp": 123,
+      "annual": 1476,
+      "monthly": 123,
       "freq": 12,
       "tier": "premium",
       "track": "bahia",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 145,
-      "marketAnnual": 1740
+      "marketMonthly": 123,
+      "marketAnnual": 1476
     }
   },
   {
@@ -1632,19 +1632,19 @@
       }
     },
     "out": {
-      "perApp": 81,
-      "annual": 729,
-      "monthly": 60.75,
+      "perApp": 69,
+      "annual": 621,
+      "monthly": 51.75,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 56,
-      "marketAnnual": 672
+      "marketMonthly": 48,
+      "marketAnnual": 576
     }
   },
   {
@@ -1660,19 +1660,19 @@
       }
     },
     "out": {
-      "perApp": 86,
-      "annual": 774,
-      "monthly": 64.5,
+      "perApp": 73,
+      "annual": 657,
+      "monthly": 54.75,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 56,
-      "marketAnnual": 672
+      "marketMonthly": 48,
+      "marketAnnual": 576
     }
   },
   {
@@ -1688,19 +1688,19 @@
       }
     },
     "out": {
-      "perApp": 92,
-      "annual": 828,
-      "monthly": 69,
+      "perApp": 78,
+      "annual": 702,
+      "monthly": 58.5,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 56,
-      "marketAnnual": 672
+      "marketMonthly": 48,
+      "marketAnnual": 576
     }
   },
   {
@@ -1715,19 +1715,19 @@
       }
     },
     "out": {
-      "perApp": 73.33,
-      "annual": 660,
-      "monthly": 55,
+      "perApp": 62.67,
+      "annual": 564,
+      "monthly": 47,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
       "pricingBasis": "TABLE_INTERPOLATION",
       "pricingSource": "MARKET_TABLE",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": false,
       "marginFloorOk": true,
-      "marketMonthly": 55,
-      "marketAnnual": 660
+      "marketMonthly": 47,
+      "marketAnnual": 564
     }
   },
   {
@@ -1742,19 +1742,19 @@
       }
     },
     "out": {
-      "perApp": 256,
-      "annual": 2304,
-      "monthly": 192,
+      "perApp": 216,
+      "annual": 1944,
+      "monthly": 162,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
-      "pricingBasis": "FORTY_FIVE_MARGIN_FLOOR",
+      "pricingBasis": "THIRTY_FIVE_MARGIN_FLOOR",
       "pricingSource": "COST_FLOOR",
-      "pricingVersion": "LAWN_PRICING_V2_DENSE_45_FLOOR",
+      "pricingVersion": "LAWN_PRICING_V2_DENSE_35_FLOOR",
       "customQuoteFlag": true,
       "marginFloorOk": true,
-      "marketMonthly": 179,
-      "marketAnnual": 2148
+      "marketMonthly": 152,
+      "marketAnnual": 1824
     }
   }
 ]

@@ -3,31 +3,31 @@
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1269,
-      "annualAfterDiscount": 1142.1,
-      "monthlyTotal": 95.18,
-      "savings": 126.9,
+      "annualBeforeDiscount": 1143,
+      "annualAfterDiscount": 1028.7,
+      "monthlyTotal": 85.73,
+      "savings": 114.3,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 35,
+          "mo": 30,
           "recommended": false,
           "name": "4x applications/yr"
         },
         {
-          "mo": 45,
+          "mo": 38,
           "recommended": false,
           "name": "6x applications/yr"
         },
         {
-          "mo": 66.75,
+          "mo": 56.25,
           "recommended": true,
           "name": "9x applications/yr"
         },
         {
-          "mo": 84,
+          "mo": 71,
           "recommended": false,
           "name": "12x applications/yr"
         }
@@ -63,39 +63,39 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1241.1,
-      "year2": 1142.1
+      "year1": 1127.7,
+      "year2": 1028.7
     }
   },
   "v1adapter_platinum_bundle_4_services_zone_a": {
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 3097,
-      "annualAfterDiscount": 2500.13,
-      "monthlyTotal": 208.34,
-      "savings": 596.87,
+      "annualBeforeDiscount": 2917,
+      "annualAfterDiscount": 2356.13,
+      "monthlyTotal": 196.34,
+      "savings": 560.87,
       "serviceCount": 4
     },
     "results": {
       "lawn": [
         {
-          "mo": 35.67,
+          "mo": 30,
           "recommended": false,
           "name": "4x applications/yr"
         },
         {
-          "mo": 48,
+          "mo": 40.5,
           "recommended": false,
           "name": "6x applications/yr"
         },
         {
-          "mo": 74.25,
+          "mo": 63,
           "recommended": false,
           "name": "9x applications/yr"
         },
         {
-          "mo": 94,
+          "mo": 79,
           "recommended": true,
           "name": "12x applications/yr"
         }
@@ -151,8 +151,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2599.13,
-      "year2": 2500.13
+      "year1": 2455.13,
+      "year2": 2356.13
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -494,31 +494,31 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 1899.7,
-      "annualAfterDiscount": 1614.75,
-      "monthlyTotal": 134.56,
-      "savings": 284.95,
+      "annualBeforeDiscount": 1773.7,
+      "annualAfterDiscount": 1507.65,
+      "monthlyTotal": 125.64,
+      "savings": 266.05,
       "serviceCount": 3
     },
     "results": {
       "lawn": [
         {
-          "mo": 40,
+          "mo": 34,
           "recommended": false,
           "name": "4x applications/yr"
         },
         {
-          "mo": 50,
+          "mo": 42,
           "recommended": false,
           "name": "6x applications/yr"
         },
         {
-          "mo": 67.5,
+          "mo": 57,
           "recommended": true,
           "name": "9x applications/yr"
         },
         {
-          "mo": 87,
+          "mo": 74,
           "recommended": false,
           "name": "12x applications/yr"
         }
@@ -565,39 +565,39 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1713.75,
-      "year2": 1614.75
+      "year1": 1606.65,
+      "year2": 1507.65
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1128,
-      "annualAfterDiscount": 1015.2,
-      "monthlyTotal": 84.6,
-      "savings": 112.8,
+      "annualBeforeDiscount": 1032,
+      "annualAfterDiscount": 928.8,
+      "monthlyTotal": 77.4,
+      "savings": 103.2,
       "serviceCount": 2
     },
     "results": {
       "lawn": [
         {
-          "mo": 30,
+          "mo": 25,
           "recommended": false,
           "name": "4x applications/yr"
         },
         {
-          "mo": 40,
+          "mo": 34,
           "recommended": false,
           "name": "6x applications/yr"
         },
         {
-          "mo": 55,
+          "mo": 47,
           "recommended": true,
           "name": "9x applications/yr"
         },
         {
-          "mo": 78,
+          "mo": 66,
           "recommended": false,
           "name": "12x applications/yr"
         }
@@ -633,8 +633,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1114.2,
-      "year2": 1015.2
+      "year1": 1027.8,
+      "year2": 928.8
     }
   }
 }

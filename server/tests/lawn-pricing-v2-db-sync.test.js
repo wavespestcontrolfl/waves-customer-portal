@@ -24,16 +24,16 @@ describe('Lawn Pricing V2 DB sync', () => {
     await db.destroy();
   });
 
-  test('DB-loaded constants preserve dense-route 55% floor pricing', () => {
+  test('DB-loaded constants apply the dense-route 35% floor pricing', () => {
     const lawn = PricingEngine.priceLawnCare(property(), {
       track: 'st_augustine',
       lawnFreq: 9,
     });
 
     expect(constants.LAWN_PRICING_V2).toMatchObject({
-      pricingVersion: 'LAWN_PRICING_V2_DENSE_55_FLOOR',
-      pricingMode: 'FIFTY_FIVE_MARGIN_FLOOR',
-      targetCollectedMarginFloor: 0.55,
+      pricingVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR',
+      pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
+      targetCollectedMarginFloor: 0.35,
       laborRateLoaded: 35,
       equipmentReservePerVisit: 0,
       adminAnnualDefault: 51,
@@ -46,17 +46,19 @@ describe('Lawn Pricing V2 DB sync', () => {
         SPARSE: 20,
       },
     });
-    expect(lawn.perApp).toBe(92);
-    expect(lawn.annual).toBe(828);
-    expect(lawn.monthly).toBe(69);
+    // Under the 35% floor the cost floor (~$572/yr) drops below the market
+    // table (~$576/yr), so the market table is the final price for this property.
+    expect(lawn.perApp).toBe(64);
+    expect(lawn.annual).toBe(576);
+    expect(lawn.monthly).toBe(48);
     expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
     expect(lawn.costs.total).toBeLessThan(372);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(826);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(827);
-    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_55_FLOOR');
-    expect(lawn.pricingSource).toBe('COST_FLOOR');
-    expect(lawn.pricingBasis).toBe('FIFTY_FIVE_MARGIN_FLOOR');
-    expect(lawn.marketAnnual).toBeGreaterThan(lawn.annual);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(571);
+    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(572);
+    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
+    expect(lawn.pricingSource).toBe('MARKET_TABLE');
+    expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
+    expect(lawn.marketAnnual).toBe(lawn.annual);
     expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
   });
 
@@ -80,9 +82,9 @@ describe('Lawn Pricing V2 DB sync', () => {
       qualifyingCount: 2,
       activeServices: ['pest_control', 'lawn_care'],
     });
-    expect(lawn.annual).toBe(828);
-    expect(lawn.annualAfterDiscount).toBe(745.2);
-    expect(lawn.monthlyAfterDiscount).toBe(62.1);
+    expect(lawn.annual).toBe(576);
+    expect(lawn.annualAfterDiscount).toBe(518.4);
+    expect(lawn.monthlyAfterDiscount).toBe(43.2);
     expect(lawn.discount).toMatchObject({
       discountable: true,
       requestedDiscountPercent: 0.10,
