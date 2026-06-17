@@ -943,7 +943,7 @@ function lawnMetricRows(assessment = {}) {
     ['Density / Coverage', scores.turfDensity],
     ['Weed Cleanliness', scores.weedSuppression],
     ['Color / Nutrients', scores.colorHealth],
-    ['Stress / Damage', scores.stressDamage],
+    ['Stress', scores.stressDamage],
   ];
 }
 

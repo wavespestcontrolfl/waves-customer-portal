@@ -768,7 +768,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
     { label: 'Density / Coverage', key: 'turfDensity', initialKey: 'turfDensity' },
     { label: 'Weed Cleanliness', key: 'weedSuppression', initialKey: 'weedSuppression' },
     { label: 'Color / Nutrients', key: 'colorHealth', initialKey: 'colorHealth' },
-    { label: 'Stress / Damage', key: 'stressDamage', initialKey: 'stressDamage' },
+    { label: 'Stress', key: 'stressDamage', initialKey: 'stressDamage' },
   ];
 
   const overallScore = scores.overallScore || Math.round(

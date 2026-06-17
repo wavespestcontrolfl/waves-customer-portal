@@ -363,7 +363,7 @@ function answerTrend({ data = {} } = {}) {
       lawnAssessment.snapshot?.summary,
       lawnAssessment.customerSummary,
       `Current lawn health is ${scores.overallScore}% overall.`,
-      `Breakdown: density/coverage ${scores.turfDensity}%, weed cleanliness ${scores.weedSuppression}%, color/nutrients ${scores.colorHealth}%, stress/damage ${scores.stressDamage}%.`,
+      `Breakdown: density/coverage ${scores.turfDensity}%, weed cleanliness ${scores.weedSuppression}%, color/nutrients ${scores.colorHealth}%, stress ${scores.stressDamage}%.`,
     ].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join(' ');
   }
   return dynamic.pressureTrend?.customerSummary
