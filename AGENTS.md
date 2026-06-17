@@ -307,10 +307,11 @@ finding and warns on P1. Reviewers must return JSON matching
   (caption/thumbnail/permalink/timestamp), 60 req/min rate limit, 15-min
   in-memory cache + 5-min public Cache-Control, per-source graceful failure,
   never 500s — returns an empty payload on total upstream failure).
-  `/api/public/estimator/property-lookup` (write; public parcel/property lookup
-  for the estimator — no auth, no token, 5 req/hour rate limit. Takes an
-  address, returns county parcel facts, persists a lead/lookup row; no PII
-  beyond the submitted address).
+  `/api/public/estimator/property-lookup` (write; unauthenticated lead-capture +
+  parcel lookup for the estimator — no auth, no token, 5 req/hour rate limit.
+  REQUIRES and stores customer PII — first name, last name, email, phone, and
+  address — into `leads`, and returns county parcel facts. Treat as a
+  PII-accepting public endpoint: scope any change to what it stores or logs).
   `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
   instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
   limit. Persists a quote/lead and may text the quote via a Twilio short-link;
@@ -328,9 +329,11 @@ finding and warns on P1. Reviewers must return JSON matching
   `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
   target / 410 on expired / generic 404 with no enumeration leak; `noindex`).
   `/api/public/track/:token` (read-only live service tracker; the token is the
-  only gate (`TOKEN_RE` format) plus a 120 req/min rate limit. Returns tracker
-  state and, when `track_state='en_route'`, live tech coords + ETA from Bouncie;
-  no other PII).
+  ONLY gate (`TOKEN_RE` format) plus a 120 req/min rate limit. Returns the
+  customer-facing property block — customer first name, service address
+  (line1/line2), lat/lng — and, when `track_state='en_route'`, live tech coords
+  + ETA from Bouncie. PII exposure is gated solely by the token, so treat token
+  handling as security-critical).
   `/api/reviews/featured` (read-only public featured Google reviews for the
   marketing site — no auth, no token, location filter + limit; reads
   `google_reviews` only).
