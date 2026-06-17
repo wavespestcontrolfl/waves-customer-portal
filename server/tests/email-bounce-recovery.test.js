@@ -454,15 +454,26 @@ describe('safety checks fail closed on DB error (codex round 6)', () => {
 });
 
 // Lead/estimate recoveries must fix the SOURCE address on delivery, not just resend (codex round 7).
-// estRows/leadRows feed the no-customer `select('id')` uniqueness path (round 11).
-function commitDb({ rec, estUpdate = 1, leadUpdate = 1, estRows = [], leadRows = [] }) {
+// The mock disambiguates the two estimate/lead queries by selected column:
+//   - ownership recheck (round 15) selects 'customer_id' → owner* rows
+//   - source-uniqueness (round 11) selects 'id'          → est/leadRows
+function commitDb({
+  rec, estUpdate = 1, leadUpdate = 1, estRows = [], leadRows = [],
+  customerOwnerRows = [], estOwnerRows = [], leadOwnerRows = [],
+} = {}) {
   const fn = jest.fn((table) => {
     const chain = {};
-    const rowsFor = table === 'estimates' ? estRows : table === 'leads' ? leadRows : [];
-    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'select']) chain[m] = jest.fn(() => chain);
-    // Thenable so `await db(t).whereRaw(...).select('id')` resolves to rows.
-    chain.then = (res, rej) => Promise.resolve(rowsFor).then(res, rej);
-    chain.catch = (rej) => Promise.resolve(rowsFor).catch(rej);
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert']) chain[m] = jest.fn(() => chain);
+    chain.select = jest.fn((col) => { chain._sel = col; return chain; });
+    const rowsFor = () => {
+      if (table === 'customers') return customerOwnerRows;
+      if (table === 'estimates') return chain._sel === 'customer_id' ? estOwnerRows : estRows;
+      if (table === 'leads') return chain._sel === 'customer_id' ? leadOwnerRows : leadRows;
+      return [];
+    };
+    // Thenable so `await db(t).whereRaw(...).select(...)` resolves to rows.
+    chain.then = (res, rej) => Promise.resolve(rowsFor()).then(res, rej);
+    chain.catch = (rej) => Promise.resolve(rowsFor()).catch(rej);
     chain.first = jest.fn(() => Promise.resolve(table === 'email_bounce_recoveries' ? rec : null));
     chain.update = jest.fn(() => Promise.resolve(table === 'estimates' ? estUpdate : table === 'leads' ? leadUpdate : 1));
     chain.returning = jest.fn(() => Promise.resolve([]));
@@ -531,5 +542,20 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
     expect(body).toContain('estimates.customer_email'); // source fixed, not just the customer row
     expect(body).toContain('email');                    // customer column fixed too
+  });
+
+  test('skips the record overwrite if another customer claimed the address by delivery (codex round 15)', async () => {
+    const rec = {
+      id: 'rec13', customer_id: 'c1', customer_email_field: 'email',
+      corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    // A DIFFERENT customer now owns the corrected address → commit must not overwrite.
+    db.mockImplementation(commitDb({ rec, customerOwnerRows: [{ id: 'other-customer' }] }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg13', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body).toContain('already belongs to another customer'); // collision alert
+    expect(body).not.toContain('Updated'); // no record was overwritten
   });
 });

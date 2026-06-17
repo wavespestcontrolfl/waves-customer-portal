@@ -520,6 +520,25 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     return { resent: true, corrected: candidate.corrected, rule: candidate.rule };
   } catch (err) {
     logger.error(`[bounce-recovery] attemptRecovery failed: ${err.message}`);
+    // Don't leave the ledger stuck 'pending': the bounce event is already marked
+    // processed and the unique key makes every future attempt return
+    // already_attempted, so a pending row would block the bounce forever with no
+    // resend and no alert. Mark it errored and route to manual.
+    try {
+      const stuck = await db('email_bounce_recoveries')
+        .where({ original_message_id: bouncedMessage?.id, status: 'pending' })
+        .update({ status: 'error', updated_at: new Date(), metadata: jsonbMerge({ recovery_error: String(err.message || err) }) });
+      if (Number(stuck) > 0) {
+        await alertUnrecoverableBounce({
+          bouncedMessage,
+          bouncedEmail: bouncedMessage?.recipient_email_snapshot,
+          customerId: null,
+          status: 'recovery_error',
+        });
+      }
+    } catch (cleanupErr) {
+      logger.error(`[bounce-recovery] failed to clear stuck recovery: ${cleanupErr.message}`);
+    }
     return { error: err.message };
   }
 }
@@ -554,29 +573,26 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
 
     const updatedFields = [];
 
+    // Re-run the pre-send ownership guard at COMMIT time: another customer/lead/
+    // estimate could have claimed the corrected address between the send and this
+    // delivery event. The resend already delivered (can't unsend), but we must NOT
+    // overwrite any record to an address that now belongs to someone else. This
+    // also subsumes the unique-primary-email collision check.
+    if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id)) {
+      await db('email_bounce_recoveries').where({ id: rec.id }).update({
+        status: 'delivered',
+        updated_at: new Date(),
+        metadata: jsonbMerge({ commit_skipped: 'corrected_owned_by_other' }),
+      });
+      await alertEmailCollision({ recovery: rec, correctedEmail });
+      return;
+    }
+
     // 1. Customer record (primary email or service-contact column), when the
     //    bounce resolved to a customer.
     if (rec.customer_id && rec.customer_email_field && correctedEmail
         && CUSTOMER_EMAIL_FIELDS.includes(rec.customer_email_field)) {
       const field = rec.customer_email_field;
-      // Guard the UNIQUE primary email column: never overwrite onto an address
-      // already owned by a different customer.
-      if (field === 'email') {
-        const clash = await db('customers')
-          .whereRaw('LOWER(email) = ?', [correctedEmail])
-          .whereNot({ id: rec.customer_id })
-          .first('id')
-          .catch(() => null);
-        if (clash) {
-          await db('email_bounce_recoveries').where({ id: rec.id }).update({
-            status: 'delivered',
-            updated_at: new Date(),
-            metadata: jsonbMerge({ commit_skipped: 'email_in_use' }),
-          });
-          await alertEmailCollision({ recovery: rec, correctedEmail });
-          return;
-        }
-      }
       // Only overwrite if the column STILL holds the bad address — a human edit
       // may have raced us, in which case we leave their value alone.
       const affected = await db('customers')
@@ -715,6 +731,7 @@ const UNRECOVERABLE_REASONS = {
   corrected_owned_by_other: 'the likely correction already belongs to another customer',
   has_attachments: 'it includes an attachment (e.g. an invoice or report PDF) that cannot be auto-resent',
   address_no_longer_on_file: 'the bounced address is no longer on the record (it was already changed)',
+  recovery_error: 'the automatic recovery hit an unexpected error',
   send_failed: 're-sending to the corrected address failed',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',

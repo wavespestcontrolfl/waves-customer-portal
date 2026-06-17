@@ -270,15 +270,21 @@ async function handleEvent(ev) {
     const tokenMatches = candidate?.send_attempt_token && ev.send_attempt_token
       && String(candidate.send_attempt_token) === String(ev.send_attempt_token);
     const acceptable = candidate && (boundHere || (!candidate.provider_message_id && tokenMatches));
-    if (acceptable) {
+    if (acceptable && boundHere) {
       emailMessage = candidate;
-      if (messageId && !emailMessage.provider_message_id) {
-        await db('email_messages')
-          .where({ id: emailMessage.id })
-          .whereNull('provider_message_id')
-          .update({ provider_message_id: messageId, updated_at: new Date() })
-          .catch(() => {});
-        emailMessage = { ...emailMessage, provider_message_id: messageId };
+    } else if (acceptable && messageId) {
+      // Unbound + token matched the snapshot. Re-assert the token IN the backfill
+      // so a retry that reclaimed the row (and changed send_attempt_token) between
+      // the read above and this write can't have a stale event bind onto it. If
+      // the guarded update touches 0 rows, the row was superseded — treat as
+      // untracked and ignore this event.
+      const bound = await db('email_messages')
+        .where({ id: candidate.id, send_attempt_token: ev.send_attempt_token })
+        .whereNull('provider_message_id')
+        .update({ provider_message_id: messageId, updated_at: new Date() })
+        .catch(() => 0);
+      if (Number(bound) > 0) {
+        emailMessage = { ...candidate, provider_message_id: messageId };
       }
     }
   }
