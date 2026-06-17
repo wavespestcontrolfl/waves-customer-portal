@@ -8,7 +8,7 @@
  * tests; this file pins the pure invariants that those flows depend on.
  *
  * Scope:
- *   - computeChargeAmount / isCardMethodType: 3.99% surcharge math.
+ *   - computeChargeAmount / isCardMethodType: 2.9% surcharge math.
  *     A regression here either over-collects (silent customer
  *     complaint) or under-collects (lost margin on every card-family
  *     transaction).
@@ -61,13 +61,13 @@ describe('stripe computeChargeAmount', () => {
     }
   });
 
-  test('card with funding=credit adds 3% (floor-rounded)', () => {
+  test('card with funding=credit adds 2.9% (floor-rounded)', () => {
     const r = computeChargeAmount(100, 'card', { funding: 'credit' });
-    expect(r.surchargeCents).toBe(300);
-    expect(r.totalCents).toBe(10300);
-    expect(r.surcharge).toBe(3);
-    expect(r.total).toBe(103);
-    expect(r.rateBps).toBe(300);
+    expect(r.surchargeCents).toBe(290);
+    expect(r.totalCents).toBe(10290);
+    expect(r.surcharge).toBe(2.9);
+    expect(r.total).toBe(102.9);
+    expect(r.rateBps).toBe(290);
     expect(r.policyVersion).toBe(SURCHARGE_POLICY_VERSION);
   });
 
@@ -95,11 +95,11 @@ describe('stripe computeChargeAmount', () => {
     expect(r.total).toBe(100);
   });
 
-  test('floor rounding never exceeds 3% cap', () => {
+  test('floor rounding never exceeds 2.9% cap', () => {
     const r = computeChargeAmount(33.33, 'card', { funding: 'credit' });
-    expect(r.surchargeCents).toBe(99);
-    expect(r.totalCents).toBe(3432);
-    expect(r.surchargeCents / r.baseCents).toBeLessThanOrEqual(0.03);
+    expect(r.surchargeCents).toBe(96);
+    expect(r.totalCents).toBe(3429);
+    expect(r.surchargeCents / r.baseCents).toBeLessThanOrEqual(0.029);
   });
 
   test('stripeMaxCents caps the surcharge', () => {
@@ -111,7 +111,7 @@ describe('stripe computeChargeAmount', () => {
   test('apple_pay / google_pay / link need funding=credit to surcharge', () => {
     for (const m of ['apple_pay', 'google_pay', 'link']) {
       expect(computeChargeAmount(100, m).surchargeCents).toBe(0);
-      expect(computeChargeAmount(100, m, { funding: 'credit' }).surchargeCents).toBe(300);
+      expect(computeChargeAmount(100, m, { funding: 'credit' }).surchargeCents).toBe(290);
     }
   });
 
@@ -121,8 +121,8 @@ describe('stripe computeChargeAmount', () => {
     expect(isCardMethodType('klarna')).toBe(true);
   });
 
-  test('CARD_SURCHARGE_RATE is 3% (legacy compat)', () => {
-    expect(CARD_SURCHARGE_RATE).toBeCloseTo(0.03, 4);
+  test('CARD_SURCHARGE_RATE is 2.9% (legacy compat)', () => {
+    expect(CARD_SURCHARGE_RATE).toBeCloseTo(0.029, 4);
   });
 });
 

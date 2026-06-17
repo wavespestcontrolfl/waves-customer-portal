@@ -1447,11 +1447,11 @@ function generateEstimate(input) {
       year2Monthly: Math.round(year2WithRenewal / 12 * 100) / 100,
     },
 
-    // Payment — a credit card surcharge (up to 3%) is added at checkout for credit cards.
+    // Payment — a credit card surcharge (up to 2.9%) is added at checkout for credit cards.
     // Debit/prepaid/ACH pay the quoted price with no surcharge.
     paymentMethod,
-    cardProcessingFeeRate: 0.03,
-    cardProcessingFeeEstimate: Math.round(year1Total * 0.03),
+    cardProcessingFeeRate: 0.029,
+    cardProcessingFeeEstimate: Math.round(year1Total * 0.029),
     achSavings: 0,
 
     // Warnings

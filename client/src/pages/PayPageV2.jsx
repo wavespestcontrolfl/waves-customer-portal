@@ -1,7 +1,7 @@
 // client/src/pages/PayPageV2.jsx
 //
 // Customer-facing pay page (V2). Renders the Stripe Payment Element,
-// credit-card surcharge (up to 3%) disclosure, save-card consent, and on success
+// credit-card surcharge (up to 2.9%) disclosure, save-card consent, and on success
 // redirects to /receipt/:token. The single most security-and-money-
 // critical page in the customer-facing portal.
 //
@@ -33,7 +33,7 @@
 //   page mounts don't re-load the script (would re-prompt user agents
 //   and slow first-paint).
 // - Surcharge disclosure: two-step quote/finalize flow ensures the customer
-//   sees the exact surcharge before payment. Credit cards = up to 3%.
+//   sees the exact surcharge before payment. Credit cards = up to 2.9%.
 //   Debit/prepaid/ACH = 0%. Server is authoritative for surcharge calculation.
 // - Confirm button single-flight: Stripe Payment Intent confirm is
 //   slow (~2-5s). Double-click must not double-confirm. Standard
@@ -58,7 +58,7 @@
 // - Idempotency table (stripe_webhook_events): event.id must be
 //   recorded BEFORE processing. If the table write happens after,
 //   a Stripe retry races and we double-credit the invoice.
-// - computeChargeAmount: credit-card surcharge (up to 3%) for confirmed
+// - computeChargeAmount: credit-card surcharge (up to 2.9%) for confirmed
 //   credit cards; 0% for debit/prepaid/unknown/ACH. Server-side
 //   quoteInvoiceSurcharge determines the exact amount based on PM funding.
 // - ensureStripeCustomer: customer-stripe linking. Confirm we don't
@@ -88,7 +88,7 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
-import { computeCardTotal } from '../lib/cardSurcharge';
+import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { getStripe } from '../lib/stripeLoader';
 
@@ -603,7 +603,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   }, [publishableKey, clientSecret, loadNonce]);
 
   const isCardFamily = selectedMethod !== 'us_bank_account';
-  const pct = '3';
   const buttonAmount = displayedTotal;
 
   const selectPaymentMethod = (methodCategory) => {
@@ -620,6 +619,19 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // ACH payments skip the quote step and go straight to confirmPayment.
   const [quoteData, setQuoteData] = useState(null);
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
+
+  // Display the surcharge percent derived from the authoritative rate — the
+  // server quote's rateBps when a quote exists, else the cardSurchargeRate prop,
+  // else the client default — so the disclosure never drifts from what is
+  // actually charged.
+  const surchargeRatePct = (() => {
+    const bps = Number(quoteData?.rateBps);
+    if (Number.isFinite(bps) && bps > 0) return bps / 100;
+    const rate = Number(cardSurchargeRate);
+    if (Number.isFinite(rate) && rate > 0) return rate * 100;
+    return DEFAULT_CARD_SURCHARGE_RATE * 100;
+  })();
+  const pct = Number(surchargeRatePct.toFixed(2)).toString();
 
   const handleSubmit = async () => {
     if (!stripeRef.current || !elementsRef.current || processing) return;
@@ -788,7 +800,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const disabled = !ready || processing || syncingAmount || amountSyncError;
   const methodControlsDisabled = !ready || processing || syncingAmount;
   const methodOptions = [
-    { value: 'card', title: 'Card or wallet', detail: 'Up to 3% credit card surcharge', icon: 'card' },
+    { value: 'card', title: 'Card or wallet', detail: `Up to ${pct}% credit card surcharge`, icon: 'card' },
     { value: 'us_bank_account', title: 'Bank account', detail: 'No added fee', icon: 'building' },
   ];
 
@@ -856,7 +868,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <Icon name="card" size={17} strokeWidth={2} />
         </span>
         <span>
-          Credit cards may add up to 3%. You will see the exact total before payment. Debit cards, prepaid cards,
+          Credit cards may add up to {pct}%. You will see the exact total before payment. Debit cards, prepaid cards,
           and bank transfers have no added card surcharge.
         </span>
       </div>
@@ -1095,7 +1107,7 @@ export default function PayPageV2() {
           clientSecret: setup.clientSecret,
           paymentIntentId: setup.paymentIntentId,
           baseAmount: setup.baseAmount ?? setup.amount,
-          cardSurchargeRate: setup.cardSurchargeRate ?? 0.03,
+          cardSurchargeRate: setup.cardSurchargeRate ?? 0.029,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
         });
         setPaymentState('ready');
