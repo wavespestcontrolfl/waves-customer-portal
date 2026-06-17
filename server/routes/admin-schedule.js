@@ -3104,14 +3104,19 @@ router.post('/:id/invoice', async (req, res, next) => {
     if (existing) {
       const applied = await applyPrepaidCredit(existing);
       existing = applied.invoice;
+      const alreadyPaid = ['paid', 'prepaid'].includes(existing.status);
       return res.json({
         success: true,
         reused: true,
         invoiceId: existing.id,
-        total: Number(existing.total),
+        // Settled invoices have nothing left to collect — report 0 due and an
+        // alreadyPaid flag so the tech checkout sheet doesn't open tender
+        // options for a covered/prepaid visit.
+        total: alreadyPaid ? 0 : Number(existing.total),
         prepaidCredit: applied.prepaidCredit,
         token: existing.token,
         status: existing.status,
+        alreadyPaid,
       });
     }
 

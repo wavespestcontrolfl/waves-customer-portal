@@ -1420,6 +1420,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         const updates = {
           credit_applied: CustomerCredit.round2(CustomerCredit.round2(locked.credit_applied || 0) + lockedDue),
           status: 'prepaid',
+          prepaid_prev_status: locked.status,
           prepaid_at: trx.fn.now(),
           prepaid_by: recordedBy,
           // Stamp paid_at so paid_at-keyed paths (AR dashboards, annual-prepay
@@ -1526,11 +1527,15 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
           createdBy: recordedBy,
         }, trx);
 
+        // Restore the status the invoice held before it was prepaid (draft/
+        // scheduled/sent/viewed/overdue); fall back to 'sent' for older rows
+        // minted before prepaid_prev_status existed.
         await trx('invoices').where({ id }).update({
-          status: 'sent',
+          status: locked.prepaid_prev_status || 'sent',
           credit_applied: 0,
           prepaid_at: null,
           prepaid_by: null,
+          prepaid_prev_status: null,
           paid_at: null,
           setup_fee_waived: false,
           updated_at: trx.fn.now(),

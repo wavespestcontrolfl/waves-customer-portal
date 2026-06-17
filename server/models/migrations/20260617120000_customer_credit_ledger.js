@@ -68,6 +68,12 @@ exports.up = async function (knex) {
         t.boolean('setup_fee_waived').notNullable().defaultTo(false);
       });
     }
+    // The collectible status the invoice held before being marked prepaid, so
+    // a reversal can restore it (draft/scheduled/sent/viewed/overdue) instead
+    // of forcing every reversed invoice to `sent`.
+    if (!(await hasInvoiceCol('prepaid_prev_status'))) {
+      await knex.schema.alterTable('invoices', (t) => t.string('prepaid_prev_status', 20));
+    }
   }
 };
 
@@ -75,7 +81,7 @@ exports.down = async function (knex) {
   await knex.schema.dropTableIfExists('customer_credit_ledger');
   if (await knex.schema.hasTable('invoices')) {
     const hasInvoiceCol = async (col) => knex.schema.hasColumn('invoices', col);
-    for (const col of ['credit_applied', 'prepaid_at', 'prepaid_by', 'setup_fee_waived']) {
+    for (const col of ['credit_applied', 'prepaid_at', 'prepaid_by', 'setup_fee_waived', 'prepaid_prev_status']) {
       if (await hasInvoiceCol(col)) {
         await knex.schema.alterTable('invoices', (t) => t.dropColumn(col));
       }

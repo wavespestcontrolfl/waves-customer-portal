@@ -2417,37 +2417,34 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   const [err, setErr] = useState("");
   const [loadError, setLoadError] = useState(false);
 
-  // Manual retry / post-mutation refresh (same customer — no race).
+  // Tracks the customer the panel is currently bound to. Every /credits fetch
+  // (initial, Retry, post-mutation refresh) tags its response against this so a
+  // response for a previously-selected customer can never write into the panel
+  // after a switch — which would otherwise show A's ledger while submits target B.
+  const currentCustomerRef = useRef(customerId);
   const load = () => {
+    const reqId = customerId;
     setLoadError(false);
-    adminFetch(`/admin/customers/${customerId}/credits`)
+    adminFetch(`/admin/customers/${reqId}/credits`)
       .then((d) => {
+        if (currentCustomerRef.current !== reqId) return;
         setData(d);
         setLoadError(false);
       })
-      .catch(() => setLoadError(true));
+      .catch(() => {
+        if (currentCustomerRef.current !== reqId) return;
+        setLoadError(true);
+      });
   };
-  // On customer switch, drop the previous customer's data immediately and
-  // ignore an in-flight response from the prior customer — otherwise the
-  // panel could show customer A's ledger while submits target customer B.
+  // On customer switch, drop the previous customer's data immediately (so the
+  // panel never shows a stale balance) and re-bind the ref before fetching.
   useEffect(() => {
-    let cancelled = false;
+    currentCustomerRef.current = customerId;
     setData(null);
     setLoadError(false);
     setOpen(false);
-    adminFetch(`/admin/customers/${customerId}/credits`)
-      .then((d) => {
-        if (!cancelled) {
-          setData(d);
-          setLoadError(false);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setLoadError(true);
-      });
-    return () => {
-      cancelled = true;
-    };
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerId]);
 
   // Only treat the ledger as known once a fetch has succeeded AND the latest
