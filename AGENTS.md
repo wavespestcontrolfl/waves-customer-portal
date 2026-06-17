@@ -57,7 +57,10 @@ finding and warns on P1. Reviewers must return JSON matching
   a deprecated legacy mirror — prefer the cents/bps API. The dollar amount displayed to the customer, the
   `amountCents` sent to Stripe (`Math.round(total * 100)`), and the
   `card_surcharge` recorded on the `payments` row must all derive from the
-  same `computeChargeAmount(invoice.total, methodCategory)` call. New
+  same `computeChargeAmount(invoice.total, methodType, { funding })` call — the
+  `funding` arg is required: the surcharge applies to confirmed **credit** cards
+  only (`computeChargeAmount` returns a zero surcharge unless
+  `opts.funding === 'credit'`; debit / prepaid / unknown / ACH pay the base). New
   ad-hoc `* 1.03`, `* 0.03`, or local rounding in pay/admin/autopay code
   will drift the three numbers apart and produce reconciliation breaks.
 - **`isCardMethodType` is the surcharge classifier.** Adding a new payment
@@ -342,9 +345,12 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/review/:token` (GET + POST; token-gated customer review flow — GET
   returns the review-request context by token, POST submits the customer's
   review. No auth beyond the review-request token).
-  `/api/rate` (review-gate; routes a customer's star rating from a
-  review-request link — high → the nearest GBP write-a-review URL, low →
-  private feedback capture. No auth; picks nearest GBP by geocoded address).
+  `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
+  `/:token/generate-review`) (review-gate; token-scoped customer rating flow
+  from a review-request link — high → the nearest GBP write-a-review URL, low →
+  private feedback capture. No auth beyond the review-request token; picks
+  nearest GBP by geocoded address. The bare `/api/rate` mount is not itself a
+  route — only the token-scoped family is public).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
