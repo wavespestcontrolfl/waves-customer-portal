@@ -1613,7 +1613,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -1626,6 +1626,12 @@ router.get('/:id', async (req, res, next) => {
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
+      // Full appointment history (past + future, all statuses). Schedule-side
+      // customer drawers (ScheduleCustomerSidebar / MobileCustomerDetailSheet)
+      // consume data.scheduled and split it into upcoming vs previous, so this
+      // must stay unfiltered.
+      db('scheduled_services').where({ customer_id: c.id }).orderBy('scheduled_date').limit(10),
+      // Upcoming, active-only — drives Customer 360's "next service" selection.
       db('scheduled_services')
         .where({ customer_id: c.id })
         .where('scheduled_date', '>=', etDateString())
@@ -1787,7 +1793,7 @@ router.get('/:id', async (req, res, next) => {
         isPrimaryProfile: !!p.is_primary_profile,
       })),
       tags: tags.map(t => t.tag),
-      interactions, preferences: prefs, services, estimates, payments, scheduled, smsLog,
+      interactions, preferences: prefs, services, estimates, payments, scheduled, upcomingScheduled, smsLog,
       healthScore: healthScore || null,
       invoices: mappedInvoices,
       cards: cards || [],

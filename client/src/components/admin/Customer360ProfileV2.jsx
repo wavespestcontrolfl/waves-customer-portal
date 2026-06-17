@@ -3166,6 +3166,9 @@ export default function Customer360ProfileV2({
   const services = data.services || [];
   const payments = data.payments || [];
   const scheduled = data.scheduled || [];
+  // Upcoming, active-only list from the server; data.scheduled is full history
+  // (past + future) and limited, so use this for next-service selection.
+  const upcomingScheduled = data.upcomingScheduled || scheduled;
   const accountProperties = data.accountProperties || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
@@ -3277,7 +3280,7 @@ export default function Customer360ProfileV2({
     "skipped",
     "no_show",
   ]);
-  const nextService = scheduled.find((s) => {
+  const nextService = upcomingScheduled.find((s) => {
     const status = String(s.status || "").toLowerCase();
     return (
       !inactiveNextServiceStatuses.has(status) &&
@@ -4276,13 +4279,13 @@ export default function Customer360ProfileV2({
                   ))}
                 </div>
               )}
-              {scheduled.length > 0 && (
+              {upcomingScheduled.length > 0 && (
                 <div className="mt-5">
                   {" "}
                   <SectionTitle>
-                    Scheduled Services ({scheduled.length})
+                    Scheduled Services ({upcomingScheduled.length})
                   </SectionTitle>
-                  {scheduled.map((s, i) => (
+                  {upcomingScheduled.map((s, i) => (
                     <div
                       key={i}
                       className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
