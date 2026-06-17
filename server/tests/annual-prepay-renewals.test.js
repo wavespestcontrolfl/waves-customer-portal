@@ -354,6 +354,52 @@ describe('annual prepay renewal helpers', () => {
     });
   });
 
+  test('matches an existing visit to a single coverage slot, not both neighbors', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        is_recurring: {},
+        recurring_pattern: {},
+        recurring_parent_id: {},
+        recurring_ongoing: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    // One existing visit on Feb 15 sits within the 45-day quarterly tolerance of
+    // BOTH the Jan 1 and Apr 1 targets. It must fill only one slot, so a 4-visit
+    // term still seeds the remaining three (Apr 1 / Jul 1 / Oct 1) rather than
+    // letting the single visit cover two slots and short the paid coverage.
+    const rowsQuery = query({
+      rows: [
+        { id: 'svc-m', customer_id: 'customer-5', scheduled_date: '2026-02-15', service_type: 'Pest Control', status: 'pending' },
+      ],
+    });
+    const i1 = query({ returning: [{ id: 's1', scheduled_date: '2026-04-01' }] });
+    const i2 = query({ returning: [{ id: 's2', scheduled_date: '2026-07-01' }] });
+    const i3 = query({ returning: [{ id: 's3', scheduled_date: '2026-10-01' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, i1, i2, i3],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-5',
+      customer_id: 'customer-5',
+      term_start: '2026-01-01',
+      term_end: '2026-12-31',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+    })).resolves.toMatchObject({
+      createdCount: 3,
+      existingCount: 1,
+    });
+
+    expect(i1.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-04-01' }));
+    expect(i3.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-10-01' }));
+  });
+
   test('creates the monthly coverage series when cadence is monthly', async () => {
     const columnQuery = query({
       columnInfo: {

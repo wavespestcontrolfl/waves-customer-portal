@@ -304,16 +304,17 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
   // its generated replacement — otherwise the paid term ends up with fewer
   // covered visits than the admin sold.
   const existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
-  const existingByDate = new Map(existingRows.map((row) => [dateOnly(row.scheduled_date), row]));
 
   // Existing in-window matching visits (e.g. the customer's pre-existing route)
   // already satisfy coverage even when they don't land on the exact generated
-  // cadence dates. Count them toward the visit total and treat a generated date
-  // within half a cadence interval of an existing visit as already covered, so a
-  // July-1 target doesn't lay a second series on top of an existing July-15
-  // route — otherwise both rows survive and both get stamped prepaid, showing
-  // dispatch duplicate visits for the same covered service.
-  const existingDates = existingRows.map((row) => dateOnly(row.scheduled_date)).filter(Boolean);
+  // cadence dates. Treat a generated date within half a cadence interval of an
+  // existing visit as already covered, so a July-1 target doesn't lay a second
+  // series on top of an existing July-15 route. Each existing visit is consumed
+  // by at most ONE slot (removed from the pool once matched) — otherwise a single
+  // visit sitting midway between two cadence dates would suppress both and leave
+  // the paid coverage short. The remaining-count cap stops over-seeding when the
+  // customer already has at least the sold number of in-window matching visits.
+  const availableExistingDates = existingRows.map((row) => dateOnly(row.scheduled_date)).filter(Boolean);
   const cadenceMonths = coverageCadenceMonths(coverageCadence);
   const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
   const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
@@ -321,12 +322,14 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
   const datesToSeed = [];
   for (const scheduledDate of targetDates) {
     if (datesToSeed.length >= remainingToSeed) break;
-    if (existingByDate.has(scheduledDate)) continue;
-    const coveredByExisting = existingDates.some((existingDate) => {
+    const matchIndex = availableExistingDates.findIndex((existingDate) => {
       const diff = daysUntil(existingDate, scheduledDate);
       return diff != null && Math.abs(diff) <= slotToleranceDays;
     });
-    if (coveredByExisting) continue;
+    if (matchIndex !== -1) {
+      availableExistingDates.splice(matchIndex, 1);
+      continue;
+    }
     datesToSeed.push(scheduledDate);
   }
 
