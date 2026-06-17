@@ -41,17 +41,30 @@ async function publishBlocks(knex, templateKey, blocks) {
   const template = await knex('email_templates').where({ template_key: templateKey }).first();
   if (!template) return;
 
-  const current = await knex('email_template_versions')
+  // Preserve subject/preview from the currently ACTIVE version — not merely the
+  // highest version_number, which can be an unapproved draft (the template
+  // library supports draft versions). Prefer the template's own
+  // active_version_id, falling back to the newest active-status row.
+  const active = (template.active_version_id
+    ? await knex('email_template_versions').where({ id: template.active_version_id }).first()
+    : null)
+    || await knex('email_template_versions')
+      .where({ template_id: template.id, status: 'active' })
+      .orderBy('version_number', 'desc')
+      .first();
+
+  // The next version number must clear EVERY existing version, drafts included.
+  const latest = await knex('email_template_versions')
     .where({ template_id: template.id })
     .orderBy('version_number', 'desc')
     .first();
 
   const [version] = await knex('email_template_versions').insert({
     template_id: template.id,
-    version_number: (current?.version_number || 0) + 1,
+    version_number: (latest?.version_number || 0) + 1,
     status: 'active',
-    subject: current?.subject || 'Your Waves membership is active',
-    preview_text: current?.preview_text || null,
+    subject: active?.subject || 'Your Waves membership is active',
+    preview_text: active?.preview_text ?? null,
     blocks: JSON.stringify(blocks),
     text_body: null,
     published_at: new Date(),
