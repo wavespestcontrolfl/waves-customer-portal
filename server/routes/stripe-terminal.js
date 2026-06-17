@@ -602,21 +602,43 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       { idempotencyKey: `handoff_${jti}` },
     );
 
-    // Atomic record: SET only if still NULL. Two concurrent /payment-intent
-    // calls for the same jti both hit Stripe with the same idempotency key
-    // and both get the same PI back — the first UPDATE wins, the second is
-    // a no-op (same value). Either way, the jti ends up pointing at one PI.
-    await db('terminal_handoff_tokens')
-      .where({ jti })
-      .whereNull('stripe_payment_intent_id')
-      .update({ stripe_payment_intent_id: pi.id });
-
-    // Also backfill the invoice row for admin-portal consistency. Not the
-    // source of truth for the terminal flow (handoff row is) — this just
-    // keeps the existing invoice detail view working.
-    await db('invoices').where({ id: invoice.id }).update({
-      stripe_payment_intent_id: pi.id,
+    // Atomic backfill + FINAL collectibility re-check under a row lock. The
+    // pre-create check at line ~560 is unlocked, so the office could mark the
+    // invoice prepaid (apply account credit) between that read and here. Lock
+    // the invoice, re-verify it's still collectible, and only then bind the PI.
+    // If it went terminal in the meantime, cancel the PI we just minted and
+    // reject — never hand a live client secret back for a settled invoice.
+    // (apply-credit does the mirror re-check under the same lock, so whichever
+    // transaction commits second detects the other and backs off.)
+    const bound = await db.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      if (!locked || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(locked.status)) {
+        return { ok: false, status: locked ? locked.status : null };
+      }
+      // SET only if still NULL — two concurrent /payment-intent calls for the
+      // same jti share an idempotency key and get the same PI back; first
+      // UPDATE wins, second is a no-op.
+      await trx('terminal_handoff_tokens')
+        .where({ jti })
+        .whereNull('stripe_payment_intent_id')
+        .update({ stripe_payment_intent_id: pi.id });
+      // Backfill the invoice row for admin-portal consistency (handoff row is
+      // the source of truth for the terminal flow).
+      await trx('invoices').where({ id: invoice.id }).update({ stripe_payment_intent_id: pi.id });
+      return { ok: true };
     });
+
+    if (!bound.ok) {
+      // PI was minted but the invoice is no longer collectible — cancel it so
+      // the card can't be charged, then report the changed state.
+      await stripe.paymentIntents
+        .cancel(pi.id, { cancellation_reason: 'abandoned' })
+        .catch((e) => logger.warn(`[stripe-terminal] failed to cancel orphaned PI ${pi.id}: ${e.message}`));
+      return res.status(409).json({
+        error: bound.status ? `Invoice is ${bound.status}` : 'Invoice not found',
+        code: 'invoice_status_changed',
+      });
+    }
 
     res.json({
       clientSecret: pi.client_secret,
