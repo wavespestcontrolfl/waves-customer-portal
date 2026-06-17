@@ -259,7 +259,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     : null;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
-  if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
+  if (invoice.status !== 'paid' && invoice.status !== 'prepaid') return { ok: false, error: 'Invoice not paid' };
 
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')

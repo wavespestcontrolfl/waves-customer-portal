@@ -2621,13 +2621,14 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
 
 // ── Apply Credit Modal ──
 // Draws down the customer's account credit to cover this invoice. Fully
-// covering the amount due marks the invoice prepaid; a partial application
-// reduces the balance due. Account credit is the holding bucket for money
-// paid ahead (quarterly prepay) or goodwill, issued from Customer 360.
+// covering the full amount due marks the invoice prepaid. Account credit is
+// the holding bucket for money paid ahead (quarterly prepay) or goodwill,
+// issued from Customer 360. Partial application is deliberately not offered —
+// a remaining balance would still be charged in full by the Stripe/Terminal
+// pay paths, so credit must cover the whole invoice.
 function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
   const [loading, setLoading] = useState(true);
   const [ctx, setCtx] = useState(null);
-  const [amountStr, setAmountStr] = useState("");
   const [waiveSetupFee, setWaiveSetupFee] = useState(false);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2641,11 +2642,6 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
         );
         if (!alive) return;
         setCtx(data);
-        const maxApply = Math.min(
-          Number(data.balance || 0),
-          Number(data.amount_due || 0),
-        );
-        setAmountStr(maxApply > 0 ? maxApply.toFixed(2) : "");
       } catch (err) {
         if (alive) onError(`Couldn't load account credit: ${err.message}`);
       } finally {
@@ -2659,12 +2655,9 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
 
   const balance = Number(ctx?.balance || 0);
   const amountDue = Number(ctx?.amount_due || 0);
-  const maxApply = Math.min(balance, amountDue);
-  const applyAmt = parseFloat(amountStr);
-  const validAmt =
-    Number.isFinite(applyAmt) && applyAmt > 0 && applyAmt <= maxApply + 0.005;
-  const fullyCovers = validAmt && applyAmt + 0.005 >= amountDue;
-  const canApply = !loading && !saving && balance > 0 && validAmt;
+  const canCover = amountDue > 0 && balance + 0.005 >= amountDue;
+  const shortfall = Math.max(0, amountDue - balance);
+  const canApply = !loading && !saving && canCover;
 
   const handleApply = async () => {
     if (!canApply) return;
@@ -2675,16 +2668,13 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
         {
           method: "POST",
           body: JSON.stringify({
-            amount: Math.round(applyAmt * 100) / 100,
             waiveSetupFee,
             note: note.trim() || undefined,
           }),
         },
       );
       onApplied(
-        res.fully_covered
-          ? `Invoice marked prepaid · $${Number(res.applied).toFixed(2)} credit applied`
-          : `$${Number(res.applied).toFixed(2)} credit applied · $${Number(res.balance).toFixed(2)} remaining`,
+        `Invoice marked prepaid · $${Number(res.applied).toFixed(2)} credit applied`,
       );
     } catch (err) {
       onError(`Apply credit failed: ${err.message}`);
@@ -2776,51 +2766,17 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
               </div>
             </div>
 
-            {balance <= 0 ? (
+            {!canCover ? (
               <div style={{ fontSize: 13, color: D.muted, marginBottom: 8, lineHeight: 1.5 }}>
-                This customer has no account credit. Issue credit from the
-                customer's profile (Customer 360 → Account credit) first.
+                {balance <= 0
+                  ? "This customer has no account credit. "
+                  : `Available credit ($${balance.toFixed(2)}) doesn't cover the $${amountDue.toFixed(2)} due — $${shortfall.toFixed(2)} short. `}
+                Credit must cover the invoice in full. Issue more credit from the
+                customer's profile (Customer 360 → Account credit), or lower the
+                invoice, then try again.
               </div>
             ) : (
               <>
-                <label style={fieldLabel}>Amount to apply</label>
-                <div style={{ position: "relative", marginBottom: 16 }}>
-                  <span
-                    style={{
-                      position: "absolute",
-                      left: 12,
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      color: D.muted,
-                      fontSize: 15,
-                    }}
-                  >
-                    $
-                  </span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={amountStr}
-                    onChange={(e) => setAmountStr(e.target.value)}
-                    style={{
-                      width: "100%",
-                      padding: "12px 12px 12px 26px",
-                      background: D.bg,
-                      color: D.text,
-                      border: `1px solid ${validAmt || !amountStr ? D.border : D.red}`,
-                      borderRadius: 8,
-                      fontSize: 15,
-                      boxSizing: "border-box",
-                    }}
-                  />
-                </div>
-                {amountStr && !validAmt && (
-                  <div style={{ fontSize: 12, color: D.red, marginTop: -8, marginBottom: 14 }}>
-                    Enter an amount between $0.01 and ${maxApply.toFixed(2)}.
-                  </div>
-                )}
-
                 <label
                   style={{
                     display: "flex",
@@ -2876,9 +2832,8 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
                     lineHeight: 1.45,
                   }}
                 >
-                  {fullyCovers
-                    ? "Fully covers the invoice — marks it prepaid and stops automated reminders."
-                    : "Partial application — reduces the balance due; the invoice stays open for the rest."}
+                  Applies ${amountDue.toFixed(2)} from account credit, marks the
+                  invoice prepaid, and stops automated reminders.
                 </div>
               </>
             )}
@@ -2900,11 +2855,7 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
             disabled={!canApply}
             style={{ ...sBtn(D.heading, D.white, isMobile), opacity: canApply ? 1 : 0.5 }}
           >
-            {saving
-              ? "Applying…"
-              : fullyCovers
-                ? "Apply & mark prepaid"
-                : "Apply credit"}
+            {saving ? "Applying…" : "Apply & mark prepaid"}
           </button>
         </div>
       </div>

@@ -34,6 +34,9 @@ function lineItemsArray(invoice) {
 // Derived from the invoice itself (line items + notes) rather than assumed, so a
 // manually built prepay invoice that does charge setup won't claim otherwise.
 function annualPrepaySetupFeeWaived(invoice) {
+  // Explicit operator flag (set by the apply-credit "waive setup fee" toggle)
+  // wins; otherwise fall back to detecting the waiver in line items / notes.
+  if (invoice?.setup_fee_waived === true) return true;
   const texts = lineItemsArray(invoice).map((li) => li?.description || '');
   if (invoice?.notes) texts.push(invoice.notes);
   return texts.some((t) => SETUP_FEE_WAIVED_RE.test(String(t)));

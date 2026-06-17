@@ -1069,16 +1069,26 @@ export default function PayPageV2() {
     }
   }, [navigate, token]);
 
-  // Already paid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit)
+  // Already paid / prepaid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit)
   useEffect(() => {
-    if (data?.invoice?.status === 'paid' || data?.invoice?.status === 'processing') {
+    if (
+      data?.invoice?.status === 'paid' ||
+      data?.invoice?.status === 'prepaid' ||
+      data?.invoice?.status === 'processing'
+    ) {
       navigate(`/receipt/${token}`, { replace: true });
     }
   }, [data, navigate, token]);
 
   // Create Stripe PaymentIntent once invoice data loads
   useEffect(() => {
-    if (!data || data.invoice.status === 'paid' || data.invoice.status === 'processing') return;
+    if (
+      !data ||
+      data.invoice.status === 'paid' ||
+      data.invoice.status === 'prepaid' ||
+      data.invoice.status === 'processing'
+    )
+      return;
     if (!data.stripe?.available || !data.stripe?.publishableKey) {
       const message = 'Payment processing is temporarily unavailable. Please call (941) 297-5749.';
       setPaymentError(message);

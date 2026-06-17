@@ -2236,6 +2236,16 @@ const InvoiceService = {
           "This invoice carries an estimate deposit credit — void it (the deposit returns to the customer's ledger) and create a replacement instead of editing line items",
         );
       }
+      // Account-credit-prepaid invoices are likewise edit-locked on line items:
+      // the consumed customer_credit_ledger entry is backed dollar-for-dollar
+      // against the current total, and a retotal here can neither re-cap nor
+      // rebalance that ledger (an edit below the applied credit would leave the
+      // ledger over-consumed). Reverse the credit before editing.
+      if (parseFloat(invoice.credit_applied || 0) > 0) {
+        throw new Error(
+          "This invoice has account credit applied (prepaid) — reverse the applied credit before editing line items",
+        );
+      }
       const customer = await db("customers")
         .where({ id: invoice.customer_id })
         .first();

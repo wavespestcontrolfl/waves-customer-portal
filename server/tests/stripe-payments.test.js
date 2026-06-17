@@ -347,6 +347,10 @@ describe('invoice assertInvoiceVoidable', () => {
     expect(() => assertInvoiceVoidable('processing')).toThrow(/in flight/);
   });
 
+  test('prepaid invoice — refuse to void (credit would be stranded)', () => {
+    expect(() => assertInvoiceVoidable('prepaid')).toThrow(/prepaid|credit/);
+  });
+
   test('draft / sent / viewed / overdue / void — voidable (no throw)', () => {
     for (const s of ['draft', 'sent', 'viewed', 'overdue', 'void']) {
       expect(() => assertInvoiceVoidable(s)).not.toThrow();

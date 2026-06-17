@@ -60,6 +60,9 @@ function assertInvoiceVoidable(currentStatus) {
   if (currentStatus === 'paid') {
     throw new Error('Cannot void a paid invoice — issue a refund instead');
   }
+  if (currentStatus === 'prepaid') {
+    throw new Error('Cannot void a prepaid invoice — the applied account credit would be stranded; reverse the credit instead');
+  }
   if (currentStatus === 'processing') {
     throw new Error('Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed');
   }

@@ -3505,7 +3505,7 @@ export default function Customer360ProfileV2({
   };
 
   const balanceOwed = invoices
-    .filter((i) => i.status !== "paid")
+    .filter((i) => i.status !== "paid" && i.status !== "prepaid")
     .reduce(
       (s, i) =>
         s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0),
