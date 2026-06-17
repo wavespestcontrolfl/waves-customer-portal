@@ -36,6 +36,9 @@ Agronomic tells to weigh:
 - Mushrooms, toadstools, or fungal fruiting bodies are a strong sign of OVERWATERING (or buried organic debris). When visible, raise "fungal_activity" to at least "minor" and call out likely overwatering in the observations.
 - Standing water, algae, or moss also point to overwatering; dry/tan blades and curling point to under-watering.
 - Brown-patch rings, dollar-spot blotches, or gray leaf spot indicate fungal disease.
+- Irregular, expanding dead patches (often at sunny edges or along sidewalks/driveways), thinning that lifts easily, or visible bugs indicate INSECT damage (chinch bugs, grubs, armyworms).
+- A blue-gray cast, folded or wilting blades, and lingering footprints (turf that doesn't spring back) indicate DROUGHT stress.
+- Uniform scalped strips, tire ruts, or shredded blade tips indicate MECHANICAL damage (scalping, mower, or foot/vehicle traffic).
 - Name specific weeds when identifiable (e.g., nutsedge, crabgrass, dollarweed) instead of just "weeds".
 
 Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
@@ -50,6 +53,9 @@ Return this exact JSON structure and nothing else — no markdown, no backticks,
   "weed_coverage": <number 0-100>,
   "color_health": <number 1-10>,
   "fungal_activity": <"none" | "minor" | "moderate" | "severe">,
+  "insect_damage": <"none" | "minor" | "moderate" | "severe">,
+  "drought_stress": <"none" | "minor" | "moderate" | "severe">,
+  "mechanical_damage": <"none" | "minor" | "moderate" | "severe">,
   "thatch_visibility": <"low" | "moderate" | "high">,
   "overwatering_signal": <true | false>,
   "grass_type": <"st_augustine" | "bermuda" | "zoysia" | "bahia" | "mixed" | "unknown">,
@@ -66,6 +72,23 @@ const THATCH_REVERSE = ['low', 'moderate', 'high'];
 
 const FUNGUS_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
 const THATCH_DISPLAY = { low: 85, moderate: 60, high: 35 };
+
+// Severity → 0-100 "health" display for the consolidated Stress/Damage card
+// (higher = healthier). Reuses the fungus scale so disease/insect/drought/
+// mechanical all share one ramp; thatch keeps its own (low/moderate/high).
+const SEVERITY_DISPLAY = FUNGUS_DISPLAY;
+// The four severity-coded stressors that feed Stress/Damage alongside thatch.
+const STRESS_SEVERITY_FIELDS = ['fungal_activity', 'insect_damage', 'drought_stress', 'mechanical_damage'];
+
+// Stress/Damage = the WORST (lowest-health) of the five stress signals, so a
+// single severe stressor isn't diluted by healthy ones. Defaults a missing
+// signal to "none" (95) rather than tanking the score on absent data.
+function computeStressDamageDisplay(src = {}) {
+  const vals = STRESS_SEVERITY_FIELDS
+    .map((f) => SEVERITY_DISPLAY[src[f]] ?? 95)
+    .concat(THATCH_DISPLAY[src.thatch_visibility] ?? 85);
+  return Math.max(0, Math.min(100, Math.min(...vals)));
+}
 
 // ── Vision API calls ────────────────────────────────────────────
 
@@ -256,6 +279,30 @@ function averageScores(claudeResult, geminiResult) {
     }
   }
 
+  // Insect / drought / mechanical damage: categorical severity (none→severe),
+  // averaged like fungal activity. Kept on the composite for grounding; they
+  // feed the consolidated Stress/Damage score in mapToDisplayScores.
+  for (const field of ['insect_damage', 'drought_stress', 'mechanical_damage']) {
+    const c = FUNGAL_MAP[claudeResult[field]] ?? 0;
+    const g = FUNGAL_MAP[geminiResult[field]] ?? 0;
+    composite[field] = FUNGAL_REVERSE[Math.round((c + g) / 2)];
+  }
+
+  // Stress/Damage divergence: flag when the two models' worst-stressor reads
+  // diverge on the 0-100 display scale (mirrors the per-tile confidence flag).
+  {
+    const cStress = computeStressDamageDisplay(claudeResult);
+    const gStress = computeStressDamageDisplay(geminiResult);
+    if (Math.abs(cStress - gStress) > DIVERGENCE_THRESHOLD) {
+      divergenceFlags.push({
+        metric: 'stress_damage',
+        claude: cStress,
+        gemini: gStress,
+        gap: Math.abs(cStress - gStress),
+      });
+    }
+  }
+
   // Observations: the customer-facing narrative is a SINGLE voice — the primary
   // VISION model (Claude), falling back to Gemini — never the two glued together
   // with " | " (which produced run-on, self-contradicting prose when the models
@@ -287,6 +334,10 @@ function mapToDisplayScores(composite) {
     color_health: clamp(Math.round((composite.color_health || 5) * 10)),
     fungus_control: clamp(FUNGUS_DISPLAY[composite.fungal_activity] || 50),
     thatch_level: clamp(THATCH_DISPLAY[composite.thatch_visibility] || 60),
+    // Consolidated customer-facing Stress/Damage (worst of disease/insect/
+    // drought/mechanical/thatch). fungus_control + thatch_level stay populated
+    // above so the Lawn Diagnostic tool, trends, and snapshot are untouched.
+    stress_damage: computeStressDamageDisplay(composite),
     overwatering_signal: !!composite.overwatering_signal,
     observations: composite.observations || '',
   };
@@ -394,6 +445,7 @@ module.exports = {
   analyzePhoto,
   averageScores,
   mapToDisplayScores,
+  computeStressDamageDisplay,
   applySeasonalAdjustment,
   getSeason,
   getCustomerHistory,

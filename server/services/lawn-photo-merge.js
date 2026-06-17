@@ -91,6 +91,13 @@ function mergePhotoComposites(validResults = []) {
     results.map(r => r.composite.thatch_visibility),
     results[0].composite.thatch_visibility,
   );
+  // Same majority-vote treatment for the stress signals that feed Stress/Damage.
+  for (const field of ['insect_damage', 'drought_stress', 'mechanical_damage']) {
+    merged[field] = majorityVote(
+      results.map(r => r.composite[field]),
+      results[0].composite[field],
+    );
+  }
   merged.observations = results.map(r => r.composite.observations).filter(Boolean)[0] || '';
   merged.overwatering_signal = results.some(r => r.composite?.overwatering_signal === true);
   // Grass type: majority vote across photos, falling back to the first detected.

@@ -765,21 +765,20 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   }, []);
 
   const metrics = [
-    { label: 'Turf Density', key: 'turfDensity', initialKey: 'turfDensity' },
-    { label: 'Weed Suppression', key: 'weedSuppression', initialKey: 'weedSuppression' },
-    { label: 'Color Health', key: 'colorHealth', initialKey: 'colorHealth' },
-    { label: 'Fungus Control', key: 'fungusControl', initialKey: 'fungusControl' },
-    { label: 'Thatch Level', key: 'thatchScore', initialKey: 'thatchScore' },
+    { label: 'Density / Coverage', key: 'turfDensity', initialKey: 'turfDensity' },
+    { label: 'Weed Cleanliness', key: 'weedSuppression', initialKey: 'weedSuppression' },
+    { label: 'Color / Nutrients', key: 'colorHealth', initialKey: 'colorHealth' },
+    { label: 'Stress / Damage', key: 'stressDamage', initialKey: 'stressDamage' },
   ];
 
   const overallScore = scores.overallScore || Math.round(
     ((scores.turfDensity || 0) + (scores.weedSuppression || 0) +
-     (scores.fungusControl || 0) + (scores.colorHealth || 0) + (scores.thatchScore || 0)) / 5
+     (scores.colorHealth || 0) + (scores.stressDamage || 0)) / 4
   );
 
   const initialOverall = initialScores?.overallScore || Math.round(
     ((initialScores?.turfDensity || 0) + (initialScores?.weedSuppression || 0) +
-     (initialScores?.fungusControl || 0) + (initialScores?.colorHealth || 0) + (initialScores?.thatchScore || 0)) / 5
+     (initialScores?.colorHealth || 0) + (initialScores?.stressDamage || 0)) / 4
   );
 
   const overallDelta = overallScore - initialOverall;
@@ -7058,8 +7057,8 @@ function MyPlanTab({ customer }) {
                             <span style={{ display: 'block', fontSize: 16, fontWeight: 850, color: B.blueDeeper }}>{svc.name}</span>
                             <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
-                              const avg = Math.round((lawnHealth.scores.turfDensity + lawnHealth.scores.weedSuppression + lawnHealth.scores.fungusControl + lawnHealth.scores.thatchScore) / 4);
-                              const initialAvg = Math.round((lawnHealth.initialScores.turfDensity + lawnHealth.initialScores.weedSuppression + lawnHealth.initialScores.fungusControl + lawnHealth.initialScores.thatchScore) / 4);
+                              const avg = Math.round((lawnHealth.scores.turfDensity + lawnHealth.scores.weedSuppression + lawnHealth.scores.colorHealth + lawnHealth.scores.stressDamage) / 4);
+                              const initialAvg = Math.round((lawnHealth.initialScores.turfDensity + lawnHealth.initialScores.weedSuppression + lawnHealth.initialScores.colorHealth + lawnHealth.initialScores.stressDamage) / 4);
                               const improving = avg >= initialAvg;
                               return (
                                 <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: improving ? B.green : B.orange, fontWeight: 800 }}>

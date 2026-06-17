@@ -37,6 +37,13 @@ async function signedUrl(s3Key) {
   }
 }
 
+// Consolidated Stress/Damage for customer surfaces. New rows store it directly;
+// older rows fall back to the worst of the two legacy signals (fungus + thatch).
+function lawnStressDamage(row = {}) {
+  if (row.stress_damage != null) return row.stress_damage;
+  return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
+}
+
 function formatScore(row) {
   return {
     assessmentId: row.id,
@@ -44,6 +51,7 @@ function formatScore(row) {
     turfDensity: row.turf_density,
     weedSuppression: row.weed_suppression,
     colorHealth: row.color_health,
+    stressDamage: lawnStressDamage(row),
     fungusControl: row.fungus_control,
     thatchScore: row.thatch_level,
     overallScore: row.overall_score || Math.round(
@@ -388,6 +396,7 @@ router.get('/:customerId', async (req, res, next) => {
           turfDensity: (latest.turf_density || 0) - (initial.turf_density || 0),
           weedSuppression: (latest.weed_suppression || 0) - (initial.weed_suppression || 0),
           colorHealth: (latest.color_health || 0) - (initial.color_health || 0),
+          stressDamage: lawnStressDamage(latest) - lawnStressDamage(initial),
           fungusControl: (latest.fungus_control || 0) - (initial.fungus_control || 0),
           thatchLevel: (latest.thatch_level || 0) - (initial.thatch_level || 0),
           overall: calcOverall(latest) - calcOverall(initial),
@@ -404,6 +413,7 @@ router.get('/:customerId', async (req, res, next) => {
       turfDensity: a.turf_density,
       weedSuppression: a.weed_suppression,
       colorHealth: a.color_health,
+      stressDamage: lawnStressDamage(a),
       fungusControl: a.fungus_control,
       thatchLevel: a.thatch_level,
       overallScore: a.overall_score || Math.round(
