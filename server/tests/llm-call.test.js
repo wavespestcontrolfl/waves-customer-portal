@@ -9,7 +9,7 @@ const {
   extractOpenAIText,
   parseLooseJson,
 } = require('../services/llm/call');
-const { PROVIDER, ROUTES } = require('../config/models');
+const { PROVIDER, ROUTES, FLAGSHIP, OPENAI_BEST, GEMINI_VISION_BEST } = require('../config/models');
 
 describe('llm/call parsers', () => {
   test('extractOpenAIText reads output_text and the output[].content walk', () => {
@@ -44,7 +44,7 @@ describe('llm/call fails closed with no key and makes NO network call', () => {
   test('callOpenAI → no_key, no fetch', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch');
     try {
-      expect(await callOpenAI({ model: 'gpt-5.5', text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
+      expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally { fetchSpy.mockRestore(); }
   });
@@ -52,13 +52,13 @@ describe('llm/call fails closed with no key and makes NO network call', () => {
   test('callGemini → no_key, no fetch', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch');
     try {
-      expect(await callGemini({ model: 'gemini-3.5-flash', text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
+      expect(await callGemini({ model: GEMINI_VISION_BEST, text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally { fetchSpy.mockRestore(); }
   });
 
   test('callAnthropic → no_key', async () => {
-    expect(await callAnthropic({ model: 'claude-opus-4-8', text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
+    expect(await callAnthropic({ model: FLAGSHIP, text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
   });
 
   test('dispatch routes by provider and fails closed (OpenAI route, no key)', async () => {

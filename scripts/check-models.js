@@ -74,13 +74,14 @@ function fetchModels() {
   console.log('\n──────────────────────────────────────────────────────');
   console.log('Currently in use (server/config/models.js):');
   // Validate every Anthropic tier so a new one (e.g. VOICE) can't slip past the
-  // checker. DEFAULT is an alias of FLAGSHIP, so skip it. The registry now also
-  // exports cross-provider entries (PROVIDER/ROUTES objects, OPENAI_BEST /
-  // GEMINI_VISION_BEST non-claude strings) — exclude those; they belong to OpenAI/
-  // Gemini, not Anthropic's /v1/models list. Derived from the module so it never
-  // drifts when an Anthropic tier is added/removed.
+  // checker. Exclude the non-tier exports by KEY, not by value — so a MISCONFIGURED
+  // tier (e.g. MODEL_FLAGSHIP set to a non-claude id) is still validated and warned
+  // about, rather than silently dropped. DEFAULT is an alias of FLAGSHIP; PROVIDER/
+  // ROUTES are objects; OPENAI_BEST/GEMINI_VISION_BEST belong to OpenAI/Gemini and
+  // are validated by their own providers, not Anthropic's /v1/models list.
+  const NON_TIER_KEYS = new Set(['DEFAULT', 'PROVIDER', 'ROUTES', 'OPENAI_BEST', 'GEMINI_VISION_BEST']);
   const TIERS = Object.keys(MODELS).filter(
-    (k) => k !== 'DEFAULT' && typeof MODELS[k] === 'string' && MODELS[k].startsWith('claude-'),
+    (k) => !NON_TIER_KEYS.has(k) && typeof MODELS[k] === 'string',
   );
   const labelWidth = Math.max(...TIERS.map((t) => t.length));
   TIERS.forEach((t) => console.log(`  ${t.padEnd(labelWidth)}  = ${MODELS[t]}`));
