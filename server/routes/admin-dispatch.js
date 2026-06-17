@@ -3674,7 +3674,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     try {
       if (!recapReviewOnly) {
         const existingPaid = await db('invoices')
-          .where({ service_record_id: record.id, status: 'paid' })
+          .where({ service_record_id: record.id })
+          .whereIn('status', ['paid', 'prepaid'])
           .first();
         if (existingPaid) alreadyPaid = true;
       }
@@ -3718,7 +3719,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 }
               )
             : null;
-          if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
+          if (['paid', 'prepaid'].includes(existingCompletionInvoice.status)) alreadyPaid = true;
           else invoiceCreated = true;
         }
       }
@@ -3842,7 +3843,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .forUpdate()
           .first();
         if (!lockedInvoice) return invoiceRow;
-        if (lockedInvoice.status === 'paid') return lockedInvoice;
+        if (['paid', 'prepaid'].includes(lockedInvoice.status)) return lockedInvoice;
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) return lockedInvoice;
         const existingCredit = await trx('payments')
@@ -3933,15 +3934,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
         codePrefix: invoiceShortCodePrefix(invoice),
       });
-      // Treat already-paid pre-mint as the same SMS branch as prepaid.
-      if (invoice.status === 'paid') alreadyPaid = true;
+      // Treat already-paid / prepaid pre-mint as the same SMS branch.
+      if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
       else invoiceCreated = true;
     }
 
     // Immediate/legacy review requests can be bundled into the completion SMS.
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
-    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
+    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms;
@@ -4110,7 +4111,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const usePaidCompletionTemplate = alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
-          || String(invoice?.status || '').toLowerCase() === 'paid';
+          || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase());
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,

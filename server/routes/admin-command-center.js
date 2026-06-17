@@ -372,7 +372,7 @@ async function getMoneyCollections() {
   const rows = await db('invoices as i')
     .leftJoin('customers as c', 'i.customer_id', 'c.id')
     .whereNull('i.archived_at')
-    .whereNotIn('i.status', ['draft', 'paid', 'void', 'processing'])
+    .whereNotIn('i.status', ['draft', 'paid', 'prepaid', 'void', 'processing'])
     .where((qb) => {
       qb.where('i.status', 'overdue').orWhere('i.due_date', '<', etDateString()).orWhere('i.total', '>=', DEFAULTS.highValueInvoiceAmount);
     })
