@@ -43,25 +43,28 @@ describe('appointment reminder registration deduplication', () => {
 
   test('registerVisitReminderInTx inserts a durable, confirmation-skipped row on the caller conn', async () => {
     const lookup = chain({ first: jest.fn().mockResolvedValue(null) });
+    const sameTime = chain({ first: jest.fn().mockResolvedValue(null) });
     const insertRow = chain({
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'rem-1' }]),
     });
-    const queue = [lookup, insertRow];
+    const queue = [lookup, sameTime, insertRow];
     const conn = jest.fn(() => queue.shift());
+    conn.raw = jest.fn().mockResolvedValue();
 
     const result = await AppointmentReminders.registerVisitReminderInTx(conn, {
       scheduledServiceId: 'svc-seed-1',
       customerId: 'cust-1',
-      appointmentTime: '2026-08-01T08:00',
+      appointmentTime: '2099-08-01T08:00', // far future → both reminder windows still open
       serviceType: 'Quarterly Pest Control',
       source: 'annual_prepay_seed',
     });
 
     expect(result).toEqual({ id: 'rem-1' });
+    expect(conn.raw).toHaveBeenCalled(); // serialized via advisory lock
     expect(lookup.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-seed-1' });
     // No confirmation SMS for system-seeded visits — confirmation_sent=true so the
-    // 72h/24h pass still picks it up; reminder flags start false.
+    // 72h/24h pass still picks it up; for a far-future visit both windows are open.
     expect(insertRow.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_service_id: 'svc-seed-1',
       customer_id: 'cust-1',
@@ -73,14 +76,43 @@ describe('appointment reminder registration deduplication', () => {
     }));
   });
 
+  test('registerVisitReminderInTx suppresses a same-customer/same-time collision', async () => {
+    const lookup = chain({ first: jest.fn().mockResolvedValue(null) });
+    const sameTime = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-primary', service_type: 'Lawn Care' }) });
+    const mergeUpdate = chain();
+    const insertSuppressed = chain({
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'rem-suppressed' }]),
+    });
+    const queue = [lookup, sameTime, mergeUpdate, insertSuppressed];
+    const conn = jest.fn(() => queue.shift());
+    conn.raw = jest.fn().mockResolvedValue();
+
+    const result = await AppointmentReminders.registerVisitReminderInTx(conn, {
+      scheduledServiceId: 'svc-seed-2',
+      customerId: 'cust-1',
+      appointmentTime: '2099-08-01T08:00',
+      serviceType: 'Quarterly Pest Control',
+      source: 'annual_prepay_seed',
+    });
+
+    expect(result).toEqual({ id: 'rem-suppressed' });
+    // The colliding row is inserted fully suppressed so the cron sends only once.
+    expect(insertSuppressed.insert).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: true,
+      reminder_24h_sent: true,
+    }));
+  });
+
   test('registerVisitReminderInTx is idempotent — returns the existing row without inserting', async () => {
     const lookup = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-existing' }) });
     const conn = jest.fn(() => lookup);
+    conn.raw = jest.fn().mockResolvedValue();
 
     const result = await AppointmentReminders.registerVisitReminderInTx(conn, {
       scheduledServiceId: 'svc-seed-1',
       customerId: 'cust-1',
-      appointmentTime: '2026-08-01T08:00',
+      appointmentTime: '2099-08-01T08:00',
       serviceType: 'Quarterly Pest Control',
     });
 
