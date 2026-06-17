@@ -742,6 +742,69 @@ function MembershipCard({ membership }) {
   );
 }
 
+// Customer portal showcase for recurring estimates. The recipient may not be
+// a portal user yet, so this is a direct-explore invitation: it links to the
+// portal and shows what they can do there. Warm customer-facing tone per the
+// design brief; rendered for recurring plans only. Features listed here mirror
+// real portal tabs (Visits, Billing, Request, notification prefs, Refer,
+// Documents) — keep them in sync with PortalPage so we never advertise a
+// surface that does not exist.
+const PORTAL_SHOWCASE_URL = 'https://portal.wavespestcontrol.com';
+
+const PORTAL_SHOWCASE_FEATURES = [
+  ['Upcoming visits', 'See every scheduled service and reschedule in a tap.'],
+  ['Billing & autopay', 'View invoices, pay online, and turn on autopay.'],
+  ['Request service', 'Ask for a re-service or add a service anytime.'],
+  ['Notifications', 'Choose how and when we reach you about each visit.'],
+  ['Refer & earn', 'Give $25, get $25 for every friend you send our way.'],
+  ['Documents', 'Service reports, invoices, and agreements in one place.'],
+];
+
+function PortalShowcaseCard() {
+  return (
+    <section style={{
+      background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12,
+      padding: 24, marginBottom: 16, display: 'grid', gap: 16,
+    }}>
+      <div>
+        <h2 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
+          Your customer portal
+        </h2>
+        <p style={{ margin: '6px 0 0', color: ESTIMATE_BODY, fontSize: 14, lineHeight: 1.55 }}>
+          Manage your service from any device. Take a look around &mdash; here&rsquo;s what you can do inside.
+        </p>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+        {PORTAL_SHOWCASE_FEATURES.map(([title, body]) => (
+          <div key={title} style={{
+            display: 'flex', gap: 10, alignItems: 'flex-start',
+            background: '#F8FAFC', border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 10, padding: '12px 14px',
+          }}>
+            <span aria-hidden="true" style={{ color: COLORS.green, fontWeight: 800, fontSize: 15, lineHeight: 1.4 }}>&#10003;</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: ESTIMATE_TEXT, fontWeight: 700, fontSize: 15 }}>{title}</div>
+              <div style={{ color: ESTIMATE_MUTED, fontSize: 13, lineHeight: 1.45, marginTop: 2 }}>{body}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div>
+        <a
+          href={PORTAL_SHOWCASE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'inline-block', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
+            fontWeight: 700, fontSize: 15, padding: '12px 22px', borderRadius: 10, textDecoration: 'none',
+          }}
+        >
+          Explore your portal
+        </a>
+      </div>
+    </section>
+  );
+}
+
 const ESTIMATE_ASK_PROMPTS = [
   'What is included?',
   'How does billing work?',
@@ -2477,6 +2540,8 @@ export default function EstimateViewPage() {
                   excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
                 />
               ) : null}
+
+              <PortalShowcaseCard />
             </>
           ) : (
             <>
