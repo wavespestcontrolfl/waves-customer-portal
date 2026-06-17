@@ -44,6 +44,19 @@ function lawnStressDamage(row = {}) {
   return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
 }
 
+// Overall uses the stored score when present, else the four-category weighting
+// (Density 0.30 / Weed 0.25 / Color 0.25 / Stress 0.20) so legacy rows without
+// a stored overall_score match the four displayed bars and the service report.
+function lawnOverall(row = {}) {
+  if (row.overall_score != null) return row.overall_score;
+  return Math.round(
+    (row.turf_density || 0) * 0.30 +
+    (row.weed_suppression || 0) * 0.25 +
+    (row.color_health || 0) * 0.25 +
+    lawnStressDamage(row) * 0.20
+  );
+}
+
 function formatScore(row) {
   return {
     assessmentId: row.id,
@@ -54,10 +67,7 @@ function formatScore(row) {
     stressDamage: lawnStressDamage(row),
     fungusControl: row.fungus_control,
     thatchScore: row.thatch_level,
-    overallScore: row.overall_score || Math.round(
-      (row.turf_density + row.weed_suppression + row.fungus_control +
-        (row.color_health || 0) + (row.thatch_level || 0)) / 5
-    ),
+    overallScore: lawnOverall(row),
     season: row.season,
     observations: row.observations,
     aiSummary: row.ai_summary || null,
@@ -374,10 +384,7 @@ router.get('/:customerId', async (req, res, next) => {
       const latestBest = latestPhotos.find(p => p.is_best_photo) || latestPhotos[0];
       const initialBest = initialPhotos[0] || null;
 
-      const calcOverall = (a) => a.overall_score || Math.round(
-        (a.turf_density + a.weed_suppression + a.fungus_control +
-          (a.color_health || 0) + (a.thatch_level || 0)) / 5
-      );
+      const calcOverall = (a) => lawnOverall(a);
 
       beforeAfter = {
         before: {
@@ -416,10 +423,7 @@ router.get('/:customerId', async (req, res, next) => {
       stressDamage: lawnStressDamage(a),
       fungusControl: a.fungus_control,
       thatchLevel: a.thatch_level,
-      overallScore: a.overall_score || Math.round(
-        (a.turf_density + a.weed_suppression + a.fungus_control +
-          (a.color_health || 0) + (a.thatch_level || 0)) / 5
-      ),
+      overallScore: lawnOverall(a),
       season: a.season,
     }));
 

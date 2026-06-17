@@ -338,6 +338,14 @@ function mapToDisplayScores(composite) {
     // drought/mechanical/thatch). fungus_control + thatch_level stay populated
     // above so the Lawn Diagnostic tool, trends, and snapshot are untouched.
     stress_damage: computeStressDamageDisplay(composite),
+    // The insect/drought/mechanical sub-scores aren't stored as their own
+    // columns, so persist them here. /confirm uses them to recompute
+    // stress_damage from the tech-corrected fungus + thatch on save.
+    stress_components: {
+      insect: clamp(SEVERITY_DISPLAY[composite.insect_damage] ?? 95),
+      drought: clamp(SEVERITY_DISPLAY[composite.drought_stress] ?? 95),
+      mechanical: clamp(SEVERITY_DISPLAY[composite.mechanical_damage] ?? 95),
+    },
     overwatering_signal: !!composite.overwatering_signal,
     observations: composite.observations || '',
   };

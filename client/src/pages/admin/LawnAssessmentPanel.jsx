@@ -1053,10 +1053,15 @@ export default function LawnAssessmentPanel() {
               }}
             >
               {[
-                { key: "turf_density", label: "Density / Coverage" },
-                { key: "weed_suppression", label: "Weed Cleanliness" },
-                { key: "color_health", label: "Color / Nutrients" },
-                { key: "stress_damage", label: "Stress / Damage" },
+                // Tech review stays granular so the tech can correct the
+                // underlying signals that still drive snapshot findings
+                // (disease/thatch) and tech calibration. Customers see the
+                // four consolidated categories on the report/portal.
+                { key: "turf_density", label: "Turf Density" },
+                { key: "weed_suppression", label: "Weed Suppression" },
+                { key: "color_health", label: "Color Health" },
+                { key: "fungus_control", label: "Fungus Control" },
+                { key: "thatch_level", label: "Thatch Level" },
               ].map((m) => {
                 const aiVal = result.adjustedScores?.[m.key] ?? result.displayScores?.[m.key] ?? 0;
                 const techVal = techScores?.[m.key] ?? aiVal;
@@ -1439,18 +1444,17 @@ export default function LawnAssessmentPanel() {
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "repeat(4, 1fr)",
+                    gridTemplateColumns: "repeat(5, 1fr)",
                     gap: isMobile ? 4 : 12,
                     fontSize: 12,
                   }}
                 >
                   {[
-                    ["Density", a.turf_density],
+                    ["Turf", a.turf_density],
                     ["Weed", a.weed_suppression],
                     ["Color", a.color_health],
-                    // Stress/Damage folds in fungus + thatch; pre-stress_damage
-                    // rows fall back to the worst of those two legacy signals.
-                    ["Stress", a.stress_damage ?? Math.min(a.fungus_control ?? 100, a.thatch_level ?? 100)],
+                    ["Fungus", a.fungus_control],
+                    ["Thatch", a.thatch_level],
                   ].map(([label, val]) => (
                     <div
                       key={label}

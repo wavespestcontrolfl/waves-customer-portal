@@ -999,8 +999,22 @@ router.post('/confirm', async (req, res, next) => {
       color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
       fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
       thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
-      stress_damage: scoreValue(adjustedScores?.stress_damage, assessment.stress_damage),
     };
+    // Recompute Stress/Damage from the FINAL (possibly tech-corrected) fungus +
+    // thatch plus the AI insect/drought/mechanical floor persisted at /assess.
+    // This reflects tech corrections to the underlying signals and derives a
+    // value for pre-stress_damage rows (worst of fungus/thatch) — never 0.
+    {
+      const fl = (v) => (Number.isFinite(Number(v)) ? Number(v) : 95);
+      const aiStress = parseJsonObject(assessment.adjusted_scores, {})?.stress_components || {};
+      finalScores.stress_damage = Math.min(
+        Number(finalScores.fungus_control),
+        Number(finalScores.thatch_level),
+        fl(aiStress.insect),
+        fl(aiStress.drought),
+        fl(aiStress.mechanical),
+      );
+    }
 
     const updateData = {
       confirmed_by_tech: true,

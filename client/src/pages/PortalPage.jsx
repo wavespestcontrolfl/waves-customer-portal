@@ -7057,8 +7057,8 @@ function MyPlanTab({ customer }) {
                             <span style={{ display: 'block', fontSize: 16, fontWeight: 850, color: B.blueDeeper }}>{svc.name}</span>
                             <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
-                              const avg = Math.round((lawnHealth.scores.turfDensity + lawnHealth.scores.weedSuppression + lawnHealth.scores.colorHealth + lawnHealth.scores.stressDamage) / 4);
-                              const initialAvg = Math.round((lawnHealth.initialScores.turfDensity + lawnHealth.initialScores.weedSuppression + lawnHealth.initialScores.colorHealth + lawnHealth.initialScores.stressDamage) / 4);
+                              const avg = Math.round(lawnHealth.scores.overallScore);
+                              const initialAvg = Math.round(lawnHealth.initialScores.overallScore);
                               const improving = avg >= initialAvg;
                               return (
                                 <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: improving ? B.green : B.orange, fontWeight: 800 }}>

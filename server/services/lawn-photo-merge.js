@@ -62,6 +62,22 @@ function majorityVote(values, fallback = null) {
   return best;
 }
 
+// Worst-severity selection across photos for the stress signals. Unlike the
+// majority vote, a single trouble-spot photo with severe damage must win —
+// Stress/Damage is defined as the worst signal, so a localized severe insect/
+// drought/mechanical reading can't be averaged away by two healthy overviews.
+const SEVERITY_RANK = { none: 0, minor: 1, moderate: 2, severe: 3 };
+function worstSeverity(values, fallback = null) {
+  let worst = fallback;
+  let worstRank = -1;
+  for (const v of (Array.isArray(values) ? values : [])) {
+    const r = SEVERITY_RANK[v];
+    if (r == null) continue;
+    if (r > worstRank) { worstRank = r; worst = v; }
+  }
+  return worst;
+}
+
 // Merge per-photo composite results into one assessment composite. A single
 // photo is returned as-is (it already carries the Claude/Gemini overwatering_signal
 // + single-voice observations from averageScores). For 2+ photos: average the
@@ -91,9 +107,10 @@ function mergePhotoComposites(validResults = []) {
     results.map(r => r.composite.thatch_visibility),
     results[0].composite.thatch_visibility,
   );
-  // Same majority-vote treatment for the stress signals that feed Stress/Damage.
+  // Worst-stressor (not majority) for the signals that feed Stress/Damage, so a
+  // localized severe spot in one photo survives the merge.
   for (const field of ['insect_damage', 'drought_stress', 'mechanical_damage']) {
-    merged[field] = majorityVote(
+    merged[field] = worstSeverity(
       results.map(r => r.composite[field]),
       results[0].composite[field],
     );
@@ -106,4 +123,4 @@ function mergePhotoComposites(validResults = []) {
   return merged;
 }
 
-module.exports = { withConcurrency, majorityVote, mergePhotoComposites };
+module.exports = { withConcurrency, majorityVote, worstSeverity, mergePhotoComposites };
