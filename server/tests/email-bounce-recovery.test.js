@@ -390,9 +390,17 @@ describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
     db.mockImplementation(ownerDb({}));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(false);
   });
-  test('customer recovery does NOT consult leads/estimates', async () => {
-    // Only a lead/estimate row owns it, but this is a customer recovery → allowed.
-    db.mockImplementation(ownerDb({ leads: [{ id: 'l1' }], estimates: [{ id: 'e1' }] }));
+  test('customer recovery: blocks when address is on another party\'s estimate/lead', async () => {
+    // A prospect estimate (no customer_id) holds the corrected address → other party.
+    db.mockImplementation(ownerDb({ estimates: [{ customer_id: null }] }));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
+    // An estimate owned by a DIFFERENT customer → other party.
+    db.mockImplementation(ownerDb({ estimates: [{ customer_id: 'c2' }] }));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
+  });
+  test('customer recovery: allows when the matching estimate/lead is the SAME customer', async () => {
+    // The customer's own prior estimate + lead (post-conversion) must not over-block.
+    db.mockImplementation(ownerDb({ estimates: [{ customer_id: 'c1' }], leads: [{ customer_id: 'c1' }] }));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
   });
 });

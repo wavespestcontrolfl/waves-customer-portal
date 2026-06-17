@@ -223,15 +223,21 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
 }
 
 /**
- * Would re-sending to the corrected address leak one customer's mail to another?
- * True when the corrected address is on file for a customer OTHER than the
- * bounced message's own customer. When the bounced message has no resolvable
- * customer (a lead), ANY existing customer owning the address blocks the send,
- * since we can't prove it's the same person.
+ * Would re-sending to the corrected address leak one party's mail to another?
+ * True when the corrected address is on file for a customer/lead/estimate that
+ * is NOT provably the same entity as the recovery's subject. Checked across all
+ * three tables regardless of whether the bounce resolved to a customer — a
+ * customer's corrected address sitting on an unrelated prospect's estimate/lead
+ * is just as much a leak. Same-entity records are positively excluded by
+ * customer_id so legit lead→customer conversions don't over-block.
  */
 async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
   const email = String(correctedEmail || '').trim().toLowerCase();
   if (!email) return false;
+  const own = String(ownCustomerId || '');
+  // A row is "another party" unless it is positively tied to our own customer.
+  // With no own customer (lead recovery) we can't disambiguate, so any match counts.
+  const isOther = (rowCustomerId) => !own || String(rowCustomerId || '') !== own;
   // Fail CLOSED on lookup error: if we can't verify the address isn't owned by
   // someone else, treat it as owned so recovery routes to manual, never a
   // privacy-leaking auto-resend.
@@ -241,18 +247,15 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
         for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
       })
       .select('id');
-    if (customerRows.some((r) => String(r.id) !== String(ownCustomerId || ''))) return true;
+    if (customerRows.some((r) => String(r.id) !== own)) return true;
 
-    // No resolvable owning customer (a lead/estimate send: recipientType 'lead',
-    // recipientId null). The corrected address matching ANY lead or estimate
-    // record is a cross-prospect collision we can't disambiguate — fail closed to
-    // manual recovery rather than risk replaying a quote to a different prospect.
-    if (!ownCustomerId) {
-      const leadOwned = await db('leads').whereRaw('LOWER(email) = ?', [email]).first('id');
-      if (leadOwned) return true;
-      const estimateOwned = await db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).first('id');
-      if (estimateOwned) return true;
-    }
+    // Estimates / leads carry a customer_id link; a record not tied to our own
+    // customer (incl. prospect rows with no customer_id) is another party.
+    const estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).select('customer_id');
+    if (estRows.some((r) => isOther(r.customer_id))) return true;
+
+    const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
+    if (leadRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
     logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
     return true;
