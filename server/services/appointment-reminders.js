@@ -488,6 +488,103 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
 const AppointmentReminders = {
 
   /**
+   * Durably register a reminder row for a freshly-created visit using the
+   * caller's transaction (`conn`), so the reminder row commits atomically with
+   * the visit and never depends on a later backfill/sweep to exist. No
+   * confirmation SMS is sent (these are system-seeded visits, not customer
+   * bookings) — confirmation_sent is marked true ("not applicable") so the
+   * 72h/24h reminder pass in checkAndSendReminders() still picks the row up.
+   * Idempotent per scheduled_service_id. Callers should run this inside a
+   * SAVEPOINT (nested trx) and swallow failures so a reminder hiccup can never
+   * roll back the visit/payment it rides with. Unlike registerAppointment() this
+   * takes the caller's conn rather than opening its own transaction.
+   */
+  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source }) {
+    if (!conn || !scheduledServiceId || !customerId) return null;
+    const apptTime = parseETDateTime(appointmentTime);
+    if (isNaN(apptTime.getTime())) return null;
+    const now = new Date();
+    const serviceLabel = smsServiceLabelStored(serviceType) || serviceType || null;
+    const reminderSource = source || 'system_seed';
+
+    // Serialize against concurrent registrations for the same customer+time
+    // (mirrors registerAppointment) so the same-time check below can't race.
+    await conn.raw('select pg_advisory_xact_lock(hashtext(?))', [
+      `appointment-reminder:${customerId}:${apptTime.toISOString()}`,
+    ]);
+
+    // Idempotent per scheduled_service_id.
+    const existing = await conn('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id');
+    if (existing) return existing;
+
+    // Same-customer/same-time de-dup — windowless seeds all default to 08:00, so
+    // a seed can collide with another service's reminder on the same date. Merge
+    // the label into the existing row and insert THIS one fully suppressed (all
+    // flags sent) so checkAndSendReminders() never sends two texts for one slot.
+    const sameAppointment = await conn('appointment_reminders')
+      .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false })
+      .orderBy([
+        { column: 'reminder_72h_sent', order: 'asc' },
+        { column: 'reminder_24h_sent', order: 'asc' },
+        { column: 'created_at', order: 'asc' },
+      ])
+      .first();
+    if (sameAppointment) {
+      const merged = mergeServiceLabels(sameAppointment.service_type, serviceLabel);
+      if (merged !== sameAppointment.service_type) {
+        await conn('appointment_reminders')
+          .where({ id: sameAppointment.id })
+          .update({ service_type: merged, updated_at: now });
+      }
+      const [suppressed] = await conn('appointment_reminders')
+        .insert({
+          scheduled_service_id: scheduledServiceId,
+          customer_id: customerId,
+          appointment_time: apptTime,
+          service_type: merged,
+          source: reminderSource,
+          confirmation_sent: true,
+          confirmation_sent_at: now,
+          reminder_72h_sent: true,
+          reminder_72h_sent_at: now,
+          reminder_24h_sent: true,
+          reminder_24h_sent_at: now,
+          cancelled: false,
+        })
+        .returning('*');
+      return suppressed;
+    }
+
+    // Pre-mark any reminder window that's already unreachable for this seed —
+    // annual-prepay terms often start today and windowless seeds default to 08:00,
+    // so the first visit can be past/too-close. Without this the cron would keep
+    // re-reading the row every 15 min for a window it can never satisfy. 72h band
+    // is (24.25h, 72.25h]; the 24h reminder can still fire for any future time.
+    const hoursUntil = (apptTime.getTime() - now.getTime()) / 3600000;
+    const seventyTwoMissed = hoursUntil <= 24.25;
+    const twentyFourMissed = hoursUntil <= 0;
+    const [record] = await conn('appointment_reminders')
+      .insert({
+        scheduled_service_id: scheduledServiceId,
+        customer_id: customerId,
+        appointment_time: apptTime,
+        service_type: serviceLabel,
+        source: reminderSource,
+        confirmation_sent: true,
+        confirmation_sent_at: now,
+        reminder_72h_sent: seventyTwoMissed,
+        reminder_72h_sent_at: seventyTwoMissed ? now : null,
+        reminder_24h_sent: twentyFourMissed,
+        reminder_24h_sent_at: twentyFourMissed ? now : null,
+        cancelled: false,
+      })
+      .returning('*');
+    return record;
+  },
+
+  /**
    * Register an appointment for reminders.
    * Sources: 'booking_new', 'admin_manual' => insert + send confirmation (default)
    *          any other source              => insert only (no confirmation)
