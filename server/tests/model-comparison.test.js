@@ -13,6 +13,7 @@ const {
   flattenLeaves,
   shadowCompare,
 } = require('../services/model-comparison-log');
+const { WORKHORSE } = require('../config/models');
 
 beforeEach(() => {
   mockInsert.mockClear();
@@ -20,13 +21,22 @@ beforeEach(() => {
 });
 
 describe('agreement helpers (pure)', () => {
-  test('extractionAgreement: identical, with meta.* ignored', () => {
+  test('extractionAgreement: identical, with server provenance ignored', () => {
     const live = { customer: { first_name: 'Sam', phone: '+19410001111' }, meta: { extraction_model: 'gemini-2.5-pro' } };
     const cand = { customer: { first_name: 'Sam', phone: '+19410001111' }, meta: { extraction_model: 'gpt-5.5' } };
     const r = extractionAgreement(live, cand);
     expect(r.level).toBe('identical');
     expect(r.score).toBe(100);
     expect(r.divergence).toBeNull();
+  });
+
+  test('extractionAgreement: routing-critical meta content (is_spam) IS compared', () => {
+    // is_spam is model-authored content, not provenance — disagreement must be caught.
+    const live = { meta: { is_spam: false, extraction_model: 'gemini-2.5-pro' } };
+    const cand = { meta: { is_spam: true, extraction_model: 'gpt-5.5' } };
+    const r = extractionAgreement(live, cand);
+    expect(r.divergence).toContain('meta.is_spam');
+    expect(r.level).toBe('divergent');
   });
 
   test('extractionAgreement: flags a divergent field', () => {
@@ -53,7 +63,7 @@ describe('agreement helpers (pure)', () => {
 describe('shadowCompare (fail-closed, non-blocking)', () => {
   const base = {
     featureKey: 'estimate_assistant',
-    live: { provider: 'anthropic', model: 'claude-opus-4-8', output: 'hi' },
+    live: { provider: 'anthropic', model: WORKHORSE, output: 'hi' },
     candidateRoute: { provider: 'openai', model: 'gpt-5.5' },
     candidatePayload: { text: 'q' },
     compare: textAgreement,

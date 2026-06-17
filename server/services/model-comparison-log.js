@@ -44,9 +44,22 @@ function bucket(score) {
   return 'divergent';
 }
 
+// Server-owned provenance leaves that ALWAYS differ between providers (model id,
+// timestamps, run id) and must not count as disagreement. Everything else — including
+// model-authored meta.* content like is_spam / is_voicemail / call_summary, which is
+// routing/customer-critical — IS compared. (Matches the fields finalizeV2Extraction
+// injects in call-recording-processor.js.)
+const PROVENANCE_PATHS = [
+  'meta.call_id',
+  'meta.schema_version',
+  'meta.extracted_at',
+  'meta.extraction_model',
+  'meta.extraction_prompt_version',
+];
+
 // Structured agreement: fraction of leaf paths (union of both) whose values are equal.
 // Coarse by design — a triage signal for later review, not a verdict.
-function extractionAgreement(live, candidate, { ignorePrefixes = ['meta'] } = {}) {
+function extractionAgreement(live, candidate, { ignorePrefixes = PROVENANCE_PATHS } = {}) {
   const a = flattenLeaves(live, ignorePrefixes);
   const b = flattenLeaves(candidate, ignorePrefixes);
   const paths = new Set([...a.keys(), ...b.keys()]);
