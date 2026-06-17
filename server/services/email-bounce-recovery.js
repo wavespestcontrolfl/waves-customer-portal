@@ -136,7 +136,7 @@ function recoveryIdFromMessage(message) {
  * whether the corrected address is itself suppressed, decide what to do.
  * Extracted so the gating logic is unit-testable without a DB.
  */
-function decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, min = 'high' }) {
+function decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, addressOnFile = true, min = 'high' }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
     return { action: 'skip', status: 'skipped_low_confidence' };
@@ -150,6 +150,10 @@ function decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachme
   // The original carried an attachment (invoice/report PDF) that isn't in the
   // stored snapshot — a replay would reference a missing file. Route to manual.
   if (hasAttachments) return { action: 'skip', status: 'has_attachments' };
+  // Final gate: the bounced address is no longer on file (an operator already
+  // changed/corrected the record). The bounce is for a stale address — don't
+  // auto-resend a correction of it; route to manual.
+  if (!addressOnFile) return { action: 'skip', status: 'address_no_longer_on_file' };
   return { action: 'send', status: 'resent' };
 }
 
@@ -220,6 +224,34 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
     (f) => String(customer[f] || '').trim().toLowerCase() === bouncedEmail,
   ) || null;
   return { customerId: customer.id, field };
+}
+
+/**
+ * Is the BOUNCED address still on file? When a bounce arrives late and an operator
+ * has already changed/corrected the address, the bounce is for a stale address and
+ * we must not auto-resend a correction of it. True if a customer column still holds
+ * it (match.field) or a source estimate/lead does (scoped to the customer when
+ * known). Fails OPEN on a read error: this is a staleness check, not a privacy one,
+ * and the suppression/ownership guards (which fail closed) still gate the send.
+ */
+async function bouncedAddressStillOnFile(bouncedEmail, match) {
+  if (match?.field) return true;
+  const email = String(bouncedEmail || '').trim().toLowerCase();
+  if (!email) return false;
+  try {
+    const estQ = db('estimates').whereRaw('LOWER(customer_email) = ?', [email]);
+    const leadQ = db('leads').whereRaw('LOWER(email) = ?', [email]);
+    if (match?.customerId) {
+      estQ.where({ customer_id: match.customerId });
+      leadQ.where({ customer_id: match.customerId });
+    }
+    if (await estQ.first('id')) return true;
+    if (await leadQ.first('id')) return true;
+  } catch (err) {
+    logger.warn(`[bounce-recovery] on-file check failed — proceeding: ${err.message}`);
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -354,11 +386,22 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       .catch(() => {});
     return { ok: true, messageRowId: message.id };
   } catch (err) {
-    await db('email_messages').where({ id: message.id }).update({
-      status: 'failed',
-      error_message: String(err.message || err).slice(0, 1000),
-      updated_at: new Date(),
-    }).catch(() => {});
+    // The send POST failed — but SendGrid may have accepted it and a webhook
+    // (via custom_args.email_message_id) already resolved the row before this
+    // catch ran (lost-response case). If so, don't regress it or report failure.
+    const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
+    const status = String(current?.status || '').toLowerCase();
+    if (current && status !== 'queued' && status !== 'failed') {
+      return { ok: true, messageRowId: message.id, reused: true };
+    }
+    await db('email_messages')
+      .where({ id: message.id, status: 'queued' })
+      .update({
+        status: 'failed',
+        error_message: String(err.message || err).slice(0, 1000),
+        updated_at: new Date(),
+      })
+      .catch(() => {});
     return { ok: false, error: String(err.message || err) };
   }
 }
@@ -401,11 +444,12 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
     const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
     const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
+    const addressOnFile = candidate ? await bouncedAddressStillOnFile(bouncedEmail, match) : true;
     // Fail closed: the stored flag OR a known attachment-bearing template (covers
     // pre-flag rows and any direct inserter that didn't stamp has_attachments).
     const hasAttachments = !!bouncedMessage.has_attachments
       || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
-    const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, min: minConfidence() });
+    const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, addressOnFile, min: minConfidence() });
 
     const baseUpdate = {
       corrected_email: candidate?.corrected || null,
@@ -421,7 +465,7 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // Every skip means a service/transactional email did NOT reach the
       // customer — nudge a human to fix the address (and show the suggestion
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
-      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other', 'has_attachments'].includes(decision.status)) {
+      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other', 'has_attachments', 'address_no_longer_on_file'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
       }
       logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
@@ -549,26 +593,43 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     //    pre-send ownership guard already verified the corrected address is
     //    unowned. Only rows still holding the bad address are touched.
     if (correctedEmail && bouncedEmail) {
-      const estQuery = db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]);
-      const leadQuery = db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]);
       if (rec.customer_id) {
-        estQuery.where({ customer_id: rec.customer_id });
-        leadQuery.where({ customer_id: rec.customer_id });
+        // Customer-owned: scope to this customer's rows — no cross-prospect risk.
+        const estAffected = await db('estimates')
+          .whereRaw('LOWER(customer_email) = ?', [bouncedEmail])
+          .where({ customer_id: rec.customer_id })
+          .update({ customer_email: correctedEmail, updated_at: new Date() })
+          .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
+        const leadAffected = await db('leads')
+          .whereRaw('LOWER(email) = ?', [bouncedEmail])
+          .where({ customer_id: rec.customer_id })
+          .update({ email: correctedEmail, updated_at: new Date() })
+          .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
+        if (Number(estAffected) > 0) updatedFields.push('estimates.customer_email');
+        if (Number(leadAffected) > 0) updatedFields.push('leads.email');
+      } else {
+        // No-customer (lead/prospect): no source id to scope by, so only rewrite
+        // when the bounced address uniquely identifies ONE record — otherwise two
+        // unrelated prospects could share the typo and we'd corrupt the other.
+        const estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]).select('id').catch(() => []);
+        if (estRows.length === 1) {
+          const ok = await db('estimates').where({ id: estRows[0].id })
+            .update({ customer_email: correctedEmail, updated_at: new Date() })
+            .catch((err) => { logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`); return 0; });
+          if (Number(ok) > 0) updatedFields.push('estimates.customer_email');
+        } else if (estRows.length > 1) {
+          logger.warn(`[bounce-recovery] ambiguous estimate source (${estRows.length} rows share the typo) — left unchanged`);
+        }
+        const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]).select('id').catch(() => []);
+        if (leadRows.length === 1) {
+          const ok = await db('leads').where({ id: leadRows[0].id })
+            .update({ email: correctedEmail, updated_at: new Date() })
+            .catch((err) => { logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`); return 0; });
+          if (Number(ok) > 0) updatedFields.push('leads.email');
+        } else if (leadRows.length > 1) {
+          logger.warn(`[bounce-recovery] ambiguous lead source (${leadRows.length} rows share the typo) — left unchanged`);
+        }
       }
-      const estAffected = await estQuery
-        .update({ customer_email: correctedEmail, updated_at: new Date() })
-        .catch((err) => {
-          logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`);
-          return 0;
-        });
-      const leadAffected = await leadQuery
-        .update({ email: correctedEmail, updated_at: new Date() })
-        .catch((err) => {
-          logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`);
-          return 0;
-        });
-      if (Number(estAffected) > 0) updatedFields.push('estimates.customer_email');
-      if (Number(leadAffected) > 0) updatedFields.push('leads.email');
     }
 
     const recordUpdated = updatedFields.length > 0;
@@ -634,6 +695,7 @@ const UNRECOVERABLE_REASONS = {
   corrected_suppressed: 'the likely correction is on the suppression list',
   corrected_owned_by_other: 'the likely correction already belongs to another customer',
   has_attachments: 'it includes an attachment (e.g. an invoice or report PDF) that cannot be auto-resent',
+  address_no_longer_on_file: 'the bounced address is no longer on the record (it was already changed)',
   send_failed: 're-sending to the corrected address failed',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',

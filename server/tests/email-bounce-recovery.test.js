@@ -83,6 +83,10 @@ describe('decideRecoveryAction', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, hasAttachments: true, min: 'high' }))
       .toEqual({ action: 'skip', status: 'has_attachments' });
   });
+  test('skips when the bounced address is no longer on file', () => {
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, addressOnFile: false, min: 'high' }))
+      .toEqual({ action: 'skip', status: 'address_no_longer_on_file' });
+  });
   test('medium threshold accepts medium candidates', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'medium' }, suppressed: false, min: 'medium' }))
       .toEqual({ action: 'send', status: 'resent' });
@@ -194,7 +198,8 @@ describe('attemptRecovery codex-fix behaviors', () => {
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);
     sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_1' });
     const mockDb = orderedDb({
-      first: () => null,
+      // estimates/leads return a row so the "bounced address still on file" gate passes.
+      first: (table) => ((table === 'estimates' || table === 'leads') ? { id: 'src' } : null),
       returning: (table) => {
         if (table === 'email_bounce_recoveries') return [{ id: 'rec1' }];
         if (table === 'email_messages') return [{ id: 'msg1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }];
@@ -444,10 +449,15 @@ describe('safety checks fail closed on DB error (codex round 6)', () => {
 });
 
 // Lead/estimate recoveries must fix the SOURCE address on delivery, not just resend (codex round 7).
-function commitDb({ rec, estUpdate = 0, leadUpdate = 0 }) {
+// estRows/leadRows feed the no-customer `select('id')` uniqueness path (round 11).
+function commitDb({ rec, estUpdate = 1, leadUpdate = 1, estRows = [], leadRows = [] }) {
   const fn = jest.fn((table) => {
     const chain = {};
+    const rowsFor = table === 'estimates' ? estRows : table === 'leads' ? leadRows : [];
     for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'select']) chain[m] = jest.fn(() => chain);
+    // Thenable so `await db(t).whereRaw(...).select('id')` resolves to rows.
+    chain.then = (res, rej) => Promise.resolve(rowsFor).then(res, rej);
+    chain.catch = (rej) => Promise.resolve(rowsFor).catch(rej);
     chain.first = jest.fn(() => Promise.resolve(table === 'email_bounce_recoveries' ? rec : null));
     chain.update = jest.fn(() => Promise.resolve(table === 'estimates' ? estUpdate : table === 'leads' ? leadUpdate : 1));
     chain.returning = jest.fn(() => Promise.resolve([]));
@@ -469,10 +479,24 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
       corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
-    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0 }));
+    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0, estRows: [{ id: 'e1' }], leadRows: [] }));
     await recovery.commitRecoveryOnDelivery({ id: 'msg9', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
+  });
+
+  test('no-customer recovery does NOT rewrite an AMBIGUOUS source (codex round 11)', async () => {
+    const rec = {
+      id: 'rec11', customer_id: null, customer_email_field: null,
+      corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    // Two estimates share the same typo → ambiguous, must not corrupt either.
+    db.mockImplementation(commitDb({ rec, estRows: [{ id: 'e1' }, { id: 'e2' }], leadRows: [] }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg11', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    // Committed (resend delivered) but no source field was rewritten.
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).not.toContain('estimates.customer_email');
   });
 
   test('also fixes the estimate source for a CUSTOMER-owned recovery (codex round 9)', async () => {

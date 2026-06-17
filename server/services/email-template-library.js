@@ -869,6 +869,10 @@ async function sendTemplate({
       categories: allCategories,
       asmGroupId,
       attachments,
+      // Echoed on every webhook event so bounce recovery can resolve this row
+      // even if a hard bounce arrives before provider_message_id is written (or
+      // SendGrid returns no X-Message-Id). See email-bounce-recovery.js.
+      customArgs: { email_message_id: message.id },
     });
     const [updated] = await db('email_messages').where({ id: message.id }).update({
       status: 'sent',

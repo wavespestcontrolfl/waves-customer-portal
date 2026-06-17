@@ -246,6 +246,9 @@ async function sendLegacyServiceReportEmail({
       categories: ['service_report_v1'],
       asmGroupId: sendgrid.serviceGroupId(),
       attachments,
+      // Echoed on every webhook event so bounce recovery can resolve this row
+      // even if a hard bounce races the provider_message_id write below.
+      ...(message?.id ? { customArgs: { email_message_id: message.id } } : {}),
     });
     if (ledgerAvailable && message?.id) {
       const rows = await db('email_messages').where({ id: message.id }).update({
