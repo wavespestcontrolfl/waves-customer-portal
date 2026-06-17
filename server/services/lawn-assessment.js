@@ -23,12 +23,13 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
-// Gemini vision scorer model. Flag-gated upgrade to the registry's best
-// (gemini-3.5-flash); default stays gemini-2.5-flash until GATE_GEMINI_VISION_PRIMARY
-// is flipped. Fan-out/averaging logic is unchanged — only the model ID moves.
-const GEMINI_VISION_MODEL = process.env.GATE_GEMINI_VISION_PRIMARY === 'true'
-  ? MODELS.GEMINI_VISION_BEST
-  : 'gemini-2.5-flash';
+// Gemini vision scorer model — live default is the registry's best
+// (gemini-3.5-flash); override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
+// On any miss (HTTP/parse/empty) callGeminiVision retries the prior model
+// (gemini-2.5-flash) so a live-model entitlement/availability issue never costs
+// us the Gemini scorer. Fan-out/averaging logic is unchanged.
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
+const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
 
 const VISION_PROMPT = `You are a lawn health assessment tool for a professional lawn care company in Southwest Florida. Analyze the provided lawn photo and return ONLY a JSON object with the following scores. Base your analysis on what is visible in the photo. The primary turf type in this region is St. Augustine grass.
 
@@ -133,43 +134,58 @@ async function callClaudeVision(base64Image, mimeType) {
   }
 }
 
+// Single attempt against one Gemini model. Returns the parsed scores, or null on
+// any miss (HTTP error / empty output / unparseable JSON) so the caller can retry.
+async function geminiVisionAttempt(model, base64Image, mimeType) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: mimeType, data: base64Image } },
+          { text: VISION_PROMPT },
+        ],
+      }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+    }),
+  });
+
+  if (!response.ok) {
+    logger.error(`Lawn assessment Gemini API ${response.status} (${model}): ${response.statusText}`);
+    return null;
+  }
+
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) return null;
+
+  const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+  parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
+  return parsed;
+}
+
 async function callGeminiVision(base64Image, mimeType) {
   if (!GEMINI_KEY) return null;
 
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${GEMINI_KEY}`;
+  // Live model first, then the prior model on any miss (skip the retry if an
+  // override has pinned both to the same id).
+  const models = GEMINI_VISION_FALLBACK_MODEL && GEMINI_VISION_FALLBACK_MODEL !== GEMINI_VISION_MODEL
+    ? [GEMINI_VISION_MODEL, GEMINI_VISION_FALLBACK_MODEL]
+    : [GEMINI_VISION_MODEL];
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inline_data: { mime_type: mimeType, data: base64Image } },
-            { text: VISION_PROMPT },
-          ],
-        }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
-      }),
-    });
-
-    if (!response.ok) {
-      logger.error(`Lawn assessment Gemini API ${response.status}: ${response.statusText}`);
-      return null;
+  for (const model of models) {
+    try {
+      const parsed = await geminiVisionAttempt(model, base64Image, mimeType);
+      if (parsed) return parsed;
+    } catch (err) {
+      logger.error(`Lawn assessment Gemini vision failed (${model}): ${err.message}`);
     }
-
-    const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) return null;
-
-    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
-    parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
-    return parsed;
-  } catch (err) {
-    logger.error(`Lawn assessment Gemini vision failed: ${err.message}`);
-    return null;
   }
+  return null;
 }
 
 // ── Core service methods ────────────────────────────────────────

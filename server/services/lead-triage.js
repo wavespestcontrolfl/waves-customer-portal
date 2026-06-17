@@ -12,9 +12,8 @@ function mapTriage(parsed) {
 }
 
 /**
- * AI-powered lead triage. Defaults to Claude (FLAGSHIP). When GATE_OPENAI_LEAD_TRIAGE
- * is on, tries the cross-provider route first and falls back to Claude on any miss —
- * so flag-off behavior is identical to before.
+ * AI-powered lead triage. Live model = GPT-5.5 (MODELS.ROUTES.leadClassify); on any
+ * miss it falls back to Claude (FLAGSHIP) so there is never a gap.
  * Extracts service interest, urgency, pest details, and generates a suggested SMS reply.
  */
 async function aiTriageLead({ name, phone, message, address, pageUrl, formName }) {
@@ -42,13 +41,13 @@ Return a JSON object with:
 
 Return ONLY valid JSON, no markdown.`;
 
-  // Optional cross-provider route (flag default off; falls back to Claude on any miss).
-  if (process.env.GATE_OPENAI_LEAD_TRIAGE === 'true') {
+  // Live model — GPT-5.5. On any miss, fall through to Claude below (never a gap).
+  {
     const r = await dispatch(MODELS.ROUTES.leadClassify, { text: prompt, jsonMode: true, maxTokens: 300 });
     if (r.ok && r.json) return mapTriage(r.json);
   }
 
-  // Default path — Claude (FLAGSHIP).
+  // Fallback — Claude (FLAGSHIP).
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
   try {

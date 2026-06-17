@@ -14,8 +14,6 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { callOpenAI } = require('./llm/call');
-const { recordModelComparison, extractionAgreement } = require('./model-comparison-log');
 const twilio = require('twilio');
 
 function capitalizeName(name) {
@@ -1347,54 +1345,6 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   return finalizeV2Extraction(rawText, { callId: opts.callId || null, extractionModel: GEMINI_EXTRACTION_MODEL });
 }
 
-// OpenAI shadow extractor — same prompt + schema + validation tail as the Gemini path,
-// via the shared llm/call dispatcher. Audit-only; output never feeds routing.
-async function extractCallDataV2OpenAI(transcription, callerPhone, opts = {}) {
-  if (!process.env.OPENAI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
-  const callDateET = etDateString(opts.callStartedAt || new Date());
-  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET);
-  const model = MODELS.ROUTES.callExtract.model;
-  const r = await callOpenAI({ model, text: prompt, jsonMode: false, maxTokens: 8192 });
-  if (!r.ok) return { status: 'parse_failed', extraction: null, errors: [{ message: r.reason }] };
-  return finalizeV2Extraction(r.text, { callId: opts.callId || null, extractionModel: model });
-}
-
-// Fire-and-forget: run the OpenAI candidate extraction and log it next to the live
-// Gemini extraction in ai_model_comparisons. Never throws, never feeds routing/TCPA.
-async function shadowCallExtraction({ transcription, callerPhone, call, liveExtraction }) {
-  try {
-    const startedAt = Date.now();
-    const candidate = await extractCallDataV2OpenAI(transcription, callerPhone, {
-      callStartedAt: call?.created_at,
-      callId: call?.id,
-    });
-    const candidateMs = Date.now() - startedAt;
-    const ok = candidate.status === 'valid' && !!candidate.extraction;
-    const agreement = ok
-      ? extractionAgreement(liveExtraction, candidate.extraction)
-      : { level: 'candidate_failed', score: 0, divergence: null };
-    await recordModelComparison({
-      featureKey: 'call_extraction',
-      entityType: 'call',
-      entityId: call?.id,
-      liveProvider: 'gemini',
-      liveModel: GEMINI_EXTRACTION_MODEL,
-      liveOutput: liveExtraction,
-      candidateProvider: MODELS.ROUTES.callExtract.provider,
-      candidateModel: MODELS.ROUTES.callExtract.model,
-      candidateOutput: candidate.extraction || null,
-      candidateMs,
-      candidateOk: ok,
-      candidateReason: ok ? null : candidate.status,
-      agreementLevel: agreement.level,
-      agreementScore: agreement.score,
-      divergence: agreement.divergence,
-    });
-  } catch (err) {
-    logger.error(`[call-proc-v2] OpenAI shadow failed for ${call?.id}: ${err.message}`);
-  }
-}
-
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
 async function generateLeadSynopsis(transcription) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
@@ -1715,20 +1665,6 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         });
       }
-    }
-
-    // ── OpenAI extraction shadow (GATE_SHADOW_CALLEXTRACT_OPENAI) ──
-    // Audit-only: logs the OpenAI candidate next to the live Gemini extraction in
-    // ai_model_comparisons. Fire-and-forget; NEVER feeds canAutoRoute / TCPA / routing.
-    if (CALL_EXTRACTION_V2_ENABLED
-        && process.env.GATE_SHADOW_CALLEXTRACT_OPENAI === 'true'
-        && v2Result?.status === 'valid' && v2Result.extraction) {
-      void shadowCallExtraction({
-        transcription,
-        callerPhone: contactPhone,
-        call,
-        liveExtraction: v2Result.extraction,
-      });
     }
 
     // Skip voicemail/spam
