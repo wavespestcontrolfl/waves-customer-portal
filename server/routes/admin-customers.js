@@ -649,6 +649,22 @@ const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_p
 // so hashtext(customerId) can't collide with locks taken elsewhere.
 const ANNUAL_PREPAY_LOCK_NS = 0x4150;
 
+// Statuses that still represent a binding annual-prepay commitment for overlap
+// checks: payment_pending / active / renewal_pending / renewed / switch_plan,
+// PLUS a renewal-LAPSED term (status='cancelled' with renewal_decision='cancel')
+// whose already-paid coverage runs through term_end — matching
+// AnnualPrepayRenewals.getActivelyCoveredCustomerIds. A refund sets
+// status='cancelled' with a NULL renewal_decision and is intentionally NOT
+// treated as overlapping (it re-enables a fresh prepay).
+function annualPrepayOverlapStatusClause() {
+  return function overlapStatus() {
+    this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+      .orWhere(function lapsedRenewalStillInTerm() {
+        this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+      });
+  };
+}
+
 // Acquire a per-customer advisory lock (released at txn commit/rollback) and
 // re-check for an overlapping annual-prepay term INSIDE the transaction. The
 // pre-flight check before the txn is a fast UX path only; without this guard two
@@ -660,7 +676,7 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
   if (allowOverlap === true) return;
   const activeTerm = await trx('annual_prepay_terms')
     .where({ customer_id: customerId })
-    .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+    .where(annualPrepayOverlapStatusClause())
     .orderBy('term_end', 'desc')
     .first();
   const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
@@ -2293,7 +2309,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
 
     const activeTerm = await db('annual_prepay_terms')
       .where({ customer_id: customer.id })
-      .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+      .where(annualPrepayOverlapStatusClause())
       .orderBy('term_end', 'desc')
       .first();
 
@@ -2463,7 +2479,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
     const activeTerm = await db('annual_prepay_terms')
       .where({ customer_id: customer.id })
-      .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+      .where(annualPrepayOverlapStatusClause())
       .orderBy('term_end', 'desc')
       .first();
 

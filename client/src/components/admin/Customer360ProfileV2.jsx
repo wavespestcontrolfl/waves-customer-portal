@@ -3171,14 +3171,16 @@ export default function Customer360ProfileV2({
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
   // What the profile shows/acts on: a truly active term, else a still-outstanding
   // (sent-but-unpaid) prepay invoice, else a renewal-decided term (renewed /
-  // switch_plan) whose paid window still covers today — all of which the server
+  // switch_plan) or a renewal-lapsed paid term (cancelled with a 'cancel'
+  // decision) whose paid window still covers today — all of which the server
   // overlap guard rejects with 409 — so the admin sees the current term instead
-  // of being offered a duplicate. Never falls through to an arbitrary
-  // (cancelled / refunded / expired) term.
+  // of being offered a duplicate. Never falls through to an arbitrary refunded /
+  // expired term.
   const displayedAnnualPrepayTerm = activeAnnualPrepayTerm
     || annualPrepayTerms.find((t) => t.status === 'payment_pending')
     || annualPrepayTerms.find((t) =>
-      ['renewed', 'switch_plan'].includes(t.status)
+      (['renewed', 'switch_plan'].includes(t.status)
+        || (t.status === 'cancelled' && t.renewalDecision === 'cancel'))
       && dateInputValue(t.termEnd) >= todayDateInput())
     || null;
 

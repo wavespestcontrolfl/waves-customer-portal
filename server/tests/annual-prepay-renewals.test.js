@@ -88,6 +88,14 @@ describe('annual prepay renewal helpers', () => {
     expect(_private.coverageCadenceDays('every_6_weeks')).toBe(42);
   });
 
+  test('caps coverage service labels to the scheduled_services.service_type width (100)', () => {
+    const longLabel = `${'A'.repeat(150)} Pest Control`;
+    const normalized = _private.normalizeCoverageServiceType(longLabel);
+    expect(normalized).toHaveLength(100);
+    expect(_private.normalizeCoverageServiceType('Quarterly Pest Control')).toBe('Quarterly Pest Control');
+    expect(_private.normalizeCoverageServiceType('   ')).toBeNull();
+  });
+
   test('maps supported customer notice offsets to term columns', () => {
     expect(_private.noticeColumnForDaysOut(30)).toBe('notice_30_sent_at');
     expect(_private.noticeColumnForDaysOut('15')).toBe('notice_15_sent_at');

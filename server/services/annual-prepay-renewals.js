@@ -116,7 +116,10 @@ function daysUntil(fromYmd, toYmd) {
 
 function normalizeCoverageServiceType(value) {
   const cleaned = String(value || '').trim().replace(/\s+/g, ' ');
-  return cleaned ? cleaned.slice(0, 120) : null;
+  // Cap to 100: this value is written verbatim into scheduled_services.service_type
+  // (varchar(100)) when coverage rows are seeded, so a longer label would fail
+  // activation with a Postgres "value too long" error.
+  return cleaned ? cleaned.slice(0, 100) : null;
 }
 
 function normalizeCoverageVisitCount(value) {
@@ -1306,6 +1309,7 @@ module.exports = {
     coverageCadenceMonths,
     coverageCadenceDays,
     inferCoverageCadence,
+    normalizeCoverageServiceType,
     normalizeCoverageVisitCount,
     defaultCoverageDurationMinutes,
     ensureCoverageRowsForTerm,
