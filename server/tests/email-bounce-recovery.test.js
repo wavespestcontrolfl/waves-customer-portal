@@ -468,4 +468,18 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
   });
+
+  test('also fixes the estimate source for a CUSTOMER-owned recovery (codex round 9)', async () => {
+    const rec = {
+      id: 'rec10', customer_id: 'c1', customer_email_field: 'email',
+      corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0 }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg10', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body).toContain('estimates.customer_email'); // source fixed, not just the customer row
+    expect(body).toContain('email');                    // customer column fixed too
+  });
 });

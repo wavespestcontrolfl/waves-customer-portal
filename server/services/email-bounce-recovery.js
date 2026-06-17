@@ -496,9 +496,10 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     const correctedEmail = String(rec.corrected_email || recoveryMessage.recipient_email_snapshot || '').trim().toLowerCase();
     const bouncedEmail = String(rec.bounced_email || '').trim().toLowerCase();
 
-    let recordUpdated = false;
-    let updatedField = null;
+    const updatedFields = [];
 
+    // 1. Customer record (primary email or service-contact column), when the
+    //    bounce resolved to a customer.
     if (rec.customer_id && rec.customer_email_field && correctedEmail
         && CUSTOMER_EMAIL_FIELDS.includes(rec.customer_email_field)) {
       const field = rec.customer_email_field;
@@ -530,35 +531,40 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
           logger.warn(`[bounce-recovery] customer ${field} overwrite failed: ${err.message}`);
           return 0;
         });
-      recordUpdated = Number(affected) > 0;
-      updatedField = recordUpdated ? field : null;
-    } else if (!rec.customer_id && correctedEmail && bouncedEmail) {
-      // Lead/estimate recovery (no customer record): fix the SOURCE address on the
-      // estimate(s)/lead(s) that held the bounced typo so estimate follow-ups
-      // (estimate-follow-up.js → est.customer_email) stop bouncing too. The
-      // pre-send ownership guard already verified the corrected address is on no
-      // other customer/lead/estimate, so this is safe. Only rows still holding the
-      // bad address are touched (won't clobber a human edit).
-      const estAffected = await db('estimates')
-        .whereRaw('LOWER(customer_email) = ?', [bouncedEmail])
+      if (Number(affected) > 0) updatedFields.push(field);
+    }
+
+    // 2. SOURCE estimate/lead rows that follow-ups read (estimate-follow-up.js →
+    //    est.customer_email). Runs for BOTH customer-owned and lead/prospect
+    //    recoveries, else a typo on a customer-owned estimate keeps bouncing.
+    //    Scope to our own customer when known; for no-customer recoveries the
+    //    pre-send ownership guard already verified the corrected address is
+    //    unowned. Only rows still holding the bad address are touched.
+    if (correctedEmail && bouncedEmail) {
+      const estQuery = db('estimates').whereRaw('LOWER(customer_email) = ?', [bouncedEmail]);
+      const leadQuery = db('leads').whereRaw('LOWER(email) = ?', [bouncedEmail]);
+      if (rec.customer_id) {
+        estQuery.where({ customer_id: rec.customer_id });
+        leadQuery.where({ customer_id: rec.customer_id });
+      }
+      const estAffected = await estQuery
         .update({ customer_email: correctedEmail, updated_at: new Date() })
         .catch((err) => {
           logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`);
           return 0;
         });
-      const leadAffected = await db('leads')
-        .whereRaw('LOWER(email) = ?', [bouncedEmail])
+      const leadAffected = await leadQuery
         .update({ email: correctedEmail, updated_at: new Date() })
         .catch((err) => {
           logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`);
           return 0;
         });
-      recordUpdated = Number(estAffected) > 0 || Number(leadAffected) > 0;
-      updatedField = [
-        Number(estAffected) > 0 ? 'estimates.customer_email' : null,
-        Number(leadAffected) > 0 ? 'leads.email' : null,
-      ].filter(Boolean).join('+') || null;
+      if (Number(estAffected) > 0) updatedFields.push('estimates.customer_email');
+      if (Number(leadAffected) > 0) updatedFields.push('leads.email');
     }
+
+    const recordUpdated = updatedFields.length > 0;
+    const updatedField = updatedFields.join('+') || null;
 
     await db('email_bounce_recoveries').where({ id: rec.id }).update({
       status: 'committed',
