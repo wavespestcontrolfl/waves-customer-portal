@@ -23,7 +23,7 @@ Three interfaces:
 - **Database:** PostgreSQL on Railway
 - **Payments:** Stripe (Payment Element — card/Apple Pay/Google Pay/ACH)
 - **SMS/Voice:** Twilio (Programmable Messaging, Voice with recording + transcription, Lookup)
-- **AI:** Anthropic Claude API. **Never hardcode model IDs** — import `FLAGSHIP` / `WORKHORSE` / `FAST` / `VISION` from `server/config/models.js`. The reasoning tiers (FLAGSHIP / WORKHORSE / FAST) currently resolve to `claude-opus-4-7`; `VISION` resolves to `claude-sonnet-4-6` because Opus 4.7 removed the `temperature` parameter and image scoring needs it. Tiers can be swapped via `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VISION` env vars with no code change.
+- **AI:** Anthropic Claude API. **Never hardcode model IDs** — import `FLAGSHIP` / `WORKHORSE` / `FAST` / `VOICE` / `VISION` from `server/config/models.js`. These are **quality tiers, not cost tiers** (owner directive: best model regardless of cost). The reasoning tiers (FLAGSHIP / WORKHORSE / FAST) resolve to `claude-opus-4-8`. `VOICE` resolves to `claude-sonnet-4-6` — customer-facing copy (SMS replies, service recaps, social posts) where a warm, natural voice beats raw reasoning; high-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site. `VISION` also resolves to `claude-sonnet-4-6` because the Opus line removed the `temperature` parameter and image scoring needs it. Tiers can be swapped via `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VOICE` / `MODEL_VISION` env vars with no code change. (Cross-provider GPT-5.5 / Gemini 3.5 Flash routing is owner-in-progress and not yet live.)
 - **Deployment:** Railway (portal server + client + PostgreSQL). Spoke fleet (15 sites) = Astro on Cloudflare Pages/Workers.
 
 ## Key Team Members
@@ -163,4 +163,4 @@ See `server/services/intelligence-bar/README.md` for the full template + 6-line 
 
 Core: `DATABASE_URL`, `ANTHROPIC_API_KEY`, `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`, `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`, `JWT_SECRET`.
 
-Optional model overrides: `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VISION` (global), `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL` (IB-specific).
+Optional model overrides: `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VOICE` / `MODEL_VISION` (global), `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL` (IB-specific).

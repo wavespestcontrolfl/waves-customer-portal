@@ -166,8 +166,11 @@ async function aiRecap(input = {}) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
 
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // Customer-facing recap → VOICE (Sonnet 4.6). Only the happy-path "completed"
+  // outcome reaches here; sensitive outcomes (concern/incomplete/declined/etc.)
+  // skip AI entirely via DETERMINISTIC_OUTCOMES above, so no escalation needed.
   const msg = await anthropic.messages.create({
-    model: MODELS.FLAGSHIP,
+    model: MODELS.VOICE,
     max_tokens: 220,
     messages: [{ role: 'user', content: buildPrompt(input) }],
   });

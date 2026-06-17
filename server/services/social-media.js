@@ -494,8 +494,9 @@ Article summary: ${safeDesc}`,
 
   const prompt = prompts[platform] || prompts.facebook;
 
+  // Final brand-voice post copy → VOICE (Sonnet 4.6, warmer/more natural).
   const response = await client.messages.create({
-    model: MODELS.FLAGSHIP,
+    model: MODELS.VOICE,
     max_tokens: 500,
     messages: [{ role: 'user', content: prompt }],
   });
@@ -568,8 +569,9 @@ Write a short professional LinkedIn post for a ${safeService} campaign in ${safe
 ${grounding}`,
   };
 
+  // Final brand-voice campaign copy → VOICE (Sonnet 4.6, warmer/more natural).
   const response = await client.messages.create({
-    model: MODELS.WORKHORSE,
+    model: MODELS.VOICE,
     max_tokens: 600,
     messages: [{ role: 'user', content: prompts[platform] || prompts.facebook }],
   });
@@ -1307,7 +1309,7 @@ const SocialMediaService = {
       platforms_posted: JSON.stringify(platformResults),
       image_url: typeof generatedImageUrl === 'string' ? generatedImageUrl : null,
       status: postStatus,
-      ai_model: MODELS.FLAGSHIP,
+      ai_model: MODELS.VOICE,
       published_content: Object.keys(publishedContent).length > 0
         ? JSON.stringify(publishedContent) : null,
     };
