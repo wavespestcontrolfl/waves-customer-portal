@@ -91,6 +91,23 @@ function hasSendableContact(contact, address) {
   return Boolean(name && (hasEmail || hasAddress));
 }
 
+// Resolve the recipient for a send/lead action. If the request ASSERTS a recipient (a
+// `contact` or `address` key is present in the body — the tech UI always sends both
+// from the current form, null when cleared), use ONLY the request: a cleared field is
+// absent (the gate then fails closed), and a new contact is never mixed field-by-field
+// with the prior prospect's stored address. Only a request that omits recipient keys
+// entirely (a bare API resend) inherits the stored snapshot verbatim.
+function resolveRecipient(req, row) {
+  const body = req.body || {};
+  if ('contact' in body || 'address' in body) {
+    return { contact: normalizeContact(body.contact), address: normalizeAddress(body.address) };
+  }
+  return {
+    contact: parseJsonObject(row.contact_snapshot, null),
+    address: parseJsonObject(row.address_snapshot, null),
+  };
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 function asArray(value) {
@@ -600,8 +617,7 @@ router.post('/:id/send', async (req, res, next) => {
     const row = await db('lawn_diagnostics').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'Diagnostic not found' });
 
-    const contact = normalizeContact(req.body?.contact) || parseJsonObject(row.contact_snapshot, null);
-    const address = normalizeAddress(req.body?.address) || parseJsonObject(row.address_snapshot, null);
+    const { contact, address } = resolveRecipient(req, row);
 
     // Hard gate: no token is minted without sendable contact info.
     if (!hasSendableContact(contact, address)) {
@@ -632,7 +648,9 @@ router.post('/:id/send', async (req, res, next) => {
         mode: 'prospect',
         status: 'sent',
         contact_snapshot: JSON.stringify(contact),
-        address_snapshot: address ? JSON.stringify(address) : row.address_snapshot,
+        // Write the RESOLVED address (null clears it) — never inherit the prior
+        // prospect's stored address when this send asserts a different recipient.
+        address_snapshot: address ? JSON.stringify(address) : null,
         report_token: db.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_token ELSE ? END`, [mintedToken]),
         report_expires_at: db.raw(`CASE WHEN ${KEEP_EXISTING} THEN report_expires_at ELSE ? END`, [freshExpiry]),
         last_sent_at: db.fn.now(),
@@ -658,8 +676,9 @@ router.post('/:id/lead', async (req, res, next) => {
     if (!row) return res.status(404).json({ error: 'Diagnostic not found' });
     if (row.lead_id) return res.json({ success: true, leadId: row.lead_id, alreadyLinked: true });
 
-    const contact = normalizeContact(req.body?.contact) || parseJsonObject(row.contact_snapshot, null);
-    const address = normalizeAddress(req.body?.address) || parseJsonObject(row.address_snapshot, null);
+    // Same recipient resolution as /send — a cleared/partial recipient on the request
+    // never inherits the prior prospect's stored contact/address into a new lead.
+    const { contact, address } = resolveRecipient(req, row);
     const name = contactName(contact);
     if (!name && !(contact && (contact.phone || contact.email))) {
       return res.status(422).json({ error: 'A contact name, phone, or email is required to save a lead.' });
@@ -718,4 +737,5 @@ module.exports._test = {
   contactName,
   hasSendableContact,
   canonicalSnapshot,
+  resolveRecipient,
 };

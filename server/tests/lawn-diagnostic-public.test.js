@@ -277,7 +277,7 @@ describe('buildPublicLawnReport whitelisting', () => {
   // customer copy for a low/unknown finding (the v0.4 naming gate). Deliberately omits
   // "disease" (the generic "no specific pest or disease" fallback uses it) and "weed"
   // (specific weeds are genericized to "weed pressure" at any confidence, by design).
-  const GOVERNED_CAUSE = /\b(chinch|caterpillar|armyworm|sod\s?webworm|grub|large patch|brown patch|gr[ae]y leaf|dollar spot|fungus|fungal|drought|water stress)\b/i;
+  const GOVERNED_CAUSE = /\b(chinch|caterpillar|armyworm|sod\s?webworm|grub|large patch|brown patch|gr[ae]y leaf|dollar spot|fungus|fungal|insect|drought|water stress)\b/i;
 
   // The diagnosis-driven, customer-facing fields — everything a cause name could leak
   // into. Excludes seasonal_context (server-generated SWFL education that legitimately
@@ -304,6 +304,7 @@ describe('buildPublicLawnReport whitelisting', () => {
       'Grub activity',
       'Drought stress along the south edge',
       'Fall armyworm caterpillars',
+      'Possible insect activity', // generic cause word, no named species
     ])('low-confidence "%s" degrades to symptom-only copy', (name) => {
       const diag = sentDiagnostic({
         report_contract: JSON.stringify({

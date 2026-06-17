@@ -57,6 +57,7 @@ const {
   hasSendableContact,
   contactName,
   canonicalSnapshot,
+  resolveRecipient,
 } = techLawnDiagnosticRouter._test;
 const { safeConditionLabel } = require('../services/lawn-diagnostic-report');
 
@@ -420,5 +421,22 @@ describe('lawn diagnostic send-gate helpers', () => {
     // Null / non-object inputs collapse to a stable empty marker.
     expect(canonicalSnapshot(null)).toBe('');
     expect(canonicalSnapshot(undefined)).toBe(canonicalSnapshot(null));
+  });
+
+  test('resolveRecipient uses request-only when asserted, inherits stored only on a bare resend', () => {
+    const row = {
+      contact_snapshot: JSON.stringify({ name: 'Dana', email: 'dana@example.com' }),
+      address_snapshot: JSON.stringify({ line1: '123 Palm St', city: 'Venice', state: 'FL' }),
+    };
+    // Cleared recipient on the request → NOT inherited (the send gate then fails closed).
+    expect(resolveRecipient({ body: { contact: null, address: null } }, row)).toEqual({ contact: null, address: null });
+    // Only a new contact supplied → address is absent, never mixed with the stored one.
+    const partial = resolveRecipient({ body: { contact: { name: 'Casey', email: 'casey@x.co' } } }, row);
+    expect(partial.contact).toMatchObject({ name: 'Casey', email: 'casey@x.co' });
+    expect(partial.address).toBeNull();
+    // Bare API resend (no recipient keys) → inherit the stored snapshot verbatim.
+    const inherited = resolveRecipient({ body: {} }, row);
+    expect(inherited.contact).toMatchObject({ name: 'Dana', email: 'dana@example.com' });
+    expect(inherited.address).toMatchObject({ city: 'Venice', line1: '123 Palm St' });
   });
 });

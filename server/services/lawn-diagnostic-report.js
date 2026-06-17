@@ -600,8 +600,11 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
   return `The photos show ${name}. ${treatmentLine} Watch for improvement based on the expected response timeline.`;
 }
 
-// Cause terms that must never appear in a low/unknown-confidence customer summary.
-const SUMMARY_CAUSE_RE = /\b(chinch|large patch|brown patch|gr[ae]y leaf|dollar spot|rhizoctonia|take[-\s]?all|fungus|fungal|grub|armyworm|sod\s?webworm|nutsedge|crabgrass|dollarweed|drought|water stress|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
+// Cause terms that must never appear in a low/unknown-confidence customer summary —
+// including the GENERIC cause words (insect/pest/disease/fungus), not just named
+// species, so a stale/LLM summary like "most consistent with insect pressure" is
+// replaced even though the public finding label is already downgraded to a symptom.
+const SUMMARY_CAUSE_RE = /\b(chinch|large patch|brown patch|gr[ae]y leaf|dollar spot|rhizoctonia|take[-\s]?all|fungus|fungal|disease|insect|pest|grub|armyworm|sod\s?webworm|nutsedge|crabgrass|dollarweed|drought|water stress|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace

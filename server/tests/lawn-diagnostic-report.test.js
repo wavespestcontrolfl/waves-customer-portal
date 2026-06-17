@@ -554,6 +554,17 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeCustomerSummary('An area is worth keeping an eye on.', 'low')).toMatch(/keeping an eye/);
   });
 
+  test('safeCustomerSummary replaces GENERIC cause terms (insect/pest/disease), not just named species', () => {
+    const insect = safeCustomerSummary('The pattern is most consistent with insect pressure.', 'low');
+    expect(insect.toLowerCase()).not.toContain('insect');
+    expect(insect).toMatch(/closer look/i); // = the generic low-confidence summary
+    const disease = safeCustomerSummary('Active disease pressure is spreading across the lawn.', 'low');
+    expect(disease).not.toMatch(/spreading across the lawn/i); // original cause claim gone
+    expect(disease).toMatch(/closer look/i);
+    // moderate+ may still name the cause
+    expect(safeCustomerSummary('Most consistent with insect pressure.', 'moderate')).toContain('insect');
+  });
+
   test('drought is gated as a named cause below moderate confidence (label + summary)', () => {
     // drought is a governed, photo-unconfirmable cause — low/unknown must not name it.
     expect(safeConditionLabel('Drought stress along the south edge', 'low')).toBe('general lawn stress');
