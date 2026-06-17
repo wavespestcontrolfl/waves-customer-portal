@@ -121,11 +121,16 @@ function recoveryIdFromMessage(message) {
  * whether the corrected address is itself suppressed, decide what to do.
  * Extracted so the gating logic is unit-testable without a DB.
  */
-function decideRecoveryAction({ candidate, suppressed, min = 'high' }) {
+function decideRecoveryAction({ candidate, suppressed, ownedByOther, min = 'high' }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
     return { action: 'skip', status: 'skipped_low_confidence' };
   }
+  // PRIVACY: the corrected address is on file for a DIFFERENT customer (or, for
+  // a lead with no resolvable customer, for any customer). Domain-only
+  // correction can't prove the corrected mailbox is the same person, so never
+  // auto-send another customer's invoice/report/estimate there — skip + alert.
+  if (ownedByOther) return { action: 'skip', status: 'corrected_owned_by_other' };
   if (suppressed) return { action: 'skip', status: 'corrected_suppressed' };
   return { action: 'send', status: 'resent' };
 }
@@ -191,6 +196,25 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
     (f) => String(customer[f] || '').trim().toLowerCase() === bouncedEmail,
   ) || null;
   return { customerId: customer.id, field };
+}
+
+/**
+ * Would re-sending to the corrected address leak one customer's mail to another?
+ * True when the corrected address is on file for a customer OTHER than the
+ * bounced message's own customer. When the bounced message has no resolvable
+ * customer (a lead), ANY existing customer owning the address blocks the send,
+ * since we can't prove it's the same person.
+ */
+async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
+  const email = String(correctedEmail || '').trim().toLowerCase();
+  if (!email) return false;
+  const rows = await db('customers')
+    .where((q) => {
+      for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
+    })
+    .select('id')
+    .catch(() => []);
+  return rows.some((r) => String(r.id) !== String(ownCustomerId || ''));
 }
 
 /**
@@ -264,6 +288,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       text: bouncedMessage.text_snapshot || undefined,
       categories,
       asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
+      // So a fast delivery/bounce webhook can resolve this row even before
+      // provider_message_id is committed below.
+      customArgs: { email_message_id: String(message.id) },
     });
     await db('email_messages').where({ id: message.id }).update({
       status: 'sent',
@@ -319,7 +346,8 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     const candidate = correctEmailDomain(bouncedEmail);
     const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
     const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
-    const decision = decideRecoveryAction({ candidate, suppressed, min: minConfidence() });
+    const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
+    const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, min: minConfidence() });
 
     const baseUpdate = {
       corrected_email: candidate?.corrected || null,
@@ -335,7 +363,7 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // Every skip means a service/transactional email did NOT reach the
       // customer — nudge a human to fix the address (and show the suggestion
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
-      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence'].includes(decision.status)) {
+      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
       }
       logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
@@ -514,6 +542,7 @@ async function adminAlertDeduped({ dedupeKey, windowHours = 168, category = 'ale
 const UNRECOVERABLE_REASONS = {
   redelivered_bounced: 'the corrected address also bounced',
   corrected_suppressed: 'the likely correction is on the suppression list',
+  corrected_owned_by_other: 'the likely correction already belongs to another customer',
   send_failed: 're-sending to the corrected address failed',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
@@ -525,7 +554,9 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
   if (stream.startsWith('marketing_')) return;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return;
-  const reasonLabel = UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate;
+  const reasonLabel = status === 'corrected_owned_by_other' && candidate?.corrected
+    ? `the likely correction (${candidate.corrected}) already belongs to another customer`
+    : (UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate);
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected && (status === 'skipped_low_confidence' || status === 'send_failed')
@@ -580,5 +611,6 @@ module.exports = {
   // exported for tests
   resolveCustomerEmailField,
   correctedAddressSuppressed,
+  correctedAddressOwnedByOther,
   CUSTOMER_EMAIL_FIELDS,
 };

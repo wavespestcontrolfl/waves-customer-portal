@@ -22,7 +22,7 @@ const recovery = require('../services/email-bounce-recovery');
 function makeChain(overrides = {}) {
   const chain = {};
   const passthrough = ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere',
-    'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert'];
+    'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'select'];
   for (const m of passthrough) chain[m] = jest.fn(() => chain);
   chain.first = jest.fn(() => Promise.resolve('first' in overrides ? overrides.first : null));
   chain.update = jest.fn(() => Promise.resolve('update' in overrides ? overrides.update : 0));
@@ -74,6 +74,10 @@ describe('decideRecoveryAction', () => {
   test('skips when corrected address is suppressed', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: true, min: 'high' }))
       .toEqual({ action: 'skip', status: 'corrected_suppressed' });
+  });
+  test('skips (privacy) when corrected address belongs to another customer', () => {
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: true, min: 'high' }))
+      .toEqual({ action: 'skip', status: 'corrected_owned_by_other' });
   });
   test('medium threshold accepts medium candidates', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'medium' }, suppressed: false, min: 'medium' }))
@@ -152,7 +156,7 @@ function orderedDb(resolvers = {}) {
   const calls = [];
   const fn = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert']) {
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'select']) {
       chain[m] = jest.fn(() => chain);
     }
     chain.first = jest.fn(() => Promise.resolve(resolvers.first ? resolvers.first(table) : null));
@@ -207,6 +211,28 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(pubIdx).toBeGreaterThanOrEqual(0);
     expect(linkIdx).toBeLessThan(pubIdx);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // P2: the send carries a custom arg so a fast webhook can resolve the row
+    // before provider_message_id is committed.
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ customArgs: { email_message_id: 'msg1' } }));
+  });
+
+  test('does NOT send when the corrected address belongs to another customer (privacy)', async () => {
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    db.mockImplementation(orderedDb({
+      first: () => null, // no resolvable owner for the bounced message (lead)
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec3' }] : []),
+      rows: (table) => (table === 'customers' ? [{ id: 'other-customer' }] : []),
+    }));
+
+    const res = await recovery.attemptRecovery(
+      { id: 'orig3', recipient_email_snapshot: 'jane@gmial.com', template_key: 'invoice.sent', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(res).toEqual({ skipped: 'corrected_owned_by_other' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('already belongs to another customer');
   });
 
   test('alerts with a suggestion when a medium-confidence typo is below the auto-send threshold', async () => {
@@ -277,5 +303,43 @@ describe('correctedAddressSuppressed fallback honors group suppressions (codex P
   test('no active suppression → not blocked', async () => {
     db.mockImplementation(suppressionDb([]));
     await expect(recovery.correctedAddressSuppressed(msg('service_operational'), 'jane@gmail.com')).resolves.toBe(false);
+  });
+});
+
+// Thenable + chainable mock for the customers ownership query.
+function customersDb(rows) {
+  return jest.fn(() => {
+    const chain = {};
+    const result = Promise.resolve(rows);
+    for (const m of ['where', 'whereRaw', 'orWhereRaw', 'select', 'modify']) chain[m] = jest.fn(() => chain);
+    chain.then = (res, rej) => result.then(res, rej);
+    chain.catch = (rej) => result.catch(rej);
+    chain.first = jest.fn(() => Promise.resolve(rows[0] || null));
+    return chain;
+  });
+}
+
+describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
+  beforeEach(() => db.mockReset());
+
+  test('true when the corrected address is on file for a different customer', async () => {
+    db.mockImplementation(customersDb([{ id: 'c2' }]));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
+  });
+  test('false when it only matches the same customer', async () => {
+    db.mockImplementation(customersDb([{ id: 'c1' }]));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
+  });
+  test('false when no customer has it', async () => {
+    db.mockImplementation(customersDb([]));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
+  });
+  test('lead (no own customer): any existing owner blocks', async () => {
+    db.mockImplementation(customersDb([{ id: 'c9' }]));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(true);
+  });
+  test('lead (no own customer): unowned address is fine', async () => {
+    db.mockImplementation(customersDb([]));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(false);
   });
 });

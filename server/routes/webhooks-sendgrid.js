@@ -241,7 +241,7 @@ async function handleEvent(ev) {
   const automationSend = !newsletterDelivery ? await db('automation_step_sends')
     .where({ sendgrid_message_id: messageId })
     .first() : null;
-  const emailMessage = !newsletterDelivery && !automationSend
+  let emailMessage = !newsletterDelivery && !automationSend
     ? await db('email_messages')
       .where({ provider_message_id: messageId })
       .modify((q) => {
@@ -249,6 +249,27 @@ async function handleEvent(ev) {
       })
       .first()
     : null;
+  // Fallback: bounce-recovery sends carry custom_args.email_message_id, echoed
+  // on every event. If the X-Message-Id isn't bound yet (the recovery delivery
+  // webhook can race the post-send provider_message_id write), resolve the row
+  // by that id and backfill provider_message_id so later events hit the fast path.
+  if (!emailMessage && !newsletterDelivery && !automationSend && ev.email_message_id) {
+    emailMessage = await db('email_messages')
+      .where({ id: String(ev.email_message_id) })
+      .modify((q) => {
+        if (email) q.whereRaw('LOWER(recipient_email_snapshot) = ?', [String(email).toLowerCase()]);
+      })
+      .first()
+      .catch(() => null);
+    if (emailMessage && messageId && !emailMessage.provider_message_id) {
+      await db('email_messages')
+        .where({ id: emailMessage.id })
+        .whereNull('provider_message_id')
+        .update({ provider_message_id: messageId, updated_at: new Date() })
+        .catch(() => {});
+      emailMessage = { ...emailMessage, provider_message_id: messageId };
+    }
+  }
 
   if (newsletterDelivery) {
     await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));

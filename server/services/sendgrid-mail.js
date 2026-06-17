@@ -104,13 +104,17 @@ function asmBlockFor(groupId) {
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header.
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const payload = {
     personalizations: [{
       to: (Array.isArray(to) ? to : [to]).map((email) => ({ email })),
       headers: headers || undefined,
+      // Echoed back on every webhook event for this send — lets the event
+      // handler resolve the row by a stable id even before provider_message_id
+      // is persisted (see webhooks-sendgrid.js bounce-recovery fallback).
+      ...(customArgs && Object.keys(customArgs).length ? { custom_args: customArgs } : {}),
     }],
     from: defaultFrom(fromEmail, fromName),
     reply_to: { email: replyTo || 'contact@wavespestcontrol.com' },
