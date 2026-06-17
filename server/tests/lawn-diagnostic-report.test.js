@@ -565,6 +565,15 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeCustomerSummary('Most consistent with insect pressure.', 'moderate')).toContain('insect');
   });
 
+  test('safeCustomerSummary gate stays in lockstep with the cause-mapped condition labels', () => {
+    // caterpillar/worm + leaf spot/mold/mildew map to governed cause labels too, so a
+    // low-confidence summary naming them must also degrade to symptom-only.
+    for (const phrase of ['caterpillar activity', 'army worm damage', 'sod webworm', 'powdery mildew', 'mold growth', 'leaf spot']) {
+      const out = safeCustomerSummary(`Most consistent with ${phrase} in the photographed area.`, 'low');
+      expect(out).toMatch(/closer look/i);
+    }
+  });
+
   test('drought is gated as a named cause below moderate confidence (label + summary)', () => {
     // drought is a governed, photo-unconfirmable cause — low/unknown must not name it.
     expect(safeConditionLabel('Drought stress along the south edge', 'low')).toBe('general lawn stress');
