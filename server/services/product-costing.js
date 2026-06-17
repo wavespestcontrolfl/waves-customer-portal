@@ -11,12 +11,17 @@ const UNIT_TO_OZ = {
   pt: 16,
   pint: 16,
   ml: 0.033814,
+  milliliter: 0.033814,
+  millilitre: 0.033814,
+  cc: 0.033814,
   l: 33.814,
   liter: 33.814,
+  litre: 33.814,
   lb: 16,
   pound: 16,
   g: 0.035274,
   gram: 0.035274,
+  gm: 0.035274,
   kg: 35.274,
 };
 
@@ -80,6 +85,20 @@ function resolveUnitToken(text) {
 function parsePackSize(quantity) {
   const raw = String(quantity || '').toLowerCase().trim();
   if (!raw) return null;
+
+  // Mixed number: "2 1/2 gal" -> 2.5 gal. Resolve before the plain-fraction and
+  // pair scans, which would otherwise read the denominator as the amount.
+  const mixed = raw.match(/^([\d.]+)\s+([\d.]+)\s*\/\s*([\d.]+)\s*([a-z].*)$/);
+  if (mixed) {
+    const whole = Number(mixed[1]);
+    const num = Number(mixed[2]);
+    const den = Number(mixed[3]);
+    const unit = resolveUnitToken(mixed[4]);
+    if (unit && den > 0 && Number.isFinite(whole) && num >= 0) {
+      return { amount: whole + num / den, unit };
+    }
+    return null;
+  }
 
   // Simple fraction: "1/2 gal", "3/4 lb". Resolve before pair-scanning, which
   // would otherwise mistake the denominator for the amount.

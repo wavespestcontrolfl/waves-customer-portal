@@ -334,8 +334,13 @@ function mapProduct(product, vendorPricing = []) {
     })?.units || null,
   }));
   const bestRow = enrichedPricing.find((vp) => vp.isBest) || enrichedPricing[0] || null;
+  // Fall back to the catalog pack size only under the same authoritative-price
+  // guard, so a rejected (stale-quantity) best row isn't re-derived unguarded.
   const unitPrices = bestRow?.unitPrices
-    || unitPriceBreakdown(product.best_price, product.container_size, { isLiquid })?.units
+    || unitPriceBreakdown(product.best_price, product.container_size, {
+      isLiquid,
+      referencePerOz: bestRow?.normalizedUnitPrice,
+    })?.units
     || null;
   return {
     id: product.id,
