@@ -529,6 +529,32 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         });
       recordUpdated = Number(affected) > 0;
       updatedField = recordUpdated ? field : null;
+    } else if (!rec.customer_id && correctedEmail && bouncedEmail) {
+      // Lead/estimate recovery (no customer record): fix the SOURCE address on the
+      // estimate(s)/lead(s) that held the bounced typo so estimate follow-ups
+      // (estimate-follow-up.js → est.customer_email) stop bouncing too. The
+      // pre-send ownership guard already verified the corrected address is on no
+      // other customer/lead/estimate, so this is safe. Only rows still holding the
+      // bad address are touched (won't clobber a human edit).
+      const estAffected = await db('estimates')
+        .whereRaw('LOWER(customer_email) = ?', [bouncedEmail])
+        .update({ customer_email: correctedEmail, updated_at: new Date() })
+        .catch((err) => {
+          logger.warn(`[bounce-recovery] estimate email overwrite failed: ${err.message}`);
+          return 0;
+        });
+      const leadAffected = await db('leads')
+        .whereRaw('LOWER(email) = ?', [bouncedEmail])
+        .update({ email: correctedEmail, updated_at: new Date() })
+        .catch((err) => {
+          logger.warn(`[bounce-recovery] lead email overwrite failed: ${err.message}`);
+          return 0;
+        });
+      recordUpdated = Number(estAffected) > 0 || Number(leadAffected) > 0;
+      updatedField = [
+        Number(estAffected) > 0 ? 'estimates.customer_email' : null,
+        Number(leadAffected) > 0 ? 'leads.email' : null,
+      ].filter(Boolean).join('+') || null;
     }
 
     await db('email_bounce_recoveries').where({ id: rec.id }).update({

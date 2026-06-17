@@ -428,3 +428,36 @@ describe('safety checks fail closed on DB error (codex round 6)', () => {
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
   });
 });
+
+// Lead/estimate recoveries must fix the SOURCE address on delivery, not just resend (codex round 7).
+function commitDb({ rec, estUpdate = 0, leadUpdate = 0 }) {
+  const fn = jest.fn((table) => {
+    const chain = {};
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'select']) chain[m] = jest.fn(() => chain);
+    chain.first = jest.fn(() => Promise.resolve(table === 'email_bounce_recoveries' ? rec : null));
+    chain.update = jest.fn(() => Promise.resolve(table === 'estimates' ? estUpdate : table === 'leads' ? leadUpdate : 1));
+    chain.returning = jest.fn(() => Promise.resolve([]));
+    return chain;
+  });
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  return fn;
+}
+
+describe('commitRecoveryOnDelivery persists lead/estimate source address (codex round 7)', () => {
+  beforeEach(() => {
+    db.mockReset();
+    NotificationService.notifyAdmin.mockReset();
+  });
+
+  test('updates estimates.customer_email for a no-customer recovery on delivery', async () => {
+    const rec = {
+      id: 'rec9', customer_id: null, customer_email_field: null,
+      corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
+      correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
+    };
+    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0 }));
+    await recovery.commitRecoveryOnDelivery({ id: 'msg9', recipient_email_snapshot: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
+  });
+});
