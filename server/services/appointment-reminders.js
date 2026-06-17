@@ -890,24 +890,29 @@ const AppointmentReminders = {
       const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
       if (!customer) return;
 
+      const scheduledServiceId = audit.metadata?.scheduled_service_id || null;
+
       // A bounce on a service-contact number does not always mean the customer
-      // missed the notice on their own phone — but getAppointmentContacts OMITS
-      // the primary unless appointment_notify_primary is set, so the primary may
-      // never have been texted at all. Skip a non-primary bounce only when the
-      // primary phone was itself a reachable SMS recipient (in the contact list AND
-      // not a known landline) — i.e. the customer already got it (or the primary's
-      // own bounce callback will drive the fallback). When the primary was never a
-      // reachable recipient, this service-contact bounce is the only delivery
-      // signal and must trigger the fallback. The primary's own bounce
-      // (to === primary) always falls through.
+      // missed the notice — another appointment text for the same occurrence may
+      // have actually reached them. But being listed as a contact does NOT prove a
+      // send was provider-accepted (sendCustomerMessage can block synchronously
+      // with no callback). So skip a non-primary bounce only when ANOTHER
+      // appointment SMS for this same occurrence was provider-accepted (sent_at
+      // set, not blocked) and isn't this very message. When nothing else was
+      // accepted, this bounce is the only delivery signal and must trigger the
+      // fallback. The primary's own bounce (to === primary) always falls through.
       const primaryDigits = lastTenDigits(customer.phone);
       const targetDigits = lastTenDigits(to);
-      if (primaryDigits && targetDigits && primaryDigits !== targetDigits) {
-        const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
-        const contacts = getAppointmentContacts(customer, prefsRow || {});
-        const primaryWasReachableRecipient = customer.line_type !== 'landline'
-          && contacts.some((c) => lastTenDigits(c.phone) === primaryDigits);
-        if (primaryWasReachableRecipient) return;
+      if (scheduledServiceId && primaryDigits && targetDigits && primaryDigits !== targetDigits) {
+        const acceptedSibling = await db('messaging_audit_log')
+          .where({ customer_id: customerId, channel: 'sms' })
+          .whereRaw("metadata->>'scheduled_service_id' = ?", [String(scheduledServiceId)])
+          .whereNotNull('sent_at')
+          .whereNull('blocked_code')
+          .whereNot('provider_message_id', sid)
+          .first()
+          .catch(() => null);
+        if (acceptedSibling) return;
       }
 
       // Carrier 30006 = "landline or unreachable carrier" — learn it (primary
@@ -917,8 +922,6 @@ const AppointmentReminders = {
         await db('customers').where({ id: customerId }).update({ line_type: 'landline' });
         logger.info(`[appt-remind] Cached customer ${customerId} primary phone as landline (Twilio 30006)`);
       }
-
-      const scheduledServiceId = audit.metadata?.scheduled_service_id || null;
 
       if (kind === 'en_route') {
         // A late en-route ETA email is stale — don't send it. Only alert if the

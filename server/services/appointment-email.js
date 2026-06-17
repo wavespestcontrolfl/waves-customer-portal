@@ -21,7 +21,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getPrimaryContact, getAppointmentContacts, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
+const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
@@ -91,20 +91,28 @@ async function loadCustomer(customerId) {
 // the primary customer email so they still get the notice.
 async function resolveRecipients(customer) {
   const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
-  const contacts = getAppointmentContacts(customer, prefs || {});
   const seen = new Set();
   const recipients = [];
-  for (const c of contacts) {
-    const email = clean(c.email);
-    const key = email.toLowerCase();
-    if (isEmailLike(email) && !seen.has(key)) {
+  const add = (email, name) => {
+    const value = clean(email);
+    const key = value.toLowerCase();
+    if (isEmailLike(value) && !seen.has(key)) {
       seen.add(key);
-      recipients.push({ email, name: c.name });
+      recipients.push({ email: value, name });
     }
-  }
+  };
+  // The SMS appointment recipients first (service contacts and/or primary, each
+  // with their own email — service email falls back to primary email in here).
+  for (const c of getAppointmentContacts(customer, prefs || {})) add(c.email, c.name);
+  // A service-contact slot can carry an email WITHOUT a phone, so it never appears
+  // in the SMS contact list above — include those addresses too so an email-only
+  // service contact can still receive the notice.
+  for (const slot of getServiceContactSlots(customer)) add(slot.email, slot.name);
+  // Last resort: the primary customer email (e.g. email-only customer with no
+  // appointment phone contacts at all).
   if (!recipients.length) {
     const primary = getPrimaryContact(customer);
-    if (isEmailLike(primary.email)) recipients.push({ email: clean(primary.email), name: primary.name });
+    add(primary.email, primary.name);
   }
   return recipients;
 }

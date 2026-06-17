@@ -73,6 +73,23 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'primary@example.com' }));
   });
 
+  test('includes an email-only service contact (email but no phone) when the primary has no email', async () => {
+    mockDb({
+      customer: {
+        id: 'c6', first_name: 'Pat', email: null, phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: null, service_contact_email: 'sue@service.com',
+      },
+      prefs: { appointment_notify_primary: false },
+    });
+
+    const res = await AppointmentEmail.sendAppointmentConfirmationEmail({
+      customerId: 'c6', scheduledServiceId: 'ss6', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'sue@service.com' }));
+  });
+
   test('a null/unreconstructable appointment time renders blank fields, not 1970', async () => {
     mockDb({
       customer: { id: 'c5', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234' },

@@ -16,13 +16,12 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
 const NotificationService = require('../services/notification-service');
-const { getAppointmentContacts } = require('../services/customer-contact');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 // Minimal knex-style chainable query mock.
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotNull', 'whereNotExists', 'whereRaw', 'orderBy', 'select'].forEach((m) => {
+  ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotExists', 'whereRaw', 'orderBy', 'select'].forEach((m) => {
     q[m] = jest.fn(() => q);
   });
   q.update = jest.fn(async () => 1);
@@ -107,10 +106,9 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('service-contact bounce when primary was NOT a reachable recipient: still emails', async () => {
-    // Customer primary is +1941..1234; the only texted contact was the service
-    // contact +1941..7777 (notify-primary off), which bounced. Primary never got it.
-    getAppointmentContacts.mockReturnValueOnce([{ phone: '+19415557777', role: 'service_contact' }]);
+  test('service-contact bounce with NO provider-accepted sibling: still emails', async () => {
+    // The service contact +1941..7777 bounced; no other appointment SMS for this
+    // occurrence was provider-accepted (e.g. primary was blocked synchronously).
     const auditChain = chain({
       first: {
         channel: 'sms',
@@ -119,14 +117,13 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
         metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss4' },
       },
     });
+    const siblingChain = chain({ first: null }); // no accepted sibling
     const custReadChain = chain({ first: { id: 'c4', phone: '+19415551234', line_type: null } });
-    const prefsChain = chain({ first: { appointment_notify_primary: false } });
     const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
 
     setDbQueues({
-      messaging_audit_log: [auditChain],
+      messaging_audit_log: [auditChain, siblingChain],
       customers: [custReadChain],
-      notification_prefs: [prefsChain],
       appointment_reminders: [reminderChain],
     });
 
@@ -137,11 +134,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
   });
 
-  test('service-contact bounce when primary WAS a reachable recipient: skips (no duplicate email)', async () => {
-    getAppointmentContacts.mockReturnValueOnce([
-      { phone: '+19415551234', role: 'primary' },
-      { phone: '+19415557777', role: 'service_contact' },
-    ]);
+  test('service-contact bounce WITH a provider-accepted sibling: skips (no duplicate email)', async () => {
     const auditChain = chain({
       first: {
         channel: 'sms',
@@ -150,13 +143,12 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
         metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss5' },
       },
     });
+    const siblingChain = chain({ first: { id: 'accepted-row' } }); // primary was accepted
     const custReadChain = chain({ first: { id: 'c5', phone: '+19415551234', line_type: null } });
-    const prefsChain = chain({ first: { appointment_notify_primary: true } });
 
     setDbQueues({
-      messaging_audit_log: [auditChain],
+      messaging_audit_log: [auditChain, siblingChain],
       customers: [custReadChain],
-      notification_prefs: [prefsChain],
     });
 
     await AppointmentReminders.handleUndeliveredSms({
