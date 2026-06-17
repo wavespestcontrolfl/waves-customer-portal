@@ -183,10 +183,16 @@ async function correctedAddressSuppressed(bouncedMessage, correctedEmail) {
   // corrected address still blocks the resend (not just global suppressions).
   const groupKey = String(bouncedMessage.suppression_group_key_snapshot || '').trim() || null;
   const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
-  const rows = await db('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [String(correctedEmail).trim().toLowerCase()])
-    .where({ status: 'active' })
-    .catch(() => []);
+  let rows;
+  try {
+    rows = await db('email_suppressions')
+      .whereRaw('LOWER(email) = ?', [String(correctedEmail).trim().toLowerCase()])
+      .where({ status: 'active' });
+  } catch (err) {
+    // Fail CLOSED: if we can't verify suppression state we must not resend.
+    logger.warn(`[bounce-recovery] suppression lookup failed — treating as suppressed: ${err.message}`);
+    return true;
+  }
   const isGlobal = (r) => globalTypes.has(String(r.suppression_type || '').toLowerCase());
   // transactional_required bypasses group opt-outs but never global ones.
   if (groupKey === 'transactional_required') {
@@ -226,23 +232,30 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
 async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
   const email = String(correctedEmail || '').trim().toLowerCase();
   if (!email) return false;
-  const customerRows = await db('customers')
-    .where((q) => {
-      for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
-    })
-    .select('id')
-    .catch(() => []);
-  if (customerRows.some((r) => String(r.id) !== String(ownCustomerId || ''))) return true;
+  // Fail CLOSED on lookup error: if we can't verify the address isn't owned by
+  // someone else, treat it as owned so recovery routes to manual, never a
+  // privacy-leaking auto-resend.
+  try {
+    const customerRows = await db('customers')
+      .where((q) => {
+        for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
+      })
+      .select('id');
+    if (customerRows.some((r) => String(r.id) !== String(ownCustomerId || ''))) return true;
 
-  // No resolvable owning customer (a lead/estimate send: recipientType 'lead',
-  // recipientId null). The corrected address matching ANY lead or estimate
-  // record is a cross-prospect collision we can't disambiguate — fail closed to
-  // manual recovery rather than risk replaying a quote to a different prospect.
-  if (!ownCustomerId) {
-    const leadOwned = await db('leads').whereRaw('LOWER(email) = ?', [email]).first('id').catch(() => null);
-    if (leadOwned) return true;
-    const estimateOwned = await db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).first('id').catch(() => null);
-    if (estimateOwned) return true;
+    // No resolvable owning customer (a lead/estimate send: recipientType 'lead',
+    // recipientId null). The corrected address matching ANY lead or estimate
+    // record is a cross-prospect collision we can't disambiguate — fail closed to
+    // manual recovery rather than risk replaying a quote to a different prospect.
+    if (!ownCustomerId) {
+      const leadOwned = await db('leads').whereRaw('LOWER(email) = ?', [email]).first('id');
+      if (leadOwned) return true;
+      const estimateOwned = await db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).first('id');
+      if (estimateOwned) return true;
+    }
+  } catch (err) {
+    logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
+    return true;
   }
   return false;
 }

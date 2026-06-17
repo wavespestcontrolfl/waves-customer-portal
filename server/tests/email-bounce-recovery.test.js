@@ -396,3 +396,35 @@ describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
   });
 });
+
+// Safety checks must fail CLOSED on DB error (codex round 6): a lookup failure
+// must never let recovery auto-resend.
+function rejectingDb() {
+  return jest.fn(() => {
+    const chain = {};
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'orWhereRaw', 'select', 'modify']) chain[m] = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.reject(new Error('db down')).then(res, rej);
+    chain.catch = (rej) => Promise.reject(new Error('db down')).catch(rej);
+    chain.first = jest.fn(() => Promise.reject(new Error('db down')));
+    return chain;
+  });
+}
+
+describe('safety checks fail closed on DB error (codex round 6)', () => {
+  beforeEach(() => {
+    db.mockReset();
+    emailLib.loadTemplateByKey.mockReset();
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined); // force the fallback query path
+    db.mockImplementation(rejectingDb());
+  });
+
+  test('correctedAddressSuppressed → suppressed (true) when the lookup errors', async () => {
+    await expect(
+      recovery.correctedAddressSuppressed({ template_key: 'x', suppression_group_key_snapshot: 'service_operational' }, 'jane@gmail.com'),
+    ).resolves.toBe(true);
+  });
+
+  test('correctedAddressOwnedByOther → owned (true) when the lookup errors', async () => {
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
+  });
+});
