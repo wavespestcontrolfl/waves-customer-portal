@@ -289,6 +289,11 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
 
     const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
     if (leadRows.some((r) => isOther(r.customer_id))) return true;
+
+    // notification_prefs.billing_email is also a sendable customer address
+    // (getInvoiceEmailRecipients), so it can belong to another customer too.
+    const prefRows = await db('notification_prefs').whereRaw('LOWER(billing_email) = ?', [email]).select('customer_id');
+    if (prefRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
     logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
     return true;
@@ -426,6 +431,13 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
 
     const bouncedEmail = String(bouncedMessage.recipient_email_snapshot || '').trim().toLowerCase();
     if (!bouncedEmail) return { skipped: 'no_recipient' };
+
+    // Marketing/newsletter bounces are handled by the suppression ledger, not by
+    // recovery — never auto-resend commercial content to a corrected address that
+    // hasn't separately opted in. Skip before creating a recovery row.
+    if (String(bouncedMessage.suppression_group_key_snapshot || '').toLowerCase().startsWith('marketing_')) {
+      return { skipped: 'marketing_stream' };
+    }
 
     // One recovery per original message (idempotent across webhook redelivery).
     const inserted = await db('email_bounce_recoveries')

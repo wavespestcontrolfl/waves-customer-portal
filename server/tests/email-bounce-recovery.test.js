@@ -156,6 +156,16 @@ describe('attemptRecovery guards', () => {
     );
     expect(res).toEqual({ skipped: 'already_attempted' });
   });
+
+  test('marketing-stream bounces are not auto-recovered (codex round 15)', async () => {
+    delete process.env.EMAIL_BOUNCE_RECOVERY;
+    const res = await recovery.attemptRecovery(
+      { id: 'm4', recipient_email_snapshot: 'a@gmial.com', suppression_group_key_snapshot: 'marketing_newsletter', categories: ['email_template'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(res).toEqual({ skipped: 'marketing_stream' });
+    expect(db).not.toHaveBeenCalled(); // skipped before any ledger write
+  });
 });
 
 // Per-table mock that records every .update() in call order, so we can assert
@@ -413,6 +423,10 @@ describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
     // The customer's own prior estimate + lead (post-conversion) must not over-block.
     db.mockImplementation(ownerDb({ estimates: [{ customer_id: 'c1' }], leads: [{ customer_id: 'c1' }] }));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
+  });
+  test('blocks when another customer holds the address as a billing contact (codex round 15)', async () => {
+    db.mockImplementation(ownerDb({ notification_prefs: [{ customer_id: 'c2' }] }));
+    await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(true);
   });
 });
 

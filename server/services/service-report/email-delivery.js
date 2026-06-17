@@ -257,15 +257,16 @@ async function sendLegacyServiceReportEmail({
       ...(message?.id ? { customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken } } : {}),
     });
     if (ledgerAvailable && message?.id) {
-      // Always record provider id + send time; advance to 'sent' only while still
-      // 'queued' so a fast delivery/bounce webhook (resolvable via custom_args
-      // before this commit) isn't regressed.
-      await db('email_messages').where({ id: message.id }).update({
+      // Scope writes to THIS attempt's send_attempt_token: a retried legacy send
+      // reuses the row with a new token, so an older request that resolves late
+      // must not overwrite the live attempt's provider id / status. Advance to
+      // 'sent' only while still 'queued' so a fast webhook isn't regressed.
+      await db('email_messages').where({ id: message.id, send_attempt_token: sendAttemptToken }).update({
         provider_message_id: result.messageId,
         sent_at: new Date(),
         updated_at: new Date(),
       });
-      await db('email_messages').where({ id: message.id, status: 'queued' }).update({
+      await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
         status: 'sent',
         updated_at: new Date(),
       });
@@ -274,9 +275,10 @@ async function sendLegacyServiceReportEmail({
     return { sent: true, messageId: result.messageId || null, message };
   } catch (err) {
     if (ledgerAvailable && message?.id) {
-      // Only mark failed while still queued — a webhook may have terminalized the
-      // row if SendGrid accepted the send despite a lost HTTP response.
-      await db('email_messages').where({ id: message.id, status: 'queued' }).update({
+      // Only mark failed while still queued AND only for this attempt — a webhook
+      // may have terminalized the row (lost-response), and a superseded older
+      // attempt must not fail the live retry's row.
+      await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
         status: 'failed',
         error_message: errorMessage(err).slice(0, 1000),
         updated_at: new Date(),
