@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Web Speech API voice dictation, extracted from CommunicationsPageV2 so the
@@ -65,6 +65,26 @@ export default function useSpeechDictation(onTranscript) {
     recognitionRef.current = rec;
     rec.start();
     setListening(true);
+  }, []);
+
+  // Stop an in-progress session if the consumer unmounts (e.g. the completion
+  // modal closes mid-dictation) so the mic isn't left recording and stale
+  // callbacks can't fire against an unmounted notes setter.
+  useEffect(() => {
+    return () => {
+      const rec = recognitionRef.current;
+      if (rec) {
+        rec.onresult = null;
+        rec.onerror = null;
+        rec.onend = null;
+        try {
+          rec.abort();
+        } catch {
+          /* no-op */
+        }
+        recognitionRef.current = null;
+      }
+    };
   }, []);
 
   return { listening, supported, toggle };
