@@ -111,7 +111,7 @@ function parseJsonObject(value) {
   }
 }
 
-async function rememberForwardAccept({ parentCallSid, dialCallSid }) {
+async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNumber }) {
   if (!parentCallSid) {
     logger.warn(`[voice] Forward accept missing ParentCallSid for child ${maskSid(dialCallSid)}`);
     return 0;
@@ -121,6 +121,8 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid }) {
     accepted: true,
     parent_call_sid: parentCallSid,
     dial_call_sid: dialCallSid || null,
+    answered_by_number: toE164(answeredByNumber) || null,
+    csr_name: resolveCsrName(answeredByNumber),
     accepted_at: new Date().toISOString(),
   };
 
@@ -203,6 +205,42 @@ function getFallbackForwardNumbers() {
   }
 
   return envFallback;
+}
+
+// Map the staff number that pressed 1 to a CSR name, for call-scoring
+// attribution. The inbound <Dial> simul-rings distinct per-person numbers, so
+// the winning leg's To/Called identifies who answered. Operator-controlled via
+// WAVES_CSR_NUMBER_MAP ("+19415551234:Virginia,+19415995678:Adam"); falls back
+// to the same named per-person env vars that feed the dial list. Returns null
+// when unmapped so downstream scoring stays 'Unknown' rather than guessing.
+function getCsrNumberMap() {
+  const map = new Map();
+  const addEntry = (rawNumber, name) => {
+    const e164 = toE164(rawNumber);
+    if (e164 && name && !map.has(e164)) map.set(e164, name);
+  };
+  // Explicit override first (operator-authoritative).
+  String(process.env.WAVES_CSR_NUMBER_MAP || '')
+    .split(',')
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .forEach((pair) => {
+      const idx = pair.lastIndexOf(':');
+      if (idx > 0) addEntry(pair.slice(0, idx), pair.slice(idx + 1).trim());
+    });
+  // Named per-person env fallback (same identities the dial already uses).
+  addEntry(process.env.VIRGINIA_PHONE, 'Virginia');
+  addEntry(process.env.ADAM_PHONE, 'Adam');
+  addEntry(process.env.OFFICE_MANAGER_PHONE, 'Office Manager');
+  addEntry(process.env.WAVES_OFFICE_MANAGER_PHONE, 'Office Manager');
+  addEntry(process.env.OWNER_PHONE, 'Waves');
+  return map;
+}
+
+function resolveCsrName(staffNumber) {
+  const e164 = toE164(staffNumber);
+  if (!e164) return null;
+  return getCsrNumberMap().get(e164) || null;
 }
 
 const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
@@ -536,6 +574,7 @@ router.post('/inbound-forward-accept', async (req, res) => {
       await rememberForwardAccept({
         parentCallSid: req.body?.ParentCallSid,
         dialCallSid: req.body?.CallSid,
+        answeredByNumber: req.body?.To || req.body?.Called,
       });
       twiml.say({ voice: 'Polly.Joanna' }, 'Connecting.');
     } else {
@@ -1023,6 +1062,7 @@ router._test = {
   maskSid,
   metadataHasForwardAcceptance,
   rememberForwardAccept,
+  resolveCsrName,
   resolveInboundDialCompletion,
   sanitizeVoiceProviderError,
   wasForwardAccepted,

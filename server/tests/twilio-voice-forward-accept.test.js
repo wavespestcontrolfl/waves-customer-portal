@@ -20,13 +20,36 @@ describe('twilio voice inbound forward acceptance', () => {
   const {
     metadataHasForwardAcceptance,
     rememberForwardAccept,
+    resolveCsrName,
     resolveInboundDialCompletion,
     wasForwardAccepted,
   } = voiceRouter._test;
 
+  const CSR_ENV_KEYS = [
+    'WAVES_CSR_NUMBER_MAP',
+    'VIRGINIA_PHONE',
+    'ADAM_PHONE',
+    'OFFICE_MANAGER_PHONE',
+    'WAVES_OFFICE_MANAGER_PHONE',
+    'OWNER_PHONE',
+  ];
+  let savedCsrEnv;
+
   beforeEach(() => {
     db.mockReset();
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    savedCsrEnv = {};
+    for (const key of CSR_ENV_KEYS) {
+      savedCsrEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of CSR_ENV_KEYS) {
+      if (savedCsrEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedCsrEnv[key];
+    }
   });
 
   test('treats completed staff leg without press-1 acceptance as Waves voicemail', () => {
@@ -129,5 +152,59 @@ describe('twilio voice inbound forward acceptance', () => {
     })).resolves.toBe(true);
 
     expect(where).toHaveBeenCalledWith('twilio_call_sid', 'CA_parent');
+  });
+
+  test('resolveCsrName maps the explicit WAVES_CSR_NUMBER_MAP override', () => {
+    process.env.WAVES_CSR_NUMBER_MAP = '+19415551234:Virginia, +19415995678:Adam';
+    expect(resolveCsrName('+19415551234')).toBe('Virginia');
+    expect(resolveCsrName('9415995678')).toBe('Adam');
+  });
+
+  test('resolveCsrName falls back to named per-person env vars', () => {
+    process.env.VIRGINIA_PHONE = '+19415551234';
+    process.env.ADAM_PHONE = '+19415995678';
+    expect(resolveCsrName('+19415551234')).toBe('Virginia');
+    expect(resolveCsrName('+19415995678')).toBe('Adam');
+  });
+
+  test('resolveCsrName returns null for unmapped or missing numbers', () => {
+    process.env.VIRGINIA_PHONE = '+19415551234';
+    expect(resolveCsrName('+19990000000')).toBeNull();
+    expect(resolveCsrName('')).toBeNull();
+    expect(resolveCsrName(undefined)).toBeNull();
+  });
+
+  test('persists the answering number and resolved CSR name', async () => {
+    process.env.VIRGINIA_PHONE = '+19415551234';
+    const update = jest.fn().mockResolvedValue(1);
+    const where = jest.fn(() => ({ update }));
+    db.mockReturnValue({ where });
+
+    await rememberForwardAccept({
+      parentCallSid: 'CA_parent',
+      dialCallSid: 'CA_child',
+      answeredByNumber: '+19415551234',
+    });
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        bindings: [expect.stringContaining('"csr_name":"Virginia"')],
+      }),
+    }));
+    expect(update.mock.calls[0][0].metadata.bindings[0]).toContain('"answered_by_number":"+19415551234"');
+  });
+
+  test('persists null CSR name when the answering number is unmapped', async () => {
+    const update = jest.fn().mockResolvedValue(1);
+    const where = jest.fn(() => ({ update }));
+    db.mockReturnValue({ where });
+
+    await rememberForwardAccept({
+      parentCallSid: 'CA_parent',
+      dialCallSid: 'CA_child',
+      answeredByNumber: '+19990000000',
+    });
+
+    expect(update.mock.calls[0][0].metadata.bindings[0]).toContain('"csr_name":null');
   });
 });

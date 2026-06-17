@@ -2501,16 +2501,20 @@ const CallRecordingProcessor = {
     }
 
     // Step 8: CSR Coach scoring — auto-score every transcribed call.
-    // We don't know which CSR actually answered (the inbound <Dial> forwards
-    // to a single number that may ring multiple people). Score against
-    // 'Unknown' so analytics aren't all silently booked to one name; fix
-    // properly when we add per-CSR routing.
+    // The inbound <Dial> simul-rings distinct per-person numbers; the staff leg
+    // that pressed 1 is recorded in metadata.forward_acceptance by the
+    // /inbound-forward-accept webhook. Resolve that to a CSR name when mapped,
+    // and fall back to 'Unknown' so analytics aren't silently booked to one name.
     let csrScoreResult = null;
     if (transcription && transcription.length > 50) {
       try {
+        const callMeta = typeof call.metadata === 'string'
+          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+          : (call.metadata || {});
+        const answeredByCsr = callMeta?.forward_acceptance?.csr_name || 'Unknown';
         const CSRCoach = require('./csr/csr-coach');
         const scoreResult = await CSRCoach.scoreCall({
-          csrName: 'Unknown',
+          csrName: answeredByCsr,
           customerId: customerId || null,
           callDirection: 'inbound',
           callSource: call.to_phone || 'unknown',
