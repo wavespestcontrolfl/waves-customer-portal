@@ -196,6 +196,29 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('keeps an already-stamped visit in the slice when a new earlier visit appears', async () => {
+    // Term sold 1 visit; the Aug visit is already stamped/linked to this term.
+    // A new earlier (Jul) matching visit is added. Plain date-order slicing would
+    // pick the Jul visit and orphan the Aug stamp (leaving 2 visits prepaid for a
+    // 1-visit term); the selection must keep the committed Aug visit instead.
+    const rows = [
+      { id: 'svc-new', customer_id: 'c1', scheduled_date: '2026-07-01', service_type: 'Quarterly Pest Control', status: 'pending', prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },
+      { id: 'svc-stamped', customer_id: 'c1', scheduled_date: '2026-08-01', service_type: 'Quarterly Pest Control', status: 'pending', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1' },
+    ];
+    setDbQueues({ scheduled_services: [query({ rows })] });
+
+    const selected = await _private.coverageRowsForTerm({
+      id: 'term-1',
+      customer_id: 'c1',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 1,
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+    });
+
+    expect(selected.map((r) => r.id)).toEqual(['svc-stamped']);
+  });
+
   test('does not overwrite a manual cash/Zelle prepaid stamp when activating coverage', async () => {
     const rows = [
       // Independently prepaid (cash) and already linked to this term by

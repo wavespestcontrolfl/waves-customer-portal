@@ -283,9 +283,25 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     ? rows
     : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
-  return filtered
-    .filter((row) => serviceMatchesCoverage(row, coverageServiceType))
-    .slice(0, coverageVisitCount);
+  const matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  if (matching.length <= coverageVisitCount) return matching;
+
+  // More matching candidates than sold visits: keep the visits already committed
+  // to THIS term (linked or annual-prepay-stamped) inside the slice. Plain
+  // date-order slicing would let a newly-added earlier matching visit displace an
+  // already-stamped later one, which then keeps its orphaned prepaid stamp —
+  // leaving more than coverageVisitCount visits prepaid and skipping completion
+  // billing on the extra work. Fill any remaining slots with the earliest
+  // uncommitted matches, then return the selection in date order.
+  const isCommittedToTerm = (row) =>
+    (term.id != null && String(row.annual_prepay_term_id) === String(term.id))
+    || (Number(row.prepaid_amount) > 0 && row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD);
+  const selectedIds = new Set(
+    [...matching.filter(isCommittedToTerm), ...matching.filter((row) => !isCommittedToTerm(row))]
+      .slice(0, coverageVisitCount)
+      .map((row) => row.id),
+  );
+  return matching.filter((row) => selectedIds.has(row.id));
 }
 
 async function ensureCoverageRowsForTerm(term, conn = db) {
@@ -1440,6 +1456,7 @@ module.exports = {
     normalizeCoverageVisitCount,
     defaultCoverageDurationMinutes,
     ensureCoverageRowsForTerm,
+    coverageRowsForTerm,
     resetCachesForTests,
   },
 };
