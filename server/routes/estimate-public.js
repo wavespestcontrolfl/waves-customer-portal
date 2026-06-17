@@ -5264,9 +5264,7 @@ ${shellQuestionsBar()}
       if (!r.ok) throw new Error(data.error || 'accept failed');
       if (bookingState.countdownTimer) clearInterval(bookingState.countdownTimer);
       // Recurring accepts show the invoice action without blocking the booking.
-      if (data.onboardingToken) {
-        window.location.href = '/onboard/' + data.onboardingToken;
-      } else if (data.nextStep === 'pay_invoice' && data.invoicePayUrl) {
+      if (data.nextStep === 'pay_invoice' && data.invoicePayUrl) {
         showInvoiceOptionalSuccess(data);
       } else {
         const prepayAmount = data.prepayInvoiceAmount != null ? fmt(Number(data.prepayInvoiceAmount)) : null;
@@ -6266,10 +6264,8 @@ router.put('/:token/accept', async (req, res, next) => {
         }
       }
 
-      let onboardingToken = null;
-      // Recurring public accepts continue through the invoice payment page.
-      // The payment method is captured on /pay/:token, so no separate
-      // onboarding SetupIntent is created here.
+      // Recurring public accepts continue through the invoice payment page;
+      // the payment method is captured on /pay/:token.
 
       let invoiceModeResult = false;
       let invoiceIdResult = null;
@@ -6378,7 +6374,6 @@ router.put('/:token/accept', async (req, res, next) => {
 
       return {
         customerId,
-        onboardingToken,
         reservationCommitted,
         acceptedAppointmentsToRegister,
         invoiceMode: invoiceModeResult,
@@ -6391,7 +6386,7 @@ router.put('/:token/accept', async (req, res, next) => {
       };
     });
 
-    const { customerId, onboardingToken, reservationCommitted } = txResult;
+    const { customerId, reservationCommitted } = txResult;
     let invoiceMode = txResult.invoiceMode === true;
     let invoiceId = txResult.invoiceId || null;
     let invoiceAmount = txResult.invoiceAmount || null;
@@ -6580,45 +6575,10 @@ router.put('/:token/accept', async (req, res, next) => {
             if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
             logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
           }
-        } else {
-          const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
-          const obUrl = longObUrl
-            ? await shortenOrPassthrough(longObUrl, {
-                kind: 'onboarding',
-                entityType: 'estimates',
-                entityId: estimate.id,
-                customerId,
-              })
-            : '';
-          const customerBody = await renderEditableSmsTemplate(
-            'estimate_accepted_customer',
-            { first_name: firstName, onboarding_url: obUrl },
-            { workflow: 'estimate_accept_customer', entity_type: 'estimate', entity_id: estimate.id },
-          );
-          if (!customerBody) {
-            logger.warn(`[estimate-accept] estimate_accepted_customer SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
-          } else {
-            const sendResult = await sendCustomerMessage({
-              to: estimate.customer_phone,
-              body: customerBody,
-              channel: 'sms',
-              audience: customerId ? 'customer' : 'lead',
-              purpose: 'estimate_followup',
-              customerId: customerId || undefined,
-              estimateId: estimate.id,
-              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-              consentBasis: customerId ? undefined : {
-                status: 'transactional_allowed',
-                source: 'estimate_token_acceptance',
-                capturedAt: new Date().toISOString(),
-              },
-              entryPoint: 'estimate_accept_onboarding',
-              metadata: { original_message_type: 'estimate_accepted_customer' },
-            });
-            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            logger.info(`[estimate-accept] Acceptance SMS sent for estimate ${estimate.id}`);
-          }
         }
+        // Standard recurring accepts no longer send a separate acceptance SMS;
+        // the onboarding handoff text was retired with the onboarding flow.
+        // Customers continue through the invoice/pay-link path below.
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
@@ -6767,7 +6727,6 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     res.json(buildAcceptSuccessPayload({
-      onboardingToken,
       invoiceMode,
       invoiceLinkDelivered,
       invoiceId,
@@ -8034,7 +7993,6 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
 }
 
 function buildAcceptSuccessPayload({
-  onboardingToken = null,
   invoiceMode = false,
   invoiceLinkDelivered = false,
   invoiceId = null,
@@ -8052,7 +8010,6 @@ function buildAcceptSuccessPayload({
   if (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl)) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
   else if (!treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
-  else if (onboardingToken) nextStep = 'complete_onboarding';
 
   const decoratedInvoicePayUrl = decorateEstimateInvoicePayUrl(invoicePayUrl, {
     billingTerm,
@@ -8064,7 +8021,6 @@ function buildAcceptSuccessPayload({
     nextStep,
     serviceMode: treatAsOneTime ? 'one_time' : 'recurring',
     reservationCommitted,
-    onboardingToken,
     invoiceMode,
     invoiceLinkDelivered,
     invoiceId,

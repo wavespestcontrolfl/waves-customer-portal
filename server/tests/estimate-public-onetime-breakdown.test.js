@@ -1548,7 +1548,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain("} else if (data.nextStep === 'pay_invoice' && data.invoicePayUrl) {");
+    expect(html).toContain("if (data.nextStep === 'pay_invoice' && data.invoicePayUrl) {");
     expect(html).toContain('showInvoiceOptionalSuccess(data);');
     expect(html).toContain('Payment is optional right now.');
     expect(html).toContain('I will pay later');
@@ -5122,13 +5122,11 @@ describe('public estimate one-time breakdown', () => {
       invoicePayUrl: '/pay/annual-token',
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
-      onboardingToken: null,
       treatAsOneTime: false,
     })).toEqual(expect.objectContaining({
       success: true,
       nextStep: 'pay_invoice',
       serviceMode: 'recurring',
-      onboardingToken: null,
       invoicePayUrl: '/pay/annual-token?source=estimate&saveCard=1&billingTerm=prepay_annual',
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
@@ -5474,7 +5472,7 @@ describe('public estimate one-time breakdown', () => {
     });
   });
 
-  test('accept success payload distinguishes one-time booking from onboarding', () => {
+  test('accept success payload distinguishes one-time booking from recurring', () => {
     expect(buildAcceptSuccessPayload({
       bookingUrl: 'https://portal.wavespestcontrol.com/book?service=pest_control',
       treatAsOneTime: true,
@@ -5503,12 +5501,10 @@ describe('public estimate one-time breakdown', () => {
     }));
 
     expect(buildAcceptSuccessPayload({
-      onboardingToken: 'setup-token',
       treatAsOneTime: false,
     })).toEqual(expect.objectContaining({
-      nextStep: 'complete_onboarding',
+      nextStep: 'confirmed',
       serviceMode: 'recurring',
-      onboardingToken: 'setup-token',
     }));
   });
 

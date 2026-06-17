@@ -177,28 +177,23 @@ class RescheduleSMS {
       const customer = await db('customers').where({ id: customerId }).first();
       const displayDate = new Date(selectedOption.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 
-      const confirmedBody = await renderSmsTemplate(
-        'reschedule_confirmed_sms_reply',
-        { date: displayDate, time: selectedOption.window.display },
-        { workflow: 'reschedule_confirmed', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id }
-      );
-      if (confirmedBody) {
-        await sendAppointmentSms({
-          to: customer.phone,
-          body: confirmedBody,
-          customerId,
-          messageType: 'confirmation',
-        });
-      } else {
-        logger.warn(`[reschedule-sms] reschedule_confirmed_sms_reply template missing/disabled — appointment moved without confirmation SMS for customer ${customerId}`);
-      }
+      // Confirmation copy is inlined — the editable reschedule_confirmed_sms_reply
+      // template was retired, but the customer must still get a confirmation the
+      // moment their 1/2 reply lands (the appointment has already moved).
+      const confirmedBody = `Confirmed. Your service is rescheduled for ${displayDate}, ${selectedOption.window.display}.\n\nWe'll remind you the day before.`;
+      await sendAppointmentSms({
+        to: customer.phone,
+        body: confirmedBody,
+        customerId,
+        messageType: 'confirmation',
+      });
 
       await db('reschedule_log').where({ id: pending.id }).update({
         new_date: selectedOption.date,
         new_window: `${selectedOption.window.start}-${selectedOption.window.end}`,
       });
 
-      return { handled: true, action: 'rescheduled', newDate: selectedOption.date, smsSent: !!confirmedBody };
+      return { handled: true, action: 'rescheduled', newDate: selectedOption.date, smsSent: true };
     }
 
     // option_expired rides the call-requested flow: the customer picked a
@@ -208,22 +203,16 @@ class RescheduleSMS {
     // closed the pending offer.
     if (responseType === 'call_requested' || responseType === 'option_expired') {
       const customer = await db('customers').where({ id: customerId }).first();
-      const callBody = await renderSmsTemplate(
-        'reschedule_call_requested',
-        {},
-        { workflow: 'reschedule_call_requested', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id }
-      );
-      if (callBody) {
-        await sendAppointmentSms({
-          to: customer.phone,
-          body: callBody,
-          customerId,
-          messageType: 'manual',
-        });
-      } else {
-        logger.warn(`[reschedule-sms] reschedule_call_requested template missing/disabled — call request logged without SMS reply for customer ${customerId}`);
-      }
-      return { handled: true, action: responseType, smsSent: !!callBody };
+      // Inlined retired reschedule_call_requested copy so the customer still
+      // gets an acknowledgement that we'll call them.
+      const callBody = "No problem. We'll give you a call shortly.";
+      await sendAppointmentSms({
+        to: customer.phone,
+        body: callBody,
+        customerId,
+        messageType: 'manual',
+      });
+      return { handled: true, action: responseType, smsSent: true };
     }
 
     return { handled: false, action: 'needs_review', reply: messageBody };

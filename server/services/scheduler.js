@@ -1539,21 +1539,6 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // =========================================================================
-  // EVERY 2 HOURS — Onboarding abandonment SMS (24h / 72h / expiring)
-  // =========================================================================
-  cron.schedule('15 */2 * * *', async () => {
-    try {
-      await runExclusive('onboarding-follow-up', async () => {
-        const OnboardingFollowUp = require('./onboarding-follow-up');
-        const result = await OnboardingFollowUp.checkAll();
-        if (result.sent > 0) logger.info(`Onboarding follow-ups: ${result.sent} sent`);
-      });
-    } catch (err) {
-      logger.error(`Onboarding follow-up job failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
   // Estimate extensions are manual-only. Do not auto-renew expired estimates
   // from cron; staff can extend deliberately through the admin estimate route.
 

@@ -1605,7 +1605,6 @@ function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRe
 
 function SuccessCard({ acceptResult }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
-  const onboardingToken = acceptResult?.onboardingToken || null;
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
   const invoiceLinkDelivered = !!acceptResult?.invoiceLinkDelivered;
@@ -1705,33 +1704,6 @@ function SuccessCard({ acceptResult }) {
               borderRadius: 12, fontWeight: 600, fontSize: 15,
             }}
           >Pick appointment</a>
-        ) : null}
-      </div>
-    );
-  }
-
-  if (nextStep === 'complete_onboarding') {
-    return (
-      <div style={{
-        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
-        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
-        marginBottom: 16,
-      }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
-          You're booked.
-        </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
-          Check your phone for the confirmation text. Finish setup to keep your appointment moving.
-        </div>
-        {onboardingToken ? (
-          <a
-            href={`/onboard/${onboardingToken}`}
-            style={{
-              display: 'inline-block', marginTop: 16, padding: '14px 20px',
-              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
-              borderRadius: 12, fontWeight: 600, fontSize: 15,
-            }}
-          >Continue to setup</a>
         ) : null}
       </div>
     );

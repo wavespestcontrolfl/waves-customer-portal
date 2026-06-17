@@ -96,7 +96,6 @@ const SERVICE_ESTIMATE_SLUGS = new Set([
 ]);
 import LoginPage from './pages/LoginPage';
 import PortalPage from './pages/PortalPage';
-import OnboardingPage from './pages/OnboardingPage';
 import AdminLoginPage from './pages/AdminLoginPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
@@ -280,7 +279,6 @@ export default function App() {
         <InstallPrompt />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route path="/onboard/:token" element={<OnboardingPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/project/:token" element={<ProjectReportViewPage />} />
           <Route path="/report/:token" element={<ReportViewPage />} />
