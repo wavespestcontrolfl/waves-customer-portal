@@ -3,7 +3,7 @@
  * surcharge-exempt: createEstimateDepositIntent charges the flat deposit at
  * face value and never routes the amount through computeChargeAmount. The
  * customer-facing deposit must equal the first-invoice credit exactly; the
- * 3.99% card surcharge applies only to the remaining invoice balance.
+ * 2.9% card surcharge applies only to the remaining invoice balance.
  *
  * If this test is failing because deposits started getting surcharged, that
  * is a deliberate policy reversal — it needs owner sign-off and customer-

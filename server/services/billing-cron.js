@@ -495,10 +495,10 @@ const BillingCron = {
         const service = await PaymentRouter.getServiceForCustomer(payment.customer_id);
 
         // Re-attempt the charge. payment.amount is the GROSS the failed
-        // attempt asked for — it includes the 3% credit-card surcharge
+        // attempt asked for — it includes the 2.9% credit-card surcharge
         // when that attempt ran on a credit card. chargeOneTime treats
         // its amount as a fresh base and surcharges again, so replaying
-        // the gross compounds the surcharge (3% on 103% — past the
+        // the gross compounds the surcharge (2.9% on 102.9% — past the
         // network cap). Re-derive the base from the recorded breakdown;
         // fall back to the gross only for legacy rows that predate base
         // tracking.

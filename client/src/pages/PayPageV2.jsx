@@ -33,7 +33,7 @@
 //   page mounts don't re-load the script (would re-prompt user agents
 //   and slow first-paint).
 // - Surcharge disclosure: two-step quote/finalize flow ensures the customer
-//   sees the exact surcharge before payment. Credit cards = up to 3%.
+//   sees the exact surcharge before payment. Credit cards = up to 2.9%.
 //   Debit/prepaid/ACH = 0%. Server is authoritative for surcharge calculation.
 // - Confirm button single-flight: Stripe Payment Intent confirm is
 //   slow (~2-5s). Double-click must not double-confirm. Standard
@@ -58,7 +58,7 @@
 // - Idempotency table (stripe_webhook_events): event.id must be
 //   recorded BEFORE processing. If the table write happens after,
 //   a Stripe retry races and we double-credit the invoice.
-// - computeChargeAmount: credit-card surcharge (up to 3%) for confirmed
+// - computeChargeAmount: credit-card surcharge (up to 2.9%) for confirmed
 //   credit cards; 0% for debit/prepaid/unknown/ACH. Server-side
 //   quoteInvoiceSurcharge determines the exact amount based on PM funding.
 // - ensureStripeCustomer: customer-stripe linking. Confirm we don't
@@ -856,7 +856,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           <Icon name="card" size={17} strokeWidth={2} />
         </span>
         <span>
-          Credit cards may add up to 3%. You will see the exact total before payment. Debit cards, prepaid cards,
+          Credit cards may add up to 2.9%. You will see the exact total before payment. Debit cards, prepaid cards,
           and bank transfers have no added card surcharge.
         </span>
       </div>
@@ -1095,7 +1095,7 @@ export default function PayPageV2() {
           clientSecret: setup.clientSecret,
           paymentIntentId: setup.paymentIntentId,
           baseAmount: setup.baseAmount ?? setup.amount,
-          cardSurchargeRate: setup.cardSurchargeRate ?? 0.03,
+          cardSurchargeRate: setup.cardSurchargeRate ?? 0.029,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
         });
         setPaymentState('ready');

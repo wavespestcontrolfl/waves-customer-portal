@@ -1,6 +1,6 @@
 // ============================================================
 // constants.js — Waves Pest Control Pricing Constants
-// Prices are quoted at base. A credit card surcharge (up to 3%) is added at
+// Prices are quoted at base. A credit card surcharge (up to 2.9%) is added at
 // checkout when the customer pays by credit card (not ACH).
 // ============================================================
 
@@ -243,7 +243,7 @@ const GRASS_TYPE_ALIASES = {
 };
 
 // Bracket tables: [sqft, 4-app, 6-app, 9-app, 12-app]
-// Base prices — credit card surcharge (up to 3%) applied at checkout, not baked in here.
+// Base prices — credit card surcharge (up to 2.9%) applied at checkout, not baked in here.
 // Revised 2026-05-30: 45% fully loaded gross margin floor.
 const LAWN_BRACKETS = {
   st_augustine: [
@@ -1647,7 +1647,7 @@ const WAVEGUARD = {
 
 // ── ACH Payment Discount ──────────────────────────────────────
 // Retired. Kept at 0% so any legacy callers stay harmless. Card payments
-// incur a credit card surcharge (up to 3%) at checkout instead.
+// incur a credit card surcharge (up to 2.9%) at checkout instead.
 const ACH_DISCOUNT = {
   percentage: 0,
   paymentMethod: 'us_bank_account',

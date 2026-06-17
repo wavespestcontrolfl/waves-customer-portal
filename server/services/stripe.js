@@ -345,7 +345,7 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) return null;
     // PRODUCT DECISION (owner, 2026-06-12): deposits intentionally bypass
-    // computeChargeAmount and the 3.99% card surcharge. The customer-facing
+    // computeChargeAmount and the 2.9% card surcharge. The customer-facing
     // deposit amount must equal the invoice credit exactly ("pay $49 now,
     // that exact $49 is credited to your first visit") — the surcharge
     // applies only to the remaining first-invoice balance when paid by card.

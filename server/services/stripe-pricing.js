@@ -1,7 +1,7 @@
 /**
  * Stripe surcharge helpers — pure, dependency-free, test-friendly.
  *
- * Phase 1: flat 3% surcharge on confirmed-credit-only. Debit, prepaid,
+ * Phase 1: flat 2.9% surcharge on confirmed-credit-only. Debit, prepaid,
  * unknown-funding, and ACH pay the quoted amount with no surcharge.
  *
  * Uses Stripe's surcharge API (`amount_details.surcharge`) with
@@ -14,17 +14,22 @@
  */
 
 // ── Rate policy ──────────────────────────────────────────────
-// CONFIGURED_COST_BPS must be ≤ actual merchant discount rate.
+// CONFIGURED_COST_BPS must be ≤ actual merchant discount rate (card-brand
+// rules cap the surcharge at the merchant's true cost of acceptance, not the
+// network ceiling). Stripe's cost is 2.9% + $0.30, so the effective per-txn
+// rate is always ≥ 2.9%; a flat 2.9% stays at/under cost on every ticket size,
+// while 3% would exceed cost on larger tickets where the fixed fee is dilutive.
+// The fixed $0.30 component cannot be surcharged, so we only pass the % part.
 // Confirm with finance/legal before launch.
-const CONFIGURED_COST_BPS = 300;     // 3.00%
-const NETWORK_CAP_BPS = 300;         // Visa/MC US credit card cap
-const SURCHARGE_POLICY_VERSION = 'v1_2026-05-27';
+const CONFIGURED_COST_BPS = 290;     // 2.90%
+const NETWORK_CAP_BPS = 300;         // Visa US credit card ceiling (secondary cap)
+const SURCHARGE_POLICY_VERSION = 'v2_2026-06-17';
 const SURCHARGE_API_VERSION = '2026-03-25.preview';
 
 // ── Legacy exports (deprecated — use cents/bps API) ─────────
 // Kept so callers that import CARD_SURCHARGE_RATE keep compiling
 // during the transition. Remove after all callers migrate.
-const CARD_SURCHARGE_RATE = CONFIGURED_COST_BPS / 10_000;  // 0.03
+const CARD_SURCHARGE_RATE = CONFIGURED_COST_BPS / 10_000;  // 0.029
 
 // ── ACH / bank detection ─────────────────────────────────────
 function isCardMethodType(methodType) {
