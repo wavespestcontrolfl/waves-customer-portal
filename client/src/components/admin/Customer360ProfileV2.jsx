@@ -3169,6 +3169,13 @@ export default function Customer360ProfileV2({
   const accountProperties = data.accountProperties || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
+  // What the profile shows/acts on: a truly active term, else a still-outstanding
+  // (sent-but-unpaid) prepay invoice so the admin can see it instead of being
+  // offered a duplicate that the server overlap guard rejects with 409. Never
+  // falls through to an arbitrary (cancelled / refunded / expired) term.
+  const displayedAnnualPrepayTerm = activeAnnualPrepayTerm
+    || annualPrepayTerms.find((t) => t.status === 'payment_pending')
+    || null;
 
   const updateNotificationPrefs = async (patch) => {
     const previous = data.notificationPrefs || {};
@@ -4068,21 +4075,23 @@ export default function Customer360ProfileV2({
                       {fmtDate(lastPayment.payment_date)}
                     </div>
                   )}
-                  {activeAnnualPrepayTerm && (
+                  {displayedAnnualPrepayTerm && (
                     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
                       <div className="text-12 font-medium text-zinc-900">
-                        {activeAnnualPrepayTerm.planLabel || "Annual Prepay"}
+                        {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
                       </div>
                       <div className="text-11 text-ink-secondary mt-0.5">
-                        Term ends {fmtDate(activeAnnualPrepayTerm.termEnd)}
-                        {activeAnnualPrepayTerm.lastScheduledServiceDate
-                          ? ` · last scheduled ${fmtDate(activeAnnualPrepayTerm.lastScheduledServiceDate)}`
+                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
+                        {" · "}
+                        {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
+                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
+                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
                           : ""}
                       </div>
-                      {activeAnnualPrepayTerm.renewalDecision && (
+                      {displayedAnnualPrepayTerm.renewalDecision && (
                         <div className="text-11 text-ink-secondary mt-0.5">
                           Decision:{" "}
-                          {activeAnnualPrepayTerm.renewalDecision.replace(
+                          {displayedAnnualPrepayTerm.renewalDecision.replace(
                             "_",
                             " ",
                           )}
@@ -4354,7 +4363,7 @@ export default function Customer360ProfileV2({
               {isAdmin && (
                 <AnnualPrepayPanelV2
                   customer={c}
-                  activeTerm={activeAnnualPrepayTerm}
+                  activeTerm={displayedAnnualPrepayTerm}
                   onOpen={() => setAnnualPrepayOpen(true)}
                   onSendInvoice={() => setAnnualPrepayInvoiceOpen(true)}
                 />
@@ -5241,7 +5250,7 @@ export default function Customer360ProfileV2({
       {annualPrepayOpen && (
         <AnnualPrepayModal
           customer={c}
-          activeTerm={activeAnnualPrepayTerm}
+          activeTerm={displayedAnnualPrepayTerm}
           prepaidPlans={data.prepaidPlans || []}
           annualPrepayTerms={data.annualPrepayTerms || []}
           onClose={() => setAnnualPrepayOpen(false)}
@@ -5251,7 +5260,7 @@ export default function Customer360ProfileV2({
       {annualPrepayInvoiceOpen && (
         <AnnualPrepayInvoiceModal
           customer={c}
-          activeTerm={activeAnnualPrepayTerm}
+          activeTerm={displayedAnnualPrepayTerm}
           prepaidPlans={data.prepaidPlans || []}
           annualPrepayTerms={data.annualPrepayTerms || []}
           onClose={() => setAnnualPrepayInvoiceOpen(false)}

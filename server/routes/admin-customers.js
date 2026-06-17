@@ -13,6 +13,7 @@ const AccountMembershipEmail = require('../services/account-membership-email');
 const { listCustomerPrepaidPlans } = require('../services/prepaid-series');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { documentRequiresSignature } = require('../services/contracts');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -185,7 +186,7 @@ function serviceCatalogMatch(line, serviceIndex) {
   if (/rodent|rat|mouse/.test(text) && /monitor|monthly/.test(text)) return pick('rodent_monitoring');
   if (/rodent|rat|mouse/.test(text) && /bait|station/.test(text)) return pick('rodent_bait_quarterly') || pick('rodent_monitoring');
   if (/rodent|rat|mouse|exclusion|trapping/.test(text)) return pick('rodent_exclusion');
-  if (/termite|bait/.test(text) && /install|station|bait/.test(text)) return pick('termite_bait');
+  if (/termite|wdo|subterranean|sentricon/.test(text) && /install|station|bait/.test(text)) return pick('termite_bait');
   if (/termite|wdo/.test(text) && /inspect|letter/.test(text)) return pick('wdo_inspection');
   if (/termite|trench|liquid/.test(text)) return pick('termite_liquid');
   if (/tree|shrub|ornamental/.test(text)) return pick('tree_shrub_program');
@@ -643,6 +644,33 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
 ];
 
 const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_present', 'other']);
+
+// Advisory-lock namespace for serializing per-customer annual-prepay creation,
+// so hashtext(customerId) can't collide with locks taken elsewhere.
+const ANNUAL_PREPAY_LOCK_NS = 0x4150;
+
+// Acquire a per-customer advisory lock (released at txn commit/rollback) and
+// re-check for an overlapping annual-prepay term INSIDE the transaction. The
+// pre-flight check before the txn is a fast UX path only; without this guard two
+// concurrent submissions (double-click, or two admins) can both pass that check
+// and create duplicate invoices/terms/payments. Throws a tagged error the route
+// translates to a 409. Statuses mirror the pre-flight overlap query.
+async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, allowOverlap, errorPrefix) {
+  await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [ANNUAL_PREPAY_LOCK_NS, String(customerId)]);
+  if (allowOverlap === true) return;
+  const activeTerm = await trx('annual_prepay_terms')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+    .orderBy('term_end', 'desc')
+    .first();
+  const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
+  if (activeTermEnd && termStart <= activeTermEnd) {
+    const message = `${errorPrefix} ${activeTermEnd}. Use a start date after ${activeTermEnd}.`;
+    const err = new Error(message);
+    err.annualPrepayOverlap = { error: message, activeTermId: activeTerm.id, activeTermEnd };
+    throw err;
+  }
+}
 
 function parseAnnualPrepayAmount(value) {
   const amount = Number(value);
@@ -1791,8 +1819,12 @@ router.get('/:id', async (req, res, next) => {
         documentTemplateKey: contract.document_template_key,
         documentTemplateCategory: contract.document_template_category,
         documentTemplateDocumentType: contract.document_template_document_type,
+        // Prefer the per-contract requires_signature_snapshot (frozen when the
+        // document was sent) over the live template flag, matching
+        // contracts.js serialization so historical contracts don't flip if the
+        // template's signature requirement later changes.
         requiresSignature: contract.contract_type === 'document_template'
-          ? contract.document_template_requires_signature !== false
+          ? documentRequiresSignature(contract)
           : true,
         documentVariablesSnapshot: contract.document_variables_snapshot || {},
         documentRenderSummary: contract.document_render_summary || {},
@@ -2302,6 +2334,10 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     let invoice;
     let term;
     await db.transaction(async (trx) => {
+      await lockAndAssertNoAnnualPrepayOverlap(
+        trx, customer.id, termStart, req.body?.allowOverlap === true,
+        'Customer already has an annual prepay term through',
+      );
       invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -2387,7 +2423,10 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       annualPrepayTerm: mapAnnualPrepayTerm(term),
       delivery,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    next(err);
+  }
 });
 
 // POST /api/admin/customers/:id/annual-prepay - record a 12-month prepay that
@@ -2463,6 +2502,10 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const InvoiceService = require('../services/invoice');
     let result;
     await db.transaction(async (trx) => {
+      await lockAndAssertNoAnnualPrepayOverlap(
+        trx, customer.id, termStart, req.body?.allowOverlap === true,
+        'Customer already has an active annual prepay term through',
+      );
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -2579,7 +2622,10 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         coverageCadence: result.term.coverage_cadence || null,
       },
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    next(err);
+  }
 });
 
 // =========================================================================

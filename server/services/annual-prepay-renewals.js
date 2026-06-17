@@ -694,22 +694,95 @@ async function activatePaidPendingTerms(conn = db) {
   return activated;
 }
 
+/**
+ * Customer IDs whose prepay coverage is active on `asOf` (ET date string;
+ * defaults to today). A customer in this set has paid for the current period up
+ * front and MUST be excluded from monthly billing even when active +
+ * monthly_rate > 0 + autopay on. The paid coverage term — not a zeroed
+ * monthly_rate — is the billing-suppression source of truth.
+ *
+ * Coverage = today within [term_start, term_end] AND a COVERED_STATUSES term
+ * (or a payment_pending term whose invoice is in fact paid, or a renewal-lapsed
+ * term still inside its paid window) AND the prepay invoice is not void/refunded
+ * AND the prepay payment was not fully refunded. A refund (invoice flips to
+ * refunded / payment refund_status='full') correctly re-enables monthly billing.
+ */
 async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
   if (!(await annualPrepayTableExists())) return new Set();
   const coverageDate = dateOnly(asOf) || etDateString();
-  const rows = await conn('annual_prepay_terms')
-    .whereIn('status', COVERED_STATUSES)
-    .where('term_start', '<=', coverageDate)
-    .where('term_end', '>=', coverageDate)
-    .select('customer_id');
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const rows = await conn('annual_prepay_terms as t')
+    .leftJoin('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.term_start', '<=', coverageDate)
+    .where('t.term_end', '>=', coverageDate)
+    // Covered = a paid-coverage status, OR a payment_pending term whose invoice
+    // is in fact paid (webhook/reconcile lag — activatePaidPendingTerms() is the
+    // canonical recovery, run before this in the billing cron), OR a renewal
+    // *lapse* (status='cancelled' with renewal_decision='cancel') whose already
+    // paid term is still current through term_end. A true refund sets
+    // status='cancelled' with a NULL renewal_decision and is dropped by the
+    // invoice/payment refund exclusions below.
+    .where(function statusGuard() {
+      this.whereIn('t.status', COVERED_STATUSES)
+        .orWhere(function paidPending() {
+          this.where('t.status', PAYMENT_PENDING_STATUS)
+            .andWhere(function invoicePaid() {
+              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+            });
+        })
+        .orWhere(function lapsedRenewalStillInTerm() {
+          this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
+        });
+    })
+    // Exclude void/refunded prepay invoices…
+    .whereRaw(
+      `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    // …and any term whose prepay payment was FULLY refunded. The Stripe refund
+    // webhook (charge.refunded) flips a full refund to status='refunded' /
+    // refund_status='full' on the payment row — it does NOT flip invoices.status
+    // — so detect it on the payment via the invoice's Stripe identifiers.
+    // Partial refunds (status stays 'paid') keep coverage.
+    .whereRaw(
+      `not exists (
+        select 1 from payments p
+        where (p.status = 'refunded' or p.refund_status = 'full')
+          and (
+            (p.stripe_payment_intent_id is not null and p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+            or (p.stripe_charge_id is not null and p.stripe_charge_id = i.stripe_charge_id)
+          )
+      )`,
+    )
+    .distinct('t.customer_id');
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
 }
 
-async function getPaymentPendingCustomerIds(conn = db) {
+/**
+ * Customer IDs with an annual-prepay commitment whose invoice is still open.
+ * These customers have not paid for coverage yet, so they are not "actively
+ * covered"; the monthly billing cron still must not charge them while the
+ * annual-prepay invoice is pending review/payment. Bounded to terms whose
+ * window has not ended and whose linked invoice is still open (not paid, void,
+ * cancelled, or refunded) so a stale/void pending row cannot suppress billing
+ * indefinitely.
+ */
+async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
   if (!(await annualPrepayTableExists())) return new Set();
-  const rows = await conn('annual_prepay_terms')
-    .where({ status: PAYMENT_PENDING_STATUS })
-    .select('customer_id');
+  const coverageDate = dateOnly(asOf) || etDateString();
+  const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
+  const rows = await conn('annual_prepay_terms as t')
+    .join('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.status', PAYMENT_PENDING_STATUS)
+    .whereNotNull('t.prepay_invoice_id')
+    .where('t.term_end', '>=', coverageDate)
+    .whereRaw(
+      `lower(coalesce(i.status, 'draft')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
+      cancelledStatuses,
+    )
+    .whereRaw("lower(coalesce(i.status, 'draft')) <> 'paid'")
+    .whereNull('i.paid_at')
+    .distinct('t.customer_id');
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
 }
 
@@ -777,8 +850,14 @@ async function createTermForAnnualPrepay({
       status: existing.renewal_decision ? existing.status : nextStatus,
       updated_at: new Date(),
     };
+    // Honor explicitly supplied coverage dates so an edit can correct them.
+    // Only the start supplied → recompute the 12-month end from it (normalizedEnd
+    // already carries start+12mo when termEnd was blank); neither supplied →
+    // leave the existing window untouched (the estimate flow re-runs with null
+    // dates and must not have its term reset).
     if (hasExplicitTermStart) updates.term_start = normalizedStart;
     if (hasExplicitTermEnd) updates.term_end = normalizedEnd;
+    else if (hasExplicitTermStart) updates.term_end = normalizedEnd;
     if (termCols.coverage_service_type && normalizedCoverageServiceType !== undefined) {
       updates.coverage_service_type = normalizedCoverageServiceType;
     }
@@ -789,6 +868,29 @@ async function createTermForAnnualPrepay({
       updates.coverage_cadence = normalizedCoverageCadence;
     }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
+    // When the coverage window is edited (start/end actually supplied), detach
+    // any visits attachScheduledServices() stamped under the old window that now
+    // fall outside it — refreshTermSnapshot only re-attaches in-window visits, it
+    // never removes out-of-window ones, so a shortened/moved window would keep
+    // reporting stale visits as Annual Prepay. Skipped when no dates were given
+    // (the estimate re-run path), so it only fires on a real window change.
+    if (updates.term_start || updates.term_end) {
+      const scCols = await scheduledServiceColumns();
+      if (scCols.annual_prepay_term_id) {
+        const winStart = dateOnly(updates.term_start || existing.term_start);
+        const winEnd = dateOnly(updates.term_end || existing.term_end);
+        try {
+          await conn('scheduled_services')
+            .where({ annual_prepay_term_id: existing.id })
+            .andWhere(function detachOutOfWindow() {
+              this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
+            })
+            .update({ annual_prepay_term_id: null, updated_at: new Date() });
+        } catch (err) {
+          logger.warn(`[annual-prepay] scheduled service detach skipped: ${err.message}`);
+        }
+      }
+    }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
