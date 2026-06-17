@@ -49,16 +49,23 @@ finding and warns on P1. Reviewers must return JSON matching
   `''`, removing the guard, or accepting events without verification is a
   forged-event vector.
 - **Surcharge math must come from `computeChargeAmount`.**
-  `server/services/stripe.js:39-47` is the single source of truth for the 3.99%
-  card surcharge. The dollar amount displayed to the customer, the
+  `server/services/stripe-pricing.js` (the pure, unit-tested surcharge module
+  imported by `stripe.js` — `computeChargeAmount`, `isCardMethodType`,
+  `CARD_SURCHARGE_RATE`) is the single source of truth for the card surcharge —
+  currently **3%** (`CONFIGURED_COST_BPS = 300`, capped at the `NETWORK_CAP_BPS`
+  3% Visa/MC cap; consent text says "up to 3%"). `CARD_SURCHARGE_RATE = 0.03` is
+  a deprecated legacy mirror — prefer the cents/bps API. The dollar amount displayed to the customer, the
   `amountCents` sent to Stripe (`Math.round(total * 100)`), and the
   `card_surcharge` recorded on the `payments` row must all derive from the
-  same `computeChargeAmount(invoice.total, methodCategory)` call. New
-  ad-hoc `* 1.0399`, `* 0.0399`, or local rounding in pay/admin/autopay code
+  same `computeChargeAmount(invoice.total, methodType, { funding })` call — the
+  `funding` arg is required: the surcharge applies to confirmed **credit** cards
+  only (`computeChargeAmount` returns a zero surcharge unless
+  `opts.funding === 'credit'`; debit / prepaid / unknown / ACH pay the base). New
+  ad-hoc `* 1.03`, `* 0.03`, or local rounding in pay/admin/autopay code
   will drift the three numbers apart and produce reconciliation breaks.
 - **`isCardMethodType` is the surcharge classifier.** Adding a new payment
   method type (e.g. `cashapp`, `affirm`) without updating
-  `isCardMethodType` in `server/services/stripe.js:31-37` silently surcharges
+  `isCardMethodType` in `server/services/stripe-pricing.js` silently surcharges
   it as card-family. Any diff that introduces a method type elsewhere must
   also update this function.
 - **PI ↔ invoice ↔ webhook amount agreement.** `pay-v2.js` calls
@@ -84,7 +91,10 @@ finding and warns on P1. Reviewers must return JSON matching
   justification widens the leaked-token window for screenshot/sniff
   attacks. P0 unless the PR description argues for it.
 - **`scheduled_services.status` is gated by a CHECK constraint, not a
-  service helper.** Migration `20260426000004` rewrote the original
+  service helper.** Migration
+  `server/models/migrations/20260426000004_relax_scheduled_services_status_enum.js`
+  (migrations live under `server/models/migrations/`, run via
+  `--knexfile server/knexfile.js`) rewrote the original
   5-value enum to:
   `pending | confirmed | rescheduled | en_route | on_site | completed | cancelled | skipped`.
   Direct `db('scheduled_services').update({ status: ... })` is the
@@ -218,7 +228,7 @@ finding and warns on P1. Reviewers must return JSON matching
   ET-wall-clock fields. `node-cron` schedules pass
   `timezone: 'America/New_York'` explicitly.
 - **Payment processor.** Stripe only — Payment Element (card / Apple Pay
-  / Google Pay / ACH). Card-family pays a 3.99% surcharge; ACH pays the base.
+  / Google Pay / ACH). Card-family pays a surcharge (up to 3%); ACH pays the base.
   Surcharge math is centralized in `server/services/stripe.js`
   (`computeChargeAmount`, `isCardMethodType`). Square is fully phased out
   and must not be reintroduced.
@@ -302,6 +312,50 @@ finding and warns on P1. Reviewers must return JSON matching
   (caption/thumbnail/permalink/timestamp), 60 req/min rate limit, 15-min
   in-memory cache + 5-min public Cache-Control, per-source graceful failure,
   never 500s — returns an empty payload on total upstream failure).
+  `/api/public/estimator/property-lookup` (write; unauthenticated lead-capture +
+  parcel lookup for the estimator — no auth, no token, 5 req/hour rate limit.
+  REQUIRES and stores customer PII — first name, last name, email, phone, and
+  address — into `leads`, and returns county parcel facts. Treat as a
+  PII-accepting public endpoint: scope any change to what it stores or logs).
+  `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
+  instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
+  limit. Persists a quote/lead and may text the quote via a Twilio short-link;
+  returns pricing only).
+  `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
+  token, public `Cache-Control`. Consumed by the Astro build and the admin blog
+  UI; no PII).
+  `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
+  canonical FDACS / license / insurance numbers — no auth, no token, public
+  `Cache-Control`. Consumed by the Astro content build; intentionally public
+  business credentials).
+  `/api/public/automation-preview/:stepId/:token` (read-only; renders an
+  automation step's HTML body with SAMPLE merge values only — no real customer
+  data — for operator preview/share. Token in path, `noindex`).
+  `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
+  target / 410 on expired / generic 404 with no enumeration leak; `noindex`).
+  `/api/public/track/:token` (read-only live service tracker; the
+  `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
+  rate limit. In ANY state it returns the customer property block — first name,
+  service address (line1/line2), lat/lng — and a top-level `prepToken` (set
+  whenever a linked project has a `prep_token`, NOT gated on state) that fans
+  out to `/prep/:token`. `en_route` additionally returns live tech coords + ETA
+  from Bouncie. The `complete` summary additionally hands out secondary bearer
+  tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
+  `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
+  to the report / receipt / rate surfaces. Treat the track token and any change
+  to its payload, in any state, as security-critical).
+  `/api/reviews/featured` (read-only public featured Google reviews for the
+  marketing site — no auth, no token, location filter + limit; reads
+  `google_reviews` only).
+  `/api/review/:token` (GET + POST; token-gated customer review flow — GET
+  returns the review-request context by token, POST submits the customer's
+  review. No auth beyond the review-request token).
+  `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
+  `/:token/generate-review`) (review-gate; token-scoped customer rating flow
+  from a review-request link — high → the nearest GBP write-a-review URL, low →
+  private feedback capture. No auth beyond the review-request token; picks
+  nearest GBP by geocoded address. The bare `/api/rate` mount is not itself a
+  route — only the token-scoped family is public).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
