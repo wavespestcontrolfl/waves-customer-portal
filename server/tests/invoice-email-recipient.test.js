@@ -308,6 +308,24 @@ describe('invoice email recipient resolution', () => {
       payer_snapshot: expect.stringContaining('ap-oneoff@westbay.com'),
     }));
   });
+
+  test('a payer invoice whose payer cannot be attached (inactive live payer, no snapshot) fails closed — never the homeowner', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'x' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    // payer_id is set on the invoice, but the live payer is deactivated and there
+    // is no snapshot, so attachToInvoice leaves invoice.payer unset.
+    db.mockImplementation(dbWithPayer(
+      { id: 7, ap_email: 'ap@westbay.com', active: false },
+      { prefs: { billing_email: 'homeowner-billing@example.com' } },
+    ));
+
+    const result = await sendInvoiceEmail('invoice-1');
+
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe('receipt email recipient resolution (third-party payer)', () => {
@@ -348,6 +366,19 @@ describe('receipt email recipient resolution (third-party payer)', () => {
 
   test('a payer with no usable AP email does NOT fall back to the homeowner — would leak the payer card last4', async () => {
     db.mockImplementation(dbForReceipt({ id: 7, ap_email: '', company_name: 'Homes by West Bay', active: true }));
+
+    const result = await sendReceiptEmail('invoice-1');
+
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('No receipt recipient email');
+  });
+
+  test('a payer receipt whose payer cannot be attached (inactive, no snapshot) fails closed — never the homeowner', async () => {
+    // payer_id is set, but the live payer is deactivated and there's no snapshot,
+    // so attachToInvoice leaves invoice.payer unset — must NOT fall back to the
+    // homeowner (would leak the payer's card last4).
+    db.mockImplementation(dbForReceipt({ id: 7, ap_email: 'ap@westbay.com', active: false }));
 
     const result = await sendReceiptEmail('invoice-1');
 

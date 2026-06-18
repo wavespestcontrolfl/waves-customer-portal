@@ -124,11 +124,15 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // add the payer's AP email (or set an explicit recipient) and resend.
   await PayerService.attachToInvoice(invoice);
   let effectiveOverride = options.recipientOverride || null;
-  if (!effectiveOverride && invoice.payer) {
-    effectiveOverride = PayerService.payerRecipient(invoice.payer) || null;
+  if (!effectiveOverride && invoice.payer_id) {
+    // Keyed on payer_id (the column), NOT the attached object: a payer-billed
+    // invoice whose payer can't be attached (no snapshot + live payer
+    // inactive/missing) must still route to the payer AP only. Fail CLOSED when
+    // no payer recipient resolves — never fall through to the homeowner.
+    effectiveOverride = (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null) || null;
     if (!effectiveOverride) {
-      logger.warn(`[invoice-email] Payer invoice ${invoice.invoice_number} has no usable AP email — not sending (operator must add a payer AP email or specify a recipient).`);
-      return { ok: false, error: 'Payer has no usable AP email; invoice not sent. Add an AP email to the payer or specify a recipient.' };
+      logger.warn(`[invoice-email] Payer invoice ${invoice.invoice_number} has no usable AP recipient — not sending (operator must add a payer AP email or specify a recipient).`);
+      return { ok: false, error: 'Payer invoice has no usable AP recipient; not sent. Add an AP email to the payer or specify a recipient.' };
     }
   }
 
@@ -322,8 +326,12 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   // receipt delivery queue treats as an expected non-actionable skip rather than
   // retrying forever); the operator fixes the AP email.
   await PayerService.attachToInvoice(invoice);
-  const recipient = invoice.payer
-    ? PayerService.payerRecipient(invoice.payer)
+  // Keyed on payer_id (the column), not the attached object: a payer-billed
+  // invoice whose payer can't be attached (inactive/missing live payer, no
+  // snapshot) must still NEVER fall back to the homeowner (would leak the
+  // payer's card last4). No payer recipient → standard no-recipient skip.
+  const recipient = invoice.payer_id
+    ? (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null)
     : getReceiptEmailRecipients(customer, prefs || {})[0];
   if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
 

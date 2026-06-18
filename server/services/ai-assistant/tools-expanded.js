@@ -220,17 +220,24 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
         }
       }
 
-      // Send the pay link via SMS
-      const sendResult = await InvoiceService.sendViaSMS(invoiceId);
+      // Send the pay link. A payer-billed invoice can't be delivered via the
+      // homeowner SMS (sendViaSMS short-circuits to payer_billed and never
+      // finalizes); route it through the email-capable path so the payer AP
+      // inbox receives it and the invoice is finalized. Self-pay keeps SMS.
+      const invoiceForSend = await db('invoices').where('id', invoiceId).first('payer_id');
+      const sendResult = invoiceForSend?.payer_id
+        ? await InvoiceService.sendViaSMSAndEmail(invoiceId)
+        : await InvoiceService.sendViaSMS(invoiceId);
+      const sent = !!(sendResult?.sent || sendResult?.ok);
       const invoice = await db('invoices').where('id', invoiceId).first();
 
       return {
-        sent: !!sendResult?.sent,
+        sent,
         invoiceNumber: invoice.invoice_number,
         amount: parseFloat(invoice.total),
         payUrl: sendResult?.payUrl,
         status: invoice.status,
-        ...(!sendResult?.sent && { error: sendResult?.code || sendResult?.reason || 'send_failed' }),
+        ...(!sent && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
       };
     }
 
