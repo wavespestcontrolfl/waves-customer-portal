@@ -857,9 +857,17 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
 // banner on the pay page + PDF. Defaults: coverage starts on the service date
 // (or today) for 12 months, prepay amount = invoice total. Idempotent per
 // invoice (annual_prepay_terms has a unique prepay_invoice_id).
+//
+// When coverageServiceType + coverageVisitCount (+ optional coverageCadence)
+// are supplied, the linked term also seeds/auto-stamps that many scheduled
+// visits prepaid on payment (the same coverage behavior as the Customer 360
+// annual-prepay flow). Omitting them preserves the legacy display-only flag.
 router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   try {
-    const { termStart, termEnd, months, planLabel, prepayAmount, monthlyRate } = req.body || {};
+    const {
+      termStart, termEnd, months, planLabel, prepayAmount, monthlyRate,
+      coverageServiceType, coverageVisitCount, coverageCadence,
+    } = req.body || {};
     const ymd = /^\d{4}-\d{2}-\d{2}$/;
     if (termStart && !ymd.test(String(termStart))) {
       return res.status(400).json({ error: 'termStart must be YYYY-MM-DD' });
@@ -899,6 +907,25 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'monthlyRate must be a non-negative number' });
     }
 
+    // Coverage fields are optional. When present, the term seeds + auto-stamps
+    // the covered visits prepaid (so completing them doesn't re-invoice the
+    // customer who already paid the year up front); when omitted they stay
+    // `undefined` and createTermForAnnualPrepay leaves the term display-only.
+    let resolvedVisitCount;
+    if (coverageVisitCount != null && coverageVisitCount !== '') {
+      const vc = parseInt(coverageVisitCount, 10);
+      if (!Number.isInteger(vc) || vc < 1 || vc > 24) {
+        return res.status(400).json({ error: 'coverageVisitCount must be between 1 and 24' });
+      }
+      resolvedVisitCount = vc;
+    }
+    const resolvedServiceType = coverageServiceType !== undefined
+      ? (cleanOptionalText(coverageServiceType) || null)
+      : undefined;
+    const resolvedCadence = coverageCadence !== undefined
+      ? (cleanOptionalText(coverageCadence) || null)
+      : undefined;
+
     const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
       customerId: invoice.customer_id,
       prepayInvoiceId: invoice.id,
@@ -907,6 +934,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       prepayAmount: resolvedAmount,
       termStart: start || null,
       termEnd: end || null,
+      coverageServiceType: resolvedServiceType,
+      coverageVisitCount: resolvedVisitCount,
+      coverageCadence: resolvedCadence,
     });
     if (!term) {
       return res.status(409).json({ error: 'Annual prepay is not available for this account' });

@@ -63,7 +63,10 @@ async function loadInvoiceAnnualPrepay(invoice) {
   if (!hasTable) return null;
   const term = await db('annual_prepay_terms')
     .where({ id: invoice.annual_prepay_term_id })
-    .first('id', 'status', 'plan_label', 'monthly_rate', 'prepay_amount', 'term_start', 'term_end')
+    .first(
+      'id', 'status', 'plan_label', 'monthly_rate', 'prepay_amount', 'term_start', 'term_end',
+      'coverage_service_type', 'coverage_visit_count', 'coverage_cadence',
+    )
     .catch(() => null);
   if (!term) return null;
   return {
@@ -75,6 +78,9 @@ async function loadInvoiceAnnualPrepay(invoice) {
     termStart: term.term_start,
     termEnd: term.term_end,
     coverageMonths: coverageMonths(term.term_start, term.term_end),
+    coverageServiceType: term.coverage_service_type || null,
+    coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
+    coverageCadence: term.coverage_cadence || null,
     setupFeeWaived: annualPrepaySetupFeeWaived(invoice),
   };
 }
