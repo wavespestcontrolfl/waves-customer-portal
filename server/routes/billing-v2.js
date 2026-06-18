@@ -16,14 +16,23 @@ router.use(authenticate);
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const { limit = 20 } = req.query;
+    const requestedLimit = parseInt(limit) || 20;
     const service = await PaymentRouter.getServiceForCustomer(req.customerId);
-    const payments = await service.getPaymentHistory(req.customerId, parseInt(limit));
 
     // Third-party Bill-To: a payment against a payer-billed invoice belongs to
     // the payer (AP contact), not the homeowner — drop those rows so the
     // logged-in customer never sees the payer's card brand / last4 / Stripe
-    // PaymentIntent id in their own history.
+    // PaymentIntent id in their own history. Over-fetch first so excluding those
+    // rows still returns up to `requestedLimit` customer-visible payments (the
+    // exclusion can't be a SQL filter without casting arbitrary payment metadata
+    // to jsonb table-wide). Payer payments are a small minority, so a padded
+    // buffer fills the page in realistic cases.
+    const payerInvRows = await db('invoices')
+      .where({ customer_id: req.customerId })
+      .whereNotNull('payer_id')
+      .select('id')
+      .catch(() => []);
+    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
     const invoiceIdOf = (p) => {
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -32,22 +41,14 @@ router.get('/', async (req, res, next) => {
         return null;
       }
     };
-    const linkedInvoiceIds = [...new Set(payments.map(invoiceIdOf).filter(Boolean))];
-    let payerInvoiceIds = new Set();
-    if (linkedInvoiceIds.length > 0) {
-      const payerRows = await db('invoices')
-        .whereIn('id', linkedInvoiceIds)
-        .whereNotNull('payer_id')
-        .select('id')
-        .catch(() => []);
-      payerInvoiceIds = new Set(payerRows.map((r) => String(r.id)));
-    }
-    const visiblePayments = payerInvoiceIds.size === 0
-      ? payments
-      : payments.filter((p) => {
+    const fetchLimit = payerInvoiceIds.size === 0 ? requestedLimit : requestedLimit * 3 + 10;
+    const fetched = await service.getPaymentHistory(req.customerId, fetchLimit);
+    const visiblePayments = (payerInvoiceIds.size === 0
+      ? fetched
+      : fetched.filter((p) => {
         const invId = invoiceIdOf(p);
         return !(invId && payerInvoiceIds.has(invId));
-      });
+      })).slice(0, requestedLimit);
 
     res.json({
       payments: visiblePayments.map(p => ({

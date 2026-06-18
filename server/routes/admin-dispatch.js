@@ -4578,6 +4578,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Third-party Bill-To: a payer-billed auto-invoice is intentionally NOT
+    // carried by the homeowner completion SMS (pay link suppressed) and is never
+    // collected in person, so the homeowner channel can't finalize it. Route it
+    // to the payer's AP inbox here and finalize on success — otherwise the
+    // third-party AR is silently stranded as an unsent draft. A payer with no
+    // usable AP email leaves the invoice unfinalized for operator correction
+    // (sendInvoiceEmail returns ok:false rather than mailing the homeowner).
+    if (invoice?.id && invoiceCreated && invoice.payer_id) {
+      try {
+        const InvoiceEmail = require('../services/invoice-email');
+        const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
+        if (payerSend?.ok) {
+          const InvoiceService = require('../services/invoice');
+          invoice = await InvoiceService.markDeliverySent(invoice.id, {
+            email: true,
+            source: 'dispatch_completion_payer',
+          });
+        } else {
+          logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
+        }
+      } catch (payerSendErr) {
+        logger.error(`[dispatch] Payer invoice AP send failed for ${invoice.id}: ${payerSendErr.message}`);
+      }
+    }
+
     const finalRecordNotes = parseJsonObject(record.structured_notes);
     const completionSmsStatus = finalRecordNotes.completionSmsStatus
       || (suppressTypedCustomerComms && sendCompletionSms

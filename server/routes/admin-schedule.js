@@ -3094,6 +3094,28 @@ router.post('/:id/invoice', async (req, res, next) => {
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
+    // Third-party Bill-To: this endpoint mints a collectible invoice and returns
+    // its token to the tech checkout sheet for in-person card/ACH collection. A
+    // payer-billed visit must never be collected from the homeowner in person —
+    // AR routes to the payer AP inbox, and the invoice is sent there on
+    // completion. Refuse the in-person mint for payer-resolved visits.
+    try {
+      const PayerService = require('../services/payer');
+      const resolved = await PayerService.resolveForInvoice({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+      });
+      if (resolved?.payerId) {
+        return res.status(400).json({
+          error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
+        });
+      }
+    } catch (e) {
+      // resolveForInvoice never throws, but never let a payer lookup break the
+      // existing self-pay charge-now flow.
+      logger.warn(`[admin-schedule] payer resolve failed on charge-now for service ${svc.id}: ${e.message}`);
+    }
+
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
     const applyPrepaidCredit = async (invoice) => {

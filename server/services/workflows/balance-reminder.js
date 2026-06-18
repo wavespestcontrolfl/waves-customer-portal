@@ -169,12 +169,35 @@ class BalanceReminder {
   }
 
   async getCustomerBalance(customerId) {
-    const outstanding = await db("payments")
+    const allOutstanding = await db("payments")
       .where({ "payments.customer_id": customerId })
       .whereIn("status", ["failed", "upcoming"])
       .whereNull("superseded_by_payment_id")
       .where("payment_date", "<", etDateString())
       .orderBy("payment_date", "asc");
+
+    // Third-party Bill-To: a payer-billed invoice's payment rows sit under the
+    // homeowner's customer_id but are the payer's debt — drop them so an AP
+    // ACH/card failure doesn't inflate the homeowner's balance / overdue age and
+    // trigger an early or incorrect balance reminder.
+    const payerInvRows = await db("invoices")
+      .where({ customer_id: customerId })
+      .whereNotNull("payer_id")
+      .select("id")
+      .catch(() => []);
+    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+    const isPayerPayment = (p) => {
+      try {
+        const m = typeof p.metadata === "string" ? JSON.parse(p.metadata) : p.metadata;
+        const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
+        return !!(invId && payerInvoiceIds.has(invId));
+      } catch {
+        return false;
+      }
+    };
+    const outstanding = payerInvoiceIds.size === 0
+      ? allOutstanding
+      : allOutstanding.filter((p) => !isPayerPayment(p));
 
     if (!outstanding.length) return null;
 
