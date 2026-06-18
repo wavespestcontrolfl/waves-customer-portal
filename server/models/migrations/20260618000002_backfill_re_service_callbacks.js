@@ -60,16 +60,24 @@ exports.up = async function up(knex) {
     // 2. Void stale, unpaid invoices minted from the old monthly-rate fallback
     //    (e.g. a pre-migration "Charge now"). Completion reuses any non-void
     //    invoice by scheduled_service_id, so these would still collect monthly
-    //    dues on a now-free callback. Paid/prepaid invoices are left alone —
-    //    refunds are out of scope for a data backfill.
+    //    dues on a now-free callback. Only target rows with NO intentional
+    //    positive price — a re-service the operator priced on purpose has a
+    //    legitimate invoice/pay link that must be preserved. Paid/prepaid are
+    //    left alone (refunds are out of scope for a data backfill).
     if (await knex.schema.hasTable('invoices')
         && await knex.schema.hasColumn('invoices', 'scheduled_service_id')) {
-      const voidUpdate = { status: 'void' };
-      if (await knex.schema.hasColumn('invoices', 'updated_at')) voidUpdate.updated_at = knex.fn.now();
-      await knex('invoices')
-        .whereIn('scheduled_service_id', pendingReServiceIds)
-        .whereNotIn('status', INVOICE_SETTLED_STATUSES)
-        .update(voidUpdate);
+      const freeReServiceIds = await knex('scheduled_services')
+        .whereIn('id', pendingReServiceIds)
+        .where(function () { this.whereNull('estimated_price').orWhere('estimated_price', 0); })
+        .pluck('id');
+      if (freeReServiceIds.length > 0) {
+        const voidUpdate = { status: 'void' };
+        if (await knex.schema.hasColumn('invoices', 'updated_at')) voidUpdate.updated_at = knex.fn.now();
+        await knex('invoices')
+          .whereIn('scheduled_service_id', freeReServiceIds)
+          .whereNotIn('status', INVOICE_SETTLED_STATUSES)
+          .update(voidUpdate);
+      }
     }
   }
 

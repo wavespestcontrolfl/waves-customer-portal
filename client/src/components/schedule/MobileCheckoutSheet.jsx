@@ -104,6 +104,10 @@ export default function MobileCheckoutSheet({
   const totalBeforePrepaid = Math.max(0, servicesSubtotal + extraDiscountsTotal);
   const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
+  // A $0 visit (e.g. a free callback with no added extras) has nothing to mint —
+  // the invoice endpoint rejects a zero charge — so disable the Charge button and
+  // point the tech at completing the job instead of a failing "Charge $0.00".
+  const nothingToCharge = total <= 0;
 
   const startTime = formatTime(service.windowStart);
   const duration = service.estimatedDuration ? `${service.estimatedDuration} mins` : '';
@@ -179,7 +183,7 @@ export default function MobileCheckoutSheet({
   const removeExtra = (id) => setExtras((prev) => prev.filter((e) => e.id !== id));
 
   async function handleCharge() {
-    if (minting) return;
+    if (minting || nothingToCharge) return;
     setMinting(true);
     setMintError(null);
     try {
@@ -246,11 +250,15 @@ export default function MobileCheckoutSheet({
         <button
           type="button"
           onClick={handleCharge}
-          disabled={minting}
+          disabled={minting || nothingToCharge}
           className="w-full bg-zinc-900 text-white font-medium rounded-xs u-focus-ring"
-          style={{ padding: '16px 20px', fontSize: 16, opacity: minting ? 0.6 : 1 }}
+          style={{ padding: '16px 20px', fontSize: 16, opacity: (minting || nothingToCharge) ? 0.6 : 1 }}
         >
-          {minting ? 'Opening payment…' : `Charge $${total.toFixed(2)}`}
+          {minting
+            ? 'Opening payment…'
+            : nothingToCharge
+              ? 'No charge — complete from job'
+              : `Charge $${total.toFixed(2)}`}
         </button>
         {mintError && (
           <div className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>

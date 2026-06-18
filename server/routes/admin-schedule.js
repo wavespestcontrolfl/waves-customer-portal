@@ -668,6 +668,16 @@ function parseMoneyInput(value, fieldName) {
   return Math.round(num * 100) / 100;
 }
 
+// A re-service callback is free for customers on a recurring plan — a WaveGuard
+// tier OR a positive monthly_rate (mirrors project-completion's hasMembership).
+// Used to decide whether to zero a re-service's price at create/edit time.
+function customerEligibleForFreeCallback(customer = {}) {
+  const tier = String(customer.waveguard_tier ?? customer.waveguardTier ?? '').trim().toLowerCase();
+  if (tier && tier !== 'none') return true;
+  const monthly = Number(customer.monthly_rate ?? customer.monthlyRate ?? 0);
+  return Number.isFinite(monthly) && monthly > 0;
+}
+
 function normalizeDiscountAmount(row, clientAmount) {
   const isVariable = row?.discount_type === 'variable_amount' || row?.discount_type === 'variable_percentage';
   const raw = isVariable && clientAmount !== null && clientAmount !== undefined && clientAmount !== ''
@@ -1710,7 +1720,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const explicitPriceProvided = positiveMoneyInput(primaryLinePrice)
       || positiveMoneyInput(estimatedPrice)
       || addonHasExplicitPrice;
-    const zeroCallbackPrice = resolvedIsCallback && !!customer?.waveguard_tier && !explicitPriceProvided;
+    const zeroCallbackPrice = resolvedIsCallback && customerEligibleForFreeCallback(customer) && !explicitPriceProvided;
 
     let finalPrice = pricing.finalPrice;
     if (zeroCallbackPrice) finalPrice = 0;
@@ -2323,51 +2333,84 @@ router.put('/:id/update-details', async (req, res, next) => {
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
-    // Re-service reclassification on edit. The appointment editor posts
-    // `serviceId` ONLY when the operator actively (re)picks a service from the
-    // library; an unrelated save omits it. So `serviceId` — not the label — is
-    // the authoritative signal that the service changed: the schedule DTOs
-    // normalize "Pest Control Re-Service" → "Pest Control Service" (and the
-    // regular + re-service variants collapse to the SAME normalized label), so
-    // the serviceType string can't tell a real switch from a no-op save. When
-    // the service is switched, classify from the catalog row and keep
-    // is_callback / service_id / price coherent with the POST create path.
+    // Re-service reclassification on edit. Callers post a service switch two
+    // ways:
+    //   • EditServiceModal sends `serviceId` (+ raw label) when the operator
+    //     picks from the library — authoritative.
+    //   • DispatchPageV2.saveEdit posts only `serviceType` (a raw library label
+    //     such as "Lawn Care Re-Service"), no serviceId.
+    // An unrelated modal save posts a *normalized* label ("Pest Control
+    // Service") with no serviceId — NOT a switch, so the persisted flag must
+    // survive. So: trust serviceId when present; otherwise fall back to the raw
+    // service_type label, but only to ADD the callback classification (a
+    // non-re-service label without serviceId can't tell "changed to regular"
+    // from "no-op save of a normalized re-service", so we leave it alone).
     let reServiceConversionZeroPrice = false;
-    if (serviceId !== undefined) {
+    let reServiceConversion = false; // a switch INTO a re-service this edit
+    if (serviceId !== undefined || serviceType !== undefined) {
       try {
         const cols = await db('scheduled_services').columnInfo();
-        const existingRow = await db('scheduled_services').where({ id: req.params.id })
-          .first('estimated_price', 'primary_line_price', 'customer_id');
-        const svcRow = serviceId
-          ? await db('services').where({ id: serviceId }).first('service_key', 'name').catch(() => null)
-          : null;
-        const incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
-        if (cols.service_id) updates.service_id = serviceId || null;
-        if (cols.is_callback) updates.is_callback = incomingIsReService;
-        if (incomingIsReService) {
+        let incomingIsReService = null; // null = unknown → leave flag as-is
+        let resolvedServiceId; // undefined = don't touch service_id
+
+        if (serviceId !== undefined) {
+          const svcRow = serviceId
+            ? await db('services').where({ id: serviceId }).first('service_key', 'name').catch(() => null)
+            : null;
+          incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
+          resolvedServiceId = serviceId || null;
+        } else if (isReService({ serviceType })) {
+          // Label-only switch INTO a re-service (dispatch card). Resolve the
+          // catalog row so completion-profile resolution (keyed off service_id)
+          // is correct; lawn vs pest is inferred from the label.
+          incomingIsReService = true;
+          const reKey = /lawn/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
+          const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
+          resolvedServiceId = reSvc?.id || null;
+        }
+
+        if (incomingIsReService !== null) {
+          if (cols.is_callback) updates.is_callback = incomingIsReService;
+          if (cols.service_id && resolvedServiceId !== undefined) updates.service_id = resolvedServiceId;
+        }
+
+        if (incomingIsReService === true) {
+          reServiceConversion = true;
+          const existingRow = await db('scheduled_services').where({ id: req.params.id })
+            .first('estimated_price', 'customer_id');
           const customerRow = await db('customers').where({ id: existingRow?.customer_id })
-            .first('waveguard_tier').catch(() => null);
-          // The modal carries over the PRIOR service's pre-filled price AND its
+            .first('waveguard_tier', 'monthly_rate').catch(() => null);
+          // The payload carries over the PRIOR service's pre-filled price AND its
           // existing add-on rows on a switch, so "is there any price?" wrongly
           // reads as a new charge. Compare the full INTENDED visit total in the
-          // payload (primary line + add-on lines) against the stored
-          // estimated_price instead: only an actual change means the operator
-          // typed a new charge; an unchanged carryover is stale and must not
-          // bill a free WaveGuard callback.
+          // payload (primary line + NET add-on lines — unchanged discounted
+          // add-ons arrive as basePrice + discount fields, not a net price)
+          // against the stored estimated_price: only an actual delta means the
+          // operator typed a new charge; an unchanged carryover is stale and
+          // must not bill a free callback.
           const posMoney = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
+          const addonNet = (a) => {
+            if (a == null) return 0;
+            const net = posMoney(a.price);
+            if (net != null) return net;
+            const gross = posMoney(a.basePrice ?? a.estimatedPrice);
+            if (gross == null) return 0;
+            if (a.discountType && a.discountAmount != null && a.discountAmount !== '') {
+              return Math.max(0, Math.round(applyDiscount(gross, a.discountType, Number(a.discountAmount)) * 100) / 100);
+            }
+            return gross;
+          };
           const prevEstimate = existingRow?.estimated_price != null ? Math.round(Number(existingRow.estimated_price) * 100) / 100 : null;
           const postedPrimary = posMoney(primaryLinePrice);
           const postedAddonTotal = Array.isArray(addons)
-            ? addons.reduce((sum, a) => sum + (posMoney(a?.price ?? a?.basePrice ?? a?.estimatedPrice) || 0), 0)
+            ? addons.reduce((sum, a) => sum + addonNet(a), 0)
             : 0;
-          // Intended total: primary + add-ons when the multi-line payload is
-          // present; otherwise a single posted estimatedPrice.
           const postedTotal = (postedPrimary != null || postedAddonTotal > 0)
             ? Math.round(((postedPrimary || 0) + postedAddonTotal) * 100) / 100
             : posMoney(estimatedPrice);
           const explicitNewCharge = postedTotal != null && postedTotal > 0
             && (prevEstimate == null || Math.abs(postedTotal - prevEstimate) >= 0.005);
-          reServiceConversionZeroPrice = !!customerRow?.waveguard_tier && !explicitNewCharge;
+          reServiceConversionZeroPrice = customerEligibleForFreeCallback(customerRow || {}) && !explicitNewCharge;
         }
       } catch { /* columns may not exist pre-migration — non-blocking */ }
     }
@@ -2701,6 +2744,73 @@ router.put('/:id/update-details', async (req, res, next) => {
           await trx('scheduled_service_addons')
             .where({ scheduled_service_id: req.params.id })
             .update(addonUpdates);
+        }
+      }
+
+      // Converting an already-invoiced visit to a free re-service: charge-now and
+      // completion reuse any non-void invoice by scheduled_service_id BEFORE
+      // considering the new zero price, so a stale charge could still be
+      // presented/collected. Void unpaid invoices for this visit so the
+      // conversion actually takes effect. Paid/prepaid are left alone.
+      if (reServiceConversionZeroPrice) {
+        const hasInvoiceLink = await trx.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
+        if (hasInvoiceLink) {
+          const voidUpdate = { status: 'void' };
+          if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidUpdate.updated_at = trx.fn.now();
+          await trx('invoices')
+            .where({ scheduled_service_id: req.params.id })
+            .whereNotIn('status', ['paid', 'prepaid', 'void'])
+            .update(voidUpdate)
+            .catch(() => {});
+        }
+      }
+
+      // Propagate a re-service conversion to the rest of a recurring series. The
+      // cadence-rewrite block below only touches dates/cadence, so without this
+      // the already-seeded pending children/boosters keep the old service_id /
+      // is_callback / price and would bill as regular visits (and drop out of
+      // callback reporting) once the converted parent completes.
+      if (reServiceConversion) {
+        const seriesCols = await trx('scheduled_services').columnInfo();
+        if (seriesCols.recurring_parent_id) {
+          const self = await trx('scheduled_services').where({ id: req.params.id })
+            .first('recurring_parent_id');
+          const seriesParentId = self?.recurring_parent_id || req.params.id;
+          const seriesUpdates = {};
+          if (seriesCols.is_callback && updates.is_callback !== undefined) seriesUpdates.is_callback = updates.is_callback;
+          if (seriesCols.service_id && updates.service_id !== undefined) seriesUpdates.service_id = updates.service_id;
+          if (reServiceConversionZeroPrice) {
+            if (seriesCols.estimated_price) seriesUpdates.estimated_price = 0;
+            if (seriesCols.primary_line_price) seriesUpdates.primary_line_price = 0;
+            if (seriesCols.discount_dollars) seriesUpdates.discount_dollars = null;
+          }
+          if (Object.keys(seriesUpdates).length > 0) {
+            await trx('scheduled_services')
+              .where(function () {
+                this.where({ recurring_parent_id: seriesParentId }).orWhere({ id: seriesParentId });
+              })
+              .whereNot({ id: req.params.id })
+              .whereIn('status', ['pending', 'confirmed'])
+              .update(seriesUpdates);
+            if (reServiceConversionZeroPrice) {
+              // Zero carried-over add-on prices on those pending series rows too.
+              const seriesIds = await trx('scheduled_services')
+                .where(function () {
+                  this.where({ recurring_parent_id: seriesParentId }).orWhere({ id: seriesParentId });
+                })
+                .whereIn('status', ['pending', 'confirmed'])
+                .pluck('id');
+              if (seriesIds.length > 0) {
+                const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
+                const addonZero = {};
+                if (addonCols.estimated_price) addonZero.estimated_price = 0;
+                if (addonCols.base_price) addonZero.base_price = 0;
+                if (Object.keys(addonZero).length > 0) {
+                  await trx('scheduled_service_addons').whereIn('scheduled_service_id', seriesIds).update(addonZero).catch(() => {});
+                }
+              }
+            }
+          }
         }
       }
 
