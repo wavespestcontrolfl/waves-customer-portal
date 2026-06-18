@@ -27,33 +27,51 @@ export default function CustomerRequestsPanel({ customerId }) {
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState("");
 
-  const load = useCallback(async () => {
-    if (!customerId) return;
+  // Load is owned by this effect so a customer switch aborts the in-flight
+  // request and discards any late response. Without this guard, an operator who
+  // navigates Customer 360 from A to B while A's fetch is still in flight could
+  // see A's open requests under B's profile and resolve the wrong customer's
+  // request (releasing the wrong estimate add-on dedup lock). The `loading`
+  // render-guard below also hides the panel during the switch, so a stale row
+  // can never be clicked.
+  useEffect(() => {
+    if (!customerId) {
+      setRequests([]);
+      setLoading(false);
+      return;
+    }
+    const ac = new AbortController();
+    let cancelled = false;
     setLoading(true);
     setError("");
-    try {
-      const res = await adminFetch(
-        `/admin/requests?customerId=${encodeURIComponent(customerId)}&openOnly=true&limit=50`
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      // Server already excludes terminal statuses (resolved/closed/cancelled)
-      // via openOnly before paginating; this filter is a defensive backstop so
-      // a stale build can't surface an already-handled row here.
-      const rows = (data.requests || []).filter(
-        (r) => !["resolved", "closed", "cancelled"].includes(r.status)
-      );
-      setRequests(rows);
-    } catch (e) {
-      setError(e?.message || "Could not load requests");
-    } finally {
-      setLoading(false);
-    }
+    (async () => {
+      try {
+        const res = await adminFetch(
+          `/admin/requests?customerId=${encodeURIComponent(customerId)}&openOnly=true&limit=50`,
+          { signal: ac.signal }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (cancelled) return;
+        // Server already excludes terminal statuses (resolved/closed/cancelled)
+        // via openOnly before paginating; this filter is a defensive backstop so
+        // a stale build can't surface an already-handled row here.
+        const rows = (data.requests || []).filter(
+          (r) => !["resolved", "closed", "cancelled"].includes(r.status)
+        );
+        setRequests(rows);
+      } catch (e) {
+        if (cancelled || e?.name === "AbortError") return;
+        setError(e?.message || "Could not load requests");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      ac.abort();
+    };
   }, [customerId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
 
   const markHandled = useCallback(async (id) => {
     setBusyId(id);
