@@ -64,7 +64,13 @@ async function suggestCoverageServiceType(customerId) {
     const cadenceCounts = new Map();
     for (const row of rows) {
       if (String(row.service_type || '').trim() !== serviceType) continue;
-      let c = normalizeCoverageCadence(row.recurring_pattern);
+      // The scheduler stores monthly "nth weekday of month" schedules as
+      // monthly_nth_weekday, which normalizeCoverageCadence doesn't recognize;
+      // map it to monthly so a monthly customer isn't prefilled as quarterly.
+      const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
+      let c = rawPattern === 'monthly_nth_weekday'
+        ? 'monthly'
+        : normalizeCoverageCadence(row.recurring_pattern);
       if (!c && Number(row.recurring_interval_days) === 42) c = 'every_6_weeks';
       if (c) cadenceCounts.set(c, (cadenceCounts.get(c) || 0) + 1);
     }
