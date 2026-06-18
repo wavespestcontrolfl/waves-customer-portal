@@ -910,6 +910,13 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
+  // Re-service callbacks must stay flagged on every cloned visit (ongoing
+  // roll-forward, recurring-alert extend/convert, following-reschedule). The
+  // parent already carries estimated_price=0; without copying is_callback,
+  // admin-dispatch's `!svc.is_callback` monthly-rate fallback would start
+  // billing a free callback — and drop it from callback reporting — once the
+  // seeded visits are exhausted.
+  if (cols.is_callback && parent?.is_callback) target.is_callback = true;
 }
 
 function formatServiceDisplay(primaryType, addons = []) {
