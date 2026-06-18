@@ -196,7 +196,29 @@ async function getBillingInfo(customerId) {
   if (!customerId) return { error: 'No customer ID' };
 
   const customer = await db('customers').where('id', customerId).first();
-  const payments = await db('payments').where('customer_id', customerId).orderBy('payment_date', 'desc').limit(5);
+
+  // Third-party Bill-To: a payment against a payer-billed invoice sits under the
+  // homeowner's customer_id but belongs to the payer (AP contact). Drop those
+  // rows so the assistant never surfaces the payer's payment to the homeowner or
+  // inflates their balance — mirrors the /api/billing filter (rounds 6–8).
+  const payerInvRows = await db('invoices')
+    .where({ customer_id: customerId })
+    .whereNotNull('payer_id')
+    .select('id');
+  const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+  const isPayerPayment = (p) => {
+    if (!payerInvoiceIds.size) return false;
+    let m = p.metadata;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch { m = null; } }
+    const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
+    return !!(invId && payerInvoiceIds.has(invId));
+  };
+  // Over-fetch when payer rows exist, then filter, so we still return up to 5.
+  const rawPayments = await db('payments')
+    .where('customer_id', customerId)
+    .orderBy('payment_date', 'desc')
+    .limit(payerInvoiceIds.size ? 30 : 5);
+  const payments = rawPayments.filter((p) => !isPayerPayment(p)).slice(0, 5);
   const cards = await db('payment_methods').where('customer_id', customerId);
   // Superseded failed attempts were collected by their retry's own row —
   // counting them would tell the customer they owe money already taken.

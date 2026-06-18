@@ -882,13 +882,20 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       if (shouldSaveBillingRecipient) {
         const invoice = await db('invoices')
           .where({ id })
-          .select('customer_id')
+          .select('customer_id', 'payer_id')
           .first();
         if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-        await saveBillingRecipientPreference(invoice.customer_id, {
-          email: overrideEmail,
-          name: overrideName,
-        });
+        // Third-party Bill-To: a one-off AP override on a payer invoice is the
+        // payer's address — never persist it to the homeowner's billing prefs
+        // (that would reroute the homeowner's own future self-pay invoices to
+        // the third party). The payer snapshot/AP path (payer.freezeApEmail)
+        // handles persisting the delivered AP email for payer invoices.
+        if (!invoice.payer_id) {
+          await saveBillingRecipientPreference(invoice.customer_id, {
+            email: overrideEmail,
+            name: overrideName,
+          });
+        }
       }
     }
 
