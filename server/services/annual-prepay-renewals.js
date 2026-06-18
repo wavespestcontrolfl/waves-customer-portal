@@ -1107,7 +1107,6 @@ async function createTermForAnnualPrepay({
           !== (normalizedCoverageCadence || null))
     );
     if (coverageSelectionChanged) {
-      await clearPrepaidStampsForTerm(existing.id, conn);
       // Clearing stamps isn't enough: the dropped visits keep their
       // annual_prepay_term_id link, which the repo treats as Annual Prepay for
       // reporting/forecasting (pricing-reality-check) and copies onto recurring
@@ -1116,16 +1115,26 @@ async function createTermForAnnualPrepay({
       // re-attach + re-stamp ONLY the new selection — visits dropped from
       // coverage fall fully back to normal billing. Completed/terminal visits
       // keep their historical link + stamp (PREPAID_UPDATE_EXCLUDED_STATUSES).
+      //
+      // The stamp clear and the link detach must be atomic: if the detach
+      // landed but the stamp clear silently failed, those visits would keep a
+      // prepaid_amount with no term link — completion billing would still skip
+      // them and no term-keyed cleanup could ever find them again. Run both in
+      // one (sub)transaction with the stamp clear set to throw, so a failed
+      // clear rolls back the detach instead of orphaning the stamps.
       const scCols = await scheduledServiceColumns();
-      if (scCols.annual_prepay_term_id) {
-        try {
-          await conn('scheduled_services')
-            .where({ annual_prepay_term_id: existing.id })
-            .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
-            .update({ annual_prepay_term_id: null, updated_at: new Date() });
-        } catch (err) {
-          logger.warn(`[annual-prepay] coverage-change detach skipped: ${err.message}`);
-        }
+      try {
+        await conn.transaction(async (trx) => {
+          await clearPrepaidStampsForTerm(existing.id, trx, { throwOnError: true });
+          if (scCols.annual_prepay_term_id) {
+            await trx('scheduled_services')
+              .where({ annual_prepay_term_id: existing.id })
+              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
+              .update({ annual_prepay_term_id: null, updated_at: new Date() });
+          }
+        });
+      } catch (err) {
+        logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
       }
     }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);

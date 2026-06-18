@@ -937,6 +937,39 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // Per-customer overlap guard, mirroring the Customer 360 annual-prepay
+    // routes. Now that this endpoint can create real visit coverage, a second
+    // overlapping term would let two terms fight over the same scheduled visits
+    // (double-counting / mis-stamping). Block it — but only for a brand-new
+    // coverage term: re-flagging THIS invoice (idempotent per prepay_invoice_id)
+    // is an edit of its own term, and a display-only flag doesn't own visits.
+    if (resolvedServiceType && resolvedVisitCount !== undefined) {
+      const ownTerm = await db('annual_prepay_terms')
+        .where({ prepay_invoice_id: invoice.id })
+        .first('id');
+      if (!ownTerm) {
+        const startYmd = dateOnly(start) || etDateString();
+        const overlapTerm = await db('annual_prepay_terms')
+          .where({ customer_id: invoice.customer_id })
+          .where(function overlapStatus() {
+            this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+              .orWhere(function lapsedRenewalStillInTerm() {
+                this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+              });
+          })
+          .orderBy('term_end', 'desc')
+          .first('id', 'term_end');
+        const overlapEnd = overlapTerm ? dateOnly(overlapTerm.term_end) : null;
+        if (overlapEnd && startYmd <= overlapEnd) {
+          return res.status(409).json({
+            error: `Customer already has an annual prepay term through ${overlapEnd}. Use a coverage start date after ${overlapEnd}, or apply coverage from that term.`,
+            activeTermId: overlapTerm.id,
+            activeTermEnd: overlapEnd,
+          });
+        }
+      }
+    }
+
     const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
       customerId: invoice.customer_id,
       prepayInvoiceId: invoice.id,

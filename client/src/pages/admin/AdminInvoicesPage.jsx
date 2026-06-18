@@ -3282,9 +3282,7 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   const [amount, setAmount] = useState(
     invoice.total != null ? String(parseFloat(invoice.total).toFixed(2)) : "",
   );
-  const [serviceType, setServiceType] = useState(
-    (invoice.title || "").replace(/\s+Annual Prepay$/i, "").trim(),
-  );
+  const [serviceType, setServiceType] = useState("");
   const [cadence, setCadence] = useState("quarterly");
   // Whether `cadence` reflects a real choice (stored on the term, or picked by
   // the operator) vs. the untouched default. We only send cadence when it's
@@ -3369,9 +3367,13 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           // scheduled visits prepaid. Empty service type → display-only flag.
           coverageServiceType: trimmedService,
           coverageVisitCount: trimmedService && coverageVisitsValid ? parsedVisits : undefined,
-          // Omit cadence unless it's explicit, so we never overwrite a legacy
-          // term's inferred schedule with the untouched default.
-          coverageCadence: trimmedService && cadenceExplicit ? cadence : undefined,
+          // For a NEW term, send the visible cadence so what the form shows is
+          // what gets seeded (the server's label-first inference would otherwise
+          // override the displayed default). For an EXISTING term, omit it
+          // unless explicit, so an unrelated edit never overwrites a legacy
+          // null-cadence term's inferred schedule with the default.
+          coverageCadence:
+            trimmedService && (!existing || cadenceExplicit) ? cadence : undefined,
         }),
       });
       onSaved(existing ? "Annual prepay updated" : "Marked as annual prepay");
