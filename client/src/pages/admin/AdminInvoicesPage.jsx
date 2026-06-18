@@ -338,6 +338,7 @@ export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
+  const [editInvoice, setEditInvoice] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   useEffect(() => {
@@ -376,13 +377,24 @@ export default function AdminInvoicesPage() {
           label: tab === "create" ? "Invoice List" : "Create Invoice",
           icon: tab === "create" ? ListChecks : Plus,
           variant: tab === "create" ? "secondary" : "primary",
-          onClick: () => setTab(tab === "create" ? "list" : "create"),
+          onClick: () => {
+            if (tab === "create") {
+              setEditInvoice(null);
+              setTab("list");
+            } else {
+              setTab("create");
+            }
+          },
         }}
       />
       {tab === "list" && (
         <InvoiceList
           showToast={showToast}
           onRefresh={loadStats}
+          onEdit={(inv) => {
+            setEditInvoice(inv);
+            setTab("create");
+          }}
           isMobile={isMobile}
           stats={stats}
         />
@@ -390,8 +402,10 @@ export default function AdminInvoicesPage() {
       {tab === "create" && (
         <CreateInvoice
           showToast={showToast}
+          editInvoice={editInvoice}
           onCreated={() => {
             loadStats();
+            setEditInvoice(null);
             setTab("list");
           }}
           isMobile={isMobile}
@@ -512,7 +526,7 @@ function FilterPill({ label, value, options, onChange, isMobile }) {
 }
 
 // ── Invoice List (mirrors attached UI) ──
-function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
+function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
   const PAGE_SIZE = 100;
   const [invoices, setInvoices] = useState([]);
   const [total, setTotal] = useState(0);
@@ -1120,6 +1134,16 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               title="Send invoice via SMS + email"
                             >
                               Send
+                            </button>
+                          )}
+                          {(inv.status === "draft" ||
+                            inv.status === "scheduled") && (
+                            <button
+                              onClick={() => onEdit?.(inv)}
+                              style={sBtn(D.card, D.text, isMobile)}
+                              title="Edit line items, notes, and due date before sending"
+                            >
+                              Edit
                             </button>
                           )}
                           {(inv.status === "sent" ||
@@ -3785,7 +3809,8 @@ function PaymentPlanModal({
 }
 
 // ── Create Invoice ──
-function CreateInvoice({ showToast, onCreated, isMobile }) {
+function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
+  const editMode = !!editInvoice;
   function defaultServiceDate() {
     const parts = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -3810,6 +3835,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState("");
+  const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [sendTiming, setSendTiming] = useState("now");
   const [sendCustomAt, setSendCustomAt] = useState("");
@@ -3840,8 +3866,55 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       .catch(() => {});
   }, []);
 
+  // Edit mode: prefill the builder from the existing draft. Only the fields
+  // the PUT /admin/invoices/:id route actually persists are loaded into editable
+  // state (line items, notes, due date); the customer and service date are shown
+  // read-only because the update route never rewrites them. The customer's
+  // property_type isn't on the list row, so taxability is derived from the
+  // invoice's own stored tax_rate — this mirrors how the server retotals on
+  // update (it keeps the invoice's existing rate), so the preview matches.
+  useEffect(() => {
+    if (!editMode) return;
+    setSelectedCustomer({
+      id: editInvoice.customer_id,
+      first_name: editInvoice.first_name,
+      last_name: editInvoice.last_name,
+      phone: editInvoice.phone,
+      email: editInvoice.email,
+      waveguard_tier: editInvoice.waveguard_tier,
+      property_type:
+        Number(editInvoice.tax_rate) > 0 ? "commercial" : "residential",
+    });
+    const stored =
+      typeof editInvoice.line_items === "string"
+        ? (() => {
+            try {
+              return JSON.parse(editInvoice.line_items);
+            } catch {
+              return [];
+            }
+          })()
+        : editInvoice.line_items || [];
+    const prefilled = (Array.isArray(stored) ? stored : []).map((item) => ({
+      ...item,
+      client_id: item.client_id || newLineItem().client_id,
+    }));
+    setLineItems(prefilled.length ? prefilled : [newLineItem()]);
+    setNotes(editInvoice.notes || "");
+    setTitle(editInvoice.title || "");
+    const due = invoiceDateOnly(editInvoice.due_date);
+    if (due) {
+      setDueTiming("custom");
+      setDueCustomDate(due);
+    }
+    const svc = invoiceDateOnly(editInvoice.service_date);
+    if (svc) setServiceDate(svc);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, editInvoice]);
+
   // Customer search
   useEffect(() => {
+    if (editMode) return;
     if (customerQuery.length < 2) {
       setCustomers([]);
       return;
@@ -3856,9 +3929,10 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     return () => clearTimeout(t);
   }, [customerQuery]);
 
-  // Load service records when customer selected
+  // Load service records when customer selected (skip in edit mode — the
+  // service-history linker is hidden and the update route can't relink it).
   useEffect(() => {
-    if (!selectedCustomer) {
+    if (editMode || !selectedCustomer) {
       setServiceRecords([]);
       return;
     }
@@ -4304,6 +4378,49 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     setSaving(false);
   };
 
+  // Edit mode save — persists only the fields the PUT route allows
+  // (title, notes, due_date, line_items). The server recalculates subtotal,
+  // discounts, tax, and total from the line items, so we never send money totals.
+  const handleSave = async () => {
+    if (
+      !lineItems.some(
+        (i) => i._kind !== "discount" && i.description && i.unit_price > 0,
+      )
+    ) {
+      showToast("Add at least one line item");
+      return;
+    }
+    const dueDate = invoiceDueDate();
+    if (!dueDate) {
+      showToast("Choose a due date");
+      return;
+    }
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/invoices/${editInvoice.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          title: title || null,
+          notes: notes || null,
+          due_date: dueDate,
+          line_items: lineItems
+            .filter((i) => i.description && Number(i.unit_price) !== 0)
+            .map((i) => ({
+              ...i,
+              amount: lineAmount(i),
+            })),
+        }),
+      });
+      showToast(
+        `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
+      );
+      onCreated();
+    } catch (e) {
+      showToast(`Error: ${e.message}`);
+    }
+    setSaving(false);
+  };
+
   const sectionHeader = (title, action = null) => (
     <div
       style={{
@@ -4371,13 +4488,17 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     borderRadius: 10,
     ...style,
   });
-  const primaryActionLabel = saving
-    ? "Creating..."
-    : sendTiming === "now"
-      ? "Send Invoice"
-      : sendTiming === "draft"
-        ? "Create Draft"
-        : "Schedule Invoice";
+  const primaryActionLabel = editMode
+    ? saving
+      ? "Saving..."
+      : "Save Changes"
+    : saving
+      ? "Creating..."
+      : sendTiming === "now"
+        ? "Send Invoice"
+        : sendTiming === "draft"
+          ? "Create Draft"
+          : "Schedule Invoice";
   const canAddQueuedAttachments = canAddInvoiceAttachments(queuedAttachments);
   const queuedAttachmentHelpId = "invoice-create-attachments-help";
   const queuedAttachmentStatusId = "invoice-create-attachments-status";
@@ -4428,7 +4549,9 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <div>
               {" "}
               <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>
-                Invoice Builder
+                {editMode
+                  ? `Edit Invoice ${editInvoice.invoice_number || ""}`.trim()
+                  : "Invoice Builder"}
               </div>{" "}
             </div>{" "}
           </div>{" "}
@@ -4469,25 +4592,27 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   </span>
                 )}
               </div>{" "}
-              <button
-                onClick={() => {
-                  setSelectedCustomer(null);
-                  setSelectedService(null);
-                  setCustomerQuery("");
-                }}
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: D.muted,
-                  cursor: "pointer",
-                  fontSize: 18,
-                  padding: isMobile ? "10px 12px" : "4px 8px",
-                  minHeight: isMobile ? 44 : undefined,
-                  minWidth: isMobile ? 44 : undefined,
-                }}
-              >
-                x
-              </button>{" "}
+              {!editMode && (
+                <button
+                  onClick={() => {
+                    setSelectedCustomer(null);
+                    setSelectedService(null);
+                    setCustomerQuery("");
+                  }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: D.muted,
+                    cursor: "pointer",
+                    fontSize: 18,
+                    padding: isMobile ? "10px 12px" : "4px 8px",
+                    minHeight: isMobile ? 44 : undefined,
+                    minWidth: isMobile ? 44 : undefined,
+                  }}
+                >
+                  x
+                </button>
+              )}{" "}
             </div>
           ) : (
             <div style={{ position: "relative" }}>
@@ -4553,7 +4678,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             </div>
           )}
         </div>
-        {serviceRecords.length > 0 && (
+        {!editMode && serviceRecords.length > 0 && (
           <div style={panelStyle()}>
             {sectionHeader("Service History")}
             <select
@@ -4588,15 +4713,17 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             </select>{" "}
           </div>
         )}
-        <div style={panelStyle()}>
-          {sectionHeader("Service Date")}
-          <input
-            type="date"
-            value={serviceDate}
-            onChange={(e) => setServiceDate(e.target.value)}
-            style={sInput(isMobile)}
-          />{" "}
-        </div>{" "}
+        {!editMode && (
+          <div style={panelStyle()}>
+            {sectionHeader("Service Date")}
+            <input
+              type="date"
+              value={serviceDate}
+              onChange={(e) => setServiceDate(e.target.value)}
+              style={sInput(isMobile)}
+            />{" "}
+          </div>
+        )}{" "}
         <div style={panelStyle()}>
           {sectionHeader("Services")}
           {!isMobile && (
@@ -4934,6 +5061,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             + Add service
           </button>{" "}
         </div>{" "}
+        {!editMode && (
         <div style={panelStyle()}>
           {sectionHeader("Attachments")}
           <input
@@ -5038,7 +5166,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               No files selected.
             </div>
           )}
-        </div>{" "}
+        </div>
+        )}{" "}
         <div style={panelStyle()}>
           {sectionHeader("Delivery")}
           <div style={{ marginBottom: 14 }}>
@@ -5099,40 +5228,42 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 marginBottom: 6,
               }}
             >
-              Schedule
+              {editMode ? "Due date" : "Schedule"}
             </div>{" "}
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                gridTemplateColumns: isMobile || editMode ? "1fr" : "1fr 1fr",
                 gap: 8,
               }}
             >
               {" "}
-              <div>
-                {" "}
-                <label
-                  style={{
-                    fontSize: 12,
-                    color: D.text,
-                    display: "block",
-                    marginBottom: 4,
-                  }}
-                >
-                  Send
-                </label>{" "}
-                <select
-                  value={sendTiming}
-                  onChange={(e) => setSendTiming(e.target.value)}
-                  style={sInput(isMobile)}
-                >
+              {!editMode && (
+                <div>
                   {" "}
-                  <option value="now">Immediately</option>{" "}
-                  <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
-                  <option value="custom">Custom time</option>{" "}
-                  <option value="draft">Save draft</option>{" "}
-                </select>{" "}
-              </div>{" "}
+                  <label
+                    style={{
+                      fontSize: 12,
+                      color: D.text,
+                      display: "block",
+                      marginBottom: 4,
+                    }}
+                  >
+                    Send
+                  </label>{" "}
+                  <select
+                    value={sendTiming}
+                    onChange={(e) => setSendTiming(e.target.value)}
+                    style={sInput(isMobile)}
+                  >
+                    {" "}
+                    <option value="now">Immediately</option>{" "}
+                    <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
+                    <option value="custom">Custom time</option>{" "}
+                    <option value="draft">Save draft</option>{" "}
+                  </select>{" "}
+                </div>
+              )}{" "}
               <div>
                 {" "}
                 <label
@@ -5163,21 +5294,22 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                  gridTemplateColumns: isMobile || editMode ? "1fr" : "1fr 1fr",
                   gap: 8,
                   marginTop: 8,
                 }}
               >
-                {sendTiming === "custom" ? (
-                  <input
-                    type="datetime-local"
-                    value={sendCustomAt}
-                    onChange={(e) => setSendCustomAt(e.target.value)}
-                    style={sInput(isMobile)}
-                  />
-                ) : (
-                  <div />
-                )}
+                {!editMode &&
+                  (sendTiming === "custom" ? (
+                    <input
+                      type="datetime-local"
+                      value={sendCustomAt}
+                      onChange={(e) => setSendCustomAt(e.target.value)}
+                      style={sInput(isMobile)}
+                    />
+                  ) : (
+                    <div />
+                  ))}
                 {dueTiming === "custom" ? (
                   <input
                     type="date"
@@ -5191,6 +5323,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               </div>
             )}
           </div>{" "}
+          {!editMode && (
           <div
             style={{
               marginBottom: 16,
@@ -5254,7 +5387,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 )}
               </div>
             )}
-          </div>{" "}
+          </div>
+          )}{" "}
         </div>{" "}
       </div>{" "}
       <div
@@ -5292,6 +5426,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             }}
           >
             {" "}
+            {!editMode && (
             <div
               style={{
                 display: "flex",
@@ -5310,7 +5445,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                       ? "Tomorrow 8 AM"
                       : "Custom"}
               </span>{" "}
-            </div>{" "}
+            </div>
+            )}{" "}
             <div
               style={{
                 display: "flex",
@@ -5345,7 +5481,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             </div>{" "}
           </div>{" "}
           <button
-            onClick={handleCreate}
+            onClick={editMode ? handleSave : handleCreate}
             disabled={saving}
             style={{
               ...sBtn("#111", D.white, isMobile),
