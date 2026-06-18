@@ -2200,6 +2200,52 @@ const InvoiceService = {
     // lets a tech mark an invoice "paid" with no Stripe charge / no
     // payments-ledger row, or flip a paid invoice back to "draft" and
     // erase the audit trail. See INVOICE_UPDATE_ALLOWED_FIELDS export.
+
+    // Editability guard. The generic update path can only safely rewrite an
+    // invoice that has not yet entered collection or accrued payment
+    // side-state. We re-read the CURRENT row here (not the one the editor was
+    // opened with) so a status race — the invoice gets sent/paid via the pay
+    // link, Charge in person, Add payment, or the scheduled-send cron after
+    // the edit form opened — is caught at the write:
+    //   - status must still be draft/scheduled (never rewrite sent/paid money)
+    //   - no live Stripe PaymentIntent: /pay/:token /setup stamps
+    //     stripe_payment_intent_id while the invoice stays collectible; a
+    //     retotal here would leave a stale pay page able to confirm the old
+    //     amount with no way to reconcile it.
+    //   - no active payment plan / annual-prepay term: those capture the total
+    //     at creation (payment_plans.total_balance, annual_prepay_terms
+    //     .prepay_amount); retotalling invoices alone leaves them collecting /
+    //     displaying the stale figure.
+    // Deposit-credit and applied-account-credit invoices stay blocked below
+    // (line-item path) for their own ledger reasons.
+    const existing = await db("invoices").where({ id }).first();
+    if (!existing) return null;
+    const currentStatus = String(existing.status || "").toLowerCase();
+    if (currentStatus !== "draft" && currentStatus !== "scheduled") {
+      throw new Error(
+        "Only draft or scheduled invoices can be edited — this invoice has already been sent or paid",
+      );
+    }
+    if (existing.stripe_payment_intent_id) {
+      throw new Error(
+        "A customer has already started paying this invoice — void it and create a replacement instead of editing",
+      );
+    }
+    if (existing.annual_prepay_term_id) {
+      throw new Error(
+        "This invoice is part of an annual prepay term — edit the term (Annual prepay) instead of the invoice",
+      );
+    }
+    const activePlan = await db("payment_plans")
+      .where({ invoice_id: id, status: "active" })
+      .first()
+      .catch(() => null);
+    if (activePlan) {
+      throw new Error(
+        "This invoice has an active payment plan — cancel the plan before editing the invoice",
+      );
+    }
+
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
     for (const key of allowed) {
@@ -2214,8 +2260,7 @@ const InvoiceService = {
     // discount rows are scoped to their parent line item, and residential
     // tax is always forced to zero.
     if (updates.line_items) {
-      const invoice = await db("invoices").where({ id }).first();
-      if (!invoice) return null;
+      const invoice = existing;
       // Deposit-credited invoices are edit-locked on line items: the credit
       // line is backed dollar-for-dollar by consumed estimate_deposits
       // ledger rows, and a recalculation here can neither re-cap the credit

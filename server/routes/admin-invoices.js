@@ -733,7 +733,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     const invoice = await InvoiceService.update(req.params.id, req.body);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     res.json(invoice);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Editability guards (status race, live PaymentIntent, payment plan,
+    // annual prepay, deposit/account credit) are operator-actionable conflicts,
+    // not server faults — surface them so the UI can toast the reason.
+    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied/i.test(err.message)) {
+      return res.status(409).json({ error: err.message });
+    }
+    if (/Invalid line-item discount/i.test(err.message)) {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // POST /:id/send — send invoice via SMS + email

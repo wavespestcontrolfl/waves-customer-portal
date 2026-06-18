@@ -1137,15 +1137,18 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                             </button>
                           )}
                           {(inv.status === "draft" ||
-                            inv.status === "scheduled") && (
-                            <button
-                              onClick={() => onEdit?.(inv)}
-                              style={sBtn(D.card, D.text, isMobile)}
-                              title="Edit line items, notes, and due date before sending"
-                            >
-                              Edit
-                            </button>
-                          )}
+                            inv.status === "scheduled") &&
+                            !inv.stripe_payment_intent_id &&
+                            !inv.active_payment_plan &&
+                            !inv.annual_prepay_term_id && (
+                              <button
+                                onClick={() => onEdit?.(inv)}
+                                style={sBtn(D.card, D.text, isMobile)}
+                                title="Edit line items, notes, and due date before sending"
+                              >
+                                Edit
+                              </button>
+                            )}
                           {(inv.status === "sent" ||
                             inv.status === "viewed" ||
                             inv.status === "overdue") && (
@@ -3852,6 +3855,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
   const [queuedAttachments, setQueuedAttachments] = useState([]);
   const attachmentInputRef = useRef(null);
+  // Snapshot of the line items as loaded in edit mode, so a save that didn't
+  // touch them can omit line_items entirely and skip the server retotal —
+  // which would otherwise revalidate (and reject) discounts that have since
+  // been disabled/hidden on an otherwise-valid open draft.
+  const editLineItemsBaselineRef = useRef(null);
 
   // Load active, invoice-visible discounts once. Tier discounts are included here
   // for explicit line-level selection; customer tier never applies a hidden discount.
@@ -3899,7 +3907,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       ...item,
       client_id: item.client_id || newLineItem().client_id,
     }));
-    setLineItems(prefilled.length ? prefilled : [newLineItem()]);
+    const initialLineItems = prefilled.length ? prefilled : [newLineItem()];
+    setLineItems(initialLineItems);
+    editLineItemsBaselineRef.current = JSON.stringify(initialLineItems);
     setNotes(editInvoice.notes || "");
     setTitle(editInvoice.title || "");
     const due = invoiceDateOnly(editInvoice.due_date);
@@ -4178,7 +4188,15 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const isCommercial =
     selectedCustomer?.property_type === "commercial" ||
     selectedCustomer?.property_type === "business";
-  const taxRate = isCommercial ? 0.07 : 0;
+  // In edit mode the server keeps the invoice's existing rate on retotal, so
+  // preview against the stored numeric rate (which may not be exactly 7%)
+  // instead of collapsing to a commercial flag — otherwise the preview tax and
+  // total can diverge from what the server saves.
+  const taxRate = editMode
+    ? Number(editInvoice.tax_rate) || 0
+    : isCommercial
+      ? 0.07
+      : 0;
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
   const cardCharge = computeCardTotal(total);
@@ -4397,19 +4415,25 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     }
     setSaving(true);
     try {
+      const body = {
+        title: title || null,
+        notes: notes || null,
+        due_date: dueDate,
+      };
+      // Only send line_items when they actually changed. An unchanged save
+      // (e.g. due-date only) skips the server retotal, so a draft that carries
+      // a since-retired discount stays editable for those fields.
+      if (JSON.stringify(lineItems) !== editLineItemsBaselineRef.current) {
+        body.line_items = lineItems
+          .filter((i) => i.description && Number(i.unit_price) !== 0)
+          .map((i) => ({
+            ...i,
+            amount: lineAmount(i),
+          }));
+      }
       await adminFetch(`/admin/invoices/${editInvoice.id}`, {
         method: "PUT",
-        body: JSON.stringify({
-          title: title || null,
-          notes: notes || null,
-          due_date: dueDate,
-          line_items: lineItems
-            .filter((i) => i.description && Number(i.unit_price) !== 0)
-            .map((i) => ({
-              ...i,
-              amount: lineAmount(i),
-            })),
-        }),
+        body: JSON.stringify(body),
       });
       showToast(
         `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
@@ -5477,7 +5501,15 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             >
               {" "}
               <span style={{ color: D.muted }}>Sales tax</span>{" "}
-              <span>{isCommercial ? "Commercial only" : "None"}</span>{" "}
+              <span>
+                {editMode
+                  ? taxRate > 0
+                    ? `${(taxRate * 100).toFixed(2).replace(/\.?0+$/, "")}%`
+                    : "None"
+                  : isCommercial
+                    ? "Commercial only"
+                    : "None"}
+              </span>{" "}
             </div>{" "}
           </div>{" "}
           <button
