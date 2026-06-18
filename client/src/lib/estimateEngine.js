@@ -1095,6 +1095,7 @@ export function calculateEstimate(inputs) {
     pestFreq: _pestFreq,
     plugArea: _plugArea,
     plugSpacing: _plugSpacing,
+    topDressArea: _topDressArea,
     grassType: _grassType,
     lawnFreq: _lawnFreq,
     measuredTurfSf: _measuredTurfSf,
@@ -1192,6 +1193,7 @@ export function calculateEstimate(inputs) {
   const pestFreq = Number(_pestFreq) || 4;
   const plugArea = Math.max(0, Number(_plugArea) || 0);
   const plugSpacing = Number(_plugSpacing) || 12;
+  const topDressArea = Math.max(0, Number(_topDressArea) || 0);
   const bedbugRooms = Number(_bedbugRooms) || 1;
   const termiteFootprintSqFt = toPositiveNumber(_termiteFootprintSqFt);
   const termitePerimeterLF = toPositiveNumber(_termitePerimeterLF);
@@ -1984,7 +1986,12 @@ export function calculateEstimate(inputs) {
   const lawnEst = hasTurfEstimate
     ? turfArea.turfSf
     : (R.lawn ? Math.round(lotSqFt * 0.55 * (R.lawn[2] ? 0.65 : 0.55)) : Math.round(lotSqFt * 0.35));
-  const topDressingLawnEst = svcLawn ? lawnEst : Math.round(lawnEst * 0.65);
+  // An explicit top-dress area (e.g. just the front or back yard) is the exact
+  // area to price — used as-is, bypassing the auto lawn estimate and the 0.65
+  // non-recurring reduction. Blank falls back to the derived lawn area.
+  const topDressingLawnEst = topDressArea > 0
+    ? topDressArea
+    : (svcLawn ? lawnEst : Math.round(lawnEst * 0.65));
   if (svcTopdress && !isCommercial && topDressingLawnEst > 0) {
     hasOT = true;
     const lk = topDressingLawnEst / 1000;

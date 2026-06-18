@@ -1507,8 +1507,18 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
   if (turfServices.length === 0) return null;
   const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
   if (manualTurfSf !== undefined) return null;
+  // Services whose treated area is entered directly (front/back-yard scope)
+  // don't need whole-lawn turf confirmation when an explicit area is given.
+  // Exempt only when EVERY selected turf service is such a bounded add-on, so a
+  // Top Dressing + Plugging combo (each with its own area) clears together,
+  // while any whole-lawn service (LAWN/OT_LAWN/DETHATCH) still requires it.
   const plugArea = firstNonNegativeNumber(options.plugArea);
-  if (turfServices.length === 1 && turfServices[0] === 'PLUGGING' && plugArea > 0) return null;
+  const topDressArea = firstNonNegativeNumber(options.topDressArea);
+  const areaBoundedExempt = {
+    PLUGGING: plugArea > 0,
+    TOPDRESS: topDressArea > 0,
+  };
+  if (turfServices.every((service) => areaBoundedExempt[service])) return null;
 
   const estimatedTurfSf = firstNonNegativeNumber(profile.estimatedTurfSf, profile.estimatedTurfSqFt);
   if (estimatedTurfSf === undefined || estimatedTurfSf <= TURF_MANUAL_CONFIRMATION_SQFT) return null;
@@ -2505,7 +2515,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       };
     }
   }
-  if (sel.has('TOPDRESS')) services.topDressing = { depth: 'eighth' };
+  if (sel.has('TOPDRESS')) {
+    const topDressArea = Math.max(0, Number(o.topDressArea) || 0);
+    services.topDressing = topDressArea > 0
+      ? { depth: 'eighth', lawnSqFt: topDressArea }
+      : { depth: 'eighth' };
+  }
   if (sel.has('DETHATCH')) {
     services.dethatching = {
       cleanupLevel: o.dethatchingCleanupLevel || o.cleanupLevel || 'none',

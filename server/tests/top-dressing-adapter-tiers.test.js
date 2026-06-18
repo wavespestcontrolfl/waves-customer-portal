@@ -1,5 +1,6 @@
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+const { priceTopDressing } = require('../services/pricing-engine/service-pricing');
 
 describe('top dressing adapter tiers', () => {
   test('maps server-authoritative 1/8 and 1/4 tiers for the admin estimate UI', () => {
@@ -82,5 +83,52 @@ describe('top dressing adapter tiers', () => {
       { name: '1/8" Depth', price: 230.35, detail: 'St. Augustine standard' },
       { name: '1/4" Depth', price: 461.55, detail: 'Bermuda / leveling — 2x material' },
     ]);
+  });
+
+  test('honors an explicit top-dress area, pricing only that square footage as-is', () => {
+    const base = {
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 16000,
+      measuredTurfSf: 16000,
+      propertyType: 'single_family',
+      zone: 'A',
+      features: {
+        shrubs: 'moderate',
+        trees: 'moderate',
+        complexity: 'moderate',
+        pool: false,
+        poolCage: false,
+        largeDriveway: false,
+        nearWater: false,
+      },
+      recurringCustomer: false,
+      paymentMethod: 'card',
+    };
+
+    const fullLawn = generateEstimate({
+      ...base,
+      services: { topDressing: { depth: 'eighth' } },
+    });
+    const partial = generateEstimate({
+      ...base,
+      services: { topDressing: { depth: 'eighth', lawnSqFt: 8000 } },
+    });
+
+    const fullItem = mapV1ToLegacyShape(fullLawn).oneTime.items.find(
+      (item) => item.service === 'top_dressing',
+    );
+    const partialItem = mapV1ToLegacyShape(partial).oneTime.items.find(
+      (item) => item.service === 'top_dressing',
+    );
+
+    // Explicit area is the exact area to price — used as-is, bypassing the 0.65
+    // non-recurring reduction that the auto (full-lawn) path applies.
+    expect(partialItem.price).toBe(priceTopDressing(8000, 'eighth', true).price);
+    expect(partialItem.price).toBeLessThan(fullItem.price);
+    // The scoped area is surfaced on the customer-visible row...
+    expect(partialItem.detail).toBe('Covers 8,000 sq ft');
+    // ...but a full-lawn quote carries no scoped-area note.
+    expect(fullItem.detail || '').not.toMatch(/Covers/);
   });
 });

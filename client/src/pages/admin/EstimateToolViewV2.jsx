@@ -1947,6 +1947,7 @@ export default function EstimateToolViewV2({
     pestFreq: "4",
     plugArea: "",
     plugSpacing: "12",
+    topDressArea: "",
     dethatchingCleanupLevel: "none",
     dethatchingDebrisRemovalIncluded: false,
     dethatchingAccess: "easy",
@@ -3028,6 +3029,7 @@ export default function EstimateToolViewV2({
         recurringCustomer: form.isRecurringCustomer === "YES",
         plugArea: parseInt(form.plugArea, 10) || 0,
         plugSpacing: parseInt(form.plugSpacing, 10) || 12,
+        topDressArea: Math.max(0, Math.round(Number(form.topDressArea) || 0)),
         dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
         dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
         dethatchingAccess: form.dethatchingAccess || "easy",
@@ -3237,7 +3239,7 @@ export default function EstimateToolViewV2({
         !profile.isCommercial &&
         (form.svcLawn ||
           form.svcOnetimeLawn ||
-          form.svcTopdress ||
+          (form.svcTopdress && !(parseInt(form.topDressArea, 10) > 0)) ||
           form.svcDethatch ||
           (form.svcPlugging && !(parseInt(form.plugArea, 10) > 0)));
       if (
@@ -3591,6 +3593,7 @@ export default function EstimateToolViewV2({
       palmLicensedApplicator: false,
       treeCount: "",
       measuredTurfSf: "",
+      topDressArea: "",
       fleaOfferKey: "flea_elimination_two_visit",
       fleaComplexity: "light",
       fleaExteriorSourceSuspected: false,
@@ -3738,6 +3741,7 @@ export default function EstimateToolViewV2({
     Math.ceil(Math.max(lotSqFtForTurf, aiTurfSqFt || 0, confirmedTurfSqFt || 0, lotEstimateTurfSqFt || 0, 5000) / 1000) * 1000,
   );
   const plugAreaSqFt = parseNonNegativeInteger(form.plugArea);
+  const topDressAreaSqFt = parseNonNegativeInteger(form.topDressArea);
   const fleaExteriorAreaSqFt = parseNonNegativeInteger(form.fleaExteriorAreaSqFt) ?? 0;
   const fleaExteriorAreaSource = form.fleaExteriorAreaSource || "UNKNOWN";
   const fleaExteriorMaxSqFt =
@@ -3756,9 +3760,10 @@ export default function EstimateToolViewV2({
     ? null
     : fleaExteriorPreview.warning;
   const pluggingUsesTurfFallback = !!form.svcPlugging && !(plugAreaSqFt > 0);
+  const topDressUsesTurfFallback = !!form.svcTopdress && !(topDressAreaSqFt > 0);
   const hasTurfPricedSelection =
     (!commercialDetected && (!!form.svcLawn || !!form.svcOnetimeLawn)) ||
-    !!form.svcTopdress ||
+    topDressUsesTurfFallback ||
     !!form.svcDethatch ||
     pluggingUsesTurfFallback;
   const needsTurfConfirmation =
@@ -4886,6 +4891,22 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <CheckboxV2 k="svcTopdress" label="Top Dressing" />{" "}
+              {form.svcTopdress && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
+                  <FieldV2 label="Area (sq ft)">
+                    <InputV2
+                      k="topDressArea"
+                      type="number"
+                      placeholder="Blank = est. lawn"
+                    />
+                  </FieldV2>{" "}
+                  <div className="mt-1 text-11 text-zinc-500">
+                    Optional — enter sq ft for just the front or back yard.
+                    Leave blank to auto-estimate from the property's lawn area.
+                  </div>{" "}
+                </div>
+              )}
               <CheckboxV2
                 k="svcDethatch"
                 label={

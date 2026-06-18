@@ -898,11 +898,21 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.topDressing && !useCommercialManualQuote(services.topDressing, 'lawn_care')) {
+    const topDressingOptions = serviceOptions(services.topDressing);
+    const explicitArea = Math.max(0, Number(topDressingOptions.lawnSqFt) || 0);
     const result = priceTopDressing(
-      property.lawnSqFt,
+      explicitArea || property.lawnSqFt,
       services.topDressing.depth || 'eighth',
-      !!services.lawn
+      // An explicit top-dress area (e.g. just the front or back yard) is the
+      // exact area to price — pass hasRecurringLawn=true so priceTopDressing
+      // skips its 0.65 non-recurring reduction and uses the entered area as-is.
+      explicitArea > 0 ? true : !!services.lawn
     );
+    // Surface the scoped area on the customer-visible row so a partial quote
+    // (front/back yard only) reads as such instead of a bare "Top Dressing".
+    if (explicitArea > 0) {
+      result.detail = `Covers ${Math.round(explicitArea).toLocaleString()} sq ft`;
+    }
     lineItems.push(result);
   }
   if (services.dethatching && !useCommercialManualQuote(services.dethatching, 'lawn_care')) {
