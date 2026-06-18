@@ -3264,6 +3264,11 @@ const ANNUAL_PREPAY_CADENCE_OPTIONS = [
 const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
   ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.value, String(option.visits)]),
 );
+// Reverse map (visit count → cadence), mirroring the server's visit-count
+// cadence inference, for prefilling a legacy term whose cadence is null.
+const ANNUAL_PREPAY_VISITS_TO_CADENCE = Object.fromEntries(
+  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.visits, option.value]),
+);
 
 // Flags an existing invoice as an annual prepayment so the customer-facing
 // coverage banner renders on the pay page + PDF. When a service type + visit
@@ -3305,10 +3310,21 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           if (term.prepayAmount != null) {
             setAmount(String(Number(term.prepayAmount).toFixed(2)));
           }
-          if (term.coverageServiceType) setServiceType(term.coverageServiceType);
-          if (term.coverageCadence) setCadence(term.coverageCadence);
+          // Reflect the stored coverage exactly. A legacy display-only term has
+          // no coverage service type — clear the title-derived default so an
+          // unrelated edit doesn't silently convert it into visit coverage.
+          setServiceType(term.coverageServiceType || "");
           if (term.coverageVisitCount != null) {
             setVisitCount(String(term.coverageVisitCount));
+          }
+          // Prefer the stored cadence; if it predates the cadence column, infer
+          // it from the stored visit count (matching the server) rather than
+          // leaving the modal's default and overwriting on save.
+          if (term.coverageCadence) {
+            setCadence(term.coverageCadence);
+          } else if (term.coverageVisitCount != null) {
+            const inferred = ANNUAL_PREPAY_VISITS_TO_CADENCE[Number(term.coverageVisitCount)];
+            if (inferred) setCadence(inferred);
           }
         }
       })
@@ -3328,12 +3344,19 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
     if (preset) setVisitCount(preset);
   };
 
+  const trimmedService = serviceType.trim();
+  const parsedVisits = parseInt(visitCount, 10);
+  const coverageVisitsValid =
+    Number.isInteger(parsedVisits) && parsedVisits >= 1 && parsedVisits <= 24;
+  // A service type with no valid visit count is incomplete coverage: the server
+  // would store the service type but skip stamping (which needs both), leaving
+  // an invoice that still re-bills its visits. Block the save in that state.
+  const coverageInvalid = trimmedService !== "" && !coverageVisitsValid;
+
   const handleSave = async () => {
-    if (saving) return;
+    if (saving || coverageInvalid) return;
     setSaving(true);
     try {
-      const trimmedService = serviceType.trim();
-      const parsedVisits = parseInt(visitCount, 10);
       await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
         method: "POST",
         body: JSON.stringify({
@@ -3344,8 +3367,7 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           // Coverage: send the service type + visits so payment auto-marks the
           // scheduled visits prepaid. Empty service type → display-only flag.
           coverageServiceType: trimmedService,
-          coverageVisitCount:
-            trimmedService && Number.isInteger(parsedVisits) ? parsedVisits : undefined,
+          coverageVisitCount: trimmedService && coverageVisitsValid ? parsedVisits : undefined,
           coverageCadence: trimmedService ? cadence : undefined,
         }),
       });
@@ -3501,10 +3523,19 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
               max={24}
               value={visitCount}
               onChange={(e) => setVisitCount(e.target.value)}
-              style={sInput(isMobile)}
+              style={{
+                ...sInput(isMobile),
+                border: coverageInvalid ? `1px solid ${D.red}` : sInput(isMobile).border,
+              }}
             />
           </div>
         </div>
+        {coverageInvalid && (
+          <div style={{ fontSize: 11, color: D.red, marginTop: 4 }}>
+            Enter a visit count (1–24) for this service type, or clear the
+            service type for a display-only flag.
+          </div>
+        )}
 
         <label style={labelStyle}>Plan label</label>
         <input
@@ -3557,10 +3588,11 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
             </button>
             <button
               onClick={handleSave}
-              disabled={saving || removing || loading}
+              disabled={saving || removing || loading || coverageInvalid}
               style={{
                 ...sBtn(D.heading, D.white, isMobile),
-                opacity: saving || loading ? 0.5 : 1,
+                opacity: saving || loading || coverageInvalid ? 0.5 : 1,
+                cursor: coverageInvalid ? "not-allowed" : "pointer",
               }}
             >
               {saving ? "Saving…" : existing ? "Update" : "Mark prepaid"}
