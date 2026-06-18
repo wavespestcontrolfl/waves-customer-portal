@@ -1698,7 +1698,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // reused for the recurring child + booster rows so callback suppression and
     // callback reporting propagate to every generated visit, not just the first.
     const positiveMoneyInput = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0; };
-    const explicitPriceProvided = positiveMoneyInput(primaryLinePrice) || positiveMoneyInput(estimatedPrice);
+    // Add-on lines are operator-entered charges too — `buildAppointmentPricing`
+    // already folded them into `pricing.finalPrice`. Treat a priced add-on as an
+    // explicit price so a re-service that addressed a billable extra isn't zeroed
+    // back to $0 (which would also zero the generated child/booster visits).
+    const addonHasExplicitPrice = Array.isArray(serviceAddons)
+      && serviceAddons.some((a) => positiveMoneyInput(a?.basePrice ?? a?.grossPrice ?? a?.price));
+    const explicitPriceProvided = positiveMoneyInput(primaryLinePrice)
+      || positiveMoneyInput(estimatedPrice)
+      || addonHasExplicitPrice;
     const zeroCallbackPrice = resolvedIsCallback && !!customer?.waveguard_tier && !explicitPriceProvided;
 
     let finalPrice = pricing.finalPrice;
@@ -2311,6 +2319,19 @@ router.put('/:id/update-details', async (req, res, next) => {
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
+    // Re-service edits: the appointment editor can switch an existing job to a
+    // re-service type but never sends `isCallback` (or `serviceId`), so mirror
+    // the POST-path auto-flag and reclassify from the service-type label on any
+    // service_type change. Without this, switching a visit to "Lawn/Pest Control
+    // Re-Service" leaves is_callback=false, so completion bills monthly dues and
+    // the visit drops out of callback reporting. Recompute (not just set) so
+    // switching away from a re-service also clears the flag.
+    if (serviceType !== undefined) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        if (cols.is_callback) updates.is_callback = isReService({ serviceType });
+      } catch { /* column may not exist pre-migration — non-blocking */ }
+    }
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
     if (windowStart !== undefined) updates.window_start = windowStart || null;
