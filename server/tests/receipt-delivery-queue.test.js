@@ -38,4 +38,21 @@ describe('receipt delivery queue retry policy', () => {
       emailResult: { ok: false, error: 'No receipt recipient email' },
     })).toBe(false);
   });
+
+  test('does not retry a payer-billed receipt — the homeowner SMS is intentionally suppressed', () => {
+    // Third-party Bill-To: the receipt email goes to the payer AP inbox and the
+    // homeowner SMS is suppressed ('payer_billed'). That suppression must not be
+    // treated as an actionable failure or the job retries/fails forever.
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'payer_billed' },
+      emailResult: { ok: true },
+    })).toBe(false);
+
+    // Misconfigured payer (no AP email): email skips with the standard
+    // no-recipient reason; still no retry storm.
+    expect(shouldRetryReceiptDelivery({
+      smsResult: { sent: false, reason: 'payer_billed' },
+      emailResult: { ok: false, error: 'No receipt recipient email' },
+    })).toBe(false);
+  });
 });

@@ -118,13 +118,18 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // Third-party Bill-To reroute. When this invoice carries a payer snapshot,
   // attach the payer (for the PDF bill-to block) and — unless the operator
   // passed an explicit one-off override — route the email to the payer's AP
-  // inbox automatically. A payer with no usable AP email yields a null
-  // recipient, so we fall back to the customer billing contact rather than
-  // strand the invoice with no delivery path.
+  // inbox automatically. A payer with no usable AP email must NOT fall back to
+  // the homeowner billing contact: that would bill the wrong party and expose
+  // the third-party bill (PDF + pay link). Instead we fail so the operator can
+  // add the payer's AP email (or set an explicit recipient) and resend.
   await PayerService.attachToInvoice(invoice);
   let effectiveOverride = options.recipientOverride || null;
   if (!effectiveOverride && invoice.payer) {
     effectiveOverride = PayerService.payerRecipient(invoice.payer) || null;
+    if (!effectiveOverride) {
+      logger.warn(`[invoice-email] Payer invoice ${invoice.invoice_number} has no usable AP email — not sending (operator must add a payer AP email or specify a recipient).`);
+      return { ok: false, error: 'Payer has no usable AP email; invoice not sent. Add an AP email to the payer or specify a recipient.' };
+    }
   }
 
   const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, effectiveOverride);
@@ -279,12 +284,16 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
-  // Third-party Bill-To: the AP contact who received and paid the invoice gets
-  // the bookkeeping receipt + PDF (with payer Bill-To). Fall back to the
-  // customer receipt recipient when the payer has no usable AP email.
+  // Third-party Bill-To: a payer-billed receipt may go ONLY to the payer's AP
+  // inbox — the receipt PDF/page exposes the payer's payment-method last4, so we
+  // never fall back to the homeowner. No usable AP email => no recipient
+  // (returned as the standard "No receipt recipient email" skip, which the
+  // receipt delivery queue treats as an expected non-actionable skip rather than
+  // retrying forever); the operator fixes the AP email.
   await PayerService.attachToInvoice(invoice);
-  const payerReceiptRecipient = invoice.payer ? PayerService.payerRecipient(invoice.payer) : null;
-  const recipient = payerReceiptRecipient || getReceiptEmailRecipients(customer, prefs || {})[0];
+  const recipient = invoice.payer
+    ? PayerService.payerRecipient(invoice.payer)
+    : getReceiptEmailRecipients(customer, prefs || {})[0];
   if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
 
   const payment = await db('payments')

@@ -4107,7 +4107,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && includePayLink !== false
           && !prepaidCovered
           && !alreadyPaid
-          && !autopayCoversVisit;
+          && !autopayCoversVisit
+          // Third-party Bill-To: never text the homeowner the pay link for a
+          // payer-billed invoice — AR routes to the payer's AP inbox. The
+          // homeowner still gets the report-only completion SMS (no pay_url).
+          && !invoice?.payer_id;
         const usePaidCompletionTemplate = alreadyPaid
           || prepaidCovered
           || autopayCoversVisit

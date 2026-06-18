@@ -94,7 +94,10 @@ function expectedEmailSkip(result) {
 }
 
 function actionableSmsFailure(result) {
-  return result?.sent === false && !['already-sent', 'no-phone'].includes(result.reason);
+  // 'payer_billed' is an intentional suppression (third-party Bill-To invoices
+  // never text the homeowner a receipt), not a delivery failure — treat it like
+  // the other expected skips so the queue doesn't retry/fail the job forever.
+  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed'].includes(result.reason);
 }
 
 function actionableEmailFailure(result) {

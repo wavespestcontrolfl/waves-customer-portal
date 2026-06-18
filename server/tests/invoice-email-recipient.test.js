@@ -15,9 +15,9 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(),
 }));
 
-const { _private, sendInvoiceEmail } = require('../services/invoice-email');
+const { _private, sendInvoiceEmail, sendReceiptEmail } = require('../services/invoice-email');
 const db = require('../models/db');
-const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
+const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('../services/pdf/invoice-pdf');
 const sendgrid = require('../services/sendgrid-mail');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendTemplate } = require('../services/email-template-library');
@@ -33,6 +33,9 @@ const customer = {
 function query(result) {
   const chain = {
     where: jest.fn(() => chain),
+    whereIn: jest.fn(() => chain),
+    whereRaw: jest.fn(() => chain),
+    orderBy: jest.fn(() => chain),
     select: jest.fn(() => chain),
     first: jest.fn(() => Promise.resolve(result)),
     catch: jest.fn((handler) => Promise.resolve(result).catch(handler)),
@@ -216,7 +219,7 @@ describe('invoice email recipient resolution', () => {
     expect(result.recipient).toEqual(expect.objectContaining({ email: 'oneoff@example.com' }));
   });
 
-  test('a payer with no usable AP email falls back to the customer billing contact', async () => {
+  test('a payer with no usable AP email does NOT fall back to the homeowner — it fails for operator correction', async () => {
     buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
     sendgrid.isConfigured.mockReturnValue(true);
     sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm3' } });
@@ -228,7 +231,74 @@ describe('invoice email recipient resolution', () => {
 
     const result = await sendInvoiceEmail('invoice-1');
 
-    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@example.com' }));
-    expect(result.recipient).toEqual(expect.objectContaining({ email: 'ap@example.com', role: 'billing_contact' }));
+    // Billing the homeowner for a third-party invoice (or exposing the bill)
+    // is worse than not sending — the operator must add the payer AP email.
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/AP email/i);
+  });
+
+  test('an explicit operator override still sends even when the payer has no AP email', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm4' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    db.mockImplementation(dbWithPayer(
+      { id: 7, ap_email: '', company_name: 'Homes by West Bay', active: true },
+    ));
+
+    const result = await sendInvoiceEmail('invoice-1', {
+      recipientOverride: { email: 'oneoff@example.com', name: 'One Off' },
+    });
+
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'oneoff@example.com' }));
+    expect(result.recipient).toEqual(expect.objectContaining({ email: 'oneoff@example.com' }));
+  });
+});
+
+describe('receipt email recipient resolution (third-party payer)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    buildReceiptPDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'r1' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+  });
+
+  function dbForReceipt(payerRow) {
+    return (table) => {
+      if (table === 'invoices') {
+        return query({
+          id: 'invoice-1', customer_id: 'cust-1', invoice_number: 'INV-1',
+          token: 'token-1', total: 300, line_items: [], status: 'paid',
+          paid_at: new Date('2026-06-17T12:00:00Z'),
+          card_brand: 'visa', card_last_four: '4242', payer_id: 7,
+        });
+      }
+      if (table === 'customers') return query({ ...customer, id: 'cust-1' });
+      if (table === 'notification_prefs') return query(null);
+      if (table === 'payers') return query(payerRow);
+      if (table === 'payments') return query(null);
+      return query(null);
+    };
+  }
+
+  test('routes the receipt to the payer AP inbox (not the homeowner)', async () => {
+    db.mockImplementation(dbForReceipt({ id: 7, ap_email: 'ap@westbay.com', company_name: 'Homes by West Bay', active: true }));
+
+    const result = await sendReceiptEmail('invoice-1');
+
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@westbay.com' }));
+    expect(result.ok).toBe(true);
+  });
+
+  test('a payer with no usable AP email does NOT fall back to the homeowner — would leak the payer card last4', async () => {
+    db.mockImplementation(dbForReceipt({ id: 7, ap_email: '', company_name: 'Homes by West Bay', active: true }));
+
+    const result = await sendReceiptEmail('invoice-1');
+
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('No receipt recipient email');
   });
 });

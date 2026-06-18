@@ -248,6 +248,11 @@ async function scheduleForInvoice(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return null;
   if (!isSchedulableInvoice(invoice)) return null;
+  // Third-party Bill-To: the follow-up/dunning sequence emails and texts the
+  // homeowner with the pay link, but a payer-billed invoice's AR rolls to the
+  // payer's AP inbox — never chase the homeowner for it. Phase 1 has no payer
+  // dunning sequence, so we simply don't arm follow-ups for payer invoices.
+  if (invoice.payer_id) return null;
 
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
   const onAutopay = await customerOnAutopay(customer);
