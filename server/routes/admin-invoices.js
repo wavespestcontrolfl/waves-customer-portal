@@ -42,7 +42,7 @@ async function suggestCoverageServiceType(customerId) {
       .whereNotNull('service_type')
       .orderBy('scheduled_date', 'desc')
       .limit(100)
-      .select('service_type');
+      .select('service_type', 'recurring_pattern', 'recurring_interval_days');
     if (!rows.length) return null;
     const counts = new Map();
     for (const row of rows) {
@@ -55,12 +55,25 @@ async function suggestCoverageServiceType(customerId) {
       if (n > bestN) { serviceType = t; bestN = n; }
     }
     if (!serviceType) return null;
-    // Derive the cadence with the SAME inference the seeder uses at activation,
-    // so the prefilled cadence matches what will actually be stamped (no drift,
-    // and a "Monthly Lawn Care" suggestion isn't stamped as quarterly).
-    const cadence = AnnualPrepayRenewals._private.inferCoverageCadence({
-      coverage_service_type: serviceType,
-    });
+    // Derive cadence from the chosen service's ACTUAL recurrence data first
+    // (recurring_pattern, or a 42-day interval = every 6 weeks) — a generic
+    // label like "Pest Control Service" carries its real cadence on the rows,
+    // not in the name. Fall back to the same label inference the seeder uses
+    // when there's no usable pattern, so the prefill matches what gets stamped.
+    const { normalizeCoverageCadence, inferCoverageCadence } = AnnualPrepayRenewals._private;
+    const cadenceCounts = new Map();
+    for (const row of rows) {
+      if (String(row.service_type || '').trim() !== serviceType) continue;
+      let c = normalizeCoverageCadence(row.recurring_pattern);
+      if (!c && Number(row.recurring_interval_days) === 42) c = 'every_6_weeks';
+      if (c) cadenceCounts.set(c, (cadenceCounts.get(c) || 0) + 1);
+    }
+    let cadence = null;
+    let cadenceBest = 0;
+    for (const [c, n] of cadenceCounts) {
+      if (n > cadenceBest) { cadence = c; cadenceBest = n; }
+    }
+    if (!cadence) cadence = inferCoverageCadence({ coverage_service_type: serviceType });
     return { serviceType, cadence: cadence || null };
   } catch (err) {
     logger.warn(`[admin-invoices] coverage service suggestion skipped: ${err.message}`);
