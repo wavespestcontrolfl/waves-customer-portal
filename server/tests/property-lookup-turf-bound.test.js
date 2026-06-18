@@ -154,6 +154,20 @@ describe('gate interaction (intentional behavior change)', () => {
     expect(confirmation).not.toBeNull();
     expect(confirmation.field).toBe('measuredTurfSf');
   });
+
+  it('exempts a top-dressing-only estimate when an explicit area is entered', () => {
+    const record = recordFixture({ _parcel: null, _fieldEvidence: { lotSize: { sourceType: 'listing' } }, lotSize: 30000 });
+    const ai = analysisFixture(); // 24k, over the 20k gate
+    applyParcelTurfBound(ai, record);
+
+    const profile = buildEnrichedProfile(record, ai, 26.99, -82.14);
+    expect(profile.estimatedTurfSf).toBe(24000);
+
+    // Without an explicit area, top dressing still blocks on the AI turf guess.
+    expect(needsTurfManualConfirmation(profile, ['TOPDRESS'])).not.toBeNull();
+    // An entered front/back-yard area is the exact priced area — no confirmation.
+    expect(needsTurfManualConfirmation(profile, ['TOPDRESS'], { topDressArea: 4000 })).toBeNull();
+  });
 });
 
 describe('enriched parcel block', () => {

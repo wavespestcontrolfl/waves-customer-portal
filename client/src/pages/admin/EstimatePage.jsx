@@ -820,7 +820,6 @@ function EstimateToolView() {
     pestFreq: "4",
     plugArea: "",
     plugSpacing: "12",
-    topDressArea: "",
     dethatchingCleanupLevel: "none",
     dethatchingDebrisRemovalIncluded: false,
     dethatchingAccess: "easy",
@@ -1670,7 +1669,6 @@ function EstimateToolView() {
           recurringCustomer: form.isRecurringCustomer === "YES",
           plugArea: parseInt(form.plugArea) || 0,
           plugSpacing: parseInt(form.plugSpacing) || 12,
-          topDressArea: parseInt(form.topDressArea) || 0,
           dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
           dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
           dethatchingAccess: form.dethatchingAccess || "easy",
@@ -3168,25 +3166,6 @@ function EstimateToolView() {
                 </div>
               )}
               <Checkbox k="svcTopdress" label="Top Dressing" />{" "}
-              {form.svcTopdress && (
-                <div style={sSubOpts}>
-                  {" "}
-                  <div style={sRow}>
-                    {" "}
-                    <Field label="Area (sq ft)">
-                      <Input
-                        k="topDressArea"
-                        type="number"
-                        placeholder="Blank = full lawn"
-                      />
-                    </Field>{" "}
-                  </div>{" "}
-                  <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
-                    Optional — enter sq ft for just the front or back yard.
-                    Leave blank to auto-estimate from the property's lawn area.
-                  </div>{" "}
-                </div>
-              )}
               <Checkbox
                 k="svcDethatch"
                 label={

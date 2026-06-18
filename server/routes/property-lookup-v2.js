@@ -1509,6 +1509,8 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
   if (manualTurfSf !== undefined) return null;
   const plugArea = firstNonNegativeNumber(options.plugArea);
   if (turfServices.length === 1 && turfServices[0] === 'PLUGGING' && plugArea > 0) return null;
+  const topDressArea = firstNonNegativeNumber(options.topDressArea);
+  if (turfServices.length === 1 && turfServices[0] === 'TOPDRESS' && topDressArea > 0) return null;
 
   const estimatedTurfSf = firstNonNegativeNumber(profile.estimatedTurfSf, profile.estimatedTurfSqFt);
   if (estimatedTurfSf === undefined || estimatedTurfSf <= TURF_MANUAL_CONFIRMATION_SQFT) return null;
