@@ -2347,21 +2347,26 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (incomingIsReService) {
           const customerRow = await db('customers').where({ id: existingRow?.customer_id })
             .first('waveguard_tier').catch(() => null);
-          // The modal carries over the PRIOR service's pre-filled price on a
-          // switch. Honour it only if it's an explicit NEW charge (posted price
-          // or a priced add-on differs from what was stored); otherwise the
-          // stale carryover must not bill a free WaveGuard callback.
+          // The modal carries over the PRIOR service's pre-filled price AND its
+          // existing add-on rows on a switch, so "is there any price?" wrongly
+          // reads as a new charge. Compare the full INTENDED visit total in the
+          // payload (primary line + add-on lines) against the stored
+          // estimated_price instead: only an actual change means the operator
+          // typed a new charge; an unchanged carryover is stale and must not
+          // bill a free WaveGuard callback.
           const posMoney = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
-          const prevPrimary = existingRow?.primary_line_price != null ? Math.round(Number(existingRow.primary_line_price) * 100) / 100 : null;
           const prevEstimate = existingRow?.estimated_price != null ? Math.round(Number(existingRow.estimated_price) * 100) / 100 : null;
           const postedPrimary = posMoney(primaryLinePrice);
-          const postedEstimate = posMoney(estimatedPrice);
-          const addonHasPrice = Array.isArray(addons)
-            && addons.some((a) => posMoney(a?.basePrice ?? a?.price ?? a?.estimatedPrice));
-          const explicitNewCharge =
-            (postedPrimary != null && postedPrimary !== prevPrimary)
-            || (postedEstimate != null && postedEstimate !== prevEstimate)
-            || addonHasPrice;
+          const postedAddonTotal = Array.isArray(addons)
+            ? addons.reduce((sum, a) => sum + (posMoney(a?.price ?? a?.basePrice ?? a?.estimatedPrice) || 0), 0)
+            : 0;
+          // Intended total: primary + add-ons when the multi-line payload is
+          // present; otherwise a single posted estimatedPrice.
+          const postedTotal = (postedPrimary != null || postedAddonTotal > 0)
+            ? Math.round(((postedPrimary || 0) + postedAddonTotal) * 100) / 100
+            : posMoney(estimatedPrice);
+          const explicitNewCharge = postedTotal != null && postedTotal > 0
+            && (prevEstimate == null || Math.abs(postedTotal - prevEstimate) >= 0.005);
           reServiceConversionZeroPrice = !!customerRow?.waveguard_tier && !explicitNewCharge;
         }
       } catch { /* columns may not exist pre-migration — non-blocking */ }
@@ -2609,6 +2614,14 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.primary_line_price) updates.primary_line_price = 0;
         if (cols.discount_dollars) updates.discount_dollars = null;
       } catch { /* non-blocking */ }
+      // Also zero any carried-over add-on line prices so the visit total stays
+      // $0 — leaving priced add-on rows while estimated_price=0 would let
+      // completion re-bill them on a free callback.
+      if (Array.isArray(replaceAddons)) {
+        replaceAddons = replaceAddons.map((line) => ({
+          ...line, base: line.base != null ? 0 : line.base, price: line.price != null ? 0 : line.price, discount: null,
+        }));
+      }
     }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;

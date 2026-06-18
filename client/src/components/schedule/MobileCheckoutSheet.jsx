@@ -71,7 +71,11 @@ export default function MobileCheckoutSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
-  const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
+  // Callbacks (re-services) are free by definition for recurring/WaveGuard
+  // customers — the server zeroes the visit and won't bill monthly dues, so the
+  // checkout preview must not fall back to monthlyRate (which would show a
+  // "Charge $<rate>" button that the mint endpoint then rejects as $0).
+  const price = rawPrice != null ? rawPrice : (service.isCallback ? 0 : Number(service.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
