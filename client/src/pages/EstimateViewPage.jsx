@@ -783,7 +783,7 @@ function PortalShowcaseCard() {
             <span aria-hidden="true" style={{ color: COLORS.green, fontWeight: 800, fontSize: 15, lineHeight: 1.4 }}>&#10003;</span>
             <div style={{ minWidth: 0 }}>
               <div style={{ color: ESTIMATE_TEXT, fontWeight: 700, fontSize: 15 }}>{title}</div>
-              <div style={{ color: ESTIMATE_MUTED, fontSize: 13, lineHeight: 1.45, marginTop: 2 }}>{body}</div>
+              <div style={{ color: ESTIMATE_MUTED, fontSize: 14, lineHeight: 1.45, marginTop: 2 }}>{body}</div>
             </div>
           </div>
         ))}
