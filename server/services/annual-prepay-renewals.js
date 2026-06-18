@@ -1084,6 +1084,59 @@ async function createTermForAnnualPrepay({
         }
       }
     }
+    // When the coverage SELECTION changes on an edit (service type / visit count
+    // / cadence) — not just the date window handled above — the visits that
+    // matched the OLD selection keep their annual-prepay prepaid stamps, since
+    // attachScheduledServices/applyPrepaidCoverageForTerm only add+stamp the new
+    // matches and never clear the old ones. Completion billing keys on
+    // prepaid_amount, so those stale visits would keep skipping billing on top
+    // of the newly covered ones. Clear the term's stamps here so the
+    // refreshTermSnapshot below re-stamps ONLY the new selection; visits dropped
+    // from coverage fall back to normal billing. Method-scoped + non-completed
+    // (clearPrepaidStampsForTerm), so manual cash/Zelle stamps and already
+    // serviced visits are untouched. Best-effort, mirroring the window block.
+    const coverageSelectionChanged = (
+      (normalizedCoverageServiceType !== undefined
+        && (normalizeCoverageServiceType(existing.coverage_service_type) || null)
+          !== (normalizedCoverageServiceType || null))
+      || (normalizedCoverageVisitCount !== undefined
+        && (normalizeCoverageVisitCount(existing.coverage_visit_count) || null)
+          !== (normalizedCoverageVisitCount || null))
+      || (normalizedCoverageCadence !== undefined
+        && (normalizeCoverageCadence(existing.coverage_cadence) || null)
+          !== (normalizedCoverageCadence || null))
+    );
+    if (coverageSelectionChanged) {
+      // Clearing stamps isn't enough: the dropped visits keep their
+      // annual_prepay_term_id link, which the repo treats as Annual Prepay for
+      // reporting/forecasting (pricing-reality-check) and copies onto recurring
+      // children (recurring-appointment-seeder). Detach the term link from the
+      // non-completed linked visits too, then let refreshTermSnapshot below
+      // re-attach + re-stamp ONLY the new selection — visits dropped from
+      // coverage fall fully back to normal billing. Completed/terminal visits
+      // keep their historical link + stamp (PREPAID_UPDATE_EXCLUDED_STATUSES).
+      //
+      // The stamp clear and the link detach must be atomic: if the detach
+      // landed but the stamp clear silently failed, those visits would keep a
+      // prepaid_amount with no term link — completion billing would still skip
+      // them and no term-keyed cleanup could ever find them again. Run both in
+      // one (sub)transaction with the stamp clear set to throw, so a failed
+      // clear rolls back the detach instead of orphaning the stamps.
+      const scCols = await scheduledServiceColumns();
+      try {
+        await conn.transaction(async (trx) => {
+          await clearPrepaidStampsForTerm(existing.id, trx, { throwOnError: true });
+          if (scCols.annual_prepay_term_id) {
+            await trx('scheduled_services')
+              .where({ annual_prepay_term_id: existing.id })
+              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
+              .update({ annual_prepay_term_id: null, updated_at: new Date() });
+          }
+        });
+      } catch (err) {
+        logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
+      }
+    }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
@@ -1096,7 +1149,7 @@ async function createTermForAnnualPrepay({
     customer_id: customerId,
     source_estimate_id: sourceEstimateId || null,
     prepay_invoice_id: prepayInvoiceId || null,
-    plan_label,
+    plan_label: planLabel,
     monthly_rate: monthlyRate != null ? monthlyRate : null,
     prepay_amount: prepayAmount != null ? prepayAmount : null,
     term_start: normalizedStart,

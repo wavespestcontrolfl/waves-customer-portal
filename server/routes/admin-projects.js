@@ -448,6 +448,17 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
   };
 }
 
+// Section-1 administrative fields the WDO property lookup auto-fills on its own.
+// They are NOT inspection findings — a report carrying only these would file
+// with a blank inspection body, so they must not satisfy "Findings captured".
+const WDO_AUTOFILL_ADMIN_KEYS = new Set([
+  'requested_by',
+  'report_sent_to',
+  'notice_location',
+  'property_address',
+  'structures_inspected',
+]);
+
 function evaluateProjectSendReadiness({ project, customer }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
@@ -455,11 +466,20 @@ function evaluateProjectSendReadiness({ project, customer }) {
   // structured findings alone, and admins can still add narrative notes when
   // a customer-facing next step is useful.
   const isCertificate = project?.project_type === 'pre_treatment_termite_certificate';
+  // "Findings captured" must reflect real inspection content. On WDO reports
+  // the Section-1 administrative fields below are auto-filled by the property
+  // lookup, so a report carrying ONLY those would pass a naive "any field set"
+  // check while the inspection body (Section 2+) is blank — exactly the failure
+  // that filed an empty FDACS-13645. Exclude them so admin auto-fill alone can't
+  // satisfy the gate; the hard wdoCoreFindingsIncomplete gate enforces the rest.
+  const findingsCaptured = project?.project_type === 'wdo_inspection'
+    ? Object.entries(findings).some(([key, value]) => !WDO_AUTOFILL_ADMIN_KEYS.has(key) && hasMeaningfulValue(value))
+    : Object.values(findings).some(hasMeaningfulValue);
   const required = [
     { key: 'project_date', label: isCertificate ? 'Treatment date' : 'Inspection date', ok: hasMeaningfulValue(project?.project_date) },
     { key: 'customer', label: 'Customer', ok: Boolean(customer?.id || project?.customer_id) },
     { key: 'project_type', label: 'Report title or type', ok: hasMeaningfulValue(project?.title) || Boolean(typeCfg) },
-    { key: 'findings', label: 'Findings captured', ok: Object.values(findings).some(hasMeaningfulValue) },
+    { key: 'findings', label: 'Findings captured', ok: findingsCaptured },
   ];
 
   if (project?.project_type === 'wdo_inspection') {
@@ -1699,6 +1719,44 @@ function wdoSectionTwoContradiction(project) {
   return `Section 2 contradiction: "${findings.wdo_finding}" is selected but ${names} still contain${conflicting.length === 1 ? 's' : ''} text. Clear ${conflicting.length === 1 ? 'it' : 'them'} or change the finding — explanatory notes belong in Comments.`;
 }
 
+// FDACS Section 2 completeness: the inspection's core finding — and, when WDO
+// activity is reported, the description of what was observed — must be present
+// before the report is filed. Without them the official form goes out with a
+// blank Section 2 (no box checked, no description): a legally deficient FDACS
+// filing that defeats the purpose of the inspection. Hard 422, no override:
+// unlike the missing-data overrides (which cover genuinely unknowable
+// administrative fields), the inspection finding is the entire point of the
+// report and is never unknowable. Pairs with wdoSectionTwoContradiction, which
+// guards the inverse (a "no visible signs" finding carrying Section 2.B text).
+function wdoCoreFindingsIncomplete(project) {
+  const findings = parseFindings(project);
+  const finding = String(findings.wdo_finding || '').trim();
+  if (!finding) {
+    return 'A WDO report requires a Section 2 finding (live WDOs, evidence of WDOs, damage, or "no visible signs") before it can be filed.';
+  }
+  // The PDF mapper only checks a Section 2 box for a finding that starts with
+  // "no visible" or "visible" (the two project-types.js select options). Any
+  // other value — a typo or a legacy string — maps to NO box and would file an
+  // unchecked, blank Section 2. Reject it rather than let it through.
+  const normalized = finding.toLowerCase();
+  const noVisible = normalized.startsWith('no visible');
+  const visible = !noVisible && normalized.startsWith('visible');
+  if (!noVisible && !visible) {
+    return 'The Section 2 finding must be a recognized selection ("Visible evidence of WDO observed" or "No visible signs of WDO observed") — the recorded value would leave the official form\'s Section 2 box blank.';
+  }
+  // A "visible activity" finding with no description would print the box
+  // checked over blank Section 2.B lines — incomplete on its face. Require at
+  // least one of the live / evidence / damage descriptions.
+  if (visible) {
+    const described = ['live_wdo', 'wdo_evidence', 'wdo_damage']
+      .some((key) => String(findings[key] || '').trim());
+    if (!described) {
+      return 'Section 2 reports visible WDO activity but no live/evidence/damage description was entered — describe what was observed (Section 2.B) before filing.';
+    }
+  }
+  return null;
+}
+
 // Called after PUT /:id persists a findings/project_date edit on a WDO
 // project. If the project is signed and the attested content changed, flag the
 // signature stale (and self-heal back to fresh if a hashed signature's content
@@ -2229,6 +2287,10 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       if (contradiction) {
         return res.status(422).json({ error: contradiction, code: 'contradictory_findings' });
       }
+      const incomplete = wdoCoreFindingsIncomplete(project);
+      if (incomplete) {
+        return res.status(422).json({ error: incomplete, code: 'incomplete_findings' });
+      }
     }
 
     const customer = project.customer_id
@@ -2563,11 +2625,14 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
       resolveProjectApplicator(project),
       loadWdoAddendumPhotos(project),
     ]);
-    // Never stamp a stale signature onto edited content — even in this admin
-    // preview, which can be downloaded and filed manually. Render unsigned
-    // instead, so the preview shows exactly what is currently sendable.
+    // Never stamp a signature onto content that isn't sendable — even in this
+    // admin preview, which can be downloaded and filed manually. Render unsigned
+    // when the signature is stale OR when the Section 2 hard gates (contradiction
+    // / incomplete) would 422 the send, so a downloadable preview can't become a
+    // signed FDACS filing that the send routes themselves refuse to emit.
     const { fresh, signature } = wdoSignatureFreshness(project);
-    const stampSignature = fresh ? signature : null;
+    const sendBlocked = wdoSectionTwoContradiction(project) || wdoCoreFindingsIncomplete(project);
+    const stampSignature = (fresh && !sendBlocked) ? signature : null;
     const applicator = applicatorForReport(baseApplicator, stampSignature);
     const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature: stampSignature, photos });
     res.setHeader('Content-Type', 'application/pdf');
@@ -2767,6 +2832,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       const contradiction = wdoSectionTwoContradiction(project);
       if (contradiction) {
         return res.status(422).json({ error: contradiction, code: 'contradictory_findings' });
+      }
+      const incomplete = wdoCoreFindingsIncomplete(project);
+      if (incomplete) {
+        return res.status(422).json({ error: incomplete, code: 'incomplete_findings' });
       }
     }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });

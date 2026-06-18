@@ -6737,9 +6737,16 @@ export function CompletionPanel({
     service.isCallback;
   const hasVisitPrice =
     service.estimatedPrice != null && Number(service.estimatedPrice) > 0;
+  // Callbacks (re-services) are free by definition for recurring/WaveGuard
+  // customers — the server suppresses the monthly_rate fallback for them
+  // (admin-dispatch completion + Charge-now). Mirror that here so the tech UI's
+  // willInvoice / pay-link prediction, AI recap framing, and review suppression
+  // match the report-only/no-invoice completion the server actually performs.
   const invoiceAmount = hasVisitPrice
     ? Number(service.estimatedPrice)
-    : Number(service.monthlyRate || 0);
+    : isCallback
+      ? 0
+      : Number(service.monthlyRate || 0);
   const autopayCoversVisit =
     !!service.autopayActive &&
     !hasVisitPrice &&

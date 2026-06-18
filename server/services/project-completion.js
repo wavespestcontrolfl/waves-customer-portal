@@ -115,6 +115,12 @@ function positiveMoney(value) {
 function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} } = {}) {
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
+  // Callbacks (re-services, e.g. pest_re_service / lawn_re_service) are free
+  // for recurring/WaveGuard customers — they must never fall back to the
+  // monthly rate, or the completion billing guard would either bill a month's
+  // dues or block the visit on a "billing required" 409. An explicit positive
+  // price above still bills if the operator set one.
+  if (scheduledService.is_callback) return 0;
   if (scheduledService.create_invoice_on_complete) {
     return positiveMoney(customer.monthly_rate ?? scheduledService.monthly_rate);
   }

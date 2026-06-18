@@ -338,6 +338,7 @@ export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
+  const [editInvoice, setEditInvoice] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   useEffect(() => {
@@ -376,13 +377,24 @@ export default function AdminInvoicesPage() {
           label: tab === "create" ? "Invoice List" : "Create Invoice",
           icon: tab === "create" ? ListChecks : Plus,
           variant: tab === "create" ? "secondary" : "primary",
-          onClick: () => setTab(tab === "create" ? "list" : "create"),
+          onClick: () => {
+            if (tab === "create") {
+              setEditInvoice(null);
+              setTab("list");
+            } else {
+              setTab("create");
+            }
+          },
         }}
       />
       {tab === "list" && (
         <InvoiceList
           showToast={showToast}
           onRefresh={loadStats}
+          onEdit={(inv) => {
+            setEditInvoice(inv);
+            setTab("create");
+          }}
           isMobile={isMobile}
           stats={stats}
         />
@@ -390,8 +402,10 @@ export default function AdminInvoicesPage() {
       {tab === "create" && (
         <CreateInvoice
           showToast={showToast}
+          editInvoice={editInvoice}
           onCreated={() => {
             loadStats();
+            setEditInvoice(null);
             setTab("list");
           }}
           isMobile={isMobile}
@@ -512,7 +526,7 @@ function FilterPill({ label, value, options, onChange, isMobile }) {
 }
 
 // ── Invoice List (mirrors attached UI) ──
-function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
+function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
   const PAGE_SIZE = 100;
   const [invoices, setInvoices] = useState([]);
   const [total, setTotal] = useState(0);
@@ -1122,6 +1136,19 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               Send
                             </button>
                           )}
+                          {(inv.status === "draft" ||
+                            inv.status === "scheduled") &&
+                            !inv.stripe_payment_intent_id &&
+                            !inv.active_payment_plan &&
+                            !inv.annual_prepay_term_id && (
+                              <button
+                                onClick={() => onEdit?.(inv)}
+                                style={sBtn(D.card, D.text, isMobile)}
+                                title="Edit line items, notes, and due date before sending"
+                              >
+                                Edit
+                              </button>
+                            )}
                           {(inv.status === "sent" ||
                             inv.status === "viewed" ||
                             inv.status === "overdue") && (
@@ -3249,9 +3276,28 @@ function RecordPaymentModal({
   );
 }
 
+// Cadence → default visit count, mirroring the Customer 360 annual-prepay form
+// (and the server's coverageCadence normalization). Picking a cadence presets
+// the visit count; the operator can still override it.
+const ANNUAL_PREPAY_CADENCE_OPTIONS = [
+  { value: "monthly", label: "Monthly", visits: 12 },
+  { value: "bimonthly", label: "Every 2 months", visits: 6 },
+  { value: "quarterly", label: "Quarterly", visits: 4 },
+  { value: "triannual", label: "Every 4 months", visits: 3 },
+  { value: "semiannual", label: "Semiannual", visits: 2 },
+  { value: "every_6_weeks", label: "Every 6 weeks", visits: 9 },
+  { value: "annual", label: "Annual", visits: 1 },
+];
+const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
+  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.value, String(option.visits)]),
+);
+
 // Flags an existing invoice as an annual prepayment so the customer-facing
-// coverage banner renders on the pay page + PDF. Prefills from the linked term
-// when one already exists (edit mode), otherwise from the invoice itself.
+// coverage banner renders on the pay page + PDF. When a service type + visit
+// count are set, paying the invoice also auto-marks that many scheduled visits
+// prepaid (so completing them doesn't re-invoice the prepaid customer).
+// Prefills from the linked term when one already exists (edit mode), otherwise
+// from the invoice itself.
 function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   const [loading, setLoading] = useState(true);
   const [existing, setExisting] = useState(null);
@@ -3263,6 +3309,15 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   const [amount, setAmount] = useState(
     invoice.total != null ? String(parseFloat(invoice.total).toFixed(2)) : "",
   );
+  const [serviceType, setServiceType] = useState("");
+  const [cadence, setCadence] = useState("quarterly");
+  // Whether `cadence` reflects a real choice (stored on the term, or picked by
+  // the operator) vs. the untouched default. We only send cadence when it's
+  // explicit; otherwise we omit it so the server's authoritative inference
+  // (label-first, then visit count) decides — the client must not overwrite a
+  // legacy term's schedule with the default "quarterly".
+  const [cadenceExplicit, setCadenceExplicit] = useState(false);
+  const [visitCount, setVisitCount] = useState("4");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
 
@@ -3273,6 +3328,10 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
       .then((data) => {
         if (!alive) return;
         const term = data?.annual_prepay;
+        // The customer's real recurring coverage (server-derived: service label
+        // + the cadence the server would infer; never the invoice title). Used
+        // only to seed a brand-new term's covered service/cadence/visit count.
+        const suggested = data?.suggested_coverage || null;
         if (term) {
           setExisting(term);
           if (term.termStart) setStart(invoiceDateOnly(term.termStart) || start);
@@ -3280,6 +3339,34 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           if (term.planLabel) setPlanLabel(term.planLabel);
           if (term.prepayAmount != null) {
             setAmount(String(Number(term.prepayAmount).toFixed(2)));
+          }
+          // Reflect the stored coverage exactly. A display-only term has no
+          // coverage service type — keep it blank so an unrelated edit doesn't
+          // silently convert it into visit coverage.
+          setServiceType(term.coverageServiceType || "");
+          if (term.coverageVisitCount != null) {
+            setVisitCount(String(term.coverageVisitCount));
+          }
+          // Only adopt a stored cadence as explicit. If the term predates the
+          // cadence column (null), leave it non-explicit so we omit it on save
+          // and the server re-infers from the service label / visit count
+          // instead of us overwriting the schedule with the default.
+          if (term.coverageCadence) {
+            setCadence(term.coverageCadence);
+            setCadenceExplicit(true);
+          }
+        } else if (suggested?.serviceType) {
+          // Brand-new term: default the covered service to the customer's real
+          // recurring service so the standard Mark-prepaid flow auto-covers the
+          // visits. Also adopt the server-inferred cadence (and its visit count)
+          // so a non-quarterly plan isn't stamped as quarterly. Marked explicit
+          // since it's a real suggestion. Operator can clear/override any of it.
+          setServiceType(suggested.serviceType);
+          if (suggested.cadence) {
+            setCadence(suggested.cadence);
+            setCadenceExplicit(true);
+            const preset = ANNUAL_PREPAY_CADENCE_VISITS[suggested.cadence];
+            if (preset) setVisitCount(preset);
           }
         }
       })
@@ -3292,8 +3379,25 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
     };
   }, [invoice.id]);
 
+  // Picking a cadence presets its standard visit count (operator can override).
+  const handleCadenceChange = (value) => {
+    setCadence(value);
+    setCadenceExplicit(true);
+    const preset = ANNUAL_PREPAY_CADENCE_VISITS[value];
+    if (preset) setVisitCount(preset);
+  };
+
+  const trimmedService = serviceType.trim();
+  const parsedVisits = parseInt(visitCount, 10);
+  const coverageVisitsValid =
+    Number.isInteger(parsedVisits) && parsedVisits >= 1 && parsedVisits <= 24;
+  // A service type with no valid visit count is incomplete coverage: the server
+  // would store the service type but skip stamping (which needs both), leaving
+  // an invoice that still re-bills its visits. Block the save in that state.
+  const coverageInvalid = trimmedService !== "" && !coverageVisitsValid;
+
   const handleSave = async () => {
-    if (saving) return;
+    if (saving || coverageInvalid) return;
     setSaving(true);
     try {
       await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
@@ -3303,6 +3407,17 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           months: Number(months) || undefined,
           planLabel: planLabel.trim() || undefined,
           prepayAmount: amount !== "" ? Number(amount) : undefined,
+          // Coverage: send the service type + visits so payment auto-marks the
+          // scheduled visits prepaid. Empty service type → display-only flag.
+          coverageServiceType: trimmedService,
+          coverageVisitCount: trimmedService && coverageVisitsValid ? parsedVisits : undefined,
+          // For a NEW term, send the visible cadence so what the form shows is
+          // what gets seeded (the server's label-first inference would otherwise
+          // override the displayed default). For an EXISTING term, omit it
+          // unless explicit, so an unrelated edit never overwrites a legacy
+          // null-cadence term's inferred schedule with the default.
+          coverageCadence:
+            trimmedService && (!existing || cadenceExplicit) ? cadence : undefined,
         }),
       });
       onSaved(existing ? "Annual prepay updated" : "Marked as annual prepay");
@@ -3399,7 +3514,9 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
         >
           Adds the "Annual prepayment" coverage banner to the customer's invoice
           (pay page + PDF), showing the dates this payment covers. Use it for a
-          customer paying a full year up front.
+          customer paying a full year up front. With a service type + visit count
+          set below, paying this invoice also auto-marks that many scheduled
+          visits prepaid, so completing them won't re-bill the customer.
         </div>
 
         <label style={labelStyle}>Coverage start</label>
@@ -3419,6 +3536,55 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           onChange={(e) => setMonths(e.target.value)}
           style={sInput(isMobile)}
         />
+
+        <label style={labelStyle}>Service type covered</label>
+        <input
+          value={serviceType}
+          onChange={(e) => setServiceType(e.target.value.slice(0, 100))}
+          placeholder="e.g. Quarterly Pest Control"
+          style={sInput(isMobile)}
+        />
+        <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+          Match the scheduled visits this covers. Leave blank for a display-only
+          flag (no auto-prepaid visits).
+        </div>
+
+        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Cadence</label>
+            <select
+              value={cadence}
+              onChange={(e) => handleCadenceChange(e.target.value)}
+              style={sInput(isMobile)}
+            >
+              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Visits covered</label>
+            <input
+              type="number"
+              min={1}
+              max={24}
+              value={visitCount}
+              onChange={(e) => setVisitCount(e.target.value)}
+              style={{
+                ...sInput(isMobile),
+                border: coverageInvalid ? `1px solid ${D.red}` : sInput(isMobile).border,
+              }}
+            />
+          </div>
+        </div>
+        {coverageInvalid && (
+          <div style={{ fontSize: 11, color: D.red, marginTop: 4 }}>
+            Enter a visit count (1–24) for this service type, or clear the
+            service type for a display-only flag.
+          </div>
+        )}
 
         <label style={labelStyle}>Plan label</label>
         <input
@@ -3471,10 +3637,11 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
             </button>
             <button
               onClick={handleSave}
-              disabled={saving || removing || loading}
+              disabled={saving || removing || loading || coverageInvalid}
               style={{
                 ...sBtn(D.heading, D.white, isMobile),
-                opacity: saving || loading ? 0.5 : 1,
+                opacity: saving || loading || coverageInvalid ? 0.5 : 1,
+                cursor: coverageInvalid ? "not-allowed" : "pointer",
               }}
             >
               {saving ? "Saving…" : existing ? "Update" : "Mark prepaid"}
@@ -3785,7 +3952,8 @@ function PaymentPlanModal({
 }
 
 // ── Create Invoice ──
-function CreateInvoice({ showToast, onCreated, isMobile }) {
+function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
+  const editMode = !!editInvoice;
   function defaultServiceDate() {
     const parts = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -3810,6 +3978,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState("");
+  const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [sendTiming, setSendTiming] = useState("now");
   const [sendCustomAt, setSendCustomAt] = useState("");
@@ -3826,6 +3995,11 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
   const [queuedAttachments, setQueuedAttachments] = useState([]);
   const attachmentInputRef = useRef(null);
+  // Snapshot of the line items as loaded in edit mode, so a save that didn't
+  // touch them can omit line_items entirely and skip the server retotal —
+  // which would otherwise revalidate (and reject) discounts that have since
+  // been disabled/hidden on an otherwise-valid open draft.
+  const editLineItemsBaselineRef = useRef(null);
 
   // Load active, invoice-visible discounts once. Tier discounts are included here
   // for explicit line-level selection; customer tier never applies a hidden discount.
@@ -3840,8 +4014,59 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       .catch(() => {});
   }, []);
 
+  // Edit mode: prefill the builder from the existing draft. Only the fields
+  // the PUT /admin/invoices/:id route actually persists are loaded into editable
+  // state (line items, notes, due date); the customer and service date are shown
+  // read-only because the update route never rewrites them. We use the customer's
+  // CURRENT property_type (from the list row) for taxability — the server
+  // retotal forces residential tax to zero regardless of the stored rate, so
+  // deriving taxability from the stored rate would mismatch the saved total when
+  // a customer's type changed after the invoice was created.
+  useEffect(() => {
+    if (!editMode) return;
+    setSelectedCustomer({
+      id: editInvoice.customer_id,
+      first_name: editInvoice.first_name,
+      last_name: editInvoice.last_name,
+      phone: editInvoice.phone,
+      email: editInvoice.email,
+      waveguard_tier: editInvoice.waveguard_tier,
+      property_type:
+        editInvoice.property_type ||
+        (Number(editInvoice.tax_rate) > 0 ? "commercial" : "residential"),
+    });
+    const stored =
+      typeof editInvoice.line_items === "string"
+        ? (() => {
+            try {
+              return JSON.parse(editInvoice.line_items);
+            } catch {
+              return [];
+            }
+          })()
+        : editInvoice.line_items || [];
+    const prefilled = (Array.isArray(stored) ? stored : []).map((item) => ({
+      ...item,
+      client_id: item.client_id || newLineItem().client_id,
+    }));
+    const initialLineItems = prefilled.length ? prefilled : [newLineItem()];
+    setLineItems(initialLineItems);
+    editLineItemsBaselineRef.current = JSON.stringify(initialLineItems);
+    setNotes(editInvoice.notes || "");
+    setTitle(editInvoice.title || "");
+    const due = invoiceDateOnly(editInvoice.due_date);
+    if (due) {
+      setDueTiming("custom");
+      setDueCustomDate(due);
+    }
+    const svc = invoiceDateOnly(editInvoice.service_date);
+    if (svc) setServiceDate(svc);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, editInvoice]);
+
   // Customer search
   useEffect(() => {
+    if (editMode) return;
     if (customerQuery.length < 2) {
       setCustomers([]);
       return;
@@ -3856,9 +4081,10 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     return () => clearTimeout(t);
   }, [customerQuery]);
 
-  // Load service records when customer selected
+  // Load service records when customer selected (skip in edit mode — the
+  // service-history linker is hidden and the update route can't relink it).
   useEffect(() => {
-    if (!selectedCustomer) {
+    if (editMode || !selectedCustomer) {
       setServiceRecords([]);
       return;
     }
@@ -4104,7 +4330,18 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
   const isCommercial =
     selectedCustomer?.property_type === "commercial" ||
     selectedCustomer?.property_type === "business";
-  const taxRate = isCommercial ? 0.07 : 0;
+  // In edit mode mirror the server retotal exactly: tax applies only when the
+  // CURRENT customer is commercial (residential is forced to zero server-side),
+  // and at the invoice's stored rate (which may not be exactly 7%). Gating on
+  // the live property_type keeps the preview honest if the customer's type
+  // changed after the invoice was created.
+  const taxRate = editMode
+    ? isCommercial
+      ? Number(editInvoice.tax_rate) || 0
+      : 0
+    : isCommercial
+      ? 0.07
+      : 0;
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
   const cardCharge = computeCardTotal(total);
@@ -4304,6 +4541,55 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     setSaving(false);
   };
 
+  // Edit mode save — persists only the fields the PUT route allows
+  // (title, notes, due_date, line_items). The server recalculates subtotal,
+  // discounts, tax, and total from the line items, so we never send money totals.
+  const handleSave = async () => {
+    if (
+      !lineItems.some(
+        (i) => i._kind !== "discount" && i.description && i.unit_price > 0,
+      )
+    ) {
+      showToast("Add at least one line item");
+      return;
+    }
+    const dueDate = invoiceDueDate();
+    if (!dueDate) {
+      showToast("Choose a due date");
+      return;
+    }
+    setSaving(true);
+    try {
+      const body = {
+        title: title || null,
+        notes: notes || null,
+        due_date: dueDate,
+      };
+      // Only send line_items when they actually changed. An unchanged save
+      // (e.g. due-date only) skips the server retotal, so a draft that carries
+      // a since-retired discount stays editable for those fields.
+      if (JSON.stringify(lineItems) !== editLineItemsBaselineRef.current) {
+        body.line_items = lineItems
+          .filter((i) => i.description && Number(i.unit_price) !== 0)
+          .map((i) => ({
+            ...i,
+            amount: lineAmount(i),
+          }));
+      }
+      await adminFetch(`/admin/invoices/${editInvoice.id}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      showToast(
+        `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
+      );
+      onCreated();
+    } catch (e) {
+      showToast(`Error: ${e.message}`);
+    }
+    setSaving(false);
+  };
+
   const sectionHeader = (title, action = null) => (
     <div
       style={{
@@ -4371,13 +4657,17 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
     borderRadius: 10,
     ...style,
   });
-  const primaryActionLabel = saving
-    ? "Creating..."
-    : sendTiming === "now"
-      ? "Send Invoice"
-      : sendTiming === "draft"
-        ? "Create Draft"
-        : "Schedule Invoice";
+  const primaryActionLabel = editMode
+    ? saving
+      ? "Saving..."
+      : "Save Changes"
+    : saving
+      ? "Creating..."
+      : sendTiming === "now"
+        ? "Send Invoice"
+        : sendTiming === "draft"
+          ? "Create Draft"
+          : "Schedule Invoice";
   const canAddQueuedAttachments = canAddInvoiceAttachments(queuedAttachments);
   const queuedAttachmentHelpId = "invoice-create-attachments-help";
   const queuedAttachmentStatusId = "invoice-create-attachments-status";
@@ -4428,7 +4718,9 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             <div>
               {" "}
               <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>
-                Invoice Builder
+                {editMode
+                  ? `Edit Invoice ${editInvoice.invoice_number || ""}`.trim()
+                  : "Invoice Builder"}
               </div>{" "}
             </div>{" "}
           </div>{" "}
@@ -4469,25 +4761,27 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   </span>
                 )}
               </div>{" "}
-              <button
-                onClick={() => {
-                  setSelectedCustomer(null);
-                  setSelectedService(null);
-                  setCustomerQuery("");
-                }}
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: D.muted,
-                  cursor: "pointer",
-                  fontSize: 18,
-                  padding: isMobile ? "10px 12px" : "4px 8px",
-                  minHeight: isMobile ? 44 : undefined,
-                  minWidth: isMobile ? 44 : undefined,
-                }}
-              >
-                x
-              </button>{" "}
+              {!editMode && (
+                <button
+                  onClick={() => {
+                    setSelectedCustomer(null);
+                    setSelectedService(null);
+                    setCustomerQuery("");
+                  }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: D.muted,
+                    cursor: "pointer",
+                    fontSize: 18,
+                    padding: isMobile ? "10px 12px" : "4px 8px",
+                    minHeight: isMobile ? 44 : undefined,
+                    minWidth: isMobile ? 44 : undefined,
+                  }}
+                >
+                  x
+                </button>
+              )}{" "}
             </div>
           ) : (
             <div style={{ position: "relative" }}>
@@ -4553,7 +4847,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             </div>
           )}
         </div>
-        {serviceRecords.length > 0 && (
+        {!editMode && serviceRecords.length > 0 && (
           <div style={panelStyle()}>
             {sectionHeader("Service History")}
             <select
@@ -4588,15 +4882,17 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             </select>{" "}
           </div>
         )}
-        <div style={panelStyle()}>
-          {sectionHeader("Service Date")}
-          <input
-            type="date"
-            value={serviceDate}
-            onChange={(e) => setServiceDate(e.target.value)}
-            style={sInput(isMobile)}
-          />{" "}
-        </div>{" "}
+        {!editMode && (
+          <div style={panelStyle()}>
+            {sectionHeader("Service Date")}
+            <input
+              type="date"
+              value={serviceDate}
+              onChange={(e) => setServiceDate(e.target.value)}
+              style={sInput(isMobile)}
+            />{" "}
+          </div>
+        )}{" "}
         <div style={panelStyle()}>
           {sectionHeader("Services")}
           {!isMobile && (
@@ -4934,6 +5230,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             + Add service
           </button>{" "}
         </div>{" "}
+        {!editMode && (
         <div style={panelStyle()}>
           {sectionHeader("Attachments")}
           <input
@@ -5038,7 +5335,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               No files selected.
             </div>
           )}
-        </div>{" "}
+        </div>
+        )}{" "}
         <div style={panelStyle()}>
           {sectionHeader("Delivery")}
           <div style={{ marginBottom: 14 }}>
@@ -5099,40 +5397,42 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 marginBottom: 6,
               }}
             >
-              Schedule
+              {editMode ? "Due date" : "Schedule"}
             </div>{" "}
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                gridTemplateColumns: isMobile || editMode ? "1fr" : "1fr 1fr",
                 gap: 8,
               }}
             >
               {" "}
-              <div>
-                {" "}
-                <label
-                  style={{
-                    fontSize: 12,
-                    color: D.text,
-                    display: "block",
-                    marginBottom: 4,
-                  }}
-                >
-                  Send
-                </label>{" "}
-                <select
-                  value={sendTiming}
-                  onChange={(e) => setSendTiming(e.target.value)}
-                  style={sInput(isMobile)}
-                >
+              {!editMode && (
+                <div>
                   {" "}
-                  <option value="now">Immediately</option>{" "}
-                  <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
-                  <option value="custom">Custom time</option>{" "}
-                  <option value="draft">Save draft</option>{" "}
-                </select>{" "}
-              </div>{" "}
+                  <label
+                    style={{
+                      fontSize: 12,
+                      color: D.text,
+                      display: "block",
+                      marginBottom: 4,
+                    }}
+                  >
+                    Send
+                  </label>{" "}
+                  <select
+                    value={sendTiming}
+                    onChange={(e) => setSendTiming(e.target.value)}
+                    style={sInput(isMobile)}
+                  >
+                    {" "}
+                    <option value="now">Immediately</option>{" "}
+                    <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
+                    <option value="custom">Custom time</option>{" "}
+                    <option value="draft">Save draft</option>{" "}
+                  </select>{" "}
+                </div>
+              )}{" "}
               <div>
                 {" "}
                 <label
@@ -5163,21 +5463,22 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                  gridTemplateColumns: isMobile || editMode ? "1fr" : "1fr 1fr",
                   gap: 8,
                   marginTop: 8,
                 }}
               >
-                {sendTiming === "custom" ? (
-                  <input
-                    type="datetime-local"
-                    value={sendCustomAt}
-                    onChange={(e) => setSendCustomAt(e.target.value)}
-                    style={sInput(isMobile)}
-                  />
-                ) : (
-                  <div />
-                )}
+                {!editMode &&
+                  (sendTiming === "custom" ? (
+                    <input
+                      type="datetime-local"
+                      value={sendCustomAt}
+                      onChange={(e) => setSendCustomAt(e.target.value)}
+                      style={sInput(isMobile)}
+                    />
+                  ) : (
+                    <div />
+                  ))}
                 {dueTiming === "custom" ? (
                   <input
                     type="date"
@@ -5191,6 +5492,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
               </div>
             )}
           </div>{" "}
+          {!editMode && (
           <div
             style={{
               marginBottom: 16,
@@ -5254,7 +5556,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                 )}
               </div>
             )}
-          </div>{" "}
+          </div>
+          )}{" "}
         </div>{" "}
       </div>{" "}
       <div
@@ -5292,6 +5595,7 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             }}
           >
             {" "}
+            {!editMode && (
             <div
               style={{
                 display: "flex",
@@ -5310,7 +5614,8 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                       ? "Tomorrow 8 AM"
                       : "Custom"}
               </span>{" "}
-            </div>{" "}
+            </div>
+            )}{" "}
             <div
               style={{
                 display: "flex",
@@ -5341,11 +5646,19 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             >
               {" "}
               <span style={{ color: D.muted }}>Sales tax</span>{" "}
-              <span>{isCommercial ? "Commercial only" : "None"}</span>{" "}
+              <span>
+                {editMode
+                  ? taxRate > 0
+                    ? `${(taxRate * 100).toFixed(2).replace(/\.?0+$/, "")}%`
+                    : "None"
+                  : isCommercial
+                    ? "Commercial only"
+                    : "None"}
+              </span>{" "}
             </div>{" "}
           </div>{" "}
           <button
-            onClick={handleCreate}
+            onClick={editMode ? handleSave : handleCreate}
             disabled={saving}
             style={{
               ...sBtn("#111", D.white, isMobile),

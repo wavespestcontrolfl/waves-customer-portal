@@ -71,7 +71,11 @@ export default function MobileCheckoutSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
-  const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
+  // Callbacks (re-services) are free by definition for recurring/WaveGuard
+  // customers — the server zeroes the visit and won't bill monthly dues, so the
+  // checkout preview must not fall back to monthlyRate (which would show a
+  // "Charge $<rate>" button that the mint endpoint then rejects as $0).
+  const price = rawPrice != null ? rawPrice : (service.isCallback ? 0 : Number(service.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -100,6 +104,13 @@ export default function MobileCheckoutSheet({
   const totalBeforePrepaid = Math.max(0, servicesSubtotal + extraDiscountsTotal);
   const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
+  // A genuinely $0 visit (e.g. a free callback with no added extras) has nothing
+  // to mint — the invoice endpoint rejects a zero charge — so disable the Charge
+  // button and point the tech at completing the job. Base this on the PRE-prepaid
+  // chargeable amount: a positive-price visit that's fully prepaid still needs to
+  // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
+  // it must stay enabled even though `total` nets to $0.
+  const nothingToCharge = totalBeforePrepaid <= 0;
 
   const startTime = formatTime(service.windowStart);
   const duration = service.estimatedDuration ? `${service.estimatedDuration} mins` : '';
@@ -175,7 +186,7 @@ export default function MobileCheckoutSheet({
   const removeExtra = (id) => setExtras((prev) => prev.filter((e) => e.id !== id));
 
   async function handleCharge() {
-    if (minting) return;
+    if (minting || nothingToCharge) return;
     setMinting(true);
     setMintError(null);
     try {
@@ -242,11 +253,15 @@ export default function MobileCheckoutSheet({
         <button
           type="button"
           onClick={handleCharge}
-          disabled={minting}
+          disabled={minting || nothingToCharge}
           className="w-full bg-zinc-900 text-white font-medium rounded-xs u-focus-ring"
-          style={{ padding: '16px 20px', fontSize: 16, opacity: minting ? 0.6 : 1 }}
+          style={{ padding: '16px 20px', fontSize: 16, opacity: (minting || nothingToCharge) ? 0.6 : 1 }}
         >
-          {minting ? 'Opening payment…' : `Charge $${total.toFixed(2)}`}
+          {minting
+            ? 'Opening payment…'
+            : nothingToCharge
+              ? 'No charge — complete from job'
+              : `Charge $${total.toFixed(2)}`}
         </button>
         {mintError && (
           <div className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>

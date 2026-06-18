@@ -1592,6 +1592,37 @@ function ProjectDetail({
     }
   }
 
+  // Open the filled FDACS-13645 exactly as it will be filed, so the operator can
+  // verify the official form is populated before sending. The endpoint is
+  // admin-only (bearer auth), so fetch it with adminFetch and open the PDF as an
+  // object URL — a plain link navigation drops the auth header and 401s.
+  async function viewFilledFdacsPdf() {
+    if (!projectId) return;
+    setError("");
+    // Open the tab synchronously inside the click gesture; Safari/iOS and strict
+    // popup blockers reject window.open that happens only after an await. We set
+    // its location once the blob is ready (no `noopener` — that would null `win`).
+    const win = window.open("", "_blank");
+    try {
+      // Render from the SAME data the send will file — persist unsaved drawer
+      // edits first, exactly like the send paths, so this isn't a stale preview.
+      await saveDirtyProjectEdits("Could not save project before preview");
+      const r = await adminFetch(`/admin/projects/${projectId}/fdacs-pdf`);
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || "Could not generate the filled FDACS-13645 PDF");
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      if (win) win.location = url;
+      else window.open(url, "_blank", "noopener");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) {
+      if (win) win.close();
+      setError(e.message || "Could not open the filled FDACS-13645 PDF");
+    }
+  }
+
   async function handleSendWithInvoice() {
     if (!canAdminActions) {
       setError("Admin access required to send project reports.");
@@ -2192,32 +2223,49 @@ function ProjectDetail({
           >
             {" "}
             <div>
-              {" "}
               <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
                 FDACS-13645 WDO form
-              </div>{" "}
+              </div>
               <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                Use this as the official inspection template and review copy.
-              </div>{" "}
+                Preview the filled report exactly as it will be filed.
+              </div>
+              <a
+                href="/forms/fdacs-13645-wdo-inspection-report.pdf"
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  fontSize: 11,
+                  color: D.muted,
+                  textDecoration: "underline",
+                  marginTop: 4,
+                  display: "inline-block",
+                }}
+              >
+                Open blank template
+              </a>
             </div>{" "}
-            <a
-              href="/forms/fdacs-13645-wdo-inspection-report.pdf"
-              target="_blank"
-              rel="noreferrer"
-              style={{
-                flexShrink: 0,
-                padding: "7px 10px",
-                borderRadius: 6,
-                fontSize: 11,
-                fontWeight: 800,
-                color: D.heading,
-                textDecoration: "none",
-                background: D.card,
-                border: `1px solid ${D.inputBorder}`,
-              }}
-            >
-              Open PDF
-            </a>{" "}
+            {/* The filled-form endpoint is admin-only (requireAdmin); only show
+                the action to operators who can actually call it, so techs (who
+                see this card too) aren't handed a button that always 403s. */}
+            {canAdminActions && (
+              <button
+                type="button"
+                onClick={viewFilledFdacsPdf}
+                style={{
+                  flexShrink: 0,
+                  padding: "7px 10px",
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  color: D.heading,
+                  cursor: "pointer",
+                  background: D.card,
+                  border: `1px solid ${D.inputBorder}`,
+                }}
+              >
+                View filled form
+              </button>
+            )}{" "}
           </div>
         )}
         <ReadinessPanel readiness={readiness} />

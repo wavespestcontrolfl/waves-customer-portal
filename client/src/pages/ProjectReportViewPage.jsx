@@ -666,10 +666,14 @@ export default function ProjectReportViewPage() {
               Official WDO Form
             </div>
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
-              This inspection follows Florida FDACS-13645, Wood-Destroying Organisms Inspection Report.
+              {data.fdacsPdfAvailable
+                ? 'Your completed, signed FDACS-13645 Wood-Destroying Organisms Inspection Report — exactly as it was filed.'
+                : 'This inspection follows Florida FDACS-13645, Wood-Destroying Organisms Inspection Report.'}
             </div>
             <a
-              href="/forms/fdacs-13645-wdo-inspection-report.pdf"
+              href={data.fdacsPdfAvailable
+                ? `${API_BASE}/reports/project/${token}/fdacs-pdf`
+                : '/forms/fdacs-13645-wdo-inspection-report.pdf'}
               target="_blank"
               rel="noreferrer"
               style={{

@@ -19,6 +19,96 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 
+// Per-customer advisory-lock namespace for annual-prepay term creation. MUST
+// match admin-customers.js so flagging an invoice here serializes against the
+// Customer 360 annual-prepay routes (a shared lock prevents two routes from
+// concurrently creating overlapping coverage for the same customer).
+const ANNUAL_PREPAY_LOCK_NS = 0x4150;
+
+// Map a recurring_interval_days value (used by the scheduler's "Custom (every N
+// days)" option, and by month-based patterns stored as custom) to an annual-
+// prepay coverage cadence, with tolerance. Returns null for intervals that don't
+// correspond to a supported coverage cadence (e.g. weekly/biweekly or an
+// arbitrary custom gap) so we never guess one.
+function cadenceFromIntervalDays(days) {
+  const d = Number(days);
+  if (!Number.isFinite(d) || d <= 17) return null; // daily/weekly/biweekly: not coverage cadences
+  if (d >= 26 && d <= 35) return 'monthly';        // ~30
+  if (d >= 38 && d <= 48) return 'every_6_weeks';  // ~42
+  if (d >= 55 && d <= 66) return 'bimonthly';      // ~60
+  if (d >= 85 && d <= 96) return 'quarterly';      // ~90/91
+  if (d >= 115 && d <= 125) return 'triannual';    // ~120
+  if (d >= 170 && d <= 190) return 'semiannual';   // ~180
+  if (d >= 350 && d <= 380) return 'annual';       // ~365
+  return null;
+}
+
+// Best-guess coverage for the annual-prepay modal: the customer's most common
+// active RECURRING scheduled-service label (NOT the invoice title, which can be
+// a plan label like "WaveGuard Bronze Annual Prepay"), plus the cadence carried
+// on those real recurring rows. Used only to prefill a brand-new term so the
+// standard Mark-prepaid flow auto-covers the real recurring visits; the operator
+// can clear/override it. Returns null unless the customer has recurring history
+// AND we can confidently determine its cadence — a one-off/initial treatment
+// must NOT seed annual coverage, and we never guess a default cadence (the modal
+// submits the suggestion as explicit, so a wrong guess mis-stamps visits).
+async function suggestCoverageServiceType(customerId) {
+  if (!customerId) return null;
+  try {
+    const rows = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .where('is_recurring', true)
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .whereNotNull('service_type')
+      .orderBy('scheduled_date', 'desc')
+      .limit(100)
+      .select('service_type', 'recurring_pattern', 'recurring_interval_days');
+    if (!rows.length) return null;
+    const counts = new Map();
+    for (const row of rows) {
+      const t = String(row.service_type || '').trim();
+      if (t) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    let serviceType = null;
+    let bestN = 0;
+    for (const [t, n] of counts) {
+      if (n > bestN) { serviceType = t; bestN = n; }
+    }
+    if (!serviceType) return null;
+    // Derive cadence ONLY from the chosen service's actual recurrence data — a
+    // generic label like "Pest Control Service" carries its real cadence on the
+    // rows, not in the name. We deliberately do NOT fall back to label inference
+    // (which defaults to quarterly): the modal treats the suggested cadence as
+    // explicit, so a guessed quarterly would mis-stamp a monthly/custom plan.
+    const { normalizeCoverageCadence } = AnnualPrepayRenewals._private;
+    const cadenceCounts = new Map();
+    for (const row of rows) {
+      if (String(row.service_type || '').trim() !== serviceType) continue;
+      // monthly_nth_weekday (scheduler's "nth weekday of month") is monthly;
+      // normalizeCoverageCadence handles the named month cadences; custom/other
+      // patterns fall to the interval-days mapping.
+      const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
+      let c = rawPattern === 'monthly_nth_weekday'
+        ? 'monthly'
+        : normalizeCoverageCadence(row.recurring_pattern);
+      if (!c) c = cadenceFromIntervalDays(row.recurring_interval_days);
+      if (c) cadenceCounts.set(c, (cadenceCounts.get(c) || 0) + 1);
+    }
+    let cadence = null;
+    let cadenceBest = 0;
+    for (const [c, n] of cadenceCounts) {
+      if (n > cadenceBest) { cadence = c; cadenceBest = n; }
+    }
+    // No determinable cadence → no prefill, so the operator sets coverage
+    // explicitly rather than us submitting a guessed quarterly default.
+    if (!cadence) return null;
+    return { serviceType, cadence };
+  } catch (err) {
+    logger.warn(`[admin-invoices] coverage service suggestion skipped: ${err.message}`);
+    return null;
+  }
+}
+
 function aggregateAttachmentMemoryStorage() {
   return {
     _handleFile(req, file, cb) {
@@ -435,6 +525,9 @@ router.get('/:id', async (req, res, next) => {
   try {
     const invoice = await InvoiceService.getById(req.params.id);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
+    // Coverage-service suggestion for the annual-prepay modal (real recurring
+    // service, not the invoice title). Modal-only; safe to attach for all GETs.
+    invoice.suggested_coverage = await suggestCoverageServiceType(invoice.customer_id);
     res.json(invoice);
   } catch (err) { next(err); }
 });
@@ -741,7 +834,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     const invoice = await InvoiceService.update(req.params.id, req.body);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     res.json(invoice);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Editability guards (status race, live PaymentIntent, payment plan,
+    // annual prepay, deposit/account credit) are operator-actionable conflicts,
+    // not server faults — surface them so the UI can toast the reason.
+    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied/i.test(err.message)) {
+      return res.status(409).json({ error: err.message });
+    }
+    if (/Invalid line-item discount/i.test(err.message)) {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // POST /:id/send — send invoice via SMS + email
@@ -865,9 +969,17 @@ router.post('/:id/void', requireAdmin, async (req, res, next) => {
 // banner on the pay page + PDF. Defaults: coverage starts on the service date
 // (or today) for 12 months, prepay amount = invoice total. Idempotent per
 // invoice (annual_prepay_terms has a unique prepay_invoice_id).
+//
+// When coverageServiceType + coverageVisitCount (+ optional coverageCadence)
+// are supplied, the linked term also seeds/auto-stamps that many scheduled
+// visits prepaid on payment (the same coverage behavior as the Customer 360
+// annual-prepay flow). Omitting them preserves the legacy display-only flag.
 router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   try {
-    const { termStart, termEnd, months, planLabel, prepayAmount, monthlyRate } = req.body || {};
+    const {
+      termStart, termEnd, months, planLabel, prepayAmount, monthlyRate,
+      coverageServiceType, coverageVisitCount, coverageCadence,
+    } = req.body || {};
     const ymd = /^\d{4}-\d{2}-\d{2}$/;
     if (termStart && !ymd.test(String(termStart))) {
       return res.status(400).json({ error: 'termStart must be YYYY-MM-DD' });
@@ -907,15 +1019,129 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'monthlyRate must be a non-negative number' });
     }
 
-    const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
-      customerId: invoice.customer_id,
-      prepayInvoiceId: invoice.id,
-      planLabel: cleanOptionalText(planLabel) || invoice.title || 'Annual Prepay',
-      monthlyRate: resolvedMonthly,
-      prepayAmount: resolvedAmount,
-      termStart: start || null,
-      termEnd: end || null,
-    });
+    // Coverage fields are optional. When present, the term seeds + auto-stamps
+    // the covered visits prepaid (so completing them doesn't re-invoice the
+    // customer who already paid the year up front); when omitted they stay
+    // `undefined` and createTermForAnnualPrepay leaves the term display-only.
+    let resolvedVisitCount;
+    if (coverageVisitCount != null && coverageVisitCount !== '') {
+      const vc = parseInt(coverageVisitCount, 10);
+      if (!Number.isInteger(vc) || vc < 1 || vc > 24) {
+        return res.status(400).json({ error: 'coverageVisitCount must be between 1 and 24' });
+      }
+      resolvedVisitCount = vc;
+    }
+    const resolvedServiceType = coverageServiceType !== undefined
+      ? (cleanOptionalText(coverageServiceType) || null)
+      : undefined;
+    const resolvedCadence = coverageCadence !== undefined
+      ? (cleanOptionalText(coverageCadence) || null)
+      : undefined;
+
+    // Mirror the client guard server-side: a service type with no valid visit
+    // count is incomplete coverage. The term would store the service type but
+    // refreshTermSnapshot needs BOTH to seed/stamp, so the invoice would look
+    // coverage-configured while its visits still bill normally. Reject it so a
+    // stale client or direct API call can't persist that half state.
+    if (resolvedServiceType && resolvedVisitCount === undefined) {
+      return res.status(400).json({
+        error: 'coverageVisitCount is required when coverageServiceType is set',
+      });
+    }
+
+    const coverageEnabled = !!resolvedServiceType && resolvedVisitCount !== undefined;
+
+    // Visit coverage needs a positive amount to stamp: applyPrepaidCoverageForTerm
+    // bails unless prepay_amount > 0, and completion billing only skips visits
+    // with a positive prepaid_amount. A zero-amount coverage term would look
+    // configured but still re-invoice every covered visit, so reject it.
+    if (coverageEnabled && !(resolvedAmount > 0)) {
+      return res.status(400).json({
+        error: 'A positive prepay amount is required to enable visit coverage',
+      });
+    }
+
+    // Coverage stamps prepay_amount split across the covered visits, and
+    // completion billing only suppresses a visit when its prepaid_amount >= the
+    // amount it would bill. If the operator lowers the prepay amount below the
+    // invoice total, the per-visit stamp can fall short and covered visits still
+    // invoice despite the customer having paid. Require the stamped amount to be
+    // at least the invoice total when coverage is enabled (the Customer 360 flow
+    // likewise stamps the full invoice total).
+    const invoiceTotalForCoverage = Number(invoice.total) || 0;
+    if (coverageEnabled && resolvedAmount + 1e-9 < invoiceTotalForCoverage) {
+      return res.status(400).json({
+        error: `When covering visits, the prepay amount must be at least the invoice total ($${invoiceTotalForCoverage.toFixed(2)}).`,
+      });
+    }
+
+    // Per-customer overlap guard, mirroring the Customer 360 annual-prepay
+    // routes. Now that this endpoint can create real visit coverage, a second
+    // overlapping term would let two terms fight over the same scheduled visits
+    // (double-counting / mis-stamping). Serialize the check + create under the
+    // same per-customer advisory lock + transaction the Customer 360 routes use,
+    // so two concurrent flags can't both pass a preflight read and insert
+    // overlapping coverage. Always run the check when coverage is enabled
+    // (incl. editing an existing term), excluding only this invoice's own term;
+    // a display-only flag owns no visits, so it skips the guard.
+    let term;
+    try {
+      term = await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(?, hashtext(?))',
+          [ANNUAL_PREPAY_LOCK_NS, String(invoice.customer_id)],
+        );
+
+        if (coverageEnabled) {
+          const ownTerm = await trx('annual_prepay_terms')
+            .where({ prepay_invoice_id: invoice.id })
+            .first('id');
+          // Proper interval overlap: this term's [start, end] vs the other
+          // term's [term_start, term_end]. Comparing only this start against the
+          // latest other term_end would falsely 409 when editing an older term
+          // whose window ends before a separate future renewal begins.
+          const startYmd = dateOnly(start) || etDateString();
+          const endYmd = dateOnly(end) || addMonthsSameDay(startYmd, 12);
+          let overlapQuery = trx('annual_prepay_terms')
+            .where({ customer_id: invoice.customer_id })
+            .where(function overlapStatus() {
+              this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+                .orWhere(function lapsedRenewalStillInTerm() {
+                  this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+                });
+            })
+            .where('term_start', '<=', endYmd)
+            .where('term_end', '>=', startYmd);
+          if (ownTerm) overlapQuery = overlapQuery.whereNot('id', ownTerm.id);
+          const overlapTerm = await overlapQuery.orderBy('term_start', 'asc').first('id', 'term_start', 'term_end');
+          if (overlapTerm) {
+            const oStart = dateOnly(overlapTerm.term_start);
+            const oEnd = dateOnly(overlapTerm.term_end);
+            const message = `Customer already has an annual prepay term covering ${oStart} through ${oEnd}. Choose coverage dates outside that window, or apply coverage from that term.`;
+            const err = new Error(message);
+            err.annualPrepayOverlap = { error: message, activeTermId: overlapTerm.id, activeTermStart: oStart, activeTermEnd: oEnd };
+            throw err;
+          }
+        }
+
+        return AnnualPrepayRenewals.createTermForAnnualPrepay({
+          customerId: invoice.customer_id,
+          prepayInvoiceId: invoice.id,
+          planLabel: cleanOptionalText(planLabel) || invoice.title || 'Annual Prepay',
+          monthlyRate: resolvedMonthly,
+          prepayAmount: resolvedAmount,
+          termStart: start || null,
+          termEnd: end || null,
+          coverageServiceType: resolvedServiceType,
+          coverageVisitCount: resolvedVisitCount,
+          coverageCadence: resolvedCadence,
+          conn: trx,
+        });
+      });
+    } catch (err) {
+      if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      throw err;
+    }
     if (!term) {
       return res.status(409).json({ error: 'Annual prepay is not available for this account' });
     }

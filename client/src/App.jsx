@@ -175,8 +175,7 @@ const AdminTurfHeightReviewPage = lazyWithRetry(() => import('./pages/admin/Turf
 const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
 const PayersPage = lazyWithRetry(() => import('./pages/admin/PayersPage'));
-const AdminDocumentTemplatesPage = lazyWithRetry(() => import('./pages/admin/DocumentTemplatesPage'));
-const AdminDocumentRequestsPage = lazyWithRetry(() => import('./pages/admin/DocumentRequestsPage'));
+const AdminContractsPage = lazyWithRetry(() => import('./pages/admin/ContractsPage'));
 const PayPage = lazyWithRetry(() => import('./pages/PayPageV2'));
 const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
@@ -355,8 +354,9 @@ export default function App() {
             <Route path="fleet" element={<FleetRedirect />} />
             <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
             <Route path="projects" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading projects...</div>}><ProjectsPage /></Suspense>} />
-            <Route path="documents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading documents...</div>}><AdminDocumentTemplatesPage /></Suspense>} />
-            <Route path="document-requests" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading document requests...</div>}><AdminDocumentRequestsPage /></Suspense>} />
+            <Route path="contracts" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading contracts...</div>}><AdminContractsPage /></Suspense>} />
+            <Route path="documents" element={<Navigate to="/admin/contracts?tab=templates" replace />} />
+            <Route path="document-requests" element={<Navigate to="/admin/contracts?tab=requests" replace />} />
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
             <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
             <Route path="credentials" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading credentials...</div>}><CredentialsPage /></Suspense>} />

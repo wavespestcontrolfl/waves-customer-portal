@@ -2189,6 +2189,10 @@ const InvoiceService = {
       "customers.phone",
       "customers.email",
       "customers.waveguard_tier",
+      // property_type drives taxability; the edit form needs the CURRENT value
+      // (not the rate stored on the invoice) so its tax preview matches the
+      // server retotal when a customer's type changed after invoice creation.
+      "customers.property_type",
       db.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)
           FROM payment_methods
@@ -2260,6 +2264,62 @@ const InvoiceService = {
     // lets a tech mark an invoice "paid" with no Stripe charge / no
     // payments-ledger row, or flip a paid invoice back to "draft" and
     // erase the audit trail. See INVOICE_UPDATE_ALLOWED_FIELDS export.
+
+    // Editability guard. The generic update path can only safely rewrite an
+    // invoice that has not yet entered collection or accrued payment
+    // side-state. We re-read the CURRENT row here (not the one the editor was
+    // opened with) so a status race — the invoice gets sent/paid via the pay
+    // link, Charge in person, Add payment, or the scheduled-send cron after
+    // the edit form opened — is caught at the write:
+    //   - status must still be draft/scheduled (never rewrite sent/paid money)
+    //   - no live Stripe PaymentIntent: /pay/:token /setup stamps
+    //     stripe_payment_intent_id while the invoice stays collectible; a
+    //     retotal here would leave a stale pay page able to confirm the old
+    //     amount with no way to reconcile it.
+    //   - no active payment plan / annual-prepay term: those capture the total
+    //     at creation (payment_plans.total_balance, annual_prepay_terms
+    //     .prepay_amount); retotalling invoices alone leaves them collecting /
+    //     displaying the stale figure.
+    // Deposit-credit and applied-account-credit invoices stay blocked below
+    // (line-item path) for their own ledger reasons.
+    const existing = await db("invoices").where({ id }).first();
+    if (!existing) return null;
+    const currentStatus = String(existing.status || "").toLowerCase();
+    if (currentStatus !== "draft" && currentStatus !== "scheduled") {
+      throw new Error(
+        "Only draft or scheduled invoices can be edited — this invoice has already been sent or paid",
+      );
+    }
+    if (existing.stripe_payment_intent_id) {
+      throw new Error(
+        "A customer has already started paying this invoice — void it and create a replacement instead of editing",
+      );
+    }
+    if (existing.annual_prepay_term_id) {
+      throw new Error(
+        "This invoice is part of an annual prepay term — edit the term (Annual prepay) instead of the invoice",
+      );
+    }
+    // Fail CLOSED: if we can't confirm the payment-plan state (migration
+    // drift, permissions, transient DB error) we must refuse the edit rather
+    // than assume there's no plan — assuming none is exactly the committed-
+    // workflow drift this guard prevents.
+    let activePlan = null;
+    try {
+      activePlan = await db("payment_plans")
+        .where({ invoice_id: id, status: "active" })
+        .first();
+    } catch (err) {
+      throw new Error(
+        `Could not verify the active payment plan state — refusing to edit (${err.message})`,
+      );
+    }
+    if (activePlan) {
+      throw new Error(
+        "This invoice has an active payment plan — cancel the plan before editing the invoice",
+      );
+    }
+
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
     for (const key of allowed) {
@@ -2274,8 +2334,7 @@ const InvoiceService = {
     // discount rows are scoped to their parent line item, and residential
     // tax is always forced to zero.
     if (updates.line_items) {
-      const invoice = await db("invoices").where({ id }).first();
-      if (!invoice) return null;
+      const invoice = existing;
       // Deposit-credited invoices are edit-locked on line items: the credit
       // line is backed dollar-for-dollar by consumed estimate_deposits
       // ledger rows, and a recalculation here can neither re-cap the credit
@@ -2318,12 +2377,55 @@ const InvoiceService = {
           taxRate: updates.tax_rate,
         }),
       );
+      // KNOWN LIMITATION (accepted): a line-item retotal here updates
+      // invoices.discount_amount but does NOT reconcile the create-time
+      // discount audit trail (invoice_discounts rows + discounts.times_applied
+      // / total_discount_given). So changing/removing a discount on a draft can
+      // drift the Discounts report from the edited invoice. Left as-is on
+      // purpose: it's reporting-only (no money/ledger/customer impact), the
+      // counters are already created-time best-effort and count unsent/voided
+      // drafts too, and there is no reversal primitive to mirror — reconciling
+      // would have to reverse + re-record across multiple create paths. Revisit
+      // if discount reporting needs to be exact to the penny on edited drafts.
     }
 
+    // Apply the editability predicates ATOMICALLY on the write so a worker
+    // that mutates the same invoice between the guard read above and this write
+    // cannot be clobbered. Column predicates cover a worker stamping
+    // stripe_payment_intent_id, flipping status off draft/scheduled, or linking
+    // a prepay term; the correlated NOT EXISTS covers a second admin creating
+    // an active payment plan (POST /:id/payment-plan inserts into payment_plans
+    // without stamping the invoice, so it isn't visible as a column here). If
+    // any predicate no longer holds the update matches zero rows and we fail
+    // closed instead of rewriting money.
+    //
+    // KNOWN LIMITATION (accepted): these predicates only see committed state.
+    // POST /:id/payment-plan and POST /:id/annual-prepay read invoice.total
+    // without locking the invoice row, so if one of those creations is in
+    // flight (uncommitted) while this edit commits, the plan/term can be born
+    // with the pre-edit total. Closing it fully would mean locking + re-reading
+    // the invoice (SELECT ... FOR UPDATE) inside those two creation
+    // transactions. Left as-is on purpose: it needs two admins on the SAME
+    // draft within a sub-second window, the already-exists cases are blocked
+    // above, and any resulting total mismatch is visible and recoverable.
     const [invoice] = await db("invoices")
       .where({ id })
+      .whereIn("status", ["draft", "scheduled"])
+      .whereNull("stripe_payment_intent_id")
+      .whereNull("annual_prepay_term_id")
+      .whereNotExists(function () {
+        this.select(db.raw("1"))
+          .from("payment_plans")
+          .whereRaw("payment_plans.invoice_id = invoices.id")
+          .where("payment_plans.status", "active");
+      })
       .update(data)
       .returning("*");
+    if (!invoice) {
+      throw new Error(
+        "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
+      );
+    }
     return invoice;
   },
 

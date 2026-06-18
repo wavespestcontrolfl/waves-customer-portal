@@ -88,8 +88,7 @@ const NAV_SECTIONS = [
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
       { path: "/admin/service-library", icon: BookOpen, label: "Services" },
       { path: "/admin/projects", icon: FileText, label: "Projects" },
-      { path: "/admin/documents", icon: FileText, label: "Documents" },
-      { path: "/admin/document-requests", icon: FileText, label: "Doc Requests" },
+      { path: "/admin/contracts", icon: FileText, label: "Contracts" },
     ],
   },
   {

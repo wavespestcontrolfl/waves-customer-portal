@@ -356,6 +356,15 @@ finding and warns on P1. Reviewers must return JSON matching
   private feedback capture. No auth beyond the review-request token; picks
   nearest GBP by geocoded address. The bare `/api/rate` mount is not itself a
   route — only the token-scoped family is public).
+  `/api/reports/project/:token/fdacs-pdf` (read-only; streams the filled, signed
+  FDACS-13645 PDF for a WDO report so the public report page can show the official
+  form instead of a blank template. Same long-lived report token + format gate as
+  the sibling `/api/reports/project/:token/data` viewer
+  (`extractProjectReportTokenLookup`), inherits the router-level 20 req/min
+  `reportLimiter`, `no-store`/`noindex`/`no-referrer` privacy headers. Serves ONLY
+  the already-emailed archived filing streamed from private S3 — never
+  live/unsigned content — and returns a generic 404 for non-WDO projects, reports
+  with no archived filing, or malformed tokens).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
