@@ -2625,11 +2625,14 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
       resolveProjectApplicator(project),
       loadWdoAddendumPhotos(project),
     ]);
-    // Never stamp a stale signature onto edited content — even in this admin
-    // preview, which can be downloaded and filed manually. Render unsigned
-    // instead, so the preview shows exactly what is currently sendable.
+    // Never stamp a signature onto content that isn't sendable — even in this
+    // admin preview, which can be downloaded and filed manually. Render unsigned
+    // when the signature is stale OR when the Section 2 hard gates (contradiction
+    // / incomplete) would 422 the send, so a downloadable preview can't become a
+    // signed FDACS filing that the send routes themselves refuse to emit.
     const { fresh, signature } = wdoSignatureFreshness(project);
-    const stampSignature = fresh ? signature : null;
+    const sendBlocked = wdoSectionTwoContradiction(project) || wdoCoreFindingsIncomplete(project);
+    const stampSignature = (fresh && !sendBlocked) ? signature : null;
     const applicator = applicatorForReport(baseApplicator, stampSignature);
     const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature: stampSignature, photos });
     res.setHeader('Content-Type', 'application/pdf');

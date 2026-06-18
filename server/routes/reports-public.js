@@ -411,7 +411,18 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
         ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
         : undefined,
     });
-    const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: lastFiling.s3_key }));
+    let object;
+    try {
+      object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: lastFiling.s3_key }));
+    } catch (err) {
+      // The /data viewer already advertised the PDF as available; if the private
+      // object is missing/purged, return the same generic 404 (not a 500) so a
+      // stale archive reads as "not found" rather than an internal error.
+      if (err?.name === 'NoSuchKey' || err?.name === 'NotFound' || err?.$metadata?.httpStatusCode === 404) {
+        return res.status(404).json({ error: 'Report not found' });
+      }
+      throw err;
+    }
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="FDACS-13645.pdf"');
     // Signed legal filing behind a long-lived token — never cache, index, or leak the URL.
