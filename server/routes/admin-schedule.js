@@ -1683,8 +1683,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const resolvedIsCallback = isCallback
       || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
+    // Re-service callbacks default to $0 for WaveGuard customers, but an operator
+    // can still enter an explicit charge (e.g. a re-service that also handled a
+    // billable extra). `buildAppointmentPricing` has already parsed that operator
+    // amount into `pricing.finalPrice`, so only zero it out when NO explicit
+    // price was provided — otherwise the charge is silently lost. This flag is
+    // reused for the recurring child + booster rows so callback suppression and
+    // callback reporting propagate to every generated visit, not just the first.
+    const positiveMoneyInput = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0; };
+    const explicitPriceProvided = positiveMoneyInput(primaryLinePrice) || positiveMoneyInput(estimatedPrice);
+    const zeroCallbackPrice = resolvedIsCallback && !!customer?.waveguard_tier && !explicitPriceProvided;
+
     let finalPrice = pricing.finalPrice;
-    if (resolvedIsCallback && customer?.waveguard_tier) finalPrice = 0;
+    if (zeroCallbackPrice) finalPrice = 0;
     const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
     const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
     const createdAppointments = [];
@@ -1793,7 +1804,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.source_estimate_id && linkedEstimateId) childData.source_estimate_id = linkedEstimateId;
         const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
-        if (cols.estimated_price && childFinancials.price != null) childData.estimated_price = childFinancials.price;
+        // Carry callback status + suppression onto recurring children: if an
+        // operator turns a re-service into a repeating cadence, every future
+        // visit must stay free and report as a callback (not bill monthly dues).
+        if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
+        if (cols.estimated_price) {
+          if (zeroCallbackPrice) childData.estimated_price = 0;
+          else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
+        }
         if (cols.primary_line_price && pricing.primaryBase != null) childData.primary_line_price = pricing.primaryBase;
         if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) childData.discount_id = pricing.appointmentDiscount.discountId;
         if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) childData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
@@ -1846,7 +1864,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
-          if (cols.estimated_price && boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
+          // Boosters off a re-service line inherit the same callback suppression.
+          if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
+          if (cols.estimated_price) {
+            if (zeroCallbackPrice) boosterData.estimated_price = 0;
+            else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
+          }
           if (cols.primary_line_price && pricing.primaryBase != null) boosterData.primary_line_price = pricing.primaryBase;
           if (cols.urgency) boosterData.urgency = urgency || 'routine';
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
@@ -3128,9 +3151,15 @@ router.post('/:id/invoice', async (req, res, next) => {
       });
     }
 
+    // Callbacks (re-services) are free by definition for recurring/WaveGuard
+    // customers — they must NOT fall back to the customer's monthly_rate, or a
+    // "Charge now" before completion would bill a full month's dues for a
+    // no-charge re-service. Mirrors the completion-path suppression in
+    // admin-dispatch.js. Honour an explicit positive price if one was set;
+    // otherwise the visit is $0.
     const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
       ? Number(svc.estimated_price)
-      : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+      : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
 
     // Mobile checkout sheet can append extra services + discount lines before
     // minting. Each extra is { description, quantity, unit_price, amount,
