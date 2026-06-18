@@ -1303,6 +1303,7 @@ router.get('/week', async (req, res, next) => {
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
         .select('scheduled_services.id', 'scheduled_services.customer_id',
           'scheduled_services.service_id',
+          'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
@@ -1368,6 +1369,7 @@ router.get('/week', async (req, res, next) => {
           tier: s.waveguard_tier,
           waveguardTier: s.waveguard_tier,
           monthlyRate: parseFloat(s.monthly_rate || 0),
+          isCallback: !!s.is_callback,
           autopayActive,
           autopayEnabled: s.autopay_enabled !== false,
           windowStart: s.window_start,
@@ -2310,6 +2312,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       discountType, discountAmount, estimatedPrice,
       primaryLinePrice,
       addons,
+      serviceId,
       createInvoice,
     } = req.body;
     const updates = {};
@@ -2320,45 +2323,47 @@ router.put('/:id/update-details', async (req, res, next) => {
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
-    // Re-service edits: the appointment editor can switch a job's service type
-    // but never sends `isCallback` or `serviceId`. Two subtleties make a naive
-    // recompute wrong:
-    //   1. The schedule-calendar DTO hands the editor a *normalized* label
-    //      (service-normalizer collapses "Pest Control Re-Service" → "Pest
-    //      Control Service"), so an unrelated save echoes a non-re-service label
-    //      back — recomputing from it would clear a real callback flag.
-    //   2. Completion-profile resolution keys off `service_id` first
-    //      (service-completion-profiles lookupServiceForScheduledService), so a
-    //      stale id from the prior service would route the wrong report flow.
-    // Compare *normalized* service types to tell an actual change from a no-op
-    // save, and only then touch the flag / service_id.
-    if (serviceType !== undefined) {
+    // Re-service reclassification on edit. The appointment editor posts
+    // `serviceId` ONLY when the operator actively (re)picks a service from the
+    // library; an unrelated save omits it. So `serviceId` — not the label — is
+    // the authoritative signal that the service changed: the schedule DTOs
+    // normalize "Pest Control Re-Service" → "Pest Control Service" (and the
+    // regular + re-service variants collapse to the SAME normalized label), so
+    // the serviceType string can't tell a real switch from a no-op save. When
+    // the service is switched, classify from the catalog row and keep
+    // is_callback / service_id / price coherent with the POST create path.
+    let reServiceConversionZeroPrice = false;
+    if (serviceId !== undefined) {
       try {
         const cols = await db('scheduled_services').columnInfo();
-        const existing = await db('scheduled_services').where({ id: req.params.id })
-          .first('service_type', 'service_id');
-        const incomingIsReService = isReService({ serviceType });
-        const typeActuallyChanged = normalizeServiceType(existing?.service_type || '')
-          !== normalizeServiceType(serviceType || '');
+        const existingRow = await db('scheduled_services').where({ id: req.params.id })
+          .first('estimated_price', 'primary_line_price', 'customer_id');
+        const svcRow = serviceId
+          ? await db('services').where({ id: serviceId }).first('service_key', 'name').catch(() => null)
+          : null;
+        const incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
+        if (cols.service_id) updates.service_id = serviceId || null;
+        if (cols.is_callback) updates.is_callback = incomingIsReService;
         if (incomingIsReService) {
-          if (cols.is_callback) updates.is_callback = true;
-          // Point service_id at the matching re-service catalog row so profile
-          // resolution stays correct even after the label is normalized on a
-          // later save. lawn vs pest is inferred from the selected label.
-          if (cols.service_id && typeActuallyChanged) {
-            const reKey = /lawn/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
-            const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
-            updates.service_id = reSvc?.id || null;
-          }
-        } else if (typeActuallyChanged) {
-          // Genuinely changed away from a re-service: clear the callback flag and
-          // the now-stale re-service service_id so completion re-resolves the
-          // profile from the new service_type.
-          if (cols.is_callback) updates.is_callback = false;
-          if (cols.service_id) updates.service_id = null;
+          const customerRow = await db('customers').where({ id: existingRow?.customer_id })
+            .first('waveguard_tier').catch(() => null);
+          // The modal carries over the PRIOR service's pre-filled price on a
+          // switch. Honour it only if it's an explicit NEW charge (posted price
+          // or a priced add-on differs from what was stored); otherwise the
+          // stale carryover must not bill a free WaveGuard callback.
+          const posMoney = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
+          const prevPrimary = existingRow?.primary_line_price != null ? Math.round(Number(existingRow.primary_line_price) * 100) / 100 : null;
+          const prevEstimate = existingRow?.estimated_price != null ? Math.round(Number(existingRow.estimated_price) * 100) / 100 : null;
+          const postedPrimary = posMoney(primaryLinePrice);
+          const postedEstimate = posMoney(estimatedPrice);
+          const addonHasPrice = Array.isArray(addons)
+            && addons.some((a) => posMoney(a?.basePrice ?? a?.price ?? a?.estimatedPrice));
+          const explicitNewCharge =
+            (postedPrimary != null && postedPrimary !== prevPrimary)
+            || (postedEstimate != null && postedEstimate !== prevEstimate)
+            || addonHasPrice;
+          reServiceConversionZeroPrice = !!customerRow?.waveguard_tier && !explicitNewCharge;
         }
-        // else: no-op save of a normalized re-service label — leave is_callback
-        // and service_id untouched so the persisted callback survives.
       } catch { /* columns may not exist pre-migration — non-blocking */ }
     }
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
@@ -2592,6 +2597,18 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.discount_type) updates.discount_type = discountType || null;
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
       } catch {}
+    }
+    // Converting an existing priced visit to a WaveGuard re-service: the price
+    // handling above may have stored the prior service's carried-over price.
+    // Zero it (callbacks default to $0) unless the operator entered an explicit
+    // new charge, which the reclassification block already detected.
+    if (reServiceConversionZeroPrice) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        if (cols.estimated_price) updates.estimated_price = 0;
+        if (cols.primary_line_price) updates.primary_line_price = 0;
+        if (cols.discount_dollars) updates.discount_dollars = null;
+      } catch { /* non-blocking */ }
     }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
