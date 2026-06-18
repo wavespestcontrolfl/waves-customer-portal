@@ -32,9 +32,11 @@ export default function CustomerRequestsPanel({ customerId }) {
     setLoading(true);
     setError("");
     try {
-      const data = await adminFetch(
+      const res = await adminFetch(
         `/admin/requests?customerId=${encodeURIComponent(customerId)}&limit=50`
       );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const rows = (data.requests || []).filter((r) => r.status !== "resolved");
       setRequests(rows);
     } catch (e) {
@@ -52,10 +54,14 @@ export default function CustomerRequestsPanel({ customerId }) {
     setBusyId(id);
     setError("");
     try {
-      await adminFetch(`/admin/requests/${id}`, {
+      const res = await adminFetch(`/admin/requests/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ status: "resolved" }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
       setRequests((prev) => prev.filter((r) => r.id !== id));
     } catch (e) {
       setError(e?.message || "Could not update request");
