@@ -3021,7 +3021,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         logger.error(`[projects] combined send payer copy failed: ${e.message}`);
         channels.payer_email = { ok: false, recipient: billingCopyEmail, error: e.message };
       }
-    } else if (!isPayerInvoice && channels.email?.ok) {
+    } else if (isPayerInvoice) {
+      // Payer-billed but no usable AP email: the bill-to party can't be reached.
+      // Record an explicit payer_email failure so the combined send is treated as
+      // partial/failed (below) and the UI doesn't claim "Report + invoice
+      // delivered" while the invoice is silently restored to draft — the operator
+      // must fix the payer AP email and resend.
+      channels.payer_email = { ok: false, recipient: null, error: 'Payer has no usable AP email — invoice not delivered to the bill-to party' };
+    } else if (channels.email?.ok) {
       // Self-pay only. A payer-billed invoice must NEVER route the invoice/pay
       // link to the homeowner's billing contact — when the payer has no usable
       // AP email (payerBilled false), the invoice is simply not delivered (and
@@ -3120,9 +3127,17 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // not-sent (claim released below, nothing finalized). A non-WDO report
     // carries its link + pay link in either channel, so any successful channel
     // counts as delivered (mirrors /send).
-    const delivered = isWdoProject ? !!channels.email?.ok : successfulChannelCount > 0;
+    const delivered_report = isWdoProject ? !!channels.email?.ok : successfulChannelCount > 0;
+    // For a payer-billed invoice the AP (bill-to) leg is part of "delivered": the
+    // project isn't fully delivered until BOTH the homeowner report and the payer
+    // invoice go out. A missing/failed AP recipient makes it partial/failed even
+    // when the homeowner report succeeded, so the UI never claims delivered while
+    // the bill-to party never received the invoice.
+    const payerLegOk = !isPayerInvoice || !!channels.payer_email?.ok;
+    const delivered = delivered_report && payerLegOk;
+    const anySuccess = successfulChannelCount > 0 || (isPayerInvoice && !!channels.payer_email?.ok);
     const deliveryStatus = !delivered
-      ? (successfulChannelCount === 0 ? 'failed' : 'partial')
+      ? (anySuccess ? 'partial' : 'failed')
       : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
 
     // Finalize the invoice as delivered (it went out alongside the report).

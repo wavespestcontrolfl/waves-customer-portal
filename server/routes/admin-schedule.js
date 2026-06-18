@@ -2074,6 +2074,11 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
         'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
         'scheduled_services.source_estimate_id',
+        // Per-job Bill-To: the Edit-appointment modal opened from the list echoes
+        // these on save, so they must come back here — otherwise a save posts
+        // blank payerId/poNumber and silently clears an existing per-job payer/PO
+        // (and trips the admin-only actual-change 403 for techs).
+        'scheduled_services.payer_id', 'scheduled_services.po_number',
         'customers.first_name', 'customers.last_name', 'customers.address_line1 as address', 'customers.city', 'customers.zip',
         'technicians.name as tech_name'
       )
@@ -2111,6 +2116,8 @@ router.get('/list', async (req, res, next) => {
       isRecurring: s.is_recurring,
       recurringPattern: s.recurring_pattern || null,
       sourceEstimateId: s.source_estimate_id || null,
+      payerId: s.payer_id || null,
+      poNumber: s.po_number || null,
     }));
 
     res.json({
