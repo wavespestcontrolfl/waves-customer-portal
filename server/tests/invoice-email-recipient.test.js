@@ -326,6 +326,46 @@ describe('invoice email recipient resolution', () => {
     expect(sendTemplate).not.toHaveBeenCalled();
     expect(result.ok).toBe(false);
   });
+
+  test('a live-recovered AP email (snapshot had none) is frozen onto the snapshot after delivery', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'm6' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+
+    const invoiceUpdate = jest.fn(() => Promise.resolve(1));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const chain = {
+          where: jest.fn(() => chain),
+          first: jest.fn(() => Promise.resolve({
+            id: 'invoice-1', customer_id: 'cust-1', invoice_number: 'INV-1',
+            token: 'token-1', total: 300, line_items: [], payer_id: 7,
+            // Snapshot frozen before the AP email was filled in.
+            payer_snapshot: { company_name: 'Homes by West Bay', ap_email: null },
+          })),
+          update: invoiceUpdate,
+          catch: jest.fn((h) => Promise.resolve(null).catch(h)),
+        };
+        return chain;
+      }
+      if (table === 'customers') return query({ ...customer, id: 'cust-1' });
+      if (table === 'notification_prefs') return query(null);
+      // Live payer row now carries the AP email ops added after minting.
+      if (table === 'payers') return query({ id: 7, ap_email: 'recovered@westbay.com', company_name: 'Homes by West Bay', active: true });
+      if (table === 'invoice_attachments') return countQuery({ count: 0 });
+      return query(null);
+    });
+
+    const result = await sendInvoiceEmail('invoice-1');
+
+    expect(result.ok).toBe(true);
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'recovered@westbay.com' }));
+    // The recovered AP email is frozen onto the snapshot for the receipt + pay page.
+    expect(invoiceUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      payer_snapshot: expect.stringContaining('recovered@westbay.com'),
+    }));
+  });
 });
 
 describe('receipt email recipient resolution (third-party payer)', () => {

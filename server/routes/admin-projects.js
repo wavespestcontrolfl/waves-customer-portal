@@ -2999,12 +2999,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
           reportAttached: isWdoProject,
           recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
-          // STABLE key (no timestamp): the invoice can be finalized as sent off
-          // the payer AP delivery even when the homeowner report leg fails, so a
-          // /send-with-invoice retry would otherwise re-bill the AP a duplicate
-          // invoice/pay-link on every attempt. A stable key dedupes the AP copy
-          // after the first success while still allowing retry after a failure.
-          idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer`,
+          // Stable-per-recipient key: dedupes the AP copy after the first success
+          // so a /send-with-invoice retry (the invoice can finalize off the payer
+          // delivery even when the homeowner report leg fails) doesn't re-bill the
+          // AP a duplicate — BUT keys on a hash of the AP email so that after an
+          // operator corrects a wrong/blocked AP address, the retry produces a new
+          // key and actually delivers to the corrected inbox instead of returning
+          // the old terminal (blocked/bounced) result.
+          idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer:${require('crypto').createHash('sha1').update(billingCopyEmail).digest('hex').slice(0, 12)}`,
         });
         channels.payer_email = result.ok
           ? { ok: true, recipient: billingCopyEmail }

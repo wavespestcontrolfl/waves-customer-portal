@@ -187,7 +187,22 @@ router.get('/:token', async (req, res, next) => {
             zip: data.payer.billing_zip || null,
             poNumber: data.po_number || null,
           }
-        : null,
+        // Fail closed: this invoice IS payer-billed (payer_id set) but the payer
+        // couldn't be attached (legacy invoice with no snapshot + an inactive/
+        // deleted payer row). Serialize a third-party-billed placeholder rather
+        // than null, so the pay page does NOT render as self-pay with the
+        // homeowner as bill-to (keeps save-card suppressed / billing email blank).
+        : data.payer_id
+          ? {
+              name: 'Third-party payer',
+              email: null,
+              address: null,
+              city: null,
+              state: null,
+              zip: null,
+              poNumber: data.po_number || null,
+            }
+          : null,
       processor: 'stripe',
       stripe: {
         available: StripeService.isAvailable(),

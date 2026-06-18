@@ -204,8 +204,13 @@ async function attachToInvoice(invoice, database = db) {
   // Prefer the frozen bill-to snapshot taken at creation — it survives later
   // edits/deactivation of the payer row, so an issued invoice/receipt keeps
   // its original Bill-To and routes to the AP email it was billed to.
-  const snap = parseSnapshot(invoice.payer_snapshot);
-  if (snap) {
+  const parsed = parseSnapshot(invoice.payer_snapshot);
+  if (parsed) {
+    // Clone so a live AP-email recovery below never mutates the STORED snapshot
+    // in place — Postgres returns jsonb as a parsed object, and downstream
+    // (persistPayerApIfNeeded) must still see that the stored snapshot lacked an
+    // AP email to know it needs to freeze the recovered one.
+    const snap = { ...parsed };
     // The snapshot freezes the bill-to identity (name/address) at creation, but
     // a usable AP email is delivery infrastructure, not identity. If the invoice
     // was minted before ops filled in the AP email, the frozen snapshot has a

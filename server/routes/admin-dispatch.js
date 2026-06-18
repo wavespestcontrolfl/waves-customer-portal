@@ -4585,7 +4585,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // third-party AR is silently stranded as an unsent draft. A payer with no
     // usable AP email leaves the invoice unfinalized for operator correction
     // (sendInvoiceEmail returns ok:false rather than mailing the homeowner).
-    if (invoice?.id && invoiceCreated && invoice.payer_id) {
+    // Only deliver to the payer when this invoice hasn't already been sent —
+    // `invoiceCreated` is also true when a completion REUSES an existing unpaid
+    // invoice (a pre-minted invoice already `sent`/`viewed`, or a request where
+    // invoiceAlreadySent suppressed the homeowner link). Re-sending would
+    // duplicate the AP billing email. Fresh completion invoices are `draft`.
+    const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
+      || ['sent', 'viewed', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
+        .includes(String(invoice?.status || '').toLowerCase());
+    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered) {
       try {
         const InvoiceEmail = require('../services/invoice-email');
         const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);

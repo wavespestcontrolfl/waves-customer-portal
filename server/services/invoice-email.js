@@ -141,19 +141,27 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (!recipient?.email) return { ok: false, error: 'No invoice recipient email' };
   const recipientPayload = publicRecipient(recipient);
 
-  // Freeze a one-off operator AP recipient onto the payer snapshot when the
-  // payer had no usable AP email of its own, so the (async) receipt and the pay
-  // page route to the same AP contact this invoice was actually billed to —
-  // otherwise they'd resolve no recipient and the AP would never get a receipt /
-  // would see the homeowner prefilled. Only runs on a successful send.
+  // Freeze the AP email this invoice was actually DELIVERED to onto the payer
+  // snapshot, so the (async) receipt and the pay page route to the same AP
+  // contact even if the payer row is later edited/deactivated. Covers all the
+  // ways the delivered AP email can differ from a frozen snapshot that lacked
+  // one: an operator one-off override, a live-recovered AP email (round 5), or
+  // the first send of a legacy invoice with no snapshot. No-ops once the
+  // snapshot already carries the delivered address. Only runs on a successful send.
   async function persistPayerApIfNeeded() {
     try {
-      const overrideEmail = cleanEmail(options.recipientOverride?.email);
-      if (!overrideEmail || !isEmailLike(overrideEmail)) return;
       if (!invoice.payer_id || !invoice.payer) return;
-      if (isEmailLike(invoice.payer.ap_email)) return; // payer already carries its own AP email
-      if (cleanEmail(recipient.email) !== overrideEmail) return; // we actually sent to the override
-      const snap = { ...invoice.payer, ap_email: overrideEmail };
+      const deliveredEmail = cleanEmail(recipient.email);
+      if (!deliveredEmail || !isEmailLike(deliveredEmail)) return;
+      let stored = null;
+      if (invoice.payer_snapshot) {
+        stored = typeof invoice.payer_snapshot === 'object'
+          ? invoice.payer_snapshot
+          : (() => { try { return JSON.parse(invoice.payer_snapshot); } catch { return null; } })();
+      }
+      if (stored && cleanEmail(stored.ap_email) === deliveredEmail) return; // already frozen with this AP email
+      const base = (invoice.payer && typeof invoice.payer === 'object') ? invoice.payer : (stored || {});
+      const snap = { ...base, ap_email: deliveredEmail };
       await db('invoices').where({ id: invoice.id }).update({ payer_snapshot: JSON.stringify(snap) });
       invoice.payer = snap;
     } catch (err) {
