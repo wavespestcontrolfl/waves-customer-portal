@@ -926,6 +926,17 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       ? (cleanOptionalText(coverageCadence) || null)
       : undefined;
 
+    // Mirror the client guard server-side: a service type with no valid visit
+    // count is incomplete coverage. The term would store the service type but
+    // refreshTermSnapshot needs BOTH to seed/stamp, so the invoice would look
+    // coverage-configured while its visits still bill normally. Reject it so a
+    // stale client or direct API call can't persist that half state.
+    if (resolvedServiceType && resolvedVisitCount === undefined) {
+      return res.status(400).json({
+        error: 'coverageVisitCount is required when coverageServiceType is set',
+      });
+    }
+
     const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
       customerId: invoice.customer_id,
       prepayInvoiceId: invoice.id,

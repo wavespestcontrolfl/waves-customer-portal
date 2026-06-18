@@ -1108,6 +1108,25 @@ async function createTermForAnnualPrepay({
     );
     if (coverageSelectionChanged) {
       await clearPrepaidStampsForTerm(existing.id, conn);
+      // Clearing stamps isn't enough: the dropped visits keep their
+      // annual_prepay_term_id link, which the repo treats as Annual Prepay for
+      // reporting/forecasting (pricing-reality-check) and copies onto recurring
+      // children (recurring-appointment-seeder). Detach the term link from the
+      // non-completed linked visits too, then let refreshTermSnapshot below
+      // re-attach + re-stamp ONLY the new selection — visits dropped from
+      // coverage fall fully back to normal billing. Completed/terminal visits
+      // keep their historical link + stamp (PREPAID_UPDATE_EXCLUDED_STATUSES).
+      const scCols = await scheduledServiceColumns();
+      if (scCols.annual_prepay_term_id) {
+        try {
+          await conn('scheduled_services')
+            .where({ annual_prepay_term_id: existing.id })
+            .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
+            .update({ annual_prepay_term_id: null, updated_at: new Date() });
+        } catch (err) {
+          logger.warn(`[annual-prepay] coverage-change detach skipped: ${err.message}`);
+        }
+      }
     }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);

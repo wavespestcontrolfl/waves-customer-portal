@@ -3264,11 +3264,6 @@ const ANNUAL_PREPAY_CADENCE_OPTIONS = [
 const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
   ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.value, String(option.visits)]),
 );
-// Reverse map (visit count → cadence), mirroring the server's visit-count
-// cadence inference, for prefilling a legacy term whose cadence is null.
-const ANNUAL_PREPAY_VISITS_TO_CADENCE = Object.fromEntries(
-  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.visits, option.value]),
-);
 
 // Flags an existing invoice as an annual prepayment so the customer-facing
 // coverage banner renders on the pay page + PDF. When a service type + visit
@@ -3291,6 +3286,12 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
     (invoice.title || "").replace(/\s+Annual Prepay$/i, "").trim(),
   );
   const [cadence, setCadence] = useState("quarterly");
+  // Whether `cadence` reflects a real choice (stored on the term, or picked by
+  // the operator) vs. the untouched default. We only send cadence when it's
+  // explicit; otherwise we omit it so the server's authoritative inference
+  // (label-first, then visit count) decides — the client must not overwrite a
+  // legacy term's schedule with the default "quarterly".
+  const [cadenceExplicit, setCadenceExplicit] = useState(false);
   const [visitCount, setVisitCount] = useState("4");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -3317,14 +3318,13 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           if (term.coverageVisitCount != null) {
             setVisitCount(String(term.coverageVisitCount));
           }
-          // Prefer the stored cadence; if it predates the cadence column, infer
-          // it from the stored visit count (matching the server) rather than
-          // leaving the modal's default and overwriting on save.
+          // Only adopt a stored cadence as explicit. If the term predates the
+          // cadence column (null), leave it non-explicit so we omit it on save
+          // and the server re-infers from the service label / visit count
+          // instead of us overwriting the schedule with the default.
           if (term.coverageCadence) {
             setCadence(term.coverageCadence);
-          } else if (term.coverageVisitCount != null) {
-            const inferred = ANNUAL_PREPAY_VISITS_TO_CADENCE[Number(term.coverageVisitCount)];
-            if (inferred) setCadence(inferred);
+            setCadenceExplicit(true);
           }
         }
       })
@@ -3340,6 +3340,7 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   // Picking a cadence presets its standard visit count (operator can override).
   const handleCadenceChange = (value) => {
     setCadence(value);
+    setCadenceExplicit(true);
     const preset = ANNUAL_PREPAY_CADENCE_VISITS[value];
     if (preset) setVisitCount(preset);
   };
@@ -3368,7 +3369,9 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           // scheduled visits prepaid. Empty service type → display-only flag.
           coverageServiceType: trimmedService,
           coverageVisitCount: trimmedService && coverageVisitsValid ? parsedVisits : undefined,
-          coverageCadence: trimmedService ? cadence : undefined,
+          // Omit cadence unless it's explicit, so we never overwrite a legacy
+          // term's inferred schedule with the untouched default.
+          coverageCadence: trimmedService && cadenceExplicit ? cadence : undefined,
         }),
       });
       onSaved(existing ? "Annual prepay updated" : "Marked as annual prepay");
