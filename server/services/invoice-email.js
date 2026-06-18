@@ -137,6 +137,26 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (!recipient?.email) return { ok: false, error: 'No invoice recipient email' };
   const recipientPayload = publicRecipient(recipient);
 
+  // Freeze a one-off operator AP recipient onto the payer snapshot when the
+  // payer had no usable AP email of its own, so the (async) receipt and the pay
+  // page route to the same AP contact this invoice was actually billed to —
+  // otherwise they'd resolve no recipient and the AP would never get a receipt /
+  // would see the homeowner prefilled. Only runs on a successful send.
+  async function persistPayerApIfNeeded() {
+    try {
+      const overrideEmail = cleanEmail(options.recipientOverride?.email);
+      if (!overrideEmail || !isEmailLike(overrideEmail)) return;
+      if (!invoice.payer_id || !invoice.payer) return;
+      if (isEmailLike(invoice.payer.ap_email)) return; // payer already carries its own AP email
+      if (cleanEmail(recipient.email) !== overrideEmail) return; // we actually sent to the override
+      const snap = { ...invoice.payer, ap_email: overrideEmail };
+      await db('invoices').where({ id: invoice.id }).update({ payer_snapshot: JSON.stringify(snap) });
+      invoice.payer = snap;
+    } catch (err) {
+      logger.warn(`[invoice-email] payer AP-email persist failed for ${invoice.invoice_number}: ${err.message}`);
+    }
+  }
+
   const domain = publicPortalUrl();
   const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, options.payUrlParams);
   const payUrl = await shortenOrPassthrough(longPayUrl, {
@@ -227,6 +247,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         categories: ['invoice_sent'],
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
       });
+      // A suppressed/blocked recipient (unsubscribed, on the suppression list)
+      // resolves with sent:false — it was NOT delivered, so don't report ok:true.
+      // Callers that finalize an invoice off `.ok` (e.g. the dispatch
+      // payer-completion send, where the homeowner SMS path is suppressed) would
+      // otherwise mark a never-delivered invoice as sent.
+      if (result?.sent === false) {
+        logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${result.reason || 'blocked/suppressed'})`);
+        return { ok: false, blocked: !!result.blocked, error: result.reason || 'Email suppressed', recipient: recipientPayload };
+      }
+      await persistPayerApIfNeeded();
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
       return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl };
     } catch (err) {
@@ -259,6 +289,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         contentType: 'application/pdf',
       }],
     });
+    await persistPayerApIfNeeded();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
     return { ok: true, recipient: recipientPayload, payUrl };
   } catch (err) {

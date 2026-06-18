@@ -46,7 +46,7 @@ router.post('/', async (req, res, next) => {
   try {
     const { payer, error } = await PayerService.createPayer(req.body || {});
     if (error) return res.status(400).json({ error });
-    logger.info(`[payers] created payer ${payer.id} (${payer.display_name})`);
+    logger.info(`[payers] created payer ${payer.id}`);
     res.status(201).json({ payer });
   } catch (err) {
     next(err);

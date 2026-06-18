@@ -41,14 +41,35 @@ router.get('/', async (req, res, next) => {
         return null;
       }
     };
-    const fetchLimit = payerInvoiceIds.size === 0 ? requestedLimit : requestedLimit * 3 + 10;
-    const fetched = await service.getPaymentHistory(req.customerId, fetchLimit);
-    const visiblePayments = (payerInvoiceIds.size === 0
-      ? fetched
-      : fetched.filter((p) => {
-        const invId = invoiceIdOf(p);
-        return !(invId && payerInvoiceIds.has(invId));
-      })).slice(0, requestedLimit);
+    const isPayerLinked = (p) => {
+      const invId = invoiceIdOf(p);
+      return !!(invId && payerInvoiceIds.has(invId));
+    };
+    let visiblePayments;
+    if (payerInvoiceIds.size === 0) {
+      visiblePayments = await service.getPaymentHistory(req.customerId, requestedLimit);
+    } else {
+      // Page through history (excluding payer-linked rows) until we have the
+      // requested number of customer-visible payments or the table is exhausted.
+      // Avoids both under-filling (a hard cap that drops payer rows) and a
+      // metadata::jsonb cast over the whole payments table.
+      visiblePayments = [];
+      const pageSize = Math.max(requestedLimit, 20);
+      let offset = 0;
+      // Bound the loop so a customer with a huge history of payer payments can't
+      // scan unboundedly; ~10 pages is far beyond any realistic visible page.
+      for (let page = 0; page < 10 && visiblePayments.length < requestedLimit; page += 1) {
+        const batch = await service.getPaymentHistory(req.customerId, pageSize, offset);
+        if (!batch.length) break;
+        for (const p of batch) {
+          if (!isPayerLinked(p)) visiblePayments.push(p);
+          if (visiblePayments.length >= requestedLimit) break;
+        }
+        if (batch.length < pageSize) break; // exhausted
+        offset += pageSize;
+      }
+      visiblePayments = visiblePayments.slice(0, requestedLimit);
+    }
 
     res.json({
       payments: visiblePayments.map(p => ({

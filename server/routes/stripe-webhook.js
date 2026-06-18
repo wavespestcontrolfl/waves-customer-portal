@@ -928,14 +928,24 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     try {
       const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
       if (payment?.customer_id) {
-        await db('ach_failure_log')
-          .where({ customer_id: payment.customer_id, resolved: false })
-          .update({ resolved: true, resolution: 'retry_success' })
-          .catch(() => {});
-        await db('customers').where({ id: payment.customer_id })
-          .update({ ach_status: 'active', ach_failure_count: 0 })
-          .catch(() => {});
-        logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
+        // Third-party Bill-To: a payer/AP bank transfer clearing must not
+        // reactivate the homeowner's suspended/needs-verification ACH state —
+        // the payer's payment row sits under the service customer's id but is
+        // not the homeowner's bank account. (Symmetric to the handleAchFailure
+        // guard.)
+        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
+        if (achInvoice?.payer_id) {
+          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
+        } else {
+          await db('ach_failure_log')
+            .where({ customer_id: payment.customer_id, resolved: false })
+            .update({ resolved: true, resolution: 'retry_success' })
+            .catch(() => {});
+          await db('customers').where({ id: payment.customer_id })
+            .update({ ach_status: 'active', ach_failure_count: 0 })
+            .catch(() => {});
+          logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
+        }
       }
     } catch { /* non-critical */ }
   }

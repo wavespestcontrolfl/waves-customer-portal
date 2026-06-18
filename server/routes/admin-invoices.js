@@ -1619,6 +1619,14 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     const body = req.body || {};
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Third-party Bill-To: a payment plan is a homeowner-scoped arrangement
+    // (payment_plans.customer_id) that pauses the invoice's collection path. A
+    // payer-billed invoice is owed by the payer, not the homeowner — reject it
+    // here before inserting a plan / pausing follow-ups (a payer-facing plan
+    // flow is Phase 2).
+    if (invoice.payer_id) {
+      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — payment plans are not supported for payer invoices' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {

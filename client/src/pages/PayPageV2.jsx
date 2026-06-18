@@ -1630,7 +1630,7 @@ export default function PayPageV2() {
                 onSaveCardChange={setSaveCard}
                 thirdPartyBilled={!!payer}
                 customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}
-                customerEmail={payer ? (payer.email || customer.email) : customer.email}
+                customerEmail={payer ? (payer.email || '') : customer.email}
                 onPaymentIntentReplaced={handlePaymentIntentReplaced}
               />
             ) : paymentState === 'error' ? null : (

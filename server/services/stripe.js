@@ -1129,8 +1129,8 @@ const StripeService = {
   /**
    * Get payment history with payment method details (both processors)
    */
-  async getPaymentHistory(customerId, limit = 20) {
-    return db('payments')
+  async getPaymentHistory(customerId, limit = 20, offset = 0) {
+    let q = db('payments')
       .where({ 'payments.customer_id': customerId })
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
@@ -1143,6 +1143,8 @@ const StripeService = {
       )
       .orderBy('payments.payment_date', 'desc')
       .limit(limit);
+    if (offset > 0) q = q.offset(offset);
+    return q;
   },
 
   // =========================================================================

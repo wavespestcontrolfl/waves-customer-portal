@@ -38,6 +38,7 @@ function query(result) {
     orderBy: jest.fn(() => chain),
     select: jest.fn(() => chain),
     first: jest.fn(() => Promise.resolve(result)),
+    update: jest.fn(() => Promise.resolve(1)),
     catch: jest.fn((handler) => Promise.resolve(result).catch(handler)),
   };
   return chain;
@@ -253,6 +254,59 @@ describe('invoice email recipient resolution', () => {
 
     expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'oneoff@example.com' }));
     expect(result.recipient).toEqual(expect.objectContaining({ email: 'oneoff@example.com' }));
+  });
+
+  test('a blocked/suppressed SendGrid send returns ok:false (not delivered)', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    // SendGrid suppression: the template result resolves with sent:false.
+    sendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'Email suppressed' });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    db.mockImplementation(dbWithPayer({ id: 7, ap_email: 'ap@westbay.com', active: true }));
+
+    const result = await sendInvoiceEmail('invoice-1');
+
+    expect(result.ok).toBe(false);
+    expect(result.blocked).toBe(true);
+  });
+
+  test('a one-off AP recipient is frozen onto the payer snapshot when the payer has no AP email', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'm5' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+
+    const invoiceUpdate = jest.fn(() => Promise.resolve(1));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const chain = {
+          where: jest.fn(() => chain),
+          first: jest.fn(() => Promise.resolve({
+            id: 'invoice-1', customer_id: 'cust-1', invoice_number: 'INV-1',
+            token: 'token-1', total: 300, line_items: [], payer_id: 7,
+          })),
+          update: invoiceUpdate,
+          catch: jest.fn((h) => Promise.resolve(null).catch(h)),
+        };
+        return chain;
+      }
+      if (table === 'customers') return query({ ...customer, id: 'cust-1' });
+      if (table === 'notification_prefs') return query(null);
+      if (table === 'payers') return query({ id: 7, ap_email: '', company_name: 'Homes by West Bay', active: true });
+      if (table === 'invoice_attachments') return countQuery({ count: 0 });
+      return query(null);
+    });
+
+    const result = await sendInvoiceEmail('invoice-1', {
+      recipientOverride: { email: 'ap-oneoff@westbay.com', name: 'AP' },
+    });
+
+    expect(result.ok).toBe(true);
+    // The override AP email is persisted into the frozen snapshot for the
+    // receipt + pay page to reuse.
+    expect(invoiceUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      payer_snapshot: expect.stringContaining('ap-oneoff@westbay.com'),
+    }));
   });
 });
 
