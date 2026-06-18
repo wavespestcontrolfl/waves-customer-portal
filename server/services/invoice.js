@@ -2129,6 +2129,10 @@ const InvoiceService = {
       "customers.phone",
       "customers.email",
       "customers.waveguard_tier",
+      // property_type drives taxability; the edit form needs the CURRENT value
+      // (not the rate stored on the invoice) so its tax preview matches the
+      // server retotal when a customer's type changed after invoice creation.
+      "customers.property_type",
       db.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)
           FROM payment_methods

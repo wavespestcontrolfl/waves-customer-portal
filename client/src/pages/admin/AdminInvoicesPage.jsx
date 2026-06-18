@@ -3877,10 +3877,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   // Edit mode: prefill the builder from the existing draft. Only the fields
   // the PUT /admin/invoices/:id route actually persists are loaded into editable
   // state (line items, notes, due date); the customer and service date are shown
-  // read-only because the update route never rewrites them. The customer's
-  // property_type isn't on the list row, so taxability is derived from the
-  // invoice's own stored tax_rate — this mirrors how the server retotals on
-  // update (it keeps the invoice's existing rate), so the preview matches.
+  // read-only because the update route never rewrites them. We use the customer's
+  // CURRENT property_type (from the list row) for taxability — the server
+  // retotal forces residential tax to zero regardless of the stored rate, so
+  // deriving taxability from the stored rate would mismatch the saved total when
+  // a customer's type changed after the invoice was created.
   useEffect(() => {
     if (!editMode) return;
     setSelectedCustomer({
@@ -3891,7 +3892,8 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       email: editInvoice.email,
       waveguard_tier: editInvoice.waveguard_tier,
       property_type:
-        Number(editInvoice.tax_rate) > 0 ? "commercial" : "residential",
+        editInvoice.property_type ||
+        (Number(editInvoice.tax_rate) > 0 ? "commercial" : "residential"),
     });
     const stored =
       typeof editInvoice.line_items === "string"
@@ -4188,12 +4190,15 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const isCommercial =
     selectedCustomer?.property_type === "commercial" ||
     selectedCustomer?.property_type === "business";
-  // In edit mode the server keeps the invoice's existing rate on retotal, so
-  // preview against the stored numeric rate (which may not be exactly 7%)
-  // instead of collapsing to a commercial flag — otherwise the preview tax and
-  // total can diverge from what the server saves.
+  // In edit mode mirror the server retotal exactly: tax applies only when the
+  // CURRENT customer is commercial (residential is forced to zero server-side),
+  // and at the invoice's stored rate (which may not be exactly 7%). Gating on
+  // the live property_type keeps the preview honest if the customer's type
+  // changed after the invoice was created.
   const taxRate = editMode
-    ? Number(editInvoice.tax_rate) || 0
+    ? isCommercial
+      ? Number(editInvoice.tax_rate) || 0
+      : 0
     : isCommercial
       ? 0.07
       : 0;
