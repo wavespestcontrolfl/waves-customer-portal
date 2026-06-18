@@ -562,7 +562,7 @@ export default function DocumentTemplatesPage() {
   return (
     <div className="mx-auto max-w-[1500px]">
       <AdminCommandHeader
-        title="Documents"
+        title="Contract Templates"
         icon={FileText}
         sections={CATEGORY_TABS}
         activeKey={category}
