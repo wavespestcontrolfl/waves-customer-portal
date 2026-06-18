@@ -187,8 +187,10 @@ async function buildSummary(service) {
     const invoice = await db('invoices')
       .where({ scheduled_service_id: service.id })
       .orderBy('created_at', 'desc')
-      .first('token');
-    invoiceToken = invoice?.token || null;
+      .first('token', 'payer_id');
+    // Third-party Bill-To: a payer-billed invoice is the payer's to pay — never
+    // expose its token / pay page on the homeowner's public tracking link.
+    invoiceToken = invoice && !invoice.payer_id ? (invoice.token || null) : null;
   } catch (err) {
     logger.warn(`[track-public] invoice lookup failed: ${err.message}`);
   }

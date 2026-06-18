@@ -2580,6 +2580,35 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // Third-party Bill-To: a payer/PO change on a recurring PARENT must reach
+        // the already-spawned pending child visits, INDEPENDENT of any date/
+        // cadence rewrite (that path is separately gated by
+        // shouldRewritePendingRecurringRows and propagates payer/PO too, but it
+        // doesn't run when only the Bill-To changed). Without this, editing just
+        // the payer/PO on a series leaves future visits routed to the old payer.
+        const payerOrPoChanged = Object.prototype.hasOwnProperty.call(updates, 'payer_id')
+          || Object.prototype.hasOwnProperty.call(updates, 'po_number');
+        if (payerOrPoChanged) {
+          const parentRow = await trx('scheduled_services')
+            .where({ id: req.params.id })
+            .first('payer_id', 'po_number', 'is_recurring', 'recurring_parent_id');
+          if (parentRow?.is_recurring && !parentRow.recurring_parent_id) {
+            const seriesCols = await trx('scheduled_services').columnInfo();
+            const childPayerUpdates = {};
+            if (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && seriesCols.payer_id) {
+              childPayerUpdates.payer_id = parentRow.payer_id ?? null;
+            }
+            if (Object.prototype.hasOwnProperty.call(updates, 'po_number') && seriesCols.po_number) {
+              childPayerUpdates.po_number = parentRow.po_number ?? null;
+            }
+            if (Object.keys(childPayerUpdates).length > 0) {
+              await trx('scheduled_services')
+                .where({ recurring_parent_id: req.params.id })
+                .whereIn('status', ['pending', 'confirmed'])
+                .update(childPayerUpdates);
+            }
+          }
+        }
         if (reminderBefore) {
           const prevDate = reminderBefore.scheduled_date instanceof Date
             ? reminderBefore.scheduled_date.toISOString().split('T')[0]

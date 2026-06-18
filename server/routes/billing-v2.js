@@ -20,8 +20,37 @@ router.get('/', async (req, res, next) => {
     const service = await PaymentRouter.getServiceForCustomer(req.customerId);
     const payments = await service.getPaymentHistory(req.customerId, parseInt(limit));
 
+    // Third-party Bill-To: a payment against a payer-billed invoice belongs to
+    // the payer (AP contact), not the homeowner — drop those rows so the
+    // logged-in customer never sees the payer's card brand / last4 / Stripe
+    // PaymentIntent id in their own history.
+    const invoiceIdOf = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return m && m.invoice_id != null ? String(m.invoice_id) : null;
+      } catch {
+        return null;
+      }
+    };
+    const linkedInvoiceIds = [...new Set(payments.map(invoiceIdOf).filter(Boolean))];
+    let payerInvoiceIds = new Set();
+    if (linkedInvoiceIds.length > 0) {
+      const payerRows = await db('invoices')
+        .whereIn('id', linkedInvoiceIds)
+        .whereNotNull('payer_id')
+        .select('id')
+        .catch(() => []);
+      payerInvoiceIds = new Set(payerRows.map((r) => String(r.id)));
+    }
+    const visiblePayments = payerInvoiceIds.size === 0
+      ? payments
+      : payments.filter((p) => {
+        const invId = invoiceIdOf(p);
+        return !(invId && payerInvoiceIds.has(invId));
+      });
+
     res.json({
-      payments: payments.map(p => ({
+      payments: visiblePayments.map(p => ({
         id: p.id,
         date: p.payment_date,
         amount: parseFloat(p.amount),
@@ -239,10 +268,13 @@ router.get('/balance', async (req, res, next) => {
       .orderBy('payment_date', 'asc')
       .first();
 
-    // Check for unpaid invoices
+    // Check for unpaid invoices. Third-party Bill-To: a payer-billed invoice is
+    // owed by the payer, not the homeowner — exclude it so the logged-in
+    // customer never sees the payer's unpaid amount as their own balance.
     const unpaidInvoices = await db('invoices')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['sent', 'viewed', 'overdue'])
+      .whereNull('payer_id')
       .sum('total as total')
       .first();
 

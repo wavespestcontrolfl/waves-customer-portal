@@ -206,6 +206,23 @@ async function attachToInvoice(invoice, database = db) {
   // its original Bill-To and routes to the AP email it was billed to.
   const snap = parseSnapshot(invoice.payer_snapshot);
   if (snap) {
+    // The snapshot freezes the bill-to identity (name/address) at creation, but
+    // a usable AP email is delivery infrastructure, not identity. If the invoice
+    // was minted before ops filled in the AP email, the frozen snapshot has a
+    // null/invalid ap_email and — since sendInvoiceEmail no longer falls back to
+    // the homeowner — delivery is stranded forever even after the operator adds
+    // the AP email in /admin/payers. Recover the live AP email from the still-
+    // active payer row in that case, without disturbing the frozen identity.
+    if ((!snap.ap_email || !isEmailLike(snap.ap_email)) && invoice.payer_id) {
+      try {
+        const live = await getPayer(invoice.payer_id, database);
+        if (live && live.active !== false && live.ap_email && isEmailLike(live.ap_email)) {
+          snap.ap_email = live.ap_email;
+        }
+      } catch (err) {
+        logger.warn(`[payer] attachToInvoice live AP-email recovery failed for invoice ${invoice.id}: ${err.message}`);
+      }
+    }
     invoice.payer = snap;
     return invoice;
   }

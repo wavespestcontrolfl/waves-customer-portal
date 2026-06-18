@@ -3008,7 +3008,13 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         logger.error(`[projects] combined send payer copy failed: ${e.message}`);
         channels.payer_email = { ok: false, recipient: billingCopyEmail, error: e.message };
       }
-    } else if (channels.email?.ok) {
+    } else if (!isPayerInvoice && channels.email?.ok) {
+      // Self-pay only. A payer-billed invoice must NEVER route the invoice/pay
+      // link to the homeowner's billing contact — when the payer has no usable
+      // AP email (payerBilled false), the invoice is simply not delivered (and
+      // not finalized below) so the operator fixes the payer AP email. Falling
+      // through here would expose the third-party bill + pay link to the
+      // homeowner.
       const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
       const [billing] = getInvoiceEmailRecipients(customer, prefs || {});
       const billingEmail = String(billing?.email || '').trim().toLowerCase();

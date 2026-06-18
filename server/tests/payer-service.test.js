@@ -136,4 +136,26 @@ describe('PayerService.attachToInvoice', () => {
     await PayerService.attachToInvoice(inv, database);
     expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'West Bay' }));
   });
+
+  test('recovers the live AP email when the frozen snapshot has none (minted before AP email was set)', async () => {
+    // Snapshot froze the identity but no AP email; ops later filled it in.
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: true, ap_email: 'ap@westbay.com' }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7,
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: null },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    // Frozen identity preserved, AP email recovered for delivery.
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com' }));
+  });
+
+  test('does NOT recover an AP email from a payer deactivated after the invoice was minted', async () => {
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: false, ap_email: 'ap@westbay.com' }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7,
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: null },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer.ap_email).toBeNull();
+  });
 });

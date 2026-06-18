@@ -4597,7 +4597,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && !prepaidCovered
       && !alreadyPaid
       && !autopayCoversVisit
-      && !suppressCompletionInvoiceLink;
+      && !suppressCompletionInvoiceLink
+      // Third-party Bill-To: never open the in-person payment sheet for a
+      // payer-billed invoice — the tech must not collect the AP's invoice from
+      // the service recipient. AR routes to the payer AP inbox.
+      && !invoice.payer_id;
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,

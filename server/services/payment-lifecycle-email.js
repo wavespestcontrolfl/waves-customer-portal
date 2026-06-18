@@ -426,6 +426,12 @@ async function sendPaymentFailed({
   if (!invoice && paymentIntentId) {
     invoice = await db('invoices').where({ stripe_payment_intent_id: paymentIntentId }).first().catch(() => null);
   }
+  // Third-party Bill-To: a payer-billed invoice's payment lifecycle belongs to
+  // the payer AP contact. These templates resolve recipients off the invoice's
+  // customer_id (the homeowner) and embed the pay link, so skip them for payer
+  // invoices rather than notify the homeowner of the payer's failed payment.
+  // (Phase 1 has no payer-facing lifecycle emails.)
+  if (invoice?.payer_id) return { ok: false, skipped: true, reason: 'payer_billed' };
   const payUrl = invoice?.token
     ? `${publicPortalUrl()}/pay/${invoice.token}`
     : portalBillingUrl();
@@ -471,6 +477,10 @@ async function sendAchProcessing({
 } = {}) {
   const invoice = invoiceId ? await db('invoices').where({ id: invoiceId }).first().catch(() => null) : null;
   if (!invoice) return { ok: false, skipped: true, reason: 'invoice_not_found' };
+  // Third-party Bill-To: ACH-processing notice routes to the invoice customer_id
+  // (homeowner) with the pay link — skip for payer invoices (the payer AP paid,
+  // not the homeowner). Phase 1 has no payer-facing lifecycle emails.
+  if (invoice.payer_id) return { ok: false, skipped: true, reason: 'payer_billed' };
   const payUrl = invoice.token
     ? `${publicPortalUrl()}/pay/${invoice.token}`
     : portalBillingUrl();

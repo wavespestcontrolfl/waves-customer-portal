@@ -359,6 +359,37 @@ describe('payment lifecycle email sender', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('skips payment failure notice for a payer-billed invoice (homeowner must not be notified)', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice({ payer_id: 7 }) })],
+      payments: [chain({ first: payment() })],
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1',
+      paymentIntentId: 'pi_test',
+      attemptId: 'ch_attempt1',
+      invoiceId: 'inv-1',
+    });
+
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('skips ACH processing notice for a payer-billed invoice', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice({ payer_id: 7 }) })],
+    });
+
+    const result = await PaymentLifecycleEmail.sendAchProcessing({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+    });
+
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('still sends required payment notices when general customer email is disabled', async () => {
     const interaction = chain();
     setDbQueues({
