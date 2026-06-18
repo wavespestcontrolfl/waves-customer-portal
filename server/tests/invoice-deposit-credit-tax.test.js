@@ -349,6 +349,15 @@ describe('line-item edits on deposit-credited invoices are blocked (P1)', () => 
         };
         return q;
       }
+      // The editability guard checks for an active payment plan before the
+      // deposit-credit guard fires; these drafts have none.
+      if (table === 'payment_plans') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => null),
+        };
+        return q;
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
   }
@@ -356,6 +365,7 @@ describe('line-item edits on deposit-credited invoices are blocked (P1)', () => 
   it('rejects line-item edits when the stored invoice carries a deposit_credit line — void-and-recreate is the supported path', async () => {
     invoicesOnlyDb({
       id: 'inv-1',
+      status: 'draft',
       customer_id: 'cust-1',
       line_items: JSON.stringify([
         { description: 'Service', quantity: 1, unit_price: 100 },
@@ -371,9 +381,104 @@ describe('line-item edits on deposit-credited invoices are blocked (P1)', () => 
   });
 
   it('rejects edits that introduce a deposit_credit line by hand — only create() may mint one, backed by the ledger', async () => {
-    invoicesOnlyDb({ id: 'inv-1', customer_id: 'cust-1', line_items: '[]' });
+    invoicesOnlyDb({ id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]' });
     await expect(InvoiceService.update('inv-1', {
       line_items: [{ description: 'Manual credit', quantity: 1, unit_price: -49, amount: -49, category: 'deposit_credit' }],
     })).rejects.toThrow(/deposit credit/);
+  });
+});
+
+describe('editability guard blocks updates once an invoice leaves the safe-to-edit window', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // Re-reads the CURRENT invoice row at write time; some cases also probe
+  // payment_plans for an active plan.
+  function guardDb(storedInvoice, { activePlan = null } = {}) {
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => storedInvoice) };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => activePlan) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+  }
+
+  it('refuses to rewrite an invoice that already raced to sent/paid', async () => {
+    guardDb({ id: 'inv-1', status: 'paid', customer_id: 'cust-1', line_items: '[]' });
+    await expect(InvoiceService.update('inv-1', { notes: 'late edit' }))
+      .rejects.toThrow(/can be edited/);
+  });
+
+  it('refuses to retotal once a customer has a live PaymentIntent', async () => {
+    guardDb({ id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]', stripe_payment_intent_id: 'pi_123' });
+    await expect(InvoiceService.update('inv-1', { line_items: [{ description: 'X', quantity: 1, unit_price: 10 }] }))
+      .rejects.toThrow(/already started paying/);
+  });
+
+  it('refuses to edit an invoice tied to an annual prepay term', async () => {
+    guardDb({ id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]', annual_prepay_term_id: 'term-1' });
+    await expect(InvoiceService.update('inv-1', { notes: 'x' }))
+      .rejects.toThrow(/annual prepay term/);
+  });
+
+  it('refuses to edit an invoice with an active payment plan', async () => {
+    guardDb({ id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]' }, { activePlan: { id: 'pp-1' } });
+    await expect(InvoiceService.update('inv-1', { notes: 'x' }))
+      .rejects.toThrow(/active payment plan/);
+  });
+
+  it('fails closed when the atomic write matches no row (status/PI/prepay raced after the guard read)', async () => {
+    const stored = { id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]' };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          // Predicate-guarded write no longer matches — simulates a concurrent
+          // worker stamping the PI / flipping status / creating a payment plan
+          // between read and write.
+          update: jest.fn(() => ({ returning: jest.fn(async () => []) })),
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await expect(InvoiceService.update('inv-1', { notes: 'late' }))
+      .rejects.toThrow(/can be edited/);
+  });
+
+  it('allows a metadata-only edit on a clean draft (no line_items, no retotal)', async () => {
+    const stored = { id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]' };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    const result = await InvoiceService.update('inv-1', { notes: 'updated' });
+    expect(result.notes).toBe('updated');
   });
 });
