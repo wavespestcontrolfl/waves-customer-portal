@@ -1813,13 +1813,16 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
         if (approval.snapshot_id) pricingUpdate.latest_snapshot_id = approval.snapshot_id;
         if (snapshot?.price_amount != null) pricingUpdate.price_amount = snapshot.price_amount;
         if (snapshot?.price != null) pricingUpdate.price = snapshot.price;
-        // Apply the approved snapshot's unit costs verbatim — INCLUDING clearing them
-        // when the snapshot has none — so a price-only report can't leave a stale unit
-        // cost behind that then wins best-price ordering (COALESCE landed → normalized
-        // → price). Only when a snapshot is actually being applied.
+        // Apply the approved snapshot's pack size + unit costs verbatim — INCLUDING
+        // clearing them when the snapshot has none — so a price-only report can't
+        // leave a stale unit cost behind that then wins best-price ordering (COALESCE
+        // landed → normalized → price), or a stale quantity that makes the per-unit
+        // price display recompute the new price against the old pack size. Only when
+        // a snapshot is actually being applied.
         if (snapshot) {
           pricingUpdate.normalized_unit_price = snapshot.normalized_unit_price ?? null;
           pricingUpdate.landed_unit_price = snapshot.landed_unit_price ?? null;
+          pricingUpdate.quantity = snapshot.quantity ?? null;
         }
         if (snapshot?.source_type) pricingUpdate.source_type = snapshot.source_type;
         if (snapshot?.price_type) pricingUpdate.price_type = snapshot.price_type;
