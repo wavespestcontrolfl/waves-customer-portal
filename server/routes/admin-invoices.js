@@ -1190,14 +1190,24 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // (`stripe`); leaving it null is the existing convention for off-
     // gateway money (see admin-payments-reconcile.js manual branch).
     try {
-      await db('payments').insert({
+      const paymentRow = {
         customer_id: updatedInvoice.customer_id,
         amount: Number(updatedInvoice.total),
         status: 'paid',
         description: `Invoice ${updatedInvoice.invoice_number} — ${method}`
           + `${trimmedReference ? ` (${trimmedReference})` : ''}`,
         payment_date: etDateString(),
-      });
+      };
+      // Third-party Bill-To: link a payer-billed manual payment to its invoice so
+      // the customer-facing billing history/balance can filter it out (it's the
+      // payer's offline payment, recorded under the homeowner's customer_id, not
+      // the homeowner's own). Self-pay rows intentionally stay unlinked to
+      // preserve the existing receipt-total fallback (no metadata.invoice_id →
+      // loadPaymentForInvoice returns null → receipt uses invoice totals).
+      if (updatedInvoice.payer_id) {
+        paymentRow.metadata = JSON.stringify({ invoice_id: updatedInvoice.id });
+      }
+      await db('payments').insert(paymentRow);
     } catch (err) {
       logger.error(`[admin-invoices:record-payment] payments-ledger insert failed for ${updatedInvoice.invoice_number}: ${err.message}`);
     }

@@ -381,6 +381,10 @@ async function sendPaymentRetryNotice({
   const payment = paymentId ? await db('payments').where({ id: paymentId }).first() : null;
   if (!payment) return { ok: false, skipped: true, reason: 'payment_not_found' };
   const invoice = await invoiceForPayment(payment, invoiceId);
+  // Third-party Bill-To: payer-billed invoices never retry against a homeowner
+  // saved card (save-card is suppressed for them), but guard the notice anyway
+  // so a stray retry can't text/email the homeowner the payer's pay link.
+  if (invoice?.payer_id) return { ok: false, skipped: true, reason: 'payer_billed' };
   const method = await loadPaymentMethod(payment.payment_method_id);
   const effectiveRetryDate = retryDate || payment.next_retry_at;
   if (!effectiveRetryDate) return { ok: false, skipped: true, reason: 'missing_retry_date' };
@@ -509,8 +513,16 @@ async function sendPaymentPlanConfirmed({
   paymentPlanId,
   paymentMethodId = null,
   plan = {},
+  invoiceId = null,
   idempotencyKey,
 } = {}) {
+  // Third-party Bill-To: a payment plan on a payer-billed invoice is the payer's
+  // arrangement — don't email the homeowner the plan/balance details.
+  const planInvoiceId = invoiceId || plan?.invoice_id || null;
+  if (planInvoiceId) {
+    const planInvoice = await db('invoices').where({ id: planInvoiceId }).first().catch(() => null);
+    if (planInvoice?.payer_id) return { ok: false, skipped: true, reason: 'payer_billed' };
+  }
   const method = await loadPaymentMethod(paymentMethodId);
   const payload = {
     plan_start_date: displayDate(plan.plan_start_date || plan.start_date),
@@ -542,6 +554,11 @@ async function sendRefundIssued({
 } = {}) {
   const payment = paymentId ? await db('payments').where({ id: paymentId }).first() : null;
   if (!payment) return { ok: false, skipped: true, reason: 'payment_not_found' };
+  // Third-party Bill-To: a refund of a payer-billed invoice's payment belongs to
+  // the payer AP contact, not the homeowner — don't email the service recipient
+  // the payer's refund details.
+  const refundInvoice = await invoiceForPayment(payment);
+  if (refundInvoice?.payer_id) return { ok: false, skipped: true, reason: 'payer_billed' };
   const method = await loadPaymentMethod(payment.payment_method_id);
   const effectiveCustomerId = customerId || payment.customer_id;
   const effectiveRefundId = refundId || payment.stripe_refund_id || `payment-${payment.id}`;

@@ -190,6 +190,9 @@ class BalanceReminder {
     const oldestInvoice = await db("invoices")
       .where({ customer_id: customerId })
       .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
+      // Third-party Bill-To: never surface a payer-billed invoice as the
+      // homeowner's oldest unpaid invoice / pay link — AR routes to the payer.
+      .whereNull("payer_id")
       .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
       .first();
 
@@ -424,10 +427,13 @@ class BalanceReminder {
         .first();
       if (sentRecently) continue;
 
-      // Get oldest unpaid invoice for title and service date
+      // Get oldest unpaid invoice for title and service date. Third-party
+      // Bill-To: exclude payer-billed invoices — the homeowner is never the
+      // bill-to and must not be texted/emailed a payer invoice's pay link.
       const oldestInvoice = await db("invoices")
         .where({ customer_id: customer.id })
         .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
+        .whereNull("payer_id")
         .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
         .first();
       if (!oldestInvoice?.id || !oldestInvoice?.token) {

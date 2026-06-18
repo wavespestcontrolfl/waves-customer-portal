@@ -253,15 +253,41 @@ router.get('/balance', async (req, res, next) => {
       .sum('amount as total')
       .first();
 
+    // Third-party Bill-To: a payment against a payer-billed invoice is the
+    // payer's, even though the row sits under the homeowner's customer_id. Pull
+    // this customer's payer-billed invoice ids once so the failed-balance sum and
+    // the "last payment failed" banner can exclude those rows (otherwise an AP
+    // payment failure would show as the homeowner's own balance / failure).
+    const payerInvRows = await db('invoices')
+      .where({ customer_id: req.customerId })
+      .whereNotNull('payer_id')
+      .select('id')
+      .catch(() => []);
+    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+    const metadataInvoiceId = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return m && m.invoice_id != null ? String(m.invoice_id) : null;
+      } catch {
+        return null;
+      }
+    };
+    const isPayerPayment = (p) => {
+      const invId = metadataInvoiceId(p);
+      return !!(invId && payerInvoiceIds.has(invId));
+    };
+
     // Failed attempts whose retry later collected are superseded — the
     // money arrived on the retry's own paid row, so they must not count
     // as balance still owed (the customer would be shown — and could
-    // pay — an amount already taken).
-    const failed = await db('payments')
+    // pay — an amount already taken). Payer-linked failures are excluded too.
+    const failedRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .sum('amount as total')
-      .first();
+      .select('amount', 'metadata');
+    const failedTotal = failedRows
+      .filter((p) => !isPayerPayment(p))
+      .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 
     const nextPayment = await db('payments')
       .where({ customer_id: req.customerId, status: 'upcoming' })
@@ -280,15 +306,18 @@ router.get('/balance', async (req, res, next) => {
 
     // The portal's billing banner flips to "failed" when the most recent
     // completed attempt failed — not when there's any failed row in history.
-    const mostRecentAttempt = await db('payments')
+    // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
+    // banner.
+    const recentAttempts = await db('payments')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['paid', 'failed', 'refunded'])
       .whereNull('superseded_by_payment_id')
       .orderBy('payment_date', 'desc')
-      .first();
+      .select('status', 'metadata');
+    const mostRecentAttempt = recentAttempts.find((p) => !isPayerPayment(p)) || null;
 
     res.json({
-      currentBalance: parseFloat(failed?.total || 0) + parseFloat(unpaidInvoices?.total || 0),
+      currentBalance: failedTotal + parseFloat(unpaidInvoices?.total || 0),
       upcomingCharges: parseFloat(upcoming?.total || 0),
       monthlyRate: parseFloat(customer.monthly_rate || 0),
       tier: customer.waveguard_tier,

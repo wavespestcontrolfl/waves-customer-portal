@@ -862,6 +862,12 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
+    // Third-party Bill-To: never charge a card on file for a payer-billed
+    // invoice — the saved card belongs to invoice.customer_id (the homeowner),
+    // but this bill is the payer's. AR routes to the payer AP inbox.
+    if (invoice.payer_id) {
+      throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+    }
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
     if (!card) throw new Error('Payment method not found');

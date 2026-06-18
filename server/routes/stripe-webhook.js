@@ -1349,6 +1349,14 @@ async function handleAchFailure(paymentIntent, failureReason) {
     // Find the customer
     const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
     if (!payment?.customer_id) return;
+    // Third-party Bill-To: an AP bank failure on a payer-billed invoice must not
+    // mutate the homeowner's ACH status (suspension, card-default flip) or text
+    // them the retry/suspension notices — that bank account is the payer's.
+    const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
+    if (achInvoice?.payer_id) {
+      logger.info(`[stripe-webhook] ACH failure on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — skipping homeowner ACH handling`);
+      return;
+    }
     const customer = await db('customers').where({ id: payment.customer_id }).first();
     if (!customer) return;
 
@@ -1652,6 +1660,13 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       if (!freshInvoice) return;
       if (freshInvoice.ach_processing_notified_at) return;
       if (freshInvoice.status !== 'processing') return;
+
+      // Third-party Bill-To: an AP ACH payment processing on a payer-billed
+      // invoice must not text/email the homeowner the bank-transfer notice (the
+      // sendAchProcessing email also self-guards, but the direct SMS below
+      // wouldn't). The payer AP contact authorized this transfer, not the
+      // service recipient.
+      if (freshInvoice.payer_id) return;
 
       const customer = freshInvoice.customer_id
         ? await db('customers').where({ id: freshInvoice.customer_id }).first()

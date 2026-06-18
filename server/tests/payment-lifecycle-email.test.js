@@ -295,6 +295,38 @@ describe('payment lifecycle email sender', () => {
     expect(JSON.stringify(payload)).not.toMatch(/pi_sensitive|re_sensitive|pm_/);
   });
 
+  test('skips refund notice for a payer-billed invoice payment (homeowner must not be emailed)', async () => {
+    setDbQueues({
+      payments: [chain({ first: payment({ invoice_id: 'inv-1' }) })],
+      invoices: [chain({ first: invoice({ payer_id: 7 }) })],
+    });
+
+    const result = await PaymentLifecycleEmail.sendRefundIssued({
+      customerId: 'cust-1',
+      paymentId: 'pay-1',
+      refundId: 're_x',
+      refundAmount: '10.00',
+    });
+
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('skips payment plan confirmation for a payer-billed invoice', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice({ payer_id: 7 }) })],
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
+      customerId: 'cust-1',
+      paymentPlanId: 'plan-1',
+      plan: { invoice_id: 'inv-1', total_balance: '390.00' },
+    });
+
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('sends ACH processing acknowledgment with invoice metadata and explicit idempotency key', async () => {
     setDbQueues({
       invoices: [chain({ first: invoice() })],
