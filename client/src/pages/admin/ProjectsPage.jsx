@@ -1592,6 +1592,28 @@ function ProjectDetail({
     }
   }
 
+  // Open the filled FDACS-13645 exactly as it will be (or was) filed, so the
+  // tech can verify the official form is populated before sending. The endpoint
+  // is admin-only (bearer auth), so fetch it with adminFetch and open the PDF
+  // as an object URL — a plain link navigation drops the auth header and 401s.
+  async function viewFilledFdacsPdf() {
+    if (!projectId) return;
+    setError("");
+    try {
+      const r = await adminFetch(`/admin/projects/${projectId}/fdacs-pdf`);
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || "Could not generate the filled FDACS-13645 PDF");
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) {
+      setError(e.message || "Could not open the filled FDACS-13645 PDF");
+    }
+  }
+
   async function handleSendWithInvoice() {
     if (!canAdminActions) {
       setError("Admin access required to send project reports.");
@@ -2192,18 +2214,30 @@ function ProjectDetail({
           >
             {" "}
             <div>
-              {" "}
               <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
                 FDACS-13645 WDO form
-              </div>{" "}
+              </div>
               <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                Use this as the official inspection template and review copy.
-              </div>{" "}
+                Preview the filled report exactly as it will be filed.
+              </div>
+              <a
+                href="/forms/fdacs-13645-wdo-inspection-report.pdf"
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  fontSize: 11,
+                  color: D.muted,
+                  textDecoration: "underline",
+                  marginTop: 4,
+                  display: "inline-block",
+                }}
+              >
+                Open blank template
+              </a>
             </div>{" "}
-            <a
-              href="/forms/fdacs-13645-wdo-inspection-report.pdf"
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
+              onClick={viewFilledFdacsPdf}
               style={{
                 flexShrink: 0,
                 padding: "7px 10px",
@@ -2211,13 +2245,13 @@ function ProjectDetail({
                 fontSize: 11,
                 fontWeight: 800,
                 color: D.heading,
-                textDecoration: "none",
+                cursor: "pointer",
                 background: D.card,
                 border: `1px solid ${D.inputBorder}`,
               }}
             >
-              Open PDF
-            </a>{" "}
+              View filled form
+            </button>{" "}
           </div>
         )}
         <ReadinessPanel readiness={readiness} />
