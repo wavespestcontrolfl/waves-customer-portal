@@ -3674,7 +3674,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     try {
       if (!recapReviewOnly) {
         const existingPaid = await db('invoices')
-          .where({ service_record_id: record.id, status: 'paid' })
+          .where({ service_record_id: record.id })
+          .whereIn('status', ['paid', 'prepaid'])
           .first();
         if (existingPaid) alreadyPaid = true;
       }
@@ -3718,7 +3719,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 }
               )
             : null;
-          if (existingCompletionInvoice.status === 'paid') alreadyPaid = true;
+          if (['paid', 'prepaid'].includes(existingCompletionInvoice.status)) alreadyPaid = true;
           else invoiceCreated = true;
         }
       }
@@ -3842,7 +3843,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .forUpdate()
           .first();
         if (!lockedInvoice) return invoiceRow;
-        if (lockedInvoice.status === 'paid') return lockedInvoice;
+        if (['paid', 'prepaid'].includes(lockedInvoice.status)) return lockedInvoice;
         const invoiceTotalCents = toCents(lockedInvoice.total);
         if (!(invoiceTotalCents > 0)) return lockedInvoice;
         const existingCredit = await trx('payments')
@@ -3933,15 +3934,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
         codePrefix: invoiceShortCodePrefix(invoice),
       });
-      // Treat already-paid pre-mint as the same SMS branch as prepaid.
-      if (invoice.status === 'paid') alreadyPaid = true;
+      // Treat already-paid / prepaid pre-mint as the same SMS branch.
+      if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
       else invoiceCreated = true;
     }
 
     // Immediate/legacy review requests can be bundled into the completion SMS.
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
-    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
+    const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms;
@@ -4110,7 +4111,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const usePaidCompletionTemplate = alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
-          || String(invoice?.status || '').toLowerCase() === 'paid';
+          || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase());
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -5281,6 +5282,111 @@ router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
     const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId);
     res.json({ options });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/rain-out-options
+//
+// Dispatch-side weather-reschedule option set — later-today (+2h/+4h)
+// windows plus route-scored day options badged with NWS rain chance.
+// Mirrors the tech route GET /api/tech/services/:id/rain-out-options
+// but WITHOUT the tech-assignment check: any dispatcher may rain-out a
+// stop on a tech's behalf. Shared engine: services/rain-out.js.
+router.get('/:serviceId/rain-out-options', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Same stale-tap guard as the tech route: the moved-first rain-out
+    // is a same-day "weather is hitting the route now" action. A job
+    // already pushed to a future date can't be rained out onto today.
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: "This job is scheduled for a future date — rain-out applies to today's route.",
+        code: 'future_scheduled_date',
+      });
+    }
+
+    const RainOut = require('../services/rain-out');
+    const options = await RainOut.getOptions(req.params.serviceId);
+    if (!options.ok) {
+      return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
+    }
+    return res.json(options);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/rain-out
+// body: { reasonCode, scope: 'job'|'route', target: { date, window },
+//         alt?: { date, window }, notifyCustomer? }
+//
+// Dispatch-side moved-first rain-out. Route scope uses the job's OWN
+// assigned technician (not the acting dispatcher) so "rest of route"
+// means that tech's remaining stops. Shared engine: services/rain-out.js.
+router.post('/:serviceId/rain-out', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
+      return res.status(409).json({
+        error: "This job is scheduled for a future date — rain-out applies to today's route.",
+        code: 'future_scheduled_date',
+      });
+    }
+
+    const { reasonCode, scope, target, alt, notifyCustomer } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.commit({
+      serviceId: req.params.serviceId,
+      technicianId: svc.technician_id,
+      reasonCode,
+      scope: scope === 'route' ? 'route' : 'job',
+      target,
+      alt,
+      notifyCustomer: notifyCustomer !== false,
+      initiatedBy: 'admin',
+    });
+
+    if (!result.ok) {
+      const code = result.reason === 'not_found' ? 404
+        : (result.reason === 'bad_reason' || result.reason === 'bad_target') ? 400
+          : 409;
+      return res.status(code).json({ error: result.reason, results: result.results || [] });
+    }
+
+    // Each moved stop: re-arm its appointment reminder onto the new slot and
+    // re-render any open dispatcher boards. Mirrors the /reschedule path — the
+    // rain-out sends its own "we moved you" SMS inside commit(), so cover the
+    // due windows (and mark the notice sent) only when that SMS actually went
+    // out; otherwise leave the 24h/72h reminder pending so the cron still
+    // reminds the customer on the new slot.
+    for (const moved of result.results || []) {
+      if (!moved.ok) continue;
+      await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true });
+      if (moved.smsSent === true) {
+        await markRescheduleReminderNotified(moved.id);
+      }
+      try {
+        await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId });
+      } catch (err) {
+        logger.error(`[dispatch] rain-out board broadcast failed for ${moved.id}: ${err.message}`);
+      }
+    }
+
+    logger.info(
+      `[admin-dispatch] rain-out service=${req.params.serviceId} actor=${req.technicianId} ` +
+      `scope=${scope === 'route' ? 'route' : 'job'} moved=${result.movedCount} failed=${result.failedCount}`
+    );
+    return res.json(result);
   } catch (err) { next(err); }
 });
 

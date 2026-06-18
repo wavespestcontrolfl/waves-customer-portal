@@ -288,6 +288,7 @@ const STATUS_COLORS = {
   sent: D.blue,
   viewed: D.teal,
   paid: D.green,
+  prepaid: D.green,
   overdue: D.red,
   void: D.muted,
 };
@@ -529,6 +530,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
+  const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
 
   const load = useCallback(
@@ -584,6 +586,27 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     onRefresh();
   };
 
+  const handleReversePrepaid = async (id) => {
+    if (
+      !confirm(
+        "Reverse this prepaid invoice? The applied account credit is returned to the customer and the invoice reopens for collection.",
+      )
+    )
+      return;
+    try {
+      const res = await adminFetch(`/admin/invoices/${id}/reverse-prepaid`, {
+        method: "POST",
+      });
+      showToast(
+        `Prepaid reversed · $${Number(res.restored).toFixed(2)} credit restored`,
+      );
+      load();
+      onRefresh();
+    } catch (err) {
+      showToast(`Reverse failed: ${err.message}`);
+    }
+  };
+
   const handleArchive = async (id) => {
     if (
       !confirm(
@@ -629,6 +652,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   ]);
   const invoiceNonCollectibleStatuses = new Set([
     "paid",
+    "prepaid",
     "void",
     "processing",
     "refunded",
@@ -696,6 +720,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const getDisplayStatus = (inv) => {
     if (inv.status === "paid")
       return { key: "paid", label: "Paid", color: D.green };
+    if (inv.status === "prepaid")
+      return { key: "prepaid", label: "Prepaid", color: D.green };
     if (inv.status === "void")
       return { key: "void", label: "Void", color: D.muted };
     if (inv.status === "processing")
@@ -820,6 +846,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
             { key: "overdue", label: "Overdue" },
             { key: "unpaid", label: "Unpaid" },
             { key: "paid", label: "Paid" },
+            { key: "prepaid", label: "Prepaid" },
             { key: "needs_receipt", label: "Needs receipt" },
             { key: "draft", label: "Draft" },
             { key: "archived", label: "Archived" },
@@ -1143,6 +1170,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               Add payment
                             </button>
                           )}
+                          {canCollect && (
+                            <button
+                              onClick={() => setApplyCreditInvoice(inv)}
+                              style={sBtn(D.card, D.text, isMobile)}
+                              title="Apply the customer's account credit — covers the invoice and marks it prepaid"
+                            >
+                              Apply credit
+                            </button>
+                          )}
                           {canCollect && !inv.active_payment_plan && (
                             <button
                               onClick={() => setPaymentPlanModalInvoice(inv)}
@@ -1197,6 +1233,15 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                               style={sBtn("transparent", D.red, isMobile)}
                             >
                               Void
+                            </button>
+                          )}
+                          {inv.status === "prepaid" && (
+                            <button
+                              onClick={() => handleReversePrepaid(inv.id)}
+                              style={sBtn("transparent", D.red, isMobile)}
+                              title="Return the applied account credit to the customer and reopen this invoice"
+                            >
+                              Reverse prepaid
                             </button>
                           )}
                           {inv.status === "void" && !inv.archived_at && (
@@ -1411,6 +1456,21 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
           onClose={() => setAnnualPrepayModalInvoice(null)}
           onSaved={(msg) => {
             setAnnualPrepayModalInvoice(null);
+            showToast(msg);
+            load();
+            onRefresh();
+          }}
+          onError={(msg) => showToast(msg)}
+        />
+      )}
+
+      {applyCreditInvoice && (
+        <ApplyCreditModal
+          invoice={applyCreditInvoice}
+          isMobile={isMobile}
+          onClose={() => setApplyCreditInvoice(null)}
+          onApplied={(msg) => {
+            setApplyCreditInvoice(null);
             showToast(msg);
             load();
             onRefresh();
@@ -2576,6 +2636,250 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           </button>{" "}
         </div>{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+// ── Apply Credit Modal ──
+// Draws down the customer's account credit to cover this invoice. Fully
+// covering the full amount due marks the invoice prepaid. Account credit is
+// the holding bucket for money paid ahead (quarterly prepay) or goodwill,
+// issued from Customer 360. Partial application is deliberately not offered —
+// a remaining balance would still be charged in full by the Stripe/Terminal
+// pay paths, so credit must cover the whole invoice.
+function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
+  const [loading, setLoading] = useState(true);
+  const [ctx, setCtx] = useState(null);
+  const [waiveSetupFee, setWaiveSetupFee] = useState(false);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const data = await adminFetch(
+          `/admin/invoices/${invoice.id}/credit-context`,
+        );
+        if (!alive) return;
+        setCtx(data);
+      } catch (err) {
+        if (alive) onError(`Couldn't load account credit: ${err.message}`);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [invoice.id]);
+
+  const balance = Number(ctx?.balance || 0);
+  const amountDue = Number(ctx?.amount_due || 0);
+  const canCover = amountDue > 0 && balance + 0.005 >= amountDue;
+  const shortfall = Math.max(0, amountDue - balance);
+  const canApply = !loading && !saving && canCover;
+
+  const handleApply = async () => {
+    if (!canApply) return;
+    setSaving(true);
+    try {
+      const res = await adminFetch(
+        `/admin/invoices/${invoice.id}/apply-credit`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            waiveSetupFee,
+            note: note.trim() || undefined,
+          }),
+        },
+      );
+      onApplied(
+        `Invoice marked prepaid · $${Number(res.applied).toFixed(2)} credit applied`,
+      );
+    } catch (err) {
+      onError(`Apply credit failed: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fieldLabel = {
+    display: "block",
+    fontSize: 12,
+    fontWeight: 600,
+    color: D.text,
+    marginBottom: 8,
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        zIndex: 400,
+        display: "flex",
+        alignItems: isMobile ? "flex-end" : "center",
+        justifyContent: "center",
+        padding: isMobile ? 0 : 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card,
+          borderRadius: isMobile ? "16px 16px 0 0" : 14,
+          width: "100%",
+          maxWidth: 460,
+          padding: isMobile ? "24px 20px 28px" : 28,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+          maxHeight: "92vh",
+          overflowY: "auto",
+        }}
+      >
+        <div
+          style={{ fontSize: 20, fontWeight: 700, color: D.heading, marginBottom: 4 }}
+        >
+          Apply account credit
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
+          Invoice #{invoice.invoice_number} · {invoice.first_name}{" "}
+          {invoice.last_name}
+        </div>
+
+        {loading ? (
+          <div style={{ fontSize: 14, color: D.muted, padding: "20px 0" }}>
+            Loading account credit…
+          </div>
+        ) : (
+          <>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 12,
+                marginBottom: 16,
+                padding: "12px 14px",
+                background: "#F4F4F5",
+                border: `1px solid ${D.border}`,
+                borderRadius: 8,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  Available credit
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: balance > 0 ? D.heading : D.muted }}>
+                  ${balance.toFixed(2)}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  Amount due
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+                  ${amountDue.toFixed(2)}
+                </div>
+              </div>
+            </div>
+
+            {!canCover ? (
+              <div style={{ fontSize: 13, color: D.muted, marginBottom: 8, lineHeight: 1.5 }}>
+                {balance <= 0
+                  ? "This customer has no account credit. "
+                  : `Available credit ($${balance.toFixed(2)}) doesn't cover the $${amountDue.toFixed(2)} due — $${shortfall.toFixed(2)} short. `}
+                Credit must cover the invoice in full. Issue more credit from the
+                customer's profile (Customer 360 → Account credit), or lower the
+                invoice, then try again.
+              </div>
+            ) : (
+              <>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    marginBottom: 16,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={waiveSetupFee}
+                    onChange={(e) => setWaiveSetupFee(e.target.checked)}
+                    style={{ width: 16, height: 16, accentColor: D.heading }}
+                  />
+                  <span style={{ fontSize: 14, color: D.text }}>
+                    Waive initial / setup fee
+                    <span style={{ color: D.muted, marginLeft: 6, fontStyle: "italic" }}>
+                      · records the waiver on this invoice
+                    </span>
+                  </span>
+                </label>
+
+                <label style={fieldLabel}>Note (optional)</label>
+                <textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. Q3 prepay collected by phone"
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    background: D.bg,
+                    color: D.text,
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 8,
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                    resize: "vertical",
+                    fontFamily: "inherit",
+                  }}
+                />
+
+                <div
+                  style={{
+                    marginTop: 14,
+                    padding: "10px 12px",
+                    background: "#F4F4F5",
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 8,
+                    fontSize: 12,
+                    color: D.muted,
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Applies ${amountDue.toFixed(2)} from account credit, marks the
+                  invoice prepaid, and stops automated reminders.
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        <div
+          style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}
+        >
+          <button
+            onClick={onClose}
+            disabled={saving}
+            style={sBtn("transparent", D.text, isMobile)}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleApply}
+            disabled={!canApply}
+            style={{ ...sBtn(D.heading, D.white, isMobile), opacity: canApply ? 1 : 0.5 }}
+          >
+            {saving ? "Applying…" : "Apply & mark prepaid"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

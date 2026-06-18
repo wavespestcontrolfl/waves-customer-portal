@@ -29,7 +29,7 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d30_final: 'invoice.followup_30_day',
 };
 
-const TERMINAL_INVOICE_STATUSES = ['paid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
+const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
 const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
 
 function clean(value) {

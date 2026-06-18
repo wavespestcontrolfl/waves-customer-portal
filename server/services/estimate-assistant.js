@@ -3,6 +3,7 @@ const MODELS = require('../config/models');
 const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 const { loadEstimateAiSupportContext } = require('./estimate-ai-context');
+const { dispatch } = require('./llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -849,6 +850,23 @@ function extractAnthropicText(response = {}) {
     .trim();
 }
 
+function buildAssistantUserContent(question, context) {
+  return `Customer question:\n${question}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`;
+}
+
+// Live model — GPT-5.5 (ROUTES.estimateAssistant). Prose answer (jsonMode:false);
+// on any miss returns null so answerEstimateQuestion falls back to Claude.
+async function answerWithOpenAI(question, context) {
+  const r = await dispatch(MODELS.ROUTES.estimateAssistant, {
+    system: SYSTEM_PROMPT,
+    text: buildAssistantUserContent(question, context),
+    jsonMode: false,
+    maxTokens: 420,
+  });
+  if (!r.ok || !r.text) return null;
+  return cleanAssistantAnswer(r.text) || null;
+}
+
 async function answerWithAnthropic(question, context) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -858,7 +876,7 @@ async function answerWithAnthropic(question, context) {
     system: SYSTEM_PROMPT,
     messages: [{
       role: 'user',
-      content: `Customer question:\n${question}\n\nEstimate context JSON:\n${JSON.stringify(context, null, 2)}`,
+      content: buildAssistantUserContent(question, context),
     }],
   });
   return extractAnthropicText(response);
@@ -904,6 +922,15 @@ async function answerEstimateQuestion({
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',
     };
+  }
+
+  // Live model — GPT-5.5. On any miss, fall back to Claude (WORKHORSE), then the
+  // deterministic template — the customer always gets an answer.
+  try {
+    const openAiAnswer = await answerWithOpenAI(cleanQuestion, context);
+    if (openAiAnswer) return { answer: openAiAnswer, source: 'openai' };
+  } catch (err) {
+    logger.warn(`[estimate-assistant] OpenAI answer failed: ${err.message}`);
   }
 
   try {

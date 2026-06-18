@@ -151,6 +151,9 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
     } else if (invoice.card_brand && invoice.card_last_four) {
       rows.push(['Method', `${invoice.card_brand.toUpperCase()} ···· ${invoice.card_last_four}`]);
     }
+  } else if (mode === 'prepaid') {
+    // Covered by account credit — nothing due, so no due date.
+    rows.push(['Covered', 'Account credit']);
   } else {
     rows.push(['Due', formatInvoiceDateOnly(invoice.due_date)]);
   }
@@ -339,20 +342,25 @@ function generateInvoicePDF(invoice, res) {
   res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
   doc.pipe(res);
 
-  const isOverdue = invoice.status !== 'paid'
+  // `prepaid` is settled (covered by account credit) — never label it Due/
+  // Overdue. It gets its own "Prepaid" badge and no "PAID IN FULL" cash stamp
+  // (the credit may be goodwill, not a payment).
+  const isPrepaid = invoice.status === 'prepaid';
+  const isPaid = invoice.status === 'paid';
+  const isSettled = isPaid || isPrepaid;
+  const isOverdue = !isSettled
     && invoice.due_date
     && new Date(invoice.due_date).getTime() < Date.now();
-  const isPaid = invoice.status === 'paid';
 
-  const statusLabel = isPaid ? 'Paid' : isOverdue ? 'Overdue' : 'Due';
-  const statusColor = isPaid ? GREEN : isOverdue ? RED : WAVES_BLUE;
+  const statusLabel = isPaid ? 'Paid' : isPrepaid ? 'Prepaid' : isOverdue ? 'Overdue' : 'Due';
+  const statusColor = isSettled ? GREEN : isOverdue ? RED : WAVES_BLUE;
   headerBar(doc, 'Invoice', statusLabel, statusColor);
 
   const L = 40, W = 612 - 80;
   let yLeft = 160;
   let yRight = 160;
   yLeft = billBlock(doc, invoice, customer, L, yLeft);
-  yRight = invoiceMetaBlock(doc, invoice, null, L + W / 2 + 20, yRight, 'invoice');
+  yRight = invoiceMetaBlock(doc, invoice, null, L + W / 2 + 20, yRight, isPrepaid ? 'prepaid' : 'invoice');
 
   let y = Math.max(yLeft, yRight) + 16;
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
@@ -366,7 +374,7 @@ function generateInvoicePDF(invoice, res) {
     doc.fontSize(10).font('Helvetica').fillColor(BODY).text(invoice.notes, L, y, { width: W, lineGap: 3 });
   }
 
-  footerBar(doc, isPaid ? 'Paid — thank you' : 'Thank you for choosing Waves');
+  footerBar(doc, isPaid ? 'Paid — thank you' : isPrepaid ? 'Covered by account credit — thank you' : 'Thank you for choosing Waves');
   doc.end();
 }
 

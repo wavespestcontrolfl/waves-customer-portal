@@ -23,7 +23,6 @@ import {
   LogOut,
   ExternalLink,
   ChevronRight,
-  DatabaseZap,
   Bot,
   Sprout,
 } from "lucide-react";
@@ -72,8 +71,12 @@ const SECTIONS = [
     items: [
       { path: "/admin/knowledge", icon: Library, label: "Knowledge Base" },
       { path: "/admin/kb", icon: Brain, label: "Claudeopedia" },
-      { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
-      { path: "/admin/agents", icon: Bot, label: "Agents" },
+    ],
+  },
+  {
+    section: "Agents",
+    items: [
+      { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
     ],
   },
   {

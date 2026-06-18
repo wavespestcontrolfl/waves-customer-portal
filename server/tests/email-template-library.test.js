@@ -36,6 +36,8 @@ function setDbQueues(queues) {
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
+  // sendTemplate guards the post-send status with a CASE expression.
+  db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
 }
 
 function serviceTemplate(overrides = {}) {
@@ -329,6 +331,35 @@ describe('email template library rendering', () => {
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
       categories: expectedCategories,
     }));
+    // Tracked sends carry the row id + a per-attempt token so the bounce-recovery
+    // webhook fallback can resolve the row and reject stale prior-attempt events.
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      customArgs: expect.objectContaining({ email_message_id: 'msg-1', send_attempt_token: expect.any(String) }),
+    }));
+  });
+
+  test('returns a superseded result when a newer attempt reclaimed the row (codex round 14)', async () => {
+    const queuedMessage = { id: 'msg-x', status: 'queued', subject_snapshot: 'S' };
+    const liveRow = { id: 'msg-x', status: 'queued', provider_message_id: 'sg-live' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    // Token-scoped completion update affects 0 rows → this attempt was superseded.
+    const supersededUpdate = chain({ returning: [] });
+    const reread = chain({ first: liveRow });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [queueInsert, supersededUpdate, reread],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-new' });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ sent: true, deduped: true, superseded: true }));
   });
 
   test('deduplicates membership.started categories before provider send', async () => {
@@ -988,8 +1019,10 @@ describe('email template library rendering', () => {
       subject: 'Your estimate expires June 12',
     }));
     expect(sentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'sent',
       provider_message_id: 'sg-1',
+      // status is advanced via a guarded CASE (only from 'queued') so a fast
+      // delivery/bounce webhook can't be regressed to 'sent'.
+      status: expect.objectContaining({ __raw: expect.stringContaining("CASE WHEN status = 'queued'") }),
     }));
     expect(result).toEqual(expect.objectContaining({
       sent: true,

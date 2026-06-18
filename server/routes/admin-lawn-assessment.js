@@ -32,13 +32,20 @@ function applyLawnServiceFilter(query, alias = 'ss') {
   });
 }
 
+// Four consolidated categories: Density 0.30 / Weed Cleanliness 0.25 /
+// Color 0.25 / Stress+Damage 0.20. Stress/Damage folds in fungus + thatch, so
+// they no longer carry their own weight. Pre-stress_damage rows fall back to
+// min(fungus_control, thatch_level) — the same worst-stressor idea.
 function calculateOverallScore(scores = {}) {
+  const stress = Number(scores.stress_damage);
+  const resolvedStress = Number.isFinite(stress)
+    ? stress
+    : Math.min(Number(scores.fungus_control) || 0, Number(scores.thatch_level) || 0);
   return Math.round(
     (Number(scores.turf_density) || 0) * 0.30 +
     (Number(scores.weed_suppression) || 0) * 0.25 +
-    (Number(scores.color_health) || 0) * 0.20 +
-    (Number(scores.fungus_control) || 0) * 0.15 +
-    (Number(scores.thatch_level) || 0) * 0.10
+    (Number(scores.color_health) || 0) * 0.25 +
+    resolvedStress * 0.20
   );
 }
 
@@ -760,6 +767,7 @@ router.post('/assess', async (req, res, next) => {
       color_health: adjustedScores.color_health,
       fungus_control: adjustedScores.fungus_control,
       thatch_level: adjustedScores.thatch_level,
+      stress_damage: adjustedScores.stress_damage,
       observations: adjustedScores.observations,
       overall_score: overallScore,
       is_baseline: isBaseline,
@@ -992,6 +1000,22 @@ router.post('/confirm', async (req, res, next) => {
       fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
       thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
     };
+    // Stress/Damage = worst of the tech-corrected fungus + thatch and the AI
+    // worst-spot floor stored at /assess (which already folds in insect/drought/
+    // mechanical and the worst per-photo disease/thatch). A tech correcting the
+    // overall fungus/thatch can push it lower; the AI worst-spot floor holds so
+    // a trouble spot isn't lost. Pre-stress_damage rows (null floor) fall back
+    // to worst-of(fungus, thatch) — never 0.
+    {
+      const aiFloor = Number.isFinite(Number(assessment.stress_damage))
+        ? Number(assessment.stress_damage)
+        : 95;
+      finalScores.stress_damage = Math.min(
+        Number(finalScores.fungus_control),
+        Number(finalScores.thatch_level),
+        aiFloor,
+      );
+    }
 
     const updateData = {
       confirmed_by_tech: true,

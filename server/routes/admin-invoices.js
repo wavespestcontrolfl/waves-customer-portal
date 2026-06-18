@@ -9,7 +9,8 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
-const { assertInvoiceCollectible } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const CustomerCredit = require('../services/customer-credit');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -1160,7 +1161,7 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // run a second time.
     const [updatedInvoice] = await db('invoices')
       .where({ id })
-      .whereNotIn('status', ['paid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'])
+      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
       .update({
         status: 'paid',
         paid_at: db.fn.now(),
@@ -1261,6 +1262,332 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// GET /:id/credit-context — available account credit + this invoice's
+// amount due, for the Apply-credit / Mark-prepaid modal.
+router.get('/:id/credit-context', async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id })
+      .first('id', 'customer_id', 'total', 'credit_applied', 'status', 'invoice_number');
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const total = CustomerCredit.round2(invoice.total || 0);
+    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
+    res.json({
+      customer_id: invoice.customer_id,
+      invoice_number: invoice.invoice_number,
+      total,
+      credit_applied: CustomerCredit.round2(invoice.credit_applied || 0),
+      amount_due: amountDue,
+      balance,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/apply-credit — draw down the customer's account credit to cover
+// this invoice in full and mark it prepaid (the prepaid / quarterly-prepay
+// flow). Account credit is the holding bucket for money paid ahead (recorded
+// via Customer 360 "Issue credit") or any goodwill/adjustment. Revenue is
+// recognized when cash is RECEIVED (a cash-backed prepayment books its payment
+// row at issuance), NOT here — applying credit only covers the invoice.
+//
+// Body: {
+//   waiveSetupFee?: boolean — record that the WaveGuard initial/setup fee was
+//                             waived for this prepaid invoice (flag only, like
+//                             the annual-prepay setupFeeWaived display flag —
+//                             does NOT recompute line-item totals).
+//   note?:          string  — operator note (≤400 chars).
+// }
+//
+// Full coverage only: credit must cover the entire amount due. Partial
+// application is deliberately NOT supported — leaving an invoice collectible
+// for a remainder would let the Stripe/Terminal pay paths still charge the
+// full `invoice.total` (they price off total, not total − credit), over-
+// collecting. To prepay part of a bill, lower the invoice first.
+//
+// On success the invoice becomes terminal `prepaid` (+ `paid_at`, so AR
+// dashboards and annual-prepay activation — both keyed on `paid_at` — treat
+// it as closed). Any already-open PaymentIntent is cancelled first so a stale
+// session can't charge the card after the credit is consumed; if that PI has
+// money in flight the request is refused for manual review.
+const PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_capture'];
+
+router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { waiveSetupFee = false, note } = req.body || {};
+    const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+
+    // ── Pre-checks (no lock): status, amount due, sufficient balance ──
+    const invoice = await db('invoices').where({ id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (err) {
+      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+    }
+    const total = CustomerCredit.round2(invoice.total || 0);
+    if (total <= 0) {
+      return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
+    }
+    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+    if (amountDue <= 0) {
+      return res.status(400).json({ error: 'Invoice is already fully covered by credit' });
+    }
+    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
+    if (balance + 0.005 < amountDue) {
+      return res.status(400).json({
+        error: `Insufficient account credit — balance is $${balance.toFixed(2)}, `
+          + `invoice needs $${amountDue.toFixed(2)}. Issue more credit first, or lower the invoice.`,
+      });
+    }
+
+    // ── Cancel any open collection session (pre-lock Stripe triage) ──
+    // Once the invoice is prepaid, assertInvoiceCollectible blocks NEW
+    // PaymentIntents / Terminal handoffs, but an already-minted PI could
+    // still settle and charge the card. Cancel it; refuse if money is in
+    // flight (mirrors the cancelled-service auto-void triage).
+    const openPiId = invoice.stripe_payment_intent_id || null;
+    if (openPiId) {
+      const StripeService = require('../services/stripe');
+      let pi;
+      try {
+        pi = await StripeService.retrievePaymentIntent(openPiId);
+      } catch (e) {
+        return res.status(409).json({ error: `Open payment session ${openPiId} could not be verified (${e.message}); resolve it before applying credit` });
+      }
+      // Null = Stripe unconfigured/unreachable — we can't prove the PI is dead,
+      // so fail closed rather than consume credit while a client secret could
+      // still settle (the webhook treats prepaid as terminal and would skip it).
+      if (!pi) {
+        return res.status(409).json({ error: `Open payment session ${openPiId} could not be verified (payment service unavailable); resolve it before applying credit` });
+      }
+      if (pi && PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
+        return res.status(409).json({ error: `A payment is already in flight (${pi.status}); wait for it to settle or refund it before applying credit` });
+      }
+      if (pi && pi.status !== 'canceled') {
+        try {
+          await StripeService.cancelPaymentIntent(openPiId, { cancellation_reason: 'abandoned' });
+        } catch (e) {
+          return res.status(409).json({ error: `Couldn't cancel the open payment session ${openPiId} (${e.message}); resolve it before applying credit` });
+        }
+      }
+    }
+
+    // ── Atomic credit draw-down + prepaid transition ──
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const locked = await trx('invoices').where({ id }).forUpdate().first();
+        if (!locked) {
+          const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
+        }
+        try {
+          assertInvoiceCollectible(locked.status);
+        } catch (err) {
+          err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
+        }
+        // A customer could have opened /pay/:token/setup between our pre-lock
+        // PI triage and this row lock, minting a NEW PaymentIntent (its own
+        // lock released by now). If the invoice's PI changed from the one we
+        // triaged/cancelled, refuse — the operator retries and the new PI gets
+        // triaged. Without this, we'd consume credit while a live client
+        // secret could still charge the card.
+        if ((locked.stripe_payment_intent_id || null) !== (openPiId || null)) {
+          const err = new Error('A new payment session started for this invoice — retry applying credit');
+          err.statusCode = 409; err.isOperational = true; throw err;
+        }
+        const lockedTotal = CustomerCredit.round2(locked.total || 0);
+        const lockedDue = CustomerCredit.round2(lockedTotal - CustomerCredit.round2(locked.credit_applied || 0));
+        if (lockedDue <= 0) {
+          const err = new Error('Invoice is already fully covered by credit'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+
+        // Consume the credit (throws 400 on insufficient balance → rolls back).
+        const { balanceAfter } = await CustomerCredit.postCreditMovement({
+          customerId: locked.customer_id,
+          delta: -lockedDue,
+          source: 'invoice_prepaid',
+          invoiceId: id,
+          note: trimmedNote || null,
+          createdBy: recordedBy,
+        }, trx);
+
+        const updates = {
+          credit_applied: CustomerCredit.round2(CustomerCredit.round2(locked.credit_applied || 0) + lockedDue),
+          status: 'prepaid',
+          prepaid_prev_status: locked.status,
+          prepaid_at: trx.fn.now(),
+          prepaid_by: recordedBy,
+          // Stamp paid_at so paid_at-keyed paths (AR dashboards, annual-prepay
+          // activation) treat the prepaid invoice as closed. Status stays
+          // 'prepaid' so collected-revenue stats (keyed on status='paid')
+          // don't double-count against the payments ledger row below.
+          paid_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        };
+        if (waiveSetupFee) updates.setup_fee_waived = true;
+        await trx('invoices').where({ id }).update(updates);
+
+        // No payments-ledger row here. Revenue is recognized when cash is
+        // RECEIVED — a cash-backed prepayment books its payment row at credit
+        // issuance (POST /admin/customers/:id/credits, kind=prepayment);
+        // goodwill/adjustment credit is non-cash and never booked. Booking
+        // again at application would double-count cash or tax courtesy credit
+        // as income (owner decision 2026-06-17).
+
+        return { invoice: locked, cover: lockedDue, balanceAfter };
+      });
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+      throw err;
+    }
+
+    const { invoice: covered, cover, balanceAfter } = outcome;
+
+    // Stop reminders + activate any linked annual-prepay term, mirroring the
+    // manual/Stripe paid paths (term activation keys on paid_at, now stamped).
+    try {
+      const FollowUps = require('../services/invoice-followups');
+      await FollowUps.stopOnPayment(id);
+    } catch (err) {
+      logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
+    }
+    try {
+      const final = await db('invoices').where({ id }).first();
+      await AnnualPrepayRenewals.syncTermForInvoicePayment(final);
+    } catch (err) {
+      logger.warn(`[admin-invoices:apply-credit] annual prepay activation failed: ${err.message}`);
+    }
+
+    await db('activity_log').insert({
+      customer_id: covered.customer_id,
+      action: 'invoice_marked_prepaid',
+      description: `$${cover.toFixed(2)} account credit applied to ${covered.invoice_number}`
+        + ` — marked PREPAID (remaining credit $${balanceAfter.toFixed(2)}) — ${recordedBy}`
+        + (trimmedNote ? ` — ${trimmedNote.slice(0, 120)}` : ''),
+    }).catch((err) => logger.warn(`[admin-invoices:apply-credit] activity_log insert failed: ${err.message}`));
+
+    const final = await db('invoices').where({ id }).first();
+    res.json({
+      ok: true,
+      invoice: final,
+      applied: cover,
+      fully_covered: true,
+      balance: balanceAfter,
+    });
+  } catch (err) {
+    logger.error(`[admin-invoices] apply-credit failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// POST /:id/reverse-prepaid — undo a prepaid invoice: restore the consumed
+// account credit to the customer and reopen the invoice for collection. This
+// is the repair path for credit applied to the wrong invoice (a prepaid
+// invoice is otherwise non-voidable / edit-locked to protect the credit).
+//
+// Body: { note?: string }
+//
+// The cash row booked at credit issuance is intentionally left in place — the
+// money is simply held as account credit again. Reopens to `sent` (collectible
+// again). Body note is appended to the credit ledger + activity entry.
+router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body || {};
+    const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
+    const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const locked = await trx('invoices').where({ id }).forUpdate().first();
+        if (!locked) {
+          const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
+        }
+        if (locked.status !== 'prepaid') {
+          const err = new Error('Only a prepaid invoice can be reversed'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+        const restore = CustomerCredit.round2(locked.credit_applied || 0);
+        if (restore <= 0) {
+          const err = new Error('No applied credit to restore'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+
+        const { balanceAfter } = await CustomerCredit.postCreditMovement({
+          customerId: locked.customer_id,
+          delta: restore,
+          source: 'adjustment',
+          invoiceId: id,
+          note: `Prepaid reversal for ${locked.invoice_number}${trimmedNote ? ` — ${trimmedNote}` : ''}`,
+          createdBy: recordedBy,
+        }, trx);
+
+        // Restore the status the invoice held before it was prepaid (draft/
+        // scheduled/sent/viewed/overdue); fall back to 'sent' for older rows
+        // minted before prepaid_prev_status existed.
+        await trx('invoices').where({ id }).update({
+          status: locked.prepaid_prev_status || 'sent',
+          credit_applied: 0,
+          prepaid_at: null,
+          prepaid_by: null,
+          prepaid_prev_status: null,
+          paid_at: null,
+          setup_fee_waived: false,
+          updated_at: trx.fn.now(),
+        });
+
+        // If apply-credit had activated a linked annual-prepay term, un-pay it:
+        // drop the term back to payment_pending and clear the future-visit
+        // prepaid stamps so covered visits bill normally again. A later real
+        // payment reactivates it (renewal-decided terms are left untouched).
+        if (locked.annual_prepay_term_id) {
+          await trx('annual_prepay_terms')
+            .where({ id: locked.annual_prepay_term_id })
+            .whereNull('renewal_decision')
+            .whereNotIn('status', ['cancelled', 'canceled'])
+            .update({ status: 'payment_pending', updated_at: trx.fn.now() });
+          // throwOnError → if stamp cleanup fails, the whole reversal rolls
+          // back rather than restoring credit while visits stay stamped free.
+          await AnnualPrepayRenewals.clearPrepaidStampsForTerm(locked.annual_prepay_term_id, trx, { throwOnError: true });
+        }
+
+        return { invoice: locked, restore, balanceAfter };
+      });
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+      throw err;
+    }
+
+    const { invoice: reversed, restore, balanceAfter } = outcome;
+
+    // apply-credit completed the follow-up sequence (stopOnPayment); the invoice
+    // is collectible again, so re-arm reminders. resumeSequence reactivates an
+    // existing (completed) row; scheduleForInvoice creates one if none exists.
+    try {
+      const FollowUps = require('../services/invoice-followups');
+      await FollowUps.resumeSequence(id);
+      await FollowUps.scheduleForInvoice(id);
+    } catch (err) {
+      logger.warn(`[admin-invoices:reverse-prepaid] follow-up re-arm failed: ${err.message}`);
+    }
+
+    await db('activity_log').insert({
+      customer_id: reversed.customer_id,
+      action: 'invoice_prepaid_reversed',
+      description: `Prepaid reversed on ${reversed.invoice_number} — $${restore.toFixed(2)} credit`
+        + ` restored (balance $${balanceAfter.toFixed(2)}), invoice reopened — ${recordedBy}`
+        + (trimmedNote ? ` — ${trimmedNote.slice(0, 120)}` : ''),
+    }).catch((err) => logger.warn(`[admin-invoices:reverse-prepaid] activity_log insert failed: ${err.message}`));
+
+    const final = await db('invoices').where({ id }).first();
+    res.json({ ok: true, invoice: final, restored: restore, balance: balanceAfter });
+  } catch (err) {
+    logger.error(`[admin-invoices] reverse-prepaid failed: ${err.message}`);
     next(err);
   }
 });

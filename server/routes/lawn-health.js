@@ -37,6 +37,29 @@ async function signedUrl(s3Key) {
   }
 }
 
+// Consolidated Stress/Damage for customer surfaces. New rows store it directly;
+// older rows fall back to the worst of the two legacy signals (fungus + thatch).
+function lawnStressDamage(row = {}) {
+  if (row.stress_damage != null) return row.stress_damage;
+  return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
+}
+
+// Overall uses the stored score when present, else the four-category weighting
+// (Density 0.30 / Weed 0.25 / Color 0.25 / Stress 0.20) so legacy rows without
+// a stored overall_score match the four displayed bars and the service report.
+function lawnOverall(row = {}) {
+  // Trust a stored overall only when it was computed under the four-category
+  // model (rows with stress_damage). Legacy rows keep an old five-signal
+  // overall, so recompute them to match the four displayed bars.
+  if (row.overall_score != null && row.stress_damage != null) return row.overall_score;
+  return Math.round(
+    (row.turf_density || 0) * 0.30 +
+    (row.weed_suppression || 0) * 0.25 +
+    (row.color_health || 0) * 0.25 +
+    lawnStressDamage(row) * 0.20
+  );
+}
+
 function formatScore(row) {
   return {
     assessmentId: row.id,
@@ -44,12 +67,10 @@ function formatScore(row) {
     turfDensity: row.turf_density,
     weedSuppression: row.weed_suppression,
     colorHealth: row.color_health,
+    stressDamage: lawnStressDamage(row),
     fungusControl: row.fungus_control,
     thatchScore: row.thatch_level,
-    overallScore: row.overall_score || Math.round(
-      (row.turf_density + row.weed_suppression + row.fungus_control +
-        (row.color_health || 0) + (row.thatch_level || 0)) / 5
-    ),
+    overallScore: lawnOverall(row),
     season: row.season,
     observations: row.observations,
     aiSummary: row.ai_summary || null,
@@ -366,10 +387,7 @@ router.get('/:customerId', async (req, res, next) => {
       const latestBest = latestPhotos.find(p => p.is_best_photo) || latestPhotos[0];
       const initialBest = initialPhotos[0] || null;
 
-      const calcOverall = (a) => a.overall_score || Math.round(
-        (a.turf_density + a.weed_suppression + a.fungus_control +
-          (a.color_health || 0) + (a.thatch_level || 0)) / 5
-      );
+      const calcOverall = (a) => lawnOverall(a);
 
       beforeAfter = {
         before: {
@@ -388,6 +406,7 @@ router.get('/:customerId', async (req, res, next) => {
           turfDensity: (latest.turf_density || 0) - (initial.turf_density || 0),
           weedSuppression: (latest.weed_suppression || 0) - (initial.weed_suppression || 0),
           colorHealth: (latest.color_health || 0) - (initial.color_health || 0),
+          stressDamage: lawnStressDamage(latest) - lawnStressDamage(initial),
           fungusControl: (latest.fungus_control || 0) - (initial.fungus_control || 0),
           thatchLevel: (latest.thatch_level || 0) - (initial.thatch_level || 0),
           overall: calcOverall(latest) - calcOverall(initial),
@@ -404,12 +423,10 @@ router.get('/:customerId', async (req, res, next) => {
       turfDensity: a.turf_density,
       weedSuppression: a.weed_suppression,
       colorHealth: a.color_health,
+      stressDamage: lawnStressDamage(a),
       fungusControl: a.fungus_control,
       thatchLevel: a.thatch_level,
-      overallScore: a.overall_score || Math.round(
-        (a.turf_density + a.weed_suppression + a.fungus_control +
-          (a.color_health || 0) + (a.thatch_level || 0)) / 5
-      ),
+      overallScore: lawnOverall(a),
       season: a.season,
     }));
 

@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const {
@@ -788,8 +789,12 @@ async function sendTemplate({
   const fromEmail = template.from_email || 'contact@wavespestcontrol.com';
   const replyTo = template.reply_to || 'contact@wavespestcontrol.com';
   const allCategories = categoriesFor(template, test ? ['test', ...categories] : categories);
+  // Fresh per send attempt; echoed in custom_args so the webhook fallback can tell
+  // this attempt's events from a prior (retried) attempt's. See webhooks-sendgrid.js.
+  const sendAttemptToken = crypto.randomUUID();
   const messageSnapshot = {
     provider: 'sendgrid',
+    send_attempt_token: sendAttemptToken,
     template_id: template.id,
     template_version_id: version.id,
     template_key: template.template_key,
@@ -808,6 +813,9 @@ async function sendTemplate({
     payload_snapshot: JSON.stringify(redactedPayloadSnapshot(payload || {})),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
+    // Attachments aren't persisted in the snapshot; flag their presence so the
+    // bounce-recovery replay can route attachment-bearing sends to manual recovery.
+    has_attachments: Array.isArray(attachments) && attachments.length > 0,
   };
 
   if (!test) {
@@ -866,20 +874,58 @@ async function sendTemplate({
       categories: allCategories,
       asmGroupId,
       attachments,
+      // Echoed on every webhook event so bounce recovery can resolve this row
+      // even if a hard bounce arrives before provider_message_id is written (or
+      // SendGrid returns no X-Message-Id). The attempt token lets the webhook
+      // reject a stale prior-attempt event. See email-bounce-recovery.js.
+      customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
     });
-    const [updated] = await db('email_messages').where({ id: message.id }).update({
-      status: 'sent',
-      provider_message_id: result.messageId,
-      sent_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
+    // Record provider id + send time, and advance status to 'sent' ONLY while
+    // still 'queued' — a fast delivery/bounce webhook (resolvable via
+    // custom_args.email_message_id before this commit) may have already moved the
+    // row to a terminal status, and we must not regress it. Scope the write to
+    // THIS attempt's send_attempt_token: a stale queued row reclaimed for a retry
+    // (queuedRowInFlight) means this attempt was superseded, so a late-resolving
+    // sendOne must not clobber the live retry's provider id / status.
+    const [updated] = await db('email_messages')
+      .where({ id: message.id, send_attempt_token: sendAttemptToken })
+      .update({
+        provider_message_id: result.messageId,
+        sent_at: new Date(),
+        updated_at: new Date(),
+        status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
+      })
+      .returning('*');
+    if (!updated) {
+      // Superseded by a newer attempt (token changed). This attempt's send still
+      // reached SendGrid, but the row belongs to the live attempt — leave it.
+      const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
+      return { sent: true, deduped: true, superseded: true, message: current || message, rendered };
+    }
     return { sent: true, message: updated, rendered };
   } catch (err) {
-    await db('email_messages').where({ id: message.id }).update({
+    // SendGrid may have accepted the send and a webhook already terminalized the
+    // row (lost-response race) — only mark failed while still queued AND only for
+    // THIS attempt (a superseded attempt must not fail the live retry's row).
+    await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
       status: 'failed',
       error_message: err.message.slice(0, 1000),
       updated_at: new Date(),
     });
+    const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
+    const currentStatus = String(current?.status || '').toLowerCase();
+    // Superseded: a newer attempt reclaimed the row (token changed), so this stale
+    // caller no longer owns it — don't audit/throw (which would make upstream jobs
+    // report failure or schedule another retry while the live attempt is in flight).
+    if (current && current.send_attempt_token && String(current.send_attempt_token) !== String(sendAttemptToken)) {
+      return { sent: true, deduped: true, superseded: true, message: current, rendered };
+    }
+    // If a webhook already moved the row to a terminal status, the send actually
+    // reached SendGrid — report success (deduped) so callers don't retry a send
+    // that landed (and may already have triggered bounce recovery).
+    if (current && currentStatus !== 'queued' && currentStatus !== 'failed') {
+      return { sent: true, deduped: true, message: current, rendered };
+    }
     await auditEmailTemplateIssue({
       templateKey: template.template_key,
       versionId: version.id,

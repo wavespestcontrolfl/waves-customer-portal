@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const sendgrid = require('../sendgrid-mail');
@@ -163,6 +164,9 @@ async function sendLegacyServiceReportEmail({
   const idempotencyKey = serviceReportEmailIdempotencyKey(recordId, recipient);
   let message = null;
   let ledgerAvailable = true;
+  // Per-attempt token (function-scoped so it's visible in the send block below);
+  // echoed in custom_args so the webhook fallback can reject a stale prior attempt.
+  const sendAttemptToken = crypto.randomUUID();
 
   try {
     const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
@@ -179,6 +183,7 @@ async function sendLegacyServiceReportEmail({
     const baseSnapshot = {
       provider: 'sendgrid',
       template_key: 'service.report_ready.legacy',
+      send_attempt_token: sendAttemptToken,
       trigger_event_id: idempotencyKey,
       recipient_type: 'customer',
       recipient_id: customerId || null,
@@ -189,6 +194,10 @@ async function sendLegacyServiceReportEmail({
       subject_snapshot: email.subject,
       html_snapshot: email.html,
       text_snapshot: email.text,
+      // Direct inserter (bypasses sendTemplate) — stamp the attachment flag so
+      // bounce recovery routes a bounced PDF report to manual instead of a
+      // body-only replay. See server/services/email-bounce-recovery.js.
+      has_attachments: Array.isArray(attachments) && attachments.length > 0,
       categories: JSON.stringify(['service_report_v1']),
       idempotency_key: idempotencyKey,
       queued_at: new Date(),
@@ -242,24 +251,46 @@ async function sendLegacyServiceReportEmail({
       categories: ['service_report_v1'],
       asmGroupId: sendgrid.serviceGroupId(),
       attachments,
+      // Echoed on every webhook event so bounce recovery can resolve this row
+      // even if a hard bounce races the provider_message_id write below. The
+      // attempt token lets the webhook reject a stale prior-attempt event.
+      ...(message?.id ? { customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken } } : {}),
     });
     if (ledgerAvailable && message?.id) {
-      const rows = await db('email_messages').where({ id: message.id }).update({
-        status: 'sent',
+      // Scope writes to THIS attempt's send_attempt_token: a retried legacy send
+      // reuses the row with a new token, so an older request that resolves late
+      // must not overwrite the live attempt's provider id / status. Advance to
+      // 'sent' only while still 'queued' so a fast webhook isn't regressed.
+      await db('email_messages').where({ id: message.id, send_attempt_token: sendAttemptToken }).update({
         provider_message_id: result.messageId,
         sent_at: new Date(),
         updated_at: new Date(),
-      }).returning('*');
-      message = rows?.[0] || message;
+      });
+      await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
+        status: 'sent',
+        updated_at: new Date(),
+      });
+      message = (await db('email_messages').where({ id: message.id }).first()) || message;
     }
     return { sent: true, messageId: result.messageId || null, message };
   } catch (err) {
     if (ledgerAvailable && message?.id) {
-      await db('email_messages').where({ id: message.id }).update({
+      // Only mark failed while still queued AND only for this attempt — a webhook
+      // may have terminalized the row (lost-response), and a superseded older
+      // attempt must not fail the live retry's row.
+      await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
         status: 'failed',
         error_message: errorMessage(err).slice(0, 1000),
         updated_at: new Date(),
       }).catch(() => {});
+      // If a fast webhook (custom_args) already terminalized the row, SendGrid
+      // accepted the send despite this thrown/timed-out response — report success
+      // (deduped) so delivery-queue.js doesn't requeue and re-send the same report.
+      const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
+      const currentStatus = String(current?.status || '').toLowerCase();
+      if (current && currentStatus !== 'queued' && currentStatus !== 'failed') {
+        return { sent: true, deduped: true, messageId: current.provider_message_id || null, message: current };
+      }
     }
     throw err;
   }

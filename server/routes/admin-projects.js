@@ -2805,7 +2805,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Match the canonical invoice non-sendable statuses (invoice.js): don't
     // push another pay link for an invoice that's paid, void, mid-send, or has
     // a bank payment (ACH) already in flight ('processing').
-    if (['paid', 'void', 'processing', 'sending'].includes(invoice.status)) {
+    if (['paid', 'prepaid', 'void', 'processing', 'sending'].includes(invoice.status)) {
       return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
     }
 

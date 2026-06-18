@@ -23,12 +23,13 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
-// Gemini vision scorer model. Flag-gated upgrade to the registry's best
-// (gemini-3.5-flash); default stays gemini-2.5-flash until GATE_GEMINI_VISION_PRIMARY
-// is flipped. Fan-out/averaging logic is unchanged — only the model ID moves.
-const GEMINI_VISION_MODEL = process.env.GATE_GEMINI_VISION_PRIMARY === 'true'
-  ? MODELS.GEMINI_VISION_BEST
-  : 'gemini-2.5-flash';
+// Gemini vision scorer model — live default is the registry's best
+// (gemini-3.5-flash); override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
+// On any miss (HTTP/parse/empty) callGeminiVision retries the prior model
+// (gemini-2.5-flash) so a live-model entitlement/availability issue never costs
+// us the Gemini scorer. Fan-out/averaging logic is unchanged.
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
+const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
 
 const VISION_PROMPT = `You are a lawn health assessment tool for a professional lawn care company in Southwest Florida. Analyze the provided lawn photo and return ONLY a JSON object with the following scores. Base your analysis on what is visible in the photo. The primary turf type in this region is St. Augustine grass.
 
@@ -36,6 +37,9 @@ Agronomic tells to weigh:
 - Mushrooms, toadstools, or fungal fruiting bodies are a strong sign of OVERWATERING (or buried organic debris). When visible, raise "fungal_activity" to at least "minor" and call out likely overwatering in the observations.
 - Standing water, algae, or moss also point to overwatering; dry/tan blades and curling point to under-watering.
 - Brown-patch rings, dollar-spot blotches, or gray leaf spot indicate fungal disease.
+- Irregular, expanding dead patches (often at sunny edges or along sidewalks/driveways), thinning that lifts easily, or visible bugs indicate INSECT damage (chinch bugs, grubs, armyworms).
+- A blue-gray cast, folded or wilting blades, and lingering footprints (turf that doesn't spring back) indicate DROUGHT stress.
+- Uniform scalped strips, tire ruts, or shredded blade tips indicate MECHANICAL damage (scalping, mower, or foot/vehicle traffic).
 - Name specific weeds when identifiable (e.g., nutsedge, crabgrass, dollarweed) instead of just "weeds".
 
 Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
@@ -50,6 +54,9 @@ Return this exact JSON structure and nothing else — no markdown, no backticks,
   "weed_coverage": <number 0-100>,
   "color_health": <number 1-10>,
   "fungal_activity": <"none" | "minor" | "moderate" | "severe">,
+  "insect_damage": <"none" | "minor" | "moderate" | "severe">,
+  "drought_stress": <"none" | "minor" | "moderate" | "severe">,
+  "mechanical_damage": <"none" | "minor" | "moderate" | "severe">,
   "thatch_visibility": <"low" | "moderate" | "high">,
   "overwatering_signal": <true | false>,
   "grass_type": <"st_augustine" | "bermuda" | "zoysia" | "bahia" | "mixed" | "unknown">,
@@ -66,6 +73,28 @@ const THATCH_REVERSE = ['low', 'moderate', 'high'];
 
 const FUNGUS_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
 const THATCH_DISPLAY = { low: 85, moderate: 60, high: 35 };
+
+// Severity → 0-100 "health" display for the consolidated Stress/Damage card
+// (higher = healthier). Reuses the fungus scale so disease/insect/drought/
+// mechanical all share one ramp; thatch keeps its own (low/moderate/high).
+const SEVERITY_DISPLAY = FUNGUS_DISPLAY;
+
+// Stress/Damage = the WORST (lowest-health) of the five stress signals, so a
+// single severe stressor isn't diluted by healthy ones. Defaults a missing
+// signal to "none" (95) rather than tanking the score on absent data.
+//
+// For merged multi-photo composites, the merge supplies worst_fungal_activity /
+// worst_thatch_visibility (the worst disease/thatch across photos) so a clean
+// overview majority can't hide a trouble-spot photo — disease + thatch are part
+// of this worst-stressor score and no longer have their own customer tiles.
+// Single-photo composites fall back to their own fungal_activity / thatch_visibility.
+function computeStressDamageDisplay(src = {}) {
+  const disease = SEVERITY_DISPLAY[src.worst_fungal_activity ?? src.fungal_activity] ?? 95;
+  const thatch = THATCH_DISPLAY[src.worst_thatch_visibility ?? src.thatch_visibility] ?? 85;
+  const others = ['insect_damage', 'drought_stress', 'mechanical_damage']
+    .map((f) => SEVERITY_DISPLAY[src[f]] ?? 95);
+  return Math.max(0, Math.min(100, Math.min(disease, thatch, ...others)));
+}
 
 // ── Vision API calls ────────────────────────────────────────────
 
@@ -105,43 +134,58 @@ async function callClaudeVision(base64Image, mimeType) {
   }
 }
 
+// Single attempt against one Gemini model. Returns the parsed scores, or null on
+// any miss (HTTP error / empty output / unparseable JSON) so the caller can retry.
+async function geminiVisionAttempt(model, base64Image, mimeType) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: mimeType, data: base64Image } },
+          { text: VISION_PROMPT },
+        ],
+      }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+    }),
+  });
+
+  if (!response.ok) {
+    logger.error(`Lawn assessment Gemini API ${response.status} (${model}): ${response.statusText}`);
+    return null;
+  }
+
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) return null;
+
+  const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
+  parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
+  return parsed;
+}
+
 async function callGeminiVision(base64Image, mimeType) {
   if (!GEMINI_KEY) return null;
 
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${GEMINI_KEY}`;
+  // Live model first, then the prior model on any miss (skip the retry if an
+  // override has pinned both to the same id).
+  const models = GEMINI_VISION_FALLBACK_MODEL && GEMINI_VISION_FALLBACK_MODEL !== GEMINI_VISION_MODEL
+    ? [GEMINI_VISION_MODEL, GEMINI_VISION_FALLBACK_MODEL]
+    : [GEMINI_VISION_MODEL];
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inline_data: { mime_type: mimeType, data: base64Image } },
-            { text: VISION_PROMPT },
-          ],
-        }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
-      }),
-    });
-
-    if (!response.ok) {
-      logger.error(`Lawn assessment Gemini API ${response.status}: ${response.statusText}`);
-      return null;
+  for (const model of models) {
+    try {
+      const parsed = await geminiVisionAttempt(model, base64Image, mimeType);
+      if (parsed) return parsed;
+    } catch (err) {
+      logger.error(`Lawn assessment Gemini vision failed (${model}): ${err.message}`);
     }
-
-    const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) return null;
-
-    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
-    parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
-    return parsed;
-  } catch (err) {
-    logger.error(`Lawn assessment Gemini vision failed: ${err.message}`);
-    return null;
   }
+  return null;
 }
 
 // ── Core service methods ────────────────────────────────────────
@@ -256,6 +300,20 @@ function averageScores(claudeResult, geminiResult) {
     }
   }
 
+  // Insect / drought / mechanical damage: categorical severity (none→severe),
+  // averaged like fungal activity. Kept on the composite for grounding; they
+  // feed the consolidated Stress/Damage score in mapToDisplayScores.
+  // Disease + thatch keep their own divergence flags (fungus_control /
+  // thatch_level) and review tiles. The new insect/drought/mechanical signals
+  // are AI-only with no tech tile, so we don't emit a stress_damage divergence
+  // flag — it would count in the summary with no tile to highlight, giving the
+  // tech nothing to act on before confirming.
+  for (const field of ['insect_damage', 'drought_stress', 'mechanical_damage']) {
+    const c = FUNGAL_MAP[claudeResult[field]] ?? 0;
+    const g = FUNGAL_MAP[geminiResult[field]] ?? 0;
+    composite[field] = FUNGAL_REVERSE[Math.round((c + g) / 2)];
+  }
+
   // Observations: the customer-facing narrative is a SINGLE voice — the primary
   // VISION model (Claude), falling back to Gemini — never the two glued together
   // with " | " (which produced run-on, self-contradicting prose when the models
@@ -287,6 +345,10 @@ function mapToDisplayScores(composite) {
     color_health: clamp(Math.round((composite.color_health || 5) * 10)),
     fungus_control: clamp(FUNGUS_DISPLAY[composite.fungal_activity] || 50),
     thatch_level: clamp(THATCH_DISPLAY[composite.thatch_visibility] || 60),
+    // Consolidated customer-facing Stress/Damage (worst of disease/insect/
+    // drought/mechanical/thatch). fungus_control + thatch_level stay populated
+    // above so the Lawn Diagnostic tool, trends, and snapshot are untouched.
+    stress_damage: computeStressDamageDisplay(composite),
     overwatering_signal: !!composite.overwatering_signal,
     observations: composite.observations || '',
   };
@@ -394,6 +456,7 @@ module.exports = {
   analyzePhoto,
   averageScores,
   mapToDisplayScores,
+  computeStressDamageDisplay,
   applySeasonalAdjustment,
   getSeason,
   getCustomerHistory,

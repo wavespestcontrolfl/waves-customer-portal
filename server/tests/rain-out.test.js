@@ -47,8 +47,10 @@ function chain({ rows = [], ...terminal } = {}) {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNot: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
@@ -170,10 +172,12 @@ describe('rain-out service', () => {
       });
 
       // Anchor 09:00→13:00 = +4h delta; sibling 11:30-13:30 → 15:30-17:30.
+      // Tail-first: the later sibling moves BEFORE the anchor so the anchor's
+      // new 13:00-15:00 slot isn't blocked by the not-yet-moved sibling.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
-        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', { allowLive: true });
-      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech', { allowLive: true });
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', { allowLive: true });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
@@ -194,6 +198,27 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(renderSmsTemplate).not.toHaveBeenCalled();
+    });
+
+    test('initiatedBy is recorded on the reschedule (admin attribution)', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        reschedule_log: [],
+      });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: false,
+        initiatedBy: 'admin',
+      });
+
+      // The dispatch path must log moves as admin-initiated, not 'tech'.
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin', { allowLive: true });
     });
 
     test('an SMS exception after the move reports moved-but-not-notified, not failure', async () => {
@@ -251,10 +276,11 @@ describe('rain-out service', () => {
 
     function wireRoute() {
       const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
+      const routeChain = chain({ rows: ROUTE_JOBS });
       wireDb({
         scheduled_services: [
           chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
-          chain({ rows: ROUTE_JOBS }),
+          routeChain,
         ],
         customers: [
           chain({ first: jest.fn().mockResolvedValue({ id: 'cust-2', phone: '+19415550002', first_name: 'Sam', zip: '34203' }) }),
@@ -262,6 +288,7 @@ describe('rain-out service', () => {
         ],
         reschedule_log: [logRow, chain()],
       });
+      return { routeChain };
     }
 
     test('day move shifts all stops to the new date keeping each window; anchor gets the alt', async () => {
@@ -296,6 +323,53 @@ describe('rain-out service', () => {
       const noPhone = result.results.find((r) => r.id === 'svc-3');
       expect(noPhone.smsSent).toBe(false);
       expect(noPhone.smsReason).toBe('no_phone');
+    });
+
+    test('route scope is bounded to the anchor route position — earlier stops are never swept', async () => {
+      const { routeChain } = wireRoute();
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: false,
+      });
+
+      // SERVICE has no route_order (→ 999) and window_start 09:00; the
+      // "rest of route" query must be bounded by (route_order, window_start)
+      // so a dispatcher rain-out of a mid-route stop can't move/text
+      // appointments ordered before the one they picked.
+      expect(routeChain.whereRaw).toHaveBeenCalledWith(
+        expect.stringContaining('route_order'),
+        [999, '09:00'],
+      );
+    });
+
+    test('day-move siblings with HH:MM:SS DB windows are trimmed to HH:MM', async () => {
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [
+            { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30:00', window_end: '13:30:00', customer_id: 'cust-2', service_type: 'Lawn Care' },
+          ] }),
+        ],
+      });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: false,
+      });
+
+      // DB TIME comes back 'HH:MM:SS'; it must be trimmed so the strict
+      // reminder helper re-arms the sibling onto its real window, not 08:00.
+      expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
+        'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech', { allowLive: true });
     });
 
     test('one stop racing to terminal does not strand the rest', async () => {

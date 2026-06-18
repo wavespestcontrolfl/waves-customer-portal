@@ -1242,22 +1242,75 @@ Return ONLY valid JSON.`;
 
 // ── V2 Extraction (shadow pipeline — stores alongside, never replaces v1) ──
 
-async function extractCallDataV2(transcription, callerPhone, opts = {}) {
-  if (!process.env.GEMINI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
-
-  const callDateET = etDateString(opts.callStartedAt || new Date());
-  const callId = opts.callId || null;
-  // The v1.0.0 schema is too deep/enum-heavy for Gemini's constrained-decoding
-  // response_schema ("too many states for serving"), so we use plain JSON mode
-  // and embed the schema as prompt guidance. Correctness is guaranteed by the
-  // two-pass ajv validation below (model-output + persisted), which fails closed
-  // to triage on any deviation — the model output is never trusted directly.
-  const prompt = buildExtractionPrompt(transcription, callerPhone, callDateET)
+// The v1.0.0 schema is too deep/enum-heavy for Gemini's constrained-decoding
+// response_schema ("too many states for serving"), so we use plain JSON mode and
+// embed the schema as prompt guidance. Correctness is guaranteed by the two-pass
+// ajv validation in finalizeV2Extraction — the model output is never trusted directly.
+// Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
+function buildV2ExtractionPrompt(transcription, callerPhone, callDateET) {
+  return buildExtractionPrompt(transcription, callerPhone, callDateET)
     + '\n\n═══ OUTPUT CONTRACT ═══\n'
     + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
     + 'every required field present, every enum value exact, no extra fields, '
     + 'use null for unknown nullable fields.\n'
     + JSON.stringify(modelOutputSchema);
+}
+
+// Parse → validate(model-output) → inject server meta → normalize → validate(persisted).
+// Provider-agnostic tail shared by the Gemini and OpenAI extraction paths. Fails closed
+// to a status string; never trusts model output directly.
+function finalizeV2Extraction(rawText, { callId = null, extractionModel } = {}) {
+  // Pass 1: parse JSON
+  let parsed;
+  try {
+    const cleaned = String(rawText).replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    logger.error(`[call-proc-v2] JSON parse failed: ${e.message} (${String(rawText).length} chars)`);
+    return { status: 'parse_failed', extraction: null, errors: [{ message: e.message }] };
+  }
+
+  // Pass 2: validate against model-output schema
+  const modelValidation = validateModelOutput(parsed);
+  if (!modelValidation.valid) {
+    logger.warn(`[call-proc-v2] Model output schema validation failed: ${JSON.stringify(modelValidation.errors?.slice(0, 5))}`);
+    return { status: 'schema_failed', extraction: parsed, errors: modelValidation.errors };
+  }
+
+  // Inject server-owned metadata
+  parsed.meta = {
+    ...parsed.meta,
+    call_id: callId,
+    schema_version: SCHEMA_VERSION,
+    extracted_at: new Date().toISOString(),
+    extraction_model: extractionModel,
+    extraction_prompt_version: PROMPT_HASH,
+  };
+
+  // Normalize
+  let normalized;
+  try {
+    normalized = normalizeExtractionV2(parsed);
+  } catch (e) {
+    logger.error(`[call-proc-v2] Normalization failed: ${e.message}`);
+    return { status: 'normalization_failed', extraction: parsed, errors: [{ message: e.message }] };
+  }
+
+  // Pass 3: validate against persisted schema
+  const persistedValidation = validatePersisted(normalized);
+  if (!persistedValidation.valid) {
+    logger.warn(`[call-proc-v2] Persisted schema validation failed: ${JSON.stringify(persistedValidation.errors?.slice(0, 5))}`);
+    return { status: 'schema_failed', extraction: normalized, errors: persistedValidation.errors };
+  }
+
+  return { status: 'valid', extraction: normalized, errors: null };
+}
+
+async function extractCallDataV2(transcription, callerPhone, opts = {}) {
+  if (!process.env.GEMINI_API_KEY) return { status: 'not_run', extraction: null, errors: null };
+
+  const callDateET = etDateString(opts.callStartedAt || new Date());
+  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET);
 
   let rawText;
   try {
@@ -1289,50 +1342,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     return { status: 'parse_failed', extraction: null, errors: [{ message: err.message }] };
   }
 
-  // Pass 1: parse JSON
-  let parsed;
-  try {
-    const cleaned = rawText.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
-    parsed = JSON.parse(cleaned);
-  } catch (e) {
-    logger.error(`[call-proc-v2] JSON parse failed: ${e.message} (${rawText.length} chars)`);
-    return { status: 'parse_failed', extraction: null, errors: [{ message: e.message }] };
-  }
-
-  // Pass 2: validate against model-output schema
-  const modelValidation = validateModelOutput(parsed);
-  if (!modelValidation.valid) {
-    logger.warn(`[call-proc-v2] Model output schema validation failed: ${JSON.stringify(modelValidation.errors?.slice(0, 5))}`);
-    return { status: 'schema_failed', extraction: parsed, errors: modelValidation.errors };
-  }
-
-  // Inject server-owned metadata
-  parsed.meta = {
-    ...parsed.meta,
-    call_id: callId,
-    schema_version: SCHEMA_VERSION,
-    extracted_at: new Date().toISOString(),
-    extraction_model: GEMINI_EXTRACTION_MODEL,
-    extraction_prompt_version: PROMPT_HASH,
-  };
-
-  // Normalize
-  let normalized;
-  try {
-    normalized = normalizeExtractionV2(parsed);
-  } catch (e) {
-    logger.error(`[call-proc-v2] Normalization failed: ${e.message}`);
-    return { status: 'normalization_failed', extraction: parsed, errors: [{ message: e.message }] };
-  }
-
-  // Pass 3: validate against persisted schema
-  const persistedValidation = validatePersisted(normalized);
-  if (!persistedValidation.valid) {
-    logger.warn(`[call-proc-v2] Persisted schema validation failed: ${JSON.stringify(persistedValidation.errors?.slice(0, 5))}`);
-    return { status: 'schema_failed', extraction: normalized, errors: persistedValidation.errors };
-  }
-
-  return { status: 'valid', extraction: normalized, errors: null };
+  return finalizeV2Extraction(rawText, { callId: opts.callId || null, extractionModel: GEMINI_EXTRACTION_MODEL });
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──

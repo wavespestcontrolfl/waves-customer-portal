@@ -1882,6 +1882,7 @@ export default function DispatchPageV2({
         <MobileDispatchList
           mode="week"
           date={date}
+          refreshKey={scheduleRefreshKey}
           onEdit={(svc) => {
             if (shouldOpenMobileCompletion(svc)) {
               handleComplete(svc);
@@ -2380,6 +2381,12 @@ export default function DispatchPageV2({
           }}
           onCancelled={() => fetchSchedule(date)}
           onNoShow={() => fetchSchedule(date)}
+          onRescheduled={() => {
+            fetchSchedule(date);
+            // The mobile week list owns its own cached weekData; bump the
+            // shared refresh key so it refetches and drops the moved stop.
+            setScheduleRefreshKey((k) => k + 1);
+          }}
         />
       )}
       {checkoutService && (

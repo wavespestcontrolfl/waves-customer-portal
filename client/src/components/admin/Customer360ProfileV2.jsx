@@ -2388,6 +2388,270 @@ function AdminAutopayPanelV2({
   );
 }
 
+// ─── Account credit panel ───────────────────────────────────────
+// Shows the customer's account-credit balance + ledger history and lets
+// admins issue or adjust credit. Credit is the holding bucket for money
+// paid ahead (quarterly prepay) and goodwill; it is drawn down against
+// invoices from the invoice's "Apply credit" action. Self-contained:
+// fetches /admin/customers/:id/credits on its own.
+const CREDIT_SOURCE_LABELS = {
+  manual: "Manual credit",
+  adjustment: "Adjustment",
+  invoice_application: "Applied to invoice",
+  invoice_prepaid: "Prepaid invoice",
+  referral: "Referral",
+};
+
+function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onChanged }) {
+  const [data, setData] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [direction, setDirection] = useState("add");
+  const [amount, setAmount] = useState("");
+  // Funding kind for an addition: 'prepayment' (cash received → books revenue
+  // at issuance) or 'goodwill' (courtesy, no money). A deduction is always an
+  // 'adjustment'. Method applies to a prepayment only.
+  const [fundKind, setFundKind] = useState("prepayment");
+  const [method, setMethod] = useState("cash");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [loadError, setLoadError] = useState(false);
+
+  // Tracks the customer the panel is currently bound to. Every /credits fetch
+  // (initial, Retry, post-mutation refresh) tags its response against this so a
+  // response for a previously-selected customer can never write into the panel
+  // after a switch — which would otherwise show A's ledger while submits target B.
+  const currentCustomerRef = useRef(customerId);
+  const load = () => {
+    const reqId = customerId;
+    setLoadError(false);
+    adminFetch(`/admin/customers/${reqId}/credits`)
+      .then((d) => {
+        if (currentCustomerRef.current !== reqId) return;
+        setData(d);
+        setLoadError(false);
+      })
+      .catch(() => {
+        if (currentCustomerRef.current !== reqId) return;
+        setLoadError(true);
+      });
+  };
+  // On customer switch, drop the previous customer's data immediately (so the
+  // panel never shows a stale balance) and re-bind the ref before fetching.
+  useEffect(() => {
+    currentCustomerRef.current = customerId;
+    setData(null);
+    setLoadError(false);
+    setOpen(false);
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerId]);
+
+  // Only treat the ledger as known once a fetch has succeeded AND the latest
+  // fetch didn't fail. A failed refresh (even after a prior success) flips back
+  // to not-loaded so the panel shows "Balance unavailable" + disables the form
+  // — never a stale balance with an enabled form (would invite duplicate credit).
+  const loaded = data != null && !loadError;
+  const balance = Number(data?.balance || 0);
+  const ledger = data?.ledger || [];
+
+  const submit = async () => {
+    const amt = parseFloat(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setErr("Enter an amount greater than 0");
+      return;
+    }
+    const delta = direction === "deduct" ? -amt : amt;
+    const kind = direction === "deduct" ? "adjustment" : fundKind;
+    setSaving(true);
+    setErr("");
+    try {
+      await adminFetch(`/admin/customers/${customerId}/credits`, {
+        method: "POST",
+        body: JSON.stringify({
+          amount: delta,
+          kind,
+          method: kind === "prepayment" ? method : undefined,
+          note: note.trim() || undefined,
+        }),
+      });
+      setOpen(false);
+      setAmount("");
+      setNote("");
+      setDirection("add");
+      setFundKind("prepayment");
+      setMethod("cash");
+      load();
+      if (onChanged) onChanged();
+    } catch (e) {
+      setErr(e.message || "Failed to update credit");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputClass =
+    "block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
+
+  return (
+    <Card className="mb-5">
+      <CardBody className="p-4">
+        <div className="flex justify-between items-start gap-3 flex-wrap mb-3">
+          <div>
+            <div className="u-label text-ink-secondary mb-1">Account credit</div>
+            <div className="text-22 text-zinc-900 u-nums leading-none">
+              {loaded ? fmtCurrency(balance) : loadError ? "—" : "…"}
+            </div>
+            <div className="text-12 text-ink-tertiary mt-1">
+              {loadError && !loaded
+                ? "Balance unavailable"
+                : "Available to apply to invoices"}
+            </div>
+          </div>
+          {canEdit && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!loaded}
+              onClick={() => setOpen((v) => !v)}
+            >
+              {open ? "Cancel" : "Issue credit"}
+            </Button>
+          )}
+        </div>
+
+        {loadError && !loaded && (
+          <div className="text-12 text-alert-fg mb-3 flex items-center gap-2">
+            <span>Couldn't load the credit balance.</span>
+            <button
+              type="button"
+              className="underline"
+              onClick={load}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {open && (
+          <div className="border-hairline border-zinc-200 rounded-sm p-3 mb-3 bg-zinc-50">
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <label className="block">
+                <span className="u-label text-ink-tertiary block mb-1">Direction</span>
+                <select
+                  value={direction}
+                  onChange={(e) => setDirection(e.target.value)}
+                  className={inputClass}
+                >
+                  <option value="add">Add credit</option>
+                  <option value="deduct">Deduct credit</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="u-label text-ink-tertiary block mb-1">Amount</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="0.00"
+                  className={cn(inputClass, "u-nums")}
+                />
+              </label>
+            </div>
+            {direction === "add" ? (
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <label className="block">
+                  <span className="u-label text-ink-tertiary block mb-1">Funding</span>
+                  <select
+                    value={fundKind}
+                    onChange={(e) => setFundKind(e.target.value)}
+                    className={inputClass}
+                  >
+                    <option value="prepayment">Prepayment (money received)</option>
+                    <option value="goodwill">Goodwill / courtesy (no money)</option>
+                  </select>
+                </label>
+                {fundKind === "prepayment" && (
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">Method</span>
+                    <select
+                      value={method}
+                      onChange={(e) => setMethod(e.target.value)}
+                      className={inputClass}
+                    >
+                      <option value="cash">Cash</option>
+                      <option value="check">Check</option>
+                      <option value="zelle">Zelle</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+            ) : (
+              <div className="text-12 text-ink-tertiary mb-2">
+                Recorded as an adjustment / correction (no payment booked).
+              </div>
+            )}
+            <div className="text-11 text-ink-tertiary mb-2 leading-snug">
+              {direction === "add" && fundKind === "prepayment"
+                ? "Books a payment now (counts as collected revenue at receipt)."
+                : "No payment booked — does not count as revenue."}
+            </div>
+            <label className="block mb-2">
+              <span className="u-label text-ink-tertiary block mb-1">Note (optional)</span>
+              <input
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="e.g. Q3 quarterly prepay collected by check"
+                className={inputClass}
+              />
+            </label>
+            {err && <div className="text-12 text-alert-fg mb-2">{err}</div>}
+            <Button size="sm" variant="primary" disabled={saving || !loaded} onClick={submit}>
+              {saving
+                ? "Saving…"
+                : direction === "deduct"
+                  ? "Deduct credit"
+                  : `Add credit to ${customerName || "account"}`}
+            </Button>
+          </div>
+        )}
+
+        {ledger.length > 0 ? (
+          <div>
+            {ledger.slice(0, 8).map((row) => {
+              const delta = Number(row.delta || 0);
+              return (
+                <div
+                  key={row.id}
+                  className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+                >
+                  <span className={cn("u-nums", delta < 0 ? "text-ink-secondary" : "text-zinc-900")}>
+                    {delta >= 0 ? "+" : "−"}
+                    {fmtCurrency(Math.abs(delta))}
+                  </span>
+                  <span className="text-ink-secondary flex-1 truncate">
+                    {CREDIT_SOURCE_LABELS[row.source] || row.source}
+                    {row.note ? ` · ${row.note}` : ""}
+                  </span>
+                  <span className="text-ink-tertiary u-nums">
+                    {fmtCurrency(Number(row.balance_after || 0))}
+                  </span>
+                  <span className="text-ink-tertiary">{fmtDate(row.created_at)}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : loaded ? (
+          <div className="text-12 text-ink-tertiary">No credit history yet</div>
+        ) : null}
+      </CardBody>
+    </Card>
+  );
+}
+
 function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
   return (
     <Card className="mb-5">
@@ -3352,7 +3616,7 @@ export default function Customer360ProfileV2({
   };
 
   const balanceOwed = invoices
-    .filter((i) => i.status !== "paid")
+    .filter((i) => i.status !== "paid" && i.status !== "prepaid")
     .reduce(
       (s, i) =>
         s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0),
@@ -4480,6 +4744,11 @@ export default function Customer360ProfileV2({
                 customerName={`${c.firstName} ${c.lastName}`}
                 canCharge={isAdmin}
               />{" "}
+              <AccountCreditPanelV2
+                customerId={c.id}
+                customerName={`${c.firstName} ${c.lastName}`}
+                canEdit={isAdmin}
+              />{" "}
               {isAdmin && (
                 <AnnualPrepayPanelV2
                   customer={c}
@@ -4518,7 +4787,11 @@ export default function Customer360ProfileV2({
                         <TD>
                           {" "}
                           <Badge
-                            tone={inv.status === "paid" ? "strong" : "alert"}
+                            tone={
+                              inv.status === "paid" || inv.status === "prepaid"
+                                ? "strong"
+                                : "alert"
+                            }
                           >
                             {inv.status}
                           </Badge>{" "}

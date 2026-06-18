@@ -940,11 +940,10 @@ function lawnScoreLabel(score) {
 function lawnMetricRows(assessment = {}) {
   const scores = assessment.scores || {};
   return [
-    ['Turf density', scores.turfDensity],
-    ['Weed suppression', scores.weedSuppression],
-    ['Color health', scores.colorHealth],
-    ['Fungus control', scores.fungusControl],
-    ['Thatch level', scores.thatchScore],
+    ['Density / Coverage', scores.turfDensity],
+    ['Weed Cleanliness', scores.weedSuppression],
+    ['Color / Nutrients', scores.colorHealth],
+    ['Stress / Damage', scores.stressDamage],
   ];
 }
 

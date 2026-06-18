@@ -1241,15 +1241,30 @@ function singleVoiceObservation(value) {
   return idx === -1 ? text : text.slice(0, idx).trim();
 }
 
+// Consolidated Stress/Damage for the customer view. New rows store it directly;
+// pre-stress_damage rows fall back to the worst of the two legacy signals
+// (fungus_control, thatch_level) so historical reports still render a value.
+function resolveStressDamage(row = {}) {
+  const explicit = lawnScoreValue(row.stress_damage);
+  if (explicit != null) return explicit;
+  const fungus = lawnScoreValue(row.fungus_control);
+  const thatch = lawnScoreValue(row.thatch_level);
+  if (fungus == null && thatch == null) return null;
+  return Math.min(fungus ?? 100, thatch ?? 100);
+}
+
 function calculateLawnOverallScore(row = {}) {
   const explicit = lawnScoreValue(row.overall_score);
-  if (explicit != null) return explicit;
+  // Trust a stored overall only when it was computed under the four-category
+  // model (rows that have stress_damage). Legacy rows keep an overall from the
+  // old five-signal weighting, so recompute them to match the four displayed
+  // bars (Density/Weed/Color/Stress) instead of hidden fungus/thatch weights.
+  if (explicit != null && row.stress_damage != null) return explicit;
   const turf = Number(row.turf_density) || 0;
   const weeds = Number(row.weed_suppression) || 0;
   const color = Number(row.color_health) || 0;
-  const fungus = Number(row.fungus_control) || 0;
-  const thatch = Number(row.thatch_level) || 0;
-  return Math.round((turf * 0.30) + (weeds * 0.25) + (color * 0.20) + (fungus * 0.15) + (thatch * 0.10));
+  const stress = resolveStressDamage(row) ?? 0;
+  return Math.round((turf * 0.30) + (weeds * 0.25) + (color * 0.25) + (stress * 0.20));
 }
 
 function formatLawnAssessmentScore(row) {
@@ -1261,6 +1276,10 @@ function formatLawnAssessmentScore(row) {
     turfDensity: lawnScoreValue(row.turf_density),
     weedSuppression: lawnScoreValue(row.weed_suppression),
     colorHealth: lawnScoreValue(row.color_health),
+    stressDamage: resolveStressDamage(row),
+    // fungusControl/thatchScore retained for back-compat consumers; the customer
+    // report now presents the four consolidated categories (stressDamage folds
+    // these in).
     fungusControl: lawnScoreValue(row.fungus_control),
     thatchScore: lawnScoreValue(row.thatch_level),
     season: row.season || null,
@@ -1684,6 +1703,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
         turfDensity: (Number(assessment.turf_density) || 0) - (Number(initialRow.turf_density) || 0),
         weedSuppression: (Number(assessment.weed_suppression) || 0) - (Number(initialRow.weed_suppression) || 0),
         colorHealth: (Number(assessment.color_health) || 0) - (Number(initialRow.color_health) || 0),
+        stressDamage: (resolveStressDamage(assessment) ?? 0) - (resolveStressDamage(initialRow) ?? 0),
         fungusControl: (Number(assessment.fungus_control) || 0) - (Number(initialRow.fungus_control) || 0),
         thatchLevel: (Number(assessment.thatch_level) || 0) - (Number(initialRow.thatch_level) || 0),
         overall: calculateLawnOverallScore(assessment) - calculateLawnOverallScore(initialRow),
@@ -1705,6 +1725,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     turfDensity: lawnScoreValue(row.turf_density),
     weedSuppression: lawnScoreValue(row.weed_suppression),
     colorHealth: lawnScoreValue(row.color_health),
+    stressDamage: resolveStressDamage(row),
+    // fungusControl/thatchScore retained for back-compat consumers; the customer
+    // report now presents the four consolidated categories (stressDamage folds
+    // these in).
     fungusControl: lawnScoreValue(row.fungus_control),
     thatchScore: lawnScoreValue(row.thatch_level),
     season: row.season || null,
