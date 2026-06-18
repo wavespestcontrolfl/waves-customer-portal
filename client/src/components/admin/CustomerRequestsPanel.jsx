@@ -33,11 +33,16 @@ export default function CustomerRequestsPanel({ customerId }) {
     setError("");
     try {
       const res = await adminFetch(
-        `/admin/requests?customerId=${encodeURIComponent(customerId)}&limit=50`
+        `/admin/requests?customerId=${encodeURIComponent(customerId)}&openOnly=true&limit=50`
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      const rows = (data.requests || []).filter((r) => r.status !== "resolved");
+      // Server already excludes terminal statuses (resolved/closed/cancelled)
+      // via openOnly before paginating; this filter is a defensive backstop so
+      // a stale build can't surface an already-handled row here.
+      const rows = (data.requests || []).filter(
+        (r) => !["resolved", "closed", "cancelled"].includes(r.status)
+      );
       setRequests(rows);
     } catch (e) {
       setError(e?.message || "Could not load requests");

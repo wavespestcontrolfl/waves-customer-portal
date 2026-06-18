@@ -20,6 +20,10 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 // Lifecycle the customer portal already renders (PortalPage STATUS_ORDER).
 const STATUSES = ['new', 'acknowledged', 'scheduled', 'resolved'];
+// Terminal statuses that release the estimate add-on dedup index
+// (uniq_service_requests_open_estimate_requested_service). `openOnly` excludes
+// these so a paginated list can never bury an unresolved request.
+const TERMINAL_STATUSES = ['resolved', 'closed', 'cancelled'];
 const STATUS_LABELS = {
   new: 'New',
   acknowledged: 'Acknowledged',
@@ -35,6 +39,7 @@ function stripHtml(value) {
 
 const listSchema = Joi.object({
   status: Joi.string().valid(...STATUSES).optional(),
+  openOnly: Joi.boolean().optional(),
   customerId: Joi.string().uuid().optional(),
   limit: Joi.number().integer().min(1).max(200).default(50),
   page: Joi.number().integer().min(1).default(1),
@@ -51,7 +56,7 @@ router.get('/', async (req, res, next) => {
   try {
     const { value, error } = listSchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { status, customerId, limit, page } = value;
+    const { status, openOnly, customerId, limit, page } = value;
     const offset = (page - 1) * limit;
 
     let query = db('service_requests')
@@ -78,6 +83,7 @@ router.get('/', async (req, res, next) => {
         'technicians.name as assignedTechnician',
       );
     if (status) query = query.where('service_requests.status', status);
+    if (openOnly) query = query.whereNotIn('service_requests.status', TERMINAL_STATUSES);
     if (customerId) query = query.where('service_requests.customer_id', customerId);
 
     const requests = await query
@@ -87,6 +93,7 @@ router.get('/', async (req, res, next) => {
 
     let countQuery = db('service_requests');
     if (status) countQuery = countQuery.where({ status });
+    if (openOnly) countQuery = countQuery.whereNotIn('status', TERMINAL_STATUSES);
     if (customerId) countQuery = countQuery.where({ customer_id: customerId });
     const total = await countQuery.count('id as count').first();
 

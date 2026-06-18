@@ -4244,6 +4244,7 @@ export default function Customer360ProfileV2({
           {/* OVERVIEW */}
           {activeTab === "overview" && (
             <div>
+              <CustomerRequestsPanel customerId={customerId} />
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}
@@ -4631,7 +4632,6 @@ export default function Customer360ProfileV2({
                   ))}
                 </div>
               )}
-              <CustomerRequestsPanel customerId={customerId} />
               {upcomingScheduled.length > 0 && (
                 <div className="mt-5">
                   {" "}
