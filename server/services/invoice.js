@@ -2236,10 +2236,20 @@ const InvoiceService = {
         "This invoice is part of an annual prepay term — edit the term (Annual prepay) instead of the invoice",
       );
     }
-    const activePlan = await db("payment_plans")
-      .where({ invoice_id: id, status: "active" })
-      .first()
-      .catch(() => null);
+    // Fail CLOSED: if we can't confirm the payment-plan state (migration
+    // drift, permissions, transient DB error) we must refuse the edit rather
+    // than assume there's no plan — assuming none is exactly the committed-
+    // workflow drift this guard prevents.
+    let activePlan = null;
+    try {
+      activePlan = await db("payment_plans")
+        .where({ invoice_id: id, status: "active" })
+        .first();
+    } catch (err) {
+      throw new Error(
+        `Could not verify the active payment plan state — refusing to edit (${err.message})`,
+      );
+    }
     if (activePlan) {
       throw new Error(
         "This invoice has an active payment plan — cancel the plan before editing the invoice",
@@ -2305,10 +2315,23 @@ const InvoiceService = {
       );
     }
 
+    // Apply the column-based editability predicates ATOMICALLY on the write so
+    // a worker that stamps stripe_payment_intent_id, flips status off
+    // draft/scheduled, or links a prepay term between the guard read above and
+    // this write cannot be clobbered. If those predicates no longer hold the
+    // update matches zero rows and we fail closed instead of rewriting money.
     const [invoice] = await db("invoices")
       .where({ id })
+      .whereIn("status", ["draft", "scheduled"])
+      .whereNull("stripe_payment_intent_id")
+      .whereNull("annual_prepay_term_id")
       .update(data)
       .returning("*");
+    if (!invoice) {
+      throw new Error(
+        "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
+      );
+    }
     return invoice;
   },
 

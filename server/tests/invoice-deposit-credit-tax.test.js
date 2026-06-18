@@ -431,12 +431,39 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       .rejects.toThrow(/active payment plan/);
   });
 
+  it('fails closed when the atomic write matches no row (status/PI/prepay raced after the guard read)', async () => {
+    const stored = { id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]' };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          // Predicate-guarded write no longer matches — simulates a concurrent
+          // worker stamping the PI / flipping status between read and write.
+          update: jest.fn(() => ({ returning: jest.fn(async () => []) })),
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await expect(InvoiceService.update('inv-1', { notes: 'late' }))
+      .rejects.toThrow(/can be edited/);
+  });
+
   it('allows a metadata-only edit on a clean draft (no line_items, no retotal)', async () => {
     const stored = { id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]' };
     db.mockImplementation((table) => {
       if (table === 'invoices') {
         const q = {
           where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
         };
