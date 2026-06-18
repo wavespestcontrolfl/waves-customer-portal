@@ -16,6 +16,23 @@ const db = require('../models/db');
 
 const SETUP_FEE_WAIVED_RE = /setup fee waived|setup.*waiv/i;
 
+// coverage_* columns were added after the original annual_prepay_terms table.
+// Detect them once so an environment that has the table but not yet the
+// coverage migration (rolling deploy / preview DB) still loads the base term
+// instead of throwing and dropping the whole annual-prepay payload.
+let coverageColsCache = null;
+async function annualPrepayCoverageCols() {
+  if (coverageColsCache) return coverageColsCache;
+  try {
+    const cols = await db('annual_prepay_terms').columnInfo();
+    coverageColsCache = ['coverage_service_type', 'coverage_visit_count', 'coverage_cadence']
+      .filter((c) => cols[c]);
+  } catch {
+    coverageColsCache = [];
+  }
+  return coverageColsCache;
+}
+
 function lineItemsArray(invoice) {
   const raw = invoice?.line_items;
   if (Array.isArray(raw)) return raw;
@@ -61,11 +78,12 @@ async function loadInvoiceAnnualPrepay(invoice) {
   if (!invoice?.annual_prepay_term_id) return null;
   const hasTable = await db.schema.hasTable('annual_prepay_terms').catch(() => false);
   if (!hasTable) return null;
+  const coverageCols = await annualPrepayCoverageCols();
   const term = await db('annual_prepay_terms')
     .where({ id: invoice.annual_prepay_term_id })
     .first(
       'id', 'status', 'plan_label', 'monthly_rate', 'prepay_amount', 'term_start', 'term_end',
-      'coverage_service_type', 'coverage_visit_count', 'coverage_cadence',
+      ...coverageCols,
     )
     .catch(() => null);
   if (!term) return null;

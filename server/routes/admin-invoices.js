@@ -19,6 +19,12 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 
+// Per-customer advisory-lock namespace for annual-prepay term creation. MUST
+// match admin-customers.js so flagging an invoice here serializes against the
+// Customer 360 annual-prepay routes (a shared lock prevents two routes from
+// concurrently creating overlapping coverage for the same customer).
+const ANNUAL_PREPAY_LOCK_NS = 0x4150;
+
 function aggregateAttachmentMemoryStorage() {
   return {
     _handleFile(req, file, cb) {
@@ -937,51 +943,77 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       });
     }
 
+    const coverageEnabled = !!resolvedServiceType && resolvedVisitCount !== undefined;
+
+    // Visit coverage needs a positive amount to stamp: applyPrepaidCoverageForTerm
+    // bails unless prepay_amount > 0, and completion billing only skips visits
+    // with a positive prepaid_amount. A zero-amount coverage term would look
+    // configured but still re-invoice every covered visit, so reject it.
+    if (coverageEnabled && !(resolvedAmount > 0)) {
+      return res.status(400).json({
+        error: 'A positive prepay amount is required to enable visit coverage',
+      });
+    }
+
     // Per-customer overlap guard, mirroring the Customer 360 annual-prepay
     // routes. Now that this endpoint can create real visit coverage, a second
     // overlapping term would let two terms fight over the same scheduled visits
-    // (double-counting / mis-stamping). Block it — but only for a brand-new
-    // coverage term: re-flagging THIS invoice (idempotent per prepay_invoice_id)
-    // is an edit of its own term, and a display-only flag doesn't own visits.
-    if (resolvedServiceType && resolvedVisitCount !== undefined) {
-      const ownTerm = await db('annual_prepay_terms')
-        .where({ prepay_invoice_id: invoice.id })
-        .first('id');
-      if (!ownTerm) {
-        const startYmd = dateOnly(start) || etDateString();
-        const overlapTerm = await db('annual_prepay_terms')
-          .where({ customer_id: invoice.customer_id })
-          .where(function overlapStatus() {
-            this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
-              .orWhere(function lapsedRenewalStillInTerm() {
-                this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
-              });
-          })
-          .orderBy('term_end', 'desc')
-          .first('id', 'term_end');
-        const overlapEnd = overlapTerm ? dateOnly(overlapTerm.term_end) : null;
-        if (overlapEnd && startYmd <= overlapEnd) {
-          return res.status(409).json({
-            error: `Customer already has an annual prepay term through ${overlapEnd}. Use a coverage start date after ${overlapEnd}, or apply coverage from that term.`,
-            activeTermId: overlapTerm.id,
-            activeTermEnd: overlapEnd,
-          });
-        }
-      }
-    }
+    // (double-counting / mis-stamping). Serialize the check + create under the
+    // same per-customer advisory lock + transaction the Customer 360 routes use,
+    // so two concurrent flags can't both pass a preflight read and insert
+    // overlapping coverage. Always run the check when coverage is enabled
+    // (incl. editing an existing term), excluding only this invoice's own term;
+    // a display-only flag owns no visits, so it skips the guard.
+    let term;
+    try {
+      term = await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(?, hashtext(?))',
+          [ANNUAL_PREPAY_LOCK_NS, String(invoice.customer_id)],
+        );
 
-    const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
-      customerId: invoice.customer_id,
-      prepayInvoiceId: invoice.id,
-      planLabel: cleanOptionalText(planLabel) || invoice.title || 'Annual Prepay',
-      monthlyRate: resolvedMonthly,
-      prepayAmount: resolvedAmount,
-      termStart: start || null,
-      termEnd: end || null,
-      coverageServiceType: resolvedServiceType,
-      coverageVisitCount: resolvedVisitCount,
-      coverageCadence: resolvedCadence,
-    });
+        if (coverageEnabled) {
+          const ownTerm = await trx('annual_prepay_terms')
+            .where({ prepay_invoice_id: invoice.id })
+            .first('id');
+          const startYmd = dateOnly(start) || etDateString();
+          let overlapQuery = trx('annual_prepay_terms')
+            .where({ customer_id: invoice.customer_id })
+            .where(function overlapStatus() {
+              this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
+                .orWhere(function lapsedRenewalStillInTerm() {
+                  this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+                });
+            });
+          if (ownTerm) overlapQuery = overlapQuery.whereNot('id', ownTerm.id);
+          const overlapTerm = await overlapQuery.orderBy('term_end', 'desc').first('id', 'term_end');
+          const overlapEnd = overlapTerm ? dateOnly(overlapTerm.term_end) : null;
+          if (overlapEnd && startYmd <= overlapEnd) {
+            const message = `Customer already has an annual prepay term through ${overlapEnd}. Use a coverage start date after ${overlapEnd}, or apply coverage from that term.`;
+            const err = new Error(message);
+            err.annualPrepayOverlap = { error: message, activeTermId: overlapTerm.id, activeTermEnd: overlapEnd };
+            throw err;
+          }
+        }
+
+        return AnnualPrepayRenewals.createTermForAnnualPrepay({
+          customerId: invoice.customer_id,
+          prepayInvoiceId: invoice.id,
+          planLabel: cleanOptionalText(planLabel) || invoice.title || 'Annual Prepay',
+          monthlyRate: resolvedMonthly,
+          prepayAmount: resolvedAmount,
+          termStart: start || null,
+          termEnd: end || null,
+          coverageServiceType: resolvedServiceType,
+          coverageVisitCount: resolvedVisitCount,
+          coverageCadence: resolvedCadence,
+          conn: trx,
+        });
+      });
+    } catch (err) {
+      if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      throw err;
+    }
     if (!term) {
       return res.status(409).json({ error: 'Annual prepay is not available for this account' });
     }
