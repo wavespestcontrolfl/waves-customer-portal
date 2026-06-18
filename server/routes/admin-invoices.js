@@ -566,8 +566,16 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         });
         let sendResult = null;
         if (sendImmediately) {
-          try { sendResult = await InvoiceService.sendViaSMS(invoice.id); }
-          catch (sendErr) {
+          try {
+            // Third-party Bill-To: a payer-billed invoice can't be delivered by
+            // the homeowner SMS (sendViaSMS short-circuits to payer_billed and
+            // never finalizes). Route it through the email-capable path so the
+            // payer AP inbox receives it and the invoice is finalized; self-pay
+            // invoices keep the existing SMS-only immediate send.
+            sendResult = invoice.payer_id
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id)
+              : await InvoiceService.sendViaSMS(invoice.id);
+          } catch (sendErr) {
             logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
             sendResult = { sent: false, error: sendErr.message };
           }

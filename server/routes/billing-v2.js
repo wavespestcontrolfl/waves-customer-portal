@@ -16,7 +16,7 @@ router.use(authenticate);
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const requestedLimit = parseInt(limit) || 20;
+    const requestedLimit = parseInt(req.query.limit) || 20;
     const service = await PaymentRouter.getServiceForCustomer(req.customerId);
 
     // Third-party Bill-To: a payment against a payer-billed invoice belongs to
@@ -249,11 +249,6 @@ router.get('/balance', async (req, res, next) => {
   try {
     const customer = req.customer;
 
-    const upcoming = await db('payments')
-      .where({ customer_id: req.customerId, status: 'upcoming' })
-      .sum('amount as total')
-      .first();
-
     // Third-party Bill-To: a payment against a payer-billed invoice is the
     // payer's, even though the row sits under the homeowner's customer_id. Pull
     // this customer's payer-billed invoice ids once so the failed-balance sum and
@@ -290,10 +285,15 @@ router.get('/balance', async (req, res, next) => {
       .filter((p) => !isPayerPayment(p))
       .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 
-    const nextPayment = await db('payments')
+    // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
+    // homeowner's upcomingCharges / nextCharge never show the payer's amount/date.
+    const upcomingRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'upcoming' })
       .orderBy('payment_date', 'asc')
-      .first();
+      .select('amount', 'payment_date', 'description', 'metadata');
+    const visibleUpcoming = upcomingRows.filter((p) => !isPayerPayment(p));
+    const upcomingTotal = visibleUpcoming.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+    const nextPayment = visibleUpcoming[0] || null;
 
     // Check for unpaid invoices. Third-party Bill-To: a payer-billed invoice is
     // owed by the payer, not the homeowner — exclude it so the logged-in
@@ -319,7 +319,7 @@ router.get('/balance', async (req, res, next) => {
 
     res.json({
       currentBalance: failedTotal + parseFloat(unpaidInvoices?.total || 0),
-      upcomingCharges: parseFloat(upcoming?.total || 0),
+      upcomingCharges: upcomingTotal,
       monthlyRate: parseFloat(customer.monthly_rate || 0),
       tier: customer.waveguard_tier,
       processor: 'stripe',
