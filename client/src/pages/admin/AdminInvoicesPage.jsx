@@ -3301,9 +3301,10 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
       .then((data) => {
         if (!alive) return;
         const term = data?.annual_prepay;
-        // The customer's real recurring service (server-derived, never the
-        // invoice title). Used only to seed a brand-new term's covered service.
-        const suggestedService = data?.suggested_coverage_service_type || "";
+        // The customer's real recurring coverage (server-derived: service label
+        // + the cadence the server would infer; never the invoice title). Used
+        // only to seed a brand-new term's covered service/cadence/visit count.
+        const suggested = data?.suggested_coverage || null;
         if (term) {
           setExisting(term);
           if (term.termStart) setStart(invoiceDateOnly(term.termStart) || start);
@@ -3327,11 +3328,19 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
             setCadence(term.coverageCadence);
             setCadenceExplicit(true);
           }
-        } else if (suggestedService) {
+        } else if (suggested?.serviceType) {
           // Brand-new term: default the covered service to the customer's real
           // recurring service so the standard Mark-prepaid flow auto-covers the
-          // visits. Operator can clear it for a display-only flag.
-          setServiceType(suggestedService);
+          // visits. Also adopt the server-inferred cadence (and its visit count)
+          // so a non-quarterly plan isn't stamped as quarterly. Marked explicit
+          // since it's a real suggestion. Operator can clear/override any of it.
+          setServiceType(suggested.serviceType);
+          if (suggested.cadence) {
+            setCadence(suggested.cadence);
+            setCadenceExplicit(true);
+            const preset = ANNUAL_PREPAY_CADENCE_VISITS[suggested.cadence];
+            if (preset) setVisitCount(preset);
+          }
         }
       })
       .catch(() => {})

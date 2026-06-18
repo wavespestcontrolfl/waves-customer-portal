@@ -25,40 +25,43 @@ const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 // concurrently creating overlapping coverage for the same customer).
 const ANNUAL_PREPAY_LOCK_NS = 0x4150;
 
-// Best-guess coverage service type for the annual-prepay modal: the customer's
-// most common active recurring scheduled-service label (NOT the invoice title,
-// which can be a plan label like "WaveGuard Bronze Annual Prepay"). Used only to
-// prefill a brand-new term so the standard Mark-prepaid flow auto-covers the
-// real visits; the operator can clear/override it. Returns null when the
-// customer has no schedulable history to infer from.
+// Best-guess coverage for the annual-prepay modal: the customer's most common
+// active RECURRING scheduled-service label (NOT the invoice title, which can be
+// a plan label like "WaveGuard Bronze Annual Prepay"), plus the cadence the
+// server would infer for it. Used only to prefill a brand-new term so the
+// standard Mark-prepaid flow auto-covers the real recurring visits; the operator
+// can clear/override it. Returns null unless the customer has recurring history
+// to infer from — a one-off/initial treatment must NOT seed annual coverage.
 async function suggestCoverageServiceType(customerId) {
   if (!customerId) return null;
   try {
     const rows = await db('scheduled_services')
       .where({ customer_id: customerId })
+      .where('is_recurring', true)
       .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
       .whereNotNull('service_type')
       .orderBy('scheduled_date', 'desc')
       .limit(100)
-      .select('service_type', 'is_recurring');
+      .select('service_type');
     if (!rows.length) return null;
-    const mostCommon = (list) => {
-      const counts = new Map();
-      for (const row of list) {
-        const t = String(row.service_type || '').trim();
-        if (t) counts.set(t, (counts.get(t) || 0) + 1);
-      }
-      let best = null;
-      let bestN = 0;
-      for (const [t, n] of counts) {
-        if (n > bestN) { best = t; bestN = n; }
-      }
-      return best;
-    };
-    // Prefer recurring visits (the coverage the prepay is meant to fund); fall
-    // back to any non-cancelled service if the customer has no recurring rows.
-    const recurring = rows.filter((row) => row.is_recurring);
-    return mostCommon(recurring.length ? recurring : rows);
+    const counts = new Map();
+    for (const row of rows) {
+      const t = String(row.service_type || '').trim();
+      if (t) counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    let serviceType = null;
+    let bestN = 0;
+    for (const [t, n] of counts) {
+      if (n > bestN) { serviceType = t; bestN = n; }
+    }
+    if (!serviceType) return null;
+    // Derive the cadence with the SAME inference the seeder uses at activation,
+    // so the prefilled cadence matches what will actually be stamped (no drift,
+    // and a "Monthly Lawn Care" suggestion isn't stamped as quarterly).
+    const cadence = AnnualPrepayRenewals._private.inferCoverageCadence({
+      coverage_service_type: serviceType,
+    });
+    return { serviceType, cadence: cadence || null };
   } catch (err) {
     logger.warn(`[admin-invoices] coverage service suggestion skipped: ${err.message}`);
     return null;
@@ -483,7 +486,7 @@ router.get('/:id', async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     // Coverage-service suggestion for the annual-prepay modal (real recurring
     // service, not the invoice title). Modal-only; safe to attach for all GETs.
-    invoice.suggested_coverage_service_type = await suggestCoverageServiceType(invoice.customer_id);
+    invoice.suggested_coverage = await suggestCoverageServiceType(invoice.customer_id);
     res.json(invoice);
   } catch (err) { next(err); }
 });
@@ -998,6 +1001,20 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // Coverage stamps prepay_amount split across the covered visits, and
+    // completion billing only suppresses a visit when its prepaid_amount >= the
+    // amount it would bill. If the operator lowers the prepay amount below the
+    // invoice total, the per-visit stamp can fall short and covered visits still
+    // invoice despite the customer having paid. Require the stamped amount to be
+    // at least the invoice total when coverage is enabled (the Customer 360 flow
+    // likewise stamps the full invoice total).
+    const invoiceTotalForCoverage = Number(invoice.total) || 0;
+    if (coverageEnabled && resolvedAmount + 1e-9 < invoiceTotalForCoverage) {
+      return res.status(400).json({
+        error: `When covering visits, the prepay amount must be at least the invoice total ($${invoiceTotalForCoverage.toFixed(2)}).`,
+      });
+    }
+
     // Per-customer overlap guard, mirroring the Customer 360 annual-prepay
     // routes. Now that this endpoint can create real visit coverage, a second
     // overlapping term would let two terms fight over the same scheduled visits
@@ -1019,7 +1036,12 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           const ownTerm = await trx('annual_prepay_terms')
             .where({ prepay_invoice_id: invoice.id })
             .first('id');
+          // Proper interval overlap: this term's [start, end] vs the other
+          // term's [term_start, term_end]. Comparing only this start against the
+          // latest other term_end would falsely 409 when editing an older term
+          // whose window ends before a separate future renewal begins.
           const startYmd = dateOnly(start) || etDateString();
+          const endYmd = dateOnly(end) || addMonthsSameDay(startYmd, 12);
           let overlapQuery = trx('annual_prepay_terms')
             .where({ customer_id: invoice.customer_id })
             .where(function overlapStatus() {
@@ -1027,14 +1049,17 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
                 .orWhere(function lapsedRenewalStillInTerm() {
                   this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
                 });
-            });
+            })
+            .where('term_start', '<=', endYmd)
+            .where('term_end', '>=', startYmd);
           if (ownTerm) overlapQuery = overlapQuery.whereNot('id', ownTerm.id);
-          const overlapTerm = await overlapQuery.orderBy('term_end', 'desc').first('id', 'term_end');
-          const overlapEnd = overlapTerm ? dateOnly(overlapTerm.term_end) : null;
-          if (overlapEnd && startYmd <= overlapEnd) {
-            const message = `Customer already has an annual prepay term through ${overlapEnd}. Use a coverage start date after ${overlapEnd}, or apply coverage from that term.`;
+          const overlapTerm = await overlapQuery.orderBy('term_start', 'asc').first('id', 'term_start', 'term_end');
+          if (overlapTerm) {
+            const oStart = dateOnly(overlapTerm.term_start);
+            const oEnd = dateOnly(overlapTerm.term_end);
+            const message = `Customer already has an annual prepay term covering ${oStart} through ${oEnd}. Choose coverage dates outside that window, or apply coverage from that term.`;
             const err = new Error(message);
-            err.annualPrepayOverlap = { error: message, activeTermId: overlapTerm.id, activeTermEnd: overlapEnd };
+            err.annualPrepayOverlap = { error: message, activeTermId: overlapTerm.id, activeTermStart: oStart, activeTermEnd: oEnd };
             throw err;
           }
         }
