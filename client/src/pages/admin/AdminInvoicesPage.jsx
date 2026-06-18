@@ -3301,6 +3301,9 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
       .then((data) => {
         if (!alive) return;
         const term = data?.annual_prepay;
+        // The customer's real recurring service (server-derived, never the
+        // invoice title). Used only to seed a brand-new term's covered service.
+        const suggestedService = data?.suggested_coverage_service_type || "";
         if (term) {
           setExisting(term);
           if (term.termStart) setStart(invoiceDateOnly(term.termStart) || start);
@@ -3309,9 +3312,9 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           if (term.prepayAmount != null) {
             setAmount(String(Number(term.prepayAmount).toFixed(2)));
           }
-          // Reflect the stored coverage exactly. A legacy display-only term has
-          // no coverage service type — clear the title-derived default so an
-          // unrelated edit doesn't silently convert it into visit coverage.
+          // Reflect the stored coverage exactly. A display-only term has no
+          // coverage service type — keep it blank so an unrelated edit doesn't
+          // silently convert it into visit coverage.
           setServiceType(term.coverageServiceType || "");
           if (term.coverageVisitCount != null) {
             setVisitCount(String(term.coverageVisitCount));
@@ -3324,6 +3327,11 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
             setCadence(term.coverageCadence);
             setCadenceExplicit(true);
           }
+        } else if (suggestedService) {
+          // Brand-new term: default the covered service to the customer's real
+          // recurring service so the standard Mark-prepaid flow auto-covers the
+          // visits. Operator can clear it for a display-only flag.
+          setServiceType(suggestedService);
         }
       })
       .catch(() => {})

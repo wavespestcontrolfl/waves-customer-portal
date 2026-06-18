@@ -25,6 +25,46 @@ const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 // concurrently creating overlapping coverage for the same customer).
 const ANNUAL_PREPAY_LOCK_NS = 0x4150;
 
+// Best-guess coverage service type for the annual-prepay modal: the customer's
+// most common active recurring scheduled-service label (NOT the invoice title,
+// which can be a plan label like "WaveGuard Bronze Annual Prepay"). Used only to
+// prefill a brand-new term so the standard Mark-prepaid flow auto-covers the
+// real visits; the operator can clear/override it. Returns null when the
+// customer has no schedulable history to infer from.
+async function suggestCoverageServiceType(customerId) {
+  if (!customerId) return null;
+  try {
+    const rows = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .whereNotNull('service_type')
+      .orderBy('scheduled_date', 'desc')
+      .limit(100)
+      .select('service_type', 'is_recurring');
+    if (!rows.length) return null;
+    const mostCommon = (list) => {
+      const counts = new Map();
+      for (const row of list) {
+        const t = String(row.service_type || '').trim();
+        if (t) counts.set(t, (counts.get(t) || 0) + 1);
+      }
+      let best = null;
+      let bestN = 0;
+      for (const [t, n] of counts) {
+        if (n > bestN) { best = t; bestN = n; }
+      }
+      return best;
+    };
+    // Prefer recurring visits (the coverage the prepay is meant to fund); fall
+    // back to any non-cancelled service if the customer has no recurring rows.
+    const recurring = rows.filter((row) => row.is_recurring);
+    return mostCommon(recurring.length ? recurring : rows);
+  } catch (err) {
+    logger.warn(`[admin-invoices] coverage service suggestion skipped: ${err.message}`);
+    return null;
+  }
+}
+
 function aggregateAttachmentMemoryStorage() {
   return {
     _handleFile(req, file, cb) {
@@ -441,6 +481,9 @@ router.get('/:id', async (req, res, next) => {
   try {
     const invoice = await InvoiceService.getById(req.params.id);
     if (!invoice) return res.status(404).json({ error: 'Not found' });
+    // Coverage-service suggestion for the annual-prepay modal (real recurring
+    // service, not the invoice title). Modal-only; safe to attach for all GETs.
+    invoice.suggested_coverage_service_type = await suggestCoverageServiceType(invoice.customer_id);
     res.json(invoice);
   } catch (err) { next(err); }
 });
