@@ -2325,16 +2325,26 @@ const InvoiceService = {
       // if discount reporting needs to be exact to the penny on edited drafts.
     }
 
-    // Apply the column-based editability predicates ATOMICALLY on the write so
-    // a worker that stamps stripe_payment_intent_id, flips status off
-    // draft/scheduled, or links a prepay term between the guard read above and
-    // this write cannot be clobbered. If those predicates no longer hold the
-    // update matches zero rows and we fail closed instead of rewriting money.
+    // Apply the editability predicates ATOMICALLY on the write so a worker
+    // that mutates the same invoice between the guard read above and this write
+    // cannot be clobbered. Column predicates cover a worker stamping
+    // stripe_payment_intent_id, flipping status off draft/scheduled, or linking
+    // a prepay term; the correlated NOT EXISTS covers a second admin creating
+    // an active payment plan (POST /:id/payment-plan inserts into payment_plans
+    // without stamping the invoice, so it isn't visible as a column here). If
+    // any predicate no longer holds the update matches zero rows and we fail
+    // closed instead of rewriting money.
     const [invoice] = await db("invoices")
       .where({ id })
       .whereIn("status", ["draft", "scheduled"])
       .whereNull("stripe_payment_intent_id")
       .whereNull("annual_prepay_term_id")
+      .whereNotExists(function () {
+        this.select(db.raw("1"))
+          .from("payment_plans")
+          .whereRaw("payment_plans.invoice_id = invoices.id")
+          .where("payment_plans.status", "active");
+      })
       .update(data)
       .returning("*");
     if (!invoice) {

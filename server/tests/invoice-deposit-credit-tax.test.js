@@ -439,9 +439,11 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           where: jest.fn(() => q),
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
           first: jest.fn(async () => stored),
           // Predicate-guarded write no longer matches — simulates a concurrent
-          // worker stamping the PI / flipping status between read and write.
+          // worker stamping the PI / flipping status / creating a payment plan
+          // between read and write.
           update: jest.fn(() => ({ returning: jest.fn(async () => []) })),
         };
         return q;
@@ -464,6 +466,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           where: jest.fn(() => q),
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
         };
