@@ -2505,7 +2505,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       };
     }
   }
-  if (sel.has('TOPDRESS')) services.topDressing = { depth: 'eighth' };
+  if (sel.has('TOPDRESS')) {
+    const topDressArea = Math.max(0, Number(o.topDressArea) || 0);
+    services.topDressing = topDressArea > 0
+      ? { depth: 'eighth', lawnSqFt: topDressArea }
+      : { depth: 'eighth' };
+  }
   if (sel.has('DETHATCH')) {
     services.dethatching = {
       cleanupLevel: o.dethatchingCleanupLevel || o.cleanupLevel || 'none',

@@ -3183,7 +3183,7 @@ function EstimateToolView() {
                   </div>{" "}
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
                     Optional — enter sq ft for just the front or back yard.
-                    Leave blank to price the full lawn estimate.
+                    Leave blank to auto-estimate from the property's lawn area.
                   </div>{" "}
                 </div>
               )}
