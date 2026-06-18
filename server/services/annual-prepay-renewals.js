@@ -1084,6 +1084,31 @@ async function createTermForAnnualPrepay({
         }
       }
     }
+    // When the coverage SELECTION changes on an edit (service type / visit count
+    // / cadence) — not just the date window handled above — the visits that
+    // matched the OLD selection keep their annual-prepay prepaid stamps, since
+    // attachScheduledServices/applyPrepaidCoverageForTerm only add+stamp the new
+    // matches and never clear the old ones. Completion billing keys on
+    // prepaid_amount, so those stale visits would keep skipping billing on top
+    // of the newly covered ones. Clear the term's stamps here so the
+    // refreshTermSnapshot below re-stamps ONLY the new selection; visits dropped
+    // from coverage fall back to normal billing. Method-scoped + non-completed
+    // (clearPrepaidStampsForTerm), so manual cash/Zelle stamps and already
+    // serviced visits are untouched. Best-effort, mirroring the window block.
+    const coverageSelectionChanged = (
+      (normalizedCoverageServiceType !== undefined
+        && (normalizeCoverageServiceType(existing.coverage_service_type) || null)
+          !== (normalizedCoverageServiceType || null))
+      || (normalizedCoverageVisitCount !== undefined
+        && (normalizeCoverageVisitCount(existing.coverage_visit_count) || null)
+          !== (normalizedCoverageVisitCount || null))
+      || (normalizedCoverageCadence !== undefined
+        && (normalizeCoverageCadence(existing.coverage_cadence) || null)
+          !== (normalizedCoverageCadence || null))
+    );
+    if (coverageSelectionChanged) {
+      await clearPrepaidStampsForTerm(existing.id, conn);
+    }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
