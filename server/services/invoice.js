@@ -2313,6 +2313,16 @@ const InvoiceService = {
           taxRate: updates.tax_rate,
         }),
       );
+      // KNOWN LIMITATION (accepted): a line-item retotal here updates
+      // invoices.discount_amount but does NOT reconcile the create-time
+      // discount audit trail (invoice_discounts rows + discounts.times_applied
+      // / total_discount_given). So changing/removing a discount on a draft can
+      // drift the Discounts report from the edited invoice. Left as-is on
+      // purpose: it's reporting-only (no money/ledger/customer impact), the
+      // counters are already created-time best-effort and count unsent/voided
+      // drafts too, and there is no reversal primitive to mirror — reconciling
+      // would have to reverse + re-record across multiple create paths. Revisit
+      // if discount reporting needs to be exact to the penny on edited drafts.
     }
 
     // Apply the column-based editability predicates ATOMICALLY on the write so
