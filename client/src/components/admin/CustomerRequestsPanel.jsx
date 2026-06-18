@@ -63,11 +63,23 @@ export default function CustomerRequestsPanel({ customerId }) {
         method: "PATCH",
         body: JSON.stringify({ status: "resolved" }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `HTTP ${res.status}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const updated = data.request;
+      const isTerminal =
+        updated && ["resolved", "closed", "cancelled"].includes(updated.status);
+      if (isTerminal) {
+        // Confirmed handled (by us, or by a racing writer who resolved it first).
+        setRequests((prev) => prev.filter((r) => r.id !== id));
+      } else {
+        // Our resolve lost a race: admin-requests returns statusChanged:false
+        // with the still-open row. Reflect reality instead of optimistically
+        // hiding it (which would falsely imply the dedup lock was released).
+        setRequests((prev) =>
+          prev.map((r) => (r.id === id ? { ...r, ...(updated || {}) } : r))
+        );
+        setError("That request changed before you could resolve it — still open.");
       }
-      setRequests((prev) => prev.filter((r) => r.id !== id));
     } catch (e) {
       setError(e?.message || "Could not update request");
     } finally {
