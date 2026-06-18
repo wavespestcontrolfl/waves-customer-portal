@@ -1194,6 +1194,7 @@ router.get('/', async (req, res, next) => {
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier, monthlyRate: parseFloat(s.monthly_rate || 0),
+        isCallback: !!s.is_callback,
         leadScore: s.lead_score, lawnType: s.lawn_type,
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
@@ -2319,18 +2320,46 @@ router.put('/:id/update-details', async (req, res, next) => {
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
-    // Re-service edits: the appointment editor can switch an existing job to a
-    // re-service type but never sends `isCallback` (or `serviceId`), so mirror
-    // the POST-path auto-flag and reclassify from the service-type label on any
-    // service_type change. Without this, switching a visit to "Lawn/Pest Control
-    // Re-Service" leaves is_callback=false, so completion bills monthly dues and
-    // the visit drops out of callback reporting. Recompute (not just set) so
-    // switching away from a re-service also clears the flag.
+    // Re-service edits: the appointment editor can switch a job's service type
+    // but never sends `isCallback` or `serviceId`. Two subtleties make a naive
+    // recompute wrong:
+    //   1. The schedule-calendar DTO hands the editor a *normalized* label
+    //      (service-normalizer collapses "Pest Control Re-Service" → "Pest
+    //      Control Service"), so an unrelated save echoes a non-re-service label
+    //      back — recomputing from it would clear a real callback flag.
+    //   2. Completion-profile resolution keys off `service_id` first
+    //      (service-completion-profiles lookupServiceForScheduledService), so a
+    //      stale id from the prior service would route the wrong report flow.
+    // Compare *normalized* service types to tell an actual change from a no-op
+    // save, and only then touch the flag / service_id.
     if (serviceType !== undefined) {
       try {
         const cols = await db('scheduled_services').columnInfo();
-        if (cols.is_callback) updates.is_callback = isReService({ serviceType });
-      } catch { /* column may not exist pre-migration — non-blocking */ }
+        const existing = await db('scheduled_services').where({ id: req.params.id })
+          .first('service_type', 'service_id');
+        const incomingIsReService = isReService({ serviceType });
+        const typeActuallyChanged = normalizeServiceType(existing?.service_type || '')
+          !== normalizeServiceType(serviceType || '');
+        if (incomingIsReService) {
+          if (cols.is_callback) updates.is_callback = true;
+          // Point service_id at the matching re-service catalog row so profile
+          // resolution stays correct even after the label is normalized on a
+          // later save. lawn vs pest is inferred from the selected label.
+          if (cols.service_id && typeActuallyChanged) {
+            const reKey = /lawn/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
+            const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
+            updates.service_id = reSvc?.id || null;
+          }
+        } else if (typeActuallyChanged) {
+          // Genuinely changed away from a re-service: clear the callback flag and
+          // the now-stale re-service service_id so completion re-resolves the
+          // profile from the new service_type.
+          if (cols.is_callback) updates.is_callback = false;
+          if (cols.service_id) updates.service_id = null;
+        }
+        // else: no-op save of a normalized re-service label — leave is_callback
+        // and service_id untouched so the persisted callback survives.
+      } catch { /* columns may not exist pre-migration — non-blocking */ }
     }
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;

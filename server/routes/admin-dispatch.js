@@ -1114,6 +1114,7 @@ router.get('/:date?', async (req, res, next) => {
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier,
         monthlyRate: parseFloat(s.monthly_rate || 0),
+        isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
