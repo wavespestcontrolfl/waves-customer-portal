@@ -25,13 +25,33 @@ const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 // concurrently creating overlapping coverage for the same customer).
 const ANNUAL_PREPAY_LOCK_NS = 0x4150;
 
+// Map a recurring_interval_days value (used by the scheduler's "Custom (every N
+// days)" option, and by month-based patterns stored as custom) to an annual-
+// prepay coverage cadence, with tolerance. Returns null for intervals that don't
+// correspond to a supported coverage cadence (e.g. weekly/biweekly or an
+// arbitrary custom gap) so we never guess one.
+function cadenceFromIntervalDays(days) {
+  const d = Number(days);
+  if (!Number.isFinite(d) || d <= 17) return null; // daily/weekly/biweekly: not coverage cadences
+  if (d >= 26 && d <= 35) return 'monthly';        // ~30
+  if (d >= 38 && d <= 48) return 'every_6_weeks';  // ~42
+  if (d >= 55 && d <= 66) return 'bimonthly';      // ~60
+  if (d >= 85 && d <= 96) return 'quarterly';      // ~90/91
+  if (d >= 115 && d <= 125) return 'triannual';    // ~120
+  if (d >= 170 && d <= 190) return 'semiannual';   // ~180
+  if (d >= 350 && d <= 380) return 'annual';       // ~365
+  return null;
+}
+
 // Best-guess coverage for the annual-prepay modal: the customer's most common
 // active RECURRING scheduled-service label (NOT the invoice title, which can be
-// a plan label like "WaveGuard Bronze Annual Prepay"), plus the cadence the
-// server would infer for it. Used only to prefill a brand-new term so the
+// a plan label like "WaveGuard Bronze Annual Prepay"), plus the cadence carried
+// on those real recurring rows. Used only to prefill a brand-new term so the
 // standard Mark-prepaid flow auto-covers the real recurring visits; the operator
 // can clear/override it. Returns null unless the customer has recurring history
-// to infer from — a one-off/initial treatment must NOT seed annual coverage.
+// AND we can confidently determine its cadence — a one-off/initial treatment
+// must NOT seed annual coverage, and we never guess a default cadence (the modal
+// submits the suggestion as explicit, so a wrong guess mis-stamps visits).
 async function suggestCoverageServiceType(customerId) {
   if (!customerId) return null;
   try {
@@ -55,23 +75,23 @@ async function suggestCoverageServiceType(customerId) {
       if (n > bestN) { serviceType = t; bestN = n; }
     }
     if (!serviceType) return null;
-    // Derive cadence from the chosen service's ACTUAL recurrence data first
-    // (recurring_pattern, or a 42-day interval = every 6 weeks) — a generic
-    // label like "Pest Control Service" carries its real cadence on the rows,
-    // not in the name. Fall back to the same label inference the seeder uses
-    // when there's no usable pattern, so the prefill matches what gets stamped.
-    const { normalizeCoverageCadence, inferCoverageCadence } = AnnualPrepayRenewals._private;
+    // Derive cadence ONLY from the chosen service's actual recurrence data — a
+    // generic label like "Pest Control Service" carries its real cadence on the
+    // rows, not in the name. We deliberately do NOT fall back to label inference
+    // (which defaults to quarterly): the modal treats the suggested cadence as
+    // explicit, so a guessed quarterly would mis-stamp a monthly/custom plan.
+    const { normalizeCoverageCadence } = AnnualPrepayRenewals._private;
     const cadenceCounts = new Map();
     for (const row of rows) {
       if (String(row.service_type || '').trim() !== serviceType) continue;
-      // The scheduler stores monthly "nth weekday of month" schedules as
-      // monthly_nth_weekday, which normalizeCoverageCadence doesn't recognize;
-      // map it to monthly so a monthly customer isn't prefilled as quarterly.
+      // monthly_nth_weekday (scheduler's "nth weekday of month") is monthly;
+      // normalizeCoverageCadence handles the named month cadences; custom/other
+      // patterns fall to the interval-days mapping.
       const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
       let c = rawPattern === 'monthly_nth_weekday'
         ? 'monthly'
         : normalizeCoverageCadence(row.recurring_pattern);
-      if (!c && Number(row.recurring_interval_days) === 42) c = 'every_6_weeks';
+      if (!c) c = cadenceFromIntervalDays(row.recurring_interval_days);
       if (c) cadenceCounts.set(c, (cadenceCounts.get(c) || 0) + 1);
     }
     let cadence = null;
@@ -79,8 +99,10 @@ async function suggestCoverageServiceType(customerId) {
     for (const [c, n] of cadenceCounts) {
       if (n > cadenceBest) { cadence = c; cadenceBest = n; }
     }
-    if (!cadence) cadence = inferCoverageCadence({ coverage_service_type: serviceType });
-    return { serviceType, cadence: cadence || null };
+    // No determinable cadence → no prefill, so the operator sets coverage
+    // explicitly rather than us submitting a guessed quarterly default.
+    if (!cadence) return null;
+    return { serviceType, cadence };
   } catch (err) {
     logger.warn(`[admin-invoices] coverage service suggestion skipped: ${err.message}`);
     return null;
