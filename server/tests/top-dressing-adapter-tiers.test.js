@@ -126,5 +126,9 @@ describe('top dressing adapter tiers', () => {
     // non-recurring reduction that the auto (full-lawn) path applies.
     expect(partialItem.price).toBe(priceTopDressing(8000, 'eighth', true).price);
     expect(partialItem.price).toBeLessThan(fullItem.price);
+    // The scoped area is surfaced on the customer-visible row...
+    expect(partialItem.detail).toBe('Covers 8,000 sq ft');
+    // ...but a full-lawn quote carries no scoped-area note.
+    expect(fullItem.detail || '').not.toMatch(/Covers/);
   });
 });

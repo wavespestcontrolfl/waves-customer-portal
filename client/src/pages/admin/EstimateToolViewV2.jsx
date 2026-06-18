@@ -3029,7 +3029,7 @@ export default function EstimateToolViewV2({
         recurringCustomer: form.isRecurringCustomer === "YES",
         plugArea: parseInt(form.plugArea, 10) || 0,
         plugSpacing: parseInt(form.plugSpacing, 10) || 12,
-        topDressArea: parseInt(form.topDressArea, 10) || 0,
+        topDressArea: Math.max(0, Math.round(Number(form.topDressArea) || 0)),
         dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
         dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
         dethatchingAccess: form.dethatchingAccess || "easy",

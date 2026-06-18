@@ -168,6 +168,28 @@ describe('gate interaction (intentional behavior change)', () => {
     // An entered front/back-yard area is the exact priced area — no confirmation.
     expect(needsTurfManualConfirmation(profile, ['TOPDRESS'], { topDressArea: 4000 })).toBeNull();
   });
+
+  it('exempts a Top Dressing + Plugging combo when both areas are entered', () => {
+    const record = recordFixture({ _parcel: null, _fieldEvidence: { lotSize: { sourceType: 'listing' } }, lotSize: 30000 });
+    const ai = analysisFixture(); // 24k, over the 20k gate
+    applyParcelTurfBound(ai, record);
+
+    const profile = buildEnrichedProfile(record, ai, 26.99, -82.14);
+    expect(profile.estimatedTurfSf).toBe(24000);
+
+    // Both bounded add-ons with explicit areas clear together.
+    expect(
+      needsTurfManualConfirmation(profile, ['TOPDRESS', 'PLUGGING'], { topDressArea: 4000, plugArea: 1000 }),
+    ).toBeNull();
+    // If one of them is missing its area, the gate still fires.
+    expect(
+      needsTurfManualConfirmation(profile, ['TOPDRESS', 'PLUGGING'], { topDressArea: 4000 }),
+    ).not.toBeNull();
+    // A whole-lawn service in the mix still requires confirmation.
+    expect(
+      needsTurfManualConfirmation(profile, ['TOPDRESS', 'LAWN'], { topDressArea: 4000 }),
+    ).not.toBeNull();
+  });
 });
 
 describe('enriched parcel block', () => {
