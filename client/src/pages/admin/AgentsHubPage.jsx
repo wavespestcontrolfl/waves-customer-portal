@@ -29,22 +29,25 @@
  */
 import React, { useState, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Bot, LayoutGrid, ListChecks, MessageSquareDashed, RefreshCw } from "lucide-react";
+import { Bot, LayoutGrid, ListChecks, MessageSquareDashed, DatabaseZap, RefreshCw } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
 import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
+import DataHygienePage from "./DataHygienePage";
 
 const TAB_KEY = "tab";
 const TABS = {
   OVERVIEW: "overview",
   DECISIONS: "decisions",
   SHADOW: "shadow",
+  HYGIENE: "hygiene",
 };
 const TAB_LIST = [
   { key: TABS.OVERVIEW, label: "Overview", Icon: LayoutGrid },
   { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
+  { key: TABS.HYGIENE, label: "Data Hygiene", Icon: DatabaseZap },
 ];
 const VALID_TABS = TAB_LIST.map((t) => t.key);
 
@@ -91,7 +94,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName="grid-cols-3"
+        navGridClassName="grid-cols-4"
         action={
           tab === TABS.OVERVIEW
             ? {
@@ -108,8 +111,10 @@ export default function AgentsHubPage() {
           <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
         ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
-        ) : (
+        ) : tab === TABS.SHADOW ? (
           <AgentShadowDraftsPage embedded />
+        ) : (
+          <DataHygienePage embedded />
         )}
       </div>
     </div>

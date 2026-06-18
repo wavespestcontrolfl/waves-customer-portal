@@ -67,6 +67,29 @@ function formatUnitCost(value, unit) {
   return `${formatMoney(numeric, decimals)}/${unit}`;
 }
 
+// Format a single $/unit value, widening decimals for sub-cent prices.
+function formatPerUnit(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  const abs = Math.abs(numeric);
+  let decimals = 2;
+  if (abs < 0.1) decimals = 4;
+  if (abs < 0.001) decimals = 6;
+  return `$${numeric.toFixed(decimals)}`;
+}
+
+// Render a server-provided unitPrices array as "$/g · $/oz · $/lb".
+function formatUnitPriceList(unitPrices) {
+  if (!Array.isArray(unitPrices) || unitPrices.length === 0) return null;
+  const parts = unitPrices
+    .map((u) => {
+      const formatted = formatPerUnit(u?.pricePerUnit);
+      return formatted ? `${formatted}/${u.unit}` : null;
+    })
+    .filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 const sCard = {
   background: D.card,
   border: `1px solid ${D.border}`,
@@ -2347,10 +2370,12 @@ function ProductsTab({
                     style={{
                       ...tdS,
                       fontFamily: "'JetBrains Mono', monospace",
-                      color: p.costPerUnit ? D.text : D.muted,
+                      fontSize: 11,
+                      color: p.unitPrices?.length || p.costPerUnit ? D.text : D.muted,
                     }}
                   >
-                    {formatUnitCost(p.costPerUnit, p.costUnit)}
+                    {formatUnitPriceList(p.unitPrices) ||
+                      formatUnitCost(p.costPerUnit, p.costUnit)}
                   </td>{" "}
                   <td style={{ ...tdS, fontSize: 12 }}>
                     {p.bestVendor || "—"}
@@ -2945,17 +2970,24 @@ function ExpandedProduct({
                 {vp.quantity && (
                   <span style={{ color: D.muted }}>{vp.quantity}</span>
                 )}
-                {vp.normalizedUnitPrice != null && vp.normalizedUnit && (
-                  <span
-                    style={{
-                      color: D.muted,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 11,
-                    }}
-                  >
-                    {formatUnitCost(vp.normalizedUnitPrice, vp.normalizedUnit)}
-                  </span>
-                )}
+                {(() => {
+                  const unitLabel =
+                    formatUnitPriceList(vp.unitPrices) ||
+                    (vp.normalizedUnitPrice != null && vp.normalizedUnit
+                      ? formatUnitCost(vp.normalizedUnitPrice, vp.normalizedUnit)
+                      : null);
+                  return unitLabel ? (
+                    <span
+                      style={{
+                        color: D.muted,
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontSize: 11,
+                      }}
+                    >
+                      {unitLabel}
+                    </span>
+                  ) : null;
+                })()}
                 {vp.sourceType && (
                   <span style={sBadge(`${D.teal}14`, D.muted)}>
                     {String(vp.sourceType).replace(/_/g, " ")}

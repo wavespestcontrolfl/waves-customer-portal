@@ -541,6 +541,7 @@ function invoiceNotSendableError(invoice) {
   if (invoice.status === "sending")
     return new Error("Invoice send already in progress");
   if (invoice.status === "paid") return new Error("Cannot send a paid invoice");
+  if (invoice.status === "prepaid") return new Error("Cannot send a prepaid invoice");
   if (invoice.status === "processing")
     return new Error("Cannot send an invoice while payment is processing");
   if (invoice.status === "void")
@@ -2049,6 +2050,7 @@ const InvoiceService = {
       "sent",
       "viewed",
       "paid",
+      "prepaid",
       "processing",
       "void",
       "refunded",
@@ -2232,6 +2234,16 @@ const InvoiceService = {
       if (hasDepositCreditLine(invoice.line_items) || hasDepositCreditLine(updates.line_items)) {
         throw new Error(
           "This invoice carries an estimate deposit credit — void it (the deposit returns to the customer's ledger) and create a replacement instead of editing line items",
+        );
+      }
+      // Account-credit-prepaid invoices are likewise edit-locked on line items:
+      // the consumed customer_credit_ledger entry is backed dollar-for-dollar
+      // against the current total, and a retotal here can neither re-cap nor
+      // rebalance that ledger (an edit below the applied credit would leave the
+      // ledger over-consumed). Reverse the credit before editing.
+      if (parseFloat(invoice.credit_applied || 0) > 0) {
+        throw new Error(
+          "This invoice has account credit applied (prepaid) — reverse the applied credit before editing line items",
         );
       }
       const customer = await db("customers")
@@ -2479,17 +2491,17 @@ const InvoiceService = {
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')) as outstanding",
         ),
         db.raw(
-          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
+          "COUNT(*) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled') AND (status = 'overdue' OR due_date < ?)) as overdue",
           [today],
         ),
         db.raw(
           "COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected",
         ),
         db.raw(
-          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
+          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
         ),
       )
       .whereNull("archived_at");

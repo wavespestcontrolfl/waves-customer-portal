@@ -193,6 +193,18 @@ export default function MobileCheckoutSheet({
       if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
       const data = await r.json();
       if (!data.invoiceId) throw new Error('No invoice id returned');
+      // The visit's invoice is already settled (paid, or prepaid/covered by
+      // account credit) — there's nothing to collect, so don't open tender
+      // options (each would fail against the terminal invoice). Tell the tech.
+      if (data.alreadyPaid) {
+        setMintError(
+          data.status === 'prepaid'
+            ? 'This visit is already covered by account credit — nothing to collect.'
+            : 'This visit is already paid — nothing to collect.',
+        );
+        setMinting(false);
+        return;
+      }
       const confirmedTotal = Number(data.total);
       onChargeSuccess?.({
         service,

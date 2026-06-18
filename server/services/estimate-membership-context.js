@@ -230,7 +230,8 @@ async function loadLastPaidAmountsByKey(database, customerId) {
   const amounts = {};
   try {
     const rows = await database('invoices')
-      .where({ customer_id: customerId, status: 'paid' })
+      .where({ customer_id: customerId })
+      .whereIn('status', ['paid', 'prepaid'])
       .whereNotNull('service_type')
       .orderBy('paid_at', 'desc')
       .limit(100)

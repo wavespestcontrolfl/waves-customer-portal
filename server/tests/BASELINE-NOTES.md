@@ -8,6 +8,25 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-06-17 lawn 35% margin recalibration
+
+Recurring lawn repriced from a 45% to a 35% fully loaded margin floor (owner
+directive). The 45% market bracket curve was scaled by 0.55/0.65 ≈ 0.846 and the
+cost-floor target dropped to 0.35 — both move because Lawn V2 is cost-floor
+authoritative (charged price = max(market bracket, cost floor at target)). See
+`pricing_changelog` entry `claude-2026-06-17` and migration
+`20260617120000_lawn_pricing_35_margin_recalibration` (updates
+`pricing_config.lawn_pricing_v2` + the `lawn_pricing_brackets` table + `services`
+base prices, the DB-authoritative sources synced by `syncConstantsFromDB`).
+
+Local baselines fully recaptured (`CAPTURE_BASELINE=1 LOCAL=1`) for both
+`pricing-engine.local-baseline.json` and
+`pricing-engine-v1-adapter.local-baseline.json`; the diff is confined to
+`lawn_care` line items and the dependent bundle summary totals (no other service
+line moved — verified via diff). The DB baselines (`*.baseline.json`) carry the
+prior lawn values and are pending post-deploy recapture against prod with
+`CAPTURE_BASELINE=1` once the new prices are live.
+
 ## 2026-06-06 mosquito market reprice
 
 Mosquito (recurring + one-time) repriced to the SW-FL market band — it ran ~2x

@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const bounceRecovery = require('../services/email-bounce-recovery');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
@@ -240,7 +241,7 @@ async function handleEvent(ev) {
   const automationSend = !newsletterDelivery ? await db('automation_step_sends')
     .where({ sendgrid_message_id: messageId })
     .first() : null;
-  const emailMessage = !newsletterDelivery && !automationSend
+  let emailMessage = !newsletterDelivery && !automationSend
     ? await db('email_messages')
       .where({ provider_message_id: messageId })
       .modify((q) => {
@@ -248,6 +249,54 @@ async function handleEvent(ev) {
       })
       .first()
     : null;
+  // Fallback: tracked sends carry custom_args.email_message_id (+ send_attempt_token),
+  // echoed on every event. If the X-Message-Id isn't bound yet (a webhook can race
+  // the post-send provider_message_id write), resolve the row by that id and backfill.
+  // SAFETY: a retried idempotent send reuses the same email_messages.id with a NEW
+  // provider id + NEW attempt token, so accept the fallback only when the row is
+  // already bound to THIS event's message id, OR it is unbound AND the event's
+  // send_attempt_token matches the row's current token. Otherwise a delayed event
+  // from a prior attempt could mis-terminalize the row or mis-trigger recovery.
+  if (!emailMessage && !newsletterDelivery && !automationSend && ev.email_message_id) {
+    const candidate = await db('email_messages')
+      .where({ id: String(ev.email_message_id) })
+      .modify((q) => {
+        if (email) q.whereRaw('LOWER(recipient_email_snapshot) = ?', [String(email).toLowerCase()]);
+      })
+      .first()
+      .catch(() => null);
+    const boundHere = candidate?.provider_message_id
+      && String(candidate.provider_message_id) === String(messageId || '');
+    const tokenMatches = candidate?.send_attempt_token && ev.send_attempt_token
+      && String(candidate.send_attempt_token) === String(ev.send_attempt_token);
+    const acceptable = candidate && (boundHere || (!candidate.provider_message_id && tokenMatches));
+    if (acceptable && boundHere) {
+      emailMessage = candidate;
+    } else if (acceptable && messageId) {
+      // Unbound + token matched the snapshot. Re-assert the token IN the backfill
+      // so a retry that reclaimed the row (and changed send_attempt_token) between
+      // the read above and this write can't have a stale event bind onto it. If
+      // the guarded update touches 0 rows, the row was superseded — treat as
+      // untracked and ignore this event.
+      const bound = await db('email_messages')
+        .where({ id: candidate.id, send_attempt_token: ev.send_attempt_token })
+        .whereNull('provider_message_id')
+        .update({ provider_message_id: messageId, updated_at: new Date() })
+        .catch(() => 0);
+      if (Number(bound) > 0) {
+        emailMessage = { ...candidate, provider_message_id: messageId };
+      } else {
+        // 0 rows: either the row was superseded (token changed) OR the sender bound
+        // the SAME provider_message_id concurrently between our read and write.
+        // Reread and accept only if it is now bound to THIS event's message id, so a
+        // genuine hard bounce isn't dropped — but a superseded/other-id row still is.
+        const reread = await db('email_messages').where({ id: candidate.id }).first().catch(() => null);
+        if (reread && String(reread.provider_message_id || '') === String(messageId || '')) {
+          emailMessage = reread;
+        }
+      }
+    }
+  }
 
   if (newsletterDelivery) {
     await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
@@ -258,20 +307,39 @@ async function handleEvent(ev) {
     return;
   }
   if (emailMessage) {
-    await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
+    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
+    // Bounce recovery runs AFTER the event transaction commits, only when the
+    // event was newly processed (so a SendGrid redelivery can't re-trigger it).
+    // It does a network re-send (sendgrid.sendOne), so dispatch it WITHOUT
+    // awaiting — a slow Mail Send must not hold the /events request open and
+    // stall the rest of the batch (SendGrid would retry the whole batch even
+    // though this event is already marked processed). Best-effort, fire-and-forget.
+    if (processedNew) {
+      if (bounceRecovery.isHardBounceEvent(ev)) {
+        bounceRecovery.attemptRecovery(emailMessage, ev)
+          .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery failed for ${messageId}: ${err.message}`));
+      } else if (String(ev.event || '').toLowerCase() === 'delivered' && bounceRecovery.isRecoveryMessage(emailMessage)) {
+        bounceRecovery.commitRecoveryOnDelivery(emailMessage)
+          .catch((err) => logger.error(`[sendgrid-webhook] recovery commit failed for ${messageId}: ${err.message}`));
+      }
+    }
     return;
   }
   // Untracked send — ignore.
   return;
 }
 
+// Returns true when this call actually processed the event (handler ran), false
+// when it was a deduped redelivery. Callers use this to fire post-commit side
+// effects (e.g. bounce recovery) exactly once per event.
 async function processWebhookEvent(ev, messageId, email, handler) {
   const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
   if (!eventId) {
     await handler(db);
-    return;
+    return true;
   }
 
+  let processed = false;
   await db.transaction(async (trx) => {
     const inserted = await trx('sendgrid_webhook_events')
       .insert({
@@ -295,7 +363,9 @@ async function processWebhookEvent(ev, messageId, email, handler) {
         processed_at: new Date(),
         updated_at: new Date(),
       });
+    processed = true;
   });
+  return processed;
 }
 
 /**

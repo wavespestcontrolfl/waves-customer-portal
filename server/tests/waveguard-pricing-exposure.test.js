@@ -1,7 +1,10 @@
 const { priceLawnCare } = require('../services/pricing-engine');
 const protocols = require('../config/protocols.json');
 
-const TARGET_COLLECTED_MARGIN = 0.55;
+// Collected-margin policy floor for recurring lawn (lowered 45% → 35% on
+// 2026-06-17 per owner directive; the protocol-material basis here runs a hair
+// above the engine's cost-floor basis, min observed 0.3515).
+const TARGET_COLLECTED_MARGIN = 0.35;
 const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 const TIERS = ['standard', 'enhanced', 'premium'];
 const TURF_SIZES = [3000, 4500, 8000, 10000, 12000, 15000, 20000];

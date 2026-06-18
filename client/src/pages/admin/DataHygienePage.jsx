@@ -72,7 +72,7 @@ function percent(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
-export default function DataHygienePage() {
+export default function DataHygienePage({ embedded = false } = {}) {
   const [status, setStatus] = useState("pending");
   const [data, setData] = useState({ proposals: [] });
   const [metrics, setMetrics] = useState(null);
@@ -220,12 +220,14 @@ export default function DataHygienePage() {
 
   return (
     <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
-      <AdminCommandHeader
-        eyebrow="System"
-        title="Data Hygiene"
-        description="Review proposed cleanup from customer communications before it updates live property data."
-        icon={DatabaseZap}
-      />
+      {!embedded && (
+        <AdminCommandHeader
+          eyebrow="System"
+          title="Data Hygiene"
+          description="Review proposed cleanup from customer communications before it updates live property data."
+          icon={DatabaseZap}
+        />
+      )}
 
       <div style={{ padding: 20, display: "grid", gap: 14 }}>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>

@@ -381,6 +381,7 @@ router.post('/:token/confirm', async (req, res, next) => {
       }
     }
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
+    if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
     if (invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
       return res.status(409).json({ error: 'Invoice has a different active payment' });

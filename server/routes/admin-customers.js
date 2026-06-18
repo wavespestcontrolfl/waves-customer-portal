@@ -14,6 +14,7 @@ const { listCustomerPrepaidPlans } = require('../services/prepaid-series');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
+const CustomerCredit = require('../services/customer-credit');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -594,7 +595,7 @@ function applyCustomerListFilters(query, filters) {
   return query;
 }
 
-async function auditCustomerMutation(req, action, customerId, metadata = {}, critical = false) {
+async function auditCustomerMutation(req, action, customerId, metadata = {}, critical = false, trx = null) {
   await recordAuditEvent({
     actor_type: 'technician',
     actor_id: req.technicianId || null,
@@ -605,6 +606,7 @@ async function auditCustomerMutation(req, action, customerId, metadata = {}, cri
     ip_address: req.ip,
     user_agent: req.get('user-agent') || null,
     critical,
+    trx,
   });
 }
 
@@ -1746,7 +1748,7 @@ router.get('/:id', async (req, res, next) => {
     const COLLECTIBLE_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid']);
     const mappedInvoices = (invoices || []).map(inv => {
       const total = parseFloat(inv.total || 0);
-      const isPaid = inv.status === 'paid';
+      const isPaid = inv.status === 'paid' || inv.status === 'prepaid';
       const isCollectible = COLLECTIBLE_STATUSES.has(inv.status);
       return {
         ...inv,
@@ -2706,6 +2708,124 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
     const StripeService = require('../services/stripe');
     const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /:id/credits — account credit balance + ledger history for Customer 360.
+router.get('/:id/credits', async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const [balance, ledger] = await Promise.all([
+      CustomerCredit.getBalance(req.params.id),
+      CustomerCredit.getLedger(req.params.id, { limit: 100 }),
+    ]);
+    res.json({ balance: balance || 0, ledger });
+  } catch (err) { next(err); }
+});
+
+// POST /:id/credits — issue or adjust account credit (Customer 360).
+// Body: {
+//   amount: number    — non-zero; negative deducts
+//   kind:   string     — 'prepayment' | 'goodwill' | 'adjustment'
+//   method?: string    — cash/check/zelle/card/other (prepayment only)
+//   note?:  string
+// }
+//
+// Revenue recognition (owner decision 2026-06-17): cash arrives as a
+// `prepayment` — that books a paid `payments` row HERE, at receipt, so it
+// counts as collected/taxable once. `goodwill`/`adjustment` are non-cash and
+// book NO payments row (they must never inflate revenue/tax). Applying credit
+// to an invoice later does NOT re-book revenue (see apply-credit). Referral /
+// invoice-application ledger sources are system-driven and not settable here.
+// Manual prepayment methods are off-gateway tenders only. `card` is
+// deliberately excluded — a card prepayment must go through Stripe (which
+// also applies the required card surcharge); booking it as a manual cash-
+// style payments row here would grant spendable credit + paid revenue
+// without actually collecting the card.
+const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+
+router.post('/:id/credits', requireAdmin, async (req, res, next) => {
+  try {
+    const { amount, kind = 'goodwill', method = 'other', note } = req.body || {};
+    const delta = Number(amount);
+    if (!Number.isFinite(delta) || delta === 0) {
+      return res.status(400).json({ error: 'amount must be a non-zero number' });
+    }
+    if (!['prepayment', 'goodwill', 'adjustment'].includes(kind)) {
+      return res.status(400).json({ error: "kind must be 'prepayment', 'goodwill', or 'adjustment'" });
+    }
+    // A prepayment is money received — it only makes sense as an addition.
+    if (kind === 'prepayment' && delta < 0) {
+      return res.status(400).json({ error: 'A prepayment must be a positive amount (money received)' });
+    }
+    if (kind === 'prepayment' && !CREDIT_PAYMENT_METHODS.includes(method)) {
+      return res.status(400).json({ error: `method must be one of: ${CREDIT_PAYMENT_METHODS.join(', ')}` });
+    }
+    const createdBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
+    // Ledger provenance: adjustments are corrections; prepayment + goodwill
+    // are both operator-issued credit ('manual').
+    const ledgerSource = kind === 'adjustment' ? 'adjustment' : 'manual';
+    const trimmedNote = note ? String(note).slice(0, 1000) : null;
+    const ledgerNote = [kind, kind === 'prepayment' ? method : null, trimmedNote]
+      .filter(Boolean).join(' · ').slice(0, 1000);
+
+    let result;
+    try {
+      result = await db.transaction(async (trx) => {
+        const movement = await CustomerCredit.postCreditMovement({
+          customerId: req.params.id,
+          delta,
+          source: ledgerSource,
+          note: ledgerNote || null,
+          createdBy,
+        }, trx);
+
+        // Cash-backed prepayment → recognize the money at receipt. No
+        // invoice link yet (the credit is held until applied). Matches the
+        // off-gateway payments-ledger convention (null processor).
+        if (kind === 'prepayment') {
+          await trx('payments').insert({
+            customer_id: req.params.id,
+            amount: CustomerCredit.round2(delta),
+            status: 'paid',
+            description: `Account credit prepayment — ${method}`
+              + (trimmedNote ? ` (${trimmedNote.slice(0, 120)})` : ''),
+            payment_date: etDateString(),
+            metadata: JSON.stringify({ source: 'account_credit_prepayment', method }),
+          });
+        }
+
+        // Critical audit inside the same transaction as the money movement —
+        // if it fails, the whole thing rolls back, so a retry can't duplicate
+        // the credit/revenue (the operator never sees a committed-but-errored
+        // state).
+        await auditCustomerMutation(req, 'customer.credit.adjust', req.params.id, {
+          amount: CustomerCredit.round2(delta),
+          kind,
+          method: kind === 'prepayment' ? method : null,
+          balance_after: movement.balanceAfter,
+          note: trimmedNote,
+        }, true, trx);
+
+        return movement;
+      });
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+      throw err;
+    }
+
+    await db('activity_log').insert({
+      customer_id: req.params.id,
+      action: 'account_credit_adjusted',
+      description: `Account credit ${delta >= 0 ? 'added' : 'deducted'} `
+        + `$${Math.abs(CustomerCredit.round2(delta)).toFixed(2)} (${kind}`
+        + `${kind === 'prepayment' ? ` · ${method}` : ''})`
+        + ` — balance $${result.balanceAfter.toFixed(2)} · ${createdBy}`
+        + (trimmedNote ? ` — ${trimmedNote.slice(0, 120)}` : ''),
+    }).catch((e) => logger.warn(`[admin-customers] credit activity_log insert failed: ${e.message}`));
+
+    res.json({ ok: true, balance: result.balanceAfter, entry: result.entry });
   } catch (err) { next(err); }
 });
 

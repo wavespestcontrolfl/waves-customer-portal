@@ -263,6 +263,16 @@ async function markEstimateManuallyAccepted({
       void AccountMembershipEmail.sendMembershipStarted(conversion.membershipEmail)
         .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${acceptedEstimate.id}: ${err.message}`));
     }
+
+    // Conversion runs inside the accept transaction, so the converter defers
+    // the new-recurring welcome SMS. Fire it post-commit. Idempotent, so if the
+    // operator later schedules the visit on the calendar (admin-schedule's own
+    // welcome path) it won't double-send.
+    if (conversion?.welcomeSms) {
+      const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
+      void sendNewRecurringWelcome(conversion.welcomeSms)
+        .catch((err) => logger.warn(`[estimate-manual-acceptance] welcome SMS failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+    }
   }
 
   return {

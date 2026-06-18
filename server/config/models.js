@@ -47,11 +47,11 @@
  * (owner directive: best model for the job). The provider + model per feature
  * lives in the ROUTES map below; services dispatch through services/llm/call.js.
  * Each route is { provider, model } and is env-overridable, so every model ID —
- * Anthropic or not — stays discoverable in one place. PR1 wires only the
- * low-risk routes (leadClassify, knowledgeAnswer); the rest are listed as
- * PLANNED until their feature is migrated (shadow-first for money-adjacent;
- * managed agents stay on Anthropic). Each wired route sits behind a GATE_* flag
- * (default off) with the Anthropic path retained as fallback.
+ * Anthropic or not — stays discoverable in one place. These are the LIVE model
+ * for each feature (owner directive 2026-06-17: best model is the live model);
+ * each call site keeps an automatic fallback to Claude (Anthropic) so a provider
+ * issue never causes a gap. Managed agents stay on Anthropic. Call transcription
+ * + extraction keep their own providers in call-recording-processor.js.
  */
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || 'claude-opus-4-8';
@@ -77,21 +77,15 @@ const OPENAI_BEST        = process.env.MODEL_OPENAI_BEST   || 'gpt-5.5';
 const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash';
 
 // Per-feature routes: { provider, model }. services/llm/call.js#dispatch switches
-// on .provider. Only routes WIRED in PR1 are defined; planned ones stay commented
-// so this map never implies a feature is migrated when it isn't. The vision
-// services (lawn-assessment, satellite-analyzer) keep their own provider fan-out
-// and read GEMINI_VISION_BEST directly rather than dispatching through a route.
+// on .provider. These are the LIVE provider for each feature; each call site falls
+// back to Claude (Anthropic) on any miss, so a provider issue never causes a gap.
+// Vision services (lawn-assessment, satellite-analyzer) read GEMINI_VISION_BEST
+// directly. Call transcription + extraction keep their own providers in
+// call-recording-processor.js (intentionally not routed here).
 const ROUTES = Object.freeze({
-  leadClassify:    Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // lead-triage.js (GATE_OPENAI_LEAD_TRIAGE)
-  knowledgeAnswer: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // knowledge-bridge.js (GATE_OPENAI_KNOWLEDGE)
-  // Phase 2 — SHADOW-ONLY: run alongside the live model, logged to ai_model_comparisons;
-  // these routes never drive customer output or call routing until the data earns a flip.
-  estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // estimate-assistant.js (GATE_SHADOW_ESTIMATE_OPENAI)
-  callExtract:       Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // call-recording-processor.js (GATE_SHADOW_CALLEXTRACT_OPENAI)
-  // ── PLANNED — not yet wired ──────────────────────────────────────────
-  // taxCategorize:     { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Phase 3; needs OpenAI tool-use loop + web-search parity
-  // mondayBriefing:    { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // Managed Agent — rebuild required; stays on Anthropic
-  // contentStrategy:   { provider: PROVIDER.OPENAI, model: OPENAI_BEST } // SEO advisor swappable; backlink half is an agent
+  leadClassify:      Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // lead-triage.js — live, Claude fallback
+  knowledgeAnswer:   Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // knowledge-bridge.js — live, Claude fallback
+  estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // estimate-assistant.js — live, Claude fallback
 });
 
 module.exports = {

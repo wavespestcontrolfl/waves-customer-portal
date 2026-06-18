@@ -645,7 +645,12 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
 // bill normally again. Completed/terminal visits (PREPAID_UPDATE_EXCLUDED_STATUSES)
 // are left untouched — already serviced and not billable here. The term link is
 // kept for audit; billing-skip keys on prepaid_amount, which is now null.
-async function clearPrepaidStampsForTerm(termId, conn = db) {
+// `throwOnError` (default false) preserves the best-effort behavior used by the
+// webhook/void paths. Callers that need the clear to be atomic with a larger
+// transaction (e.g. prepaid reversal) pass `{ throwOnError: true }` so a
+// transient DB failure rolls the whole unit of work back instead of silently
+// leaving future visits stamped prepaid.
+async function clearPrepaidStampsForTerm(termId, conn = db, { throwOnError = false } = {}) {
   if (!termId) return 0;
   const cols = await scheduledServiceColumns();
   if (!cols.annual_prepay_term_id || !cols.prepaid_amount) return 0;
@@ -664,6 +669,7 @@ async function clearPrepaidStampsForTerm(termId, conn = db) {
     const cleared = await q.update(updates);
     return Array.isArray(cleared) ? cleared.length : cleared;
   } catch (err) {
+    if (throwOnError) throw err;
     logger.warn(`[annual-prepay] clear prepaid stamps skipped for term ${termId}: ${err.message}`);
     return 0;
   }

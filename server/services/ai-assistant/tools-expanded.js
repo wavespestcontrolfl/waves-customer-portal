@@ -199,7 +199,7 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
       if (!invoiceId) {
         const unpaid = await db('invoices')
           .where({ customer_id: customerId })
-          .whereNotIn('status', ['paid', 'void'])
+          .whereNotIn('status', ['paid', 'prepaid', 'void'])
           .orderBy('created_at', 'desc')
           .first();
 

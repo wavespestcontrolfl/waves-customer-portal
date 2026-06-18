@@ -347,6 +347,10 @@ describe('invoice assertInvoiceVoidable', () => {
     expect(() => assertInvoiceVoidable('processing')).toThrow(/in flight/);
   });
 
+  test('prepaid invoice — refuse to void (credit would be stranded)', () => {
+    expect(() => assertInvoiceVoidable('prepaid')).toThrow(/prepaid|credit/);
+  });
+
   test('draft / sent / viewed / overdue / void — voidable (no throw)', () => {
     for (const s of ['draft', 'sent', 'viewed', 'overdue', 'void']) {
       expect(() => assertInvoiceVoidable(s)).not.toThrow();
@@ -357,11 +361,11 @@ describe('invoice assertInvoiceVoidable', () => {
 describe('invoice assertInvoiceCollectible', () => {
   test('paid / processing / void / refunded / canceled cannot be collected', () => {
     expect([...INVOICE_UNCOLLECTIBLE_STATUSES]).toEqual(
-      ['paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'],
+      ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'],
     );
     for (const s of INVOICE_UNCOLLECTIBLE_STATUSES) {
       expect(isInvoiceCollectibleStatus(s)).toBe(false);
-      expect(() => assertInvoiceCollectible(s)).toThrow(/paid|processing|void|refunded|canceled/);
+      expect(() => assertInvoiceCollectible(s)).toThrow(/paid|prepaid|processing|void|refunded|canceled/);
     }
   });
 

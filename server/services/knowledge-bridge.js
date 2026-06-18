@@ -37,15 +37,16 @@ function slugify(text) {
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
-  // Optional cross-provider route (flag default off; falls back to Claude on any miss).
-  // callClaude's sole caller (generateAssessmentRecommendations) strict-JSON.parses
-  // the result, so require PARSEABLE JSON here: dispatch with jsonMode and return the
-  // normalized JSON string. Invalid/preamble OpenAI output → { ok:false } → we fall
-  // through to Claude rather than returning text the caller can't parse.
-  if (process.env.GATE_OPENAI_KNOWLEDGE === 'true') {
+  // Live model — GPT-5.5 (ROUTES.knowledgeAnswer). callClaude's sole caller
+  // (generateAssessmentRecommendations) strict-JSON.parses the result, so require
+  // PARSEABLE JSON here: dispatch with jsonMode and return the normalized JSON string.
+  // Invalid/preamble OpenAI output → { ok:false } → fall through to the Claude
+  // fallback below rather than returning text the caller can't parse.
+  {
     const r = await dispatch(ROUTES.knowledgeAnswer, { system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
     if (r.ok && r.json) return JSON.stringify(r.json);
   }
+  // Fallback — Claude (FLAGSHIP).
   if (!Anthropic) return null;
   try {
     const client = new Anthropic();
