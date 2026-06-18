@@ -140,7 +140,9 @@ export default function MobileAppointmentDetailSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
-  const price = rawPrice != null ? rawPrice : Number(service.monthlyRate || 0);
+  // Callbacks (re-services) are free for recurring/WaveGuard customers — don't
+  // preview the monthlyRate fallback (mirrors the completion panel + checkout).
+  const price = rawPrice != null ? rawPrice : (service.isCallback ? 0 : Number(service.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100

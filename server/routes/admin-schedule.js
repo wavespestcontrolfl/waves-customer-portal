@@ -16,6 +16,8 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { isReService } = require('../services/re-service');
+const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const {
   isNewRecurringSignupCandidate,
@@ -667,6 +669,15 @@ function parseMoneyInput(value, fieldName) {
   return Math.round(num * 100) / 100;
 }
 
+// A re-service callback is free for customers on a recurring plan. Delegate to
+// project-completion's hasMembership so tier normalization + non-membership
+// sentinels ('none' / 'onetime' / 'na' / 'no' / 'notset') and the monthly_rate
+// fallback stay in ONE place — a bespoke `tier !== 'none'` check here would let
+// "One-Time" / "N/A" customers slip through and get their priced visit zeroed.
+function customerEligibleForFreeCallback(customer = {}) {
+  return hasMembership(customer || {});
+}
+
 function normalizeDiscountAmount(row, clientAmount) {
   const isVariable = row?.discount_type === 'variable_amount' || row?.discount_type === 'variable_percentage';
   const raw = isVariable && clientAmount !== null && clientAmount !== undefined && clientAmount !== ''
@@ -909,6 +920,13 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
+  // Re-service callbacks must stay flagged on every cloned visit (ongoing
+  // roll-forward, recurring-alert extend/convert, following-reschedule). The
+  // parent already carries estimated_price=0; without copying is_callback,
+  // admin-dispatch's `!svc.is_callback` monthly-rate fallback would start
+  // billing a free callback — and drop it from callback reporting — once the
+  // seeded visits are exhausted.
+  if (cols.is_callback && parent?.is_callback) target.is_callback = true;
 }
 
 function formatServiceDisplay(primaryType, addons = []) {
@@ -1186,6 +1204,7 @@ router.get('/', async (req, res, next) => {
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier, monthlyRate: parseFloat(s.monthly_rate || 0),
+        isCallback: !!s.is_callback,
         leadScore: s.lead_score, lawnType: s.lawn_type,
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
@@ -1294,6 +1313,7 @@ router.get('/week', async (req, res, next) => {
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
         .select('scheduled_services.id', 'scheduled_services.customer_id',
           'scheduled_services.service_id',
+          'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
@@ -1359,6 +1379,7 @@ router.get('/week', async (req, res, next) => {
           tier: s.waveguard_tier,
           waveguardTier: s.waveguard_tier,
           monthlyRate: parseFloat(s.monthly_rate || 0),
+          isCallback: !!s.is_callback,
           autopayActive,
           autopayEnabled: s.autopay_enabled !== false,
           windowStart: s.window_start,
@@ -1675,8 +1696,34 @@ router.post('/', requireAdmin, async (req, res, next) => {
       customer,
     });
 
+    // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
+    // definition — the new-appointment modal never sends `isCallback`, so
+    // derive it server-side from the catalog row. Persisted `is_callback`
+    // drives callback reporting + completion invoice suppression downstream.
+    const resolvedIsCallback = isCallback
+      || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
+
+    // Re-service callbacks default to $0 for WaveGuard customers, but an operator
+    // can still enter an explicit charge (e.g. a re-service that also handled a
+    // billable extra). `buildAppointmentPricing` has already parsed that operator
+    // amount into `pricing.finalPrice`, so only zero it out when NO explicit
+    // price was provided — otherwise the charge is silently lost. This flag is
+    // reused for the recurring child + booster rows so callback suppression and
+    // callback reporting propagate to every generated visit, not just the first.
+    const positiveMoneyInput = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0; };
+    // Add-on lines are operator-entered charges too — `buildAppointmentPricing`
+    // already folded them into `pricing.finalPrice`. Treat a priced add-on as an
+    // explicit price so a re-service that addressed a billable extra isn't zeroed
+    // back to $0 (which would also zero the generated child/booster visits).
+    const addonHasExplicitPrice = Array.isArray(serviceAddons)
+      && serviceAddons.some((a) => positiveMoneyInput(a?.basePrice ?? a?.grossPrice ?? a?.price));
+    const explicitPriceProvided = positiveMoneyInput(primaryLinePrice)
+      || positiveMoneyInput(estimatedPrice)
+      || addonHasExplicitPrice;
+    const zeroCallbackPrice = resolvedIsCallback && customerEligibleForFreeCallback(customer) && !explicitPriceProvided;
+
     let finalPrice = pricing.finalPrice;
-    if (isCallback && customer?.waveguard_tier) finalPrice = 0;
+    if (zeroCallbackPrice) finalPrice = 0;
     const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
     const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
     const createdAppointments = [];
@@ -1705,7 +1752,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
-      if (cols.is_callback) insertData.is_callback = isCallback || false;
+      if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.source_estimate_id && linkedEstimateId) insertData.source_estimate_id = linkedEstimateId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
@@ -1785,7 +1832,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.source_estimate_id && linkedEstimateId) childData.source_estimate_id = linkedEstimateId;
         const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
-        if (cols.estimated_price && childFinancials.price != null) childData.estimated_price = childFinancials.price;
+        // Carry callback status + suppression onto recurring children: if an
+        // operator turns a re-service into a repeating cadence, every future
+        // visit must stay free and report as a callback (not bill monthly dues).
+        if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
+        if (cols.estimated_price) {
+          if (zeroCallbackPrice) childData.estimated_price = 0;
+          else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
+        }
         if (cols.primary_line_price && pricing.primaryBase != null) childData.primary_line_price = pricing.primaryBase;
         if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) childData.discount_id = pricing.appointmentDiscount.discountId;
         if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) childData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
@@ -1838,7 +1892,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
-          if (cols.estimated_price && boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
+          // Boosters off a re-service line inherit the same callback suppression.
+          if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
+          if (cols.estimated_price) {
+            if (zeroCallbackPrice) boosterData.estimated_price = 0;
+            else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
+          }
           if (cols.primary_line_price && pricing.primaryBase != null) boosterData.primary_line_price = pricing.primaryBase;
           if (cols.urgency) boosterData.urgency = urgency || 'routine';
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
@@ -2263,6 +2322,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       discountType, discountAmount, estimatedPrice,
       primaryLinePrice,
       addons,
+      serviceId,
       createInvoice,
     } = req.body;
     const updates = {};
@@ -2273,6 +2333,87 @@ router.put('/:id/update-details', async (req, res, next) => {
     // visit financials from the primary line + add-on lines.
     let replaceAddons = null;
     if (serviceType !== undefined) updates.service_type = serviceType;
+    // Re-service reclassification on edit. Callers post a service switch two
+    // ways:
+    //   • EditServiceModal sends `serviceId` (+ raw label) when the operator
+    //     picks from the library — authoritative.
+    //   • DispatchPageV2.saveEdit posts only `serviceType` (a raw library label
+    //     such as "Lawn Care Re-Service"), no serviceId.
+    // An unrelated modal save posts a *normalized* label ("Pest Control
+    // Service") with no serviceId — NOT a switch, so the persisted flag must
+    // survive. So: trust serviceId when present; otherwise fall back to the raw
+    // service_type label, but only to ADD the callback classification (a
+    // non-re-service label without serviceId can't tell "changed to regular"
+    // from "no-op save of a normalized re-service", so we leave it alone).
+    let reServiceConversionZeroPrice = false;
+    let reServiceConversion = false; // a switch INTO a re-service this edit
+    if (serviceId !== undefined || serviceType !== undefined) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        let incomingIsReService = null; // null = unknown → leave flag as-is
+        let resolvedServiceId; // undefined = don't touch service_id
+
+        if (serviceId !== undefined) {
+          const svcRow = serviceId
+            ? await db('services').where({ id: serviceId }).first('service_key', 'name').catch(() => null)
+            : null;
+          incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
+          resolvedServiceId = serviceId || null;
+        } else if (isReService({ serviceType })) {
+          // Label-only switch INTO a re-service (dispatch card). Resolve the
+          // catalog row so completion-profile resolution (keyed off service_id)
+          // is correct; lawn vs pest is inferred from the label.
+          incomingIsReService = true;
+          const reKey = /lawn/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
+          const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
+          resolvedServiceId = reSvc?.id || null;
+        }
+
+        if (incomingIsReService !== null) {
+          if (cols.is_callback) updates.is_callback = incomingIsReService;
+          if (cols.service_id && resolvedServiceId !== undefined) updates.service_id = resolvedServiceId;
+        }
+
+        if (incomingIsReService === true) {
+          reServiceConversion = true;
+          const existingRow = await db('scheduled_services').where({ id: req.params.id })
+            .first('estimated_price', 'customer_id');
+          const customerRow = await db('customers').where({ id: existingRow?.customer_id })
+            .first('waveguard_tier', 'monthly_rate').catch(() => null);
+          // The payload carries over the PRIOR service's pre-filled price AND its
+          // existing add-on rows on a switch, so "is there any price?" wrongly
+          // reads as a new charge. Compare the full INTENDED visit total in the
+          // payload (primary line + NET add-on lines — unchanged discounted
+          // add-ons arrive as basePrice + discount fields, not a net price)
+          // against the stored estimated_price: only an actual delta means the
+          // operator typed a new charge; an unchanged carryover is stale and
+          // must not bill a free callback.
+          const posMoney = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null; };
+          const addonNet = (a) => {
+            if (a == null) return 0;
+            const net = posMoney(a.price);
+            if (net != null) return net;
+            const gross = posMoney(a.basePrice ?? a.estimatedPrice);
+            if (gross == null) return 0;
+            if (a.discountType && a.discountAmount != null && a.discountAmount !== '') {
+              return Math.max(0, Math.round(applyDiscount(gross, a.discountType, Number(a.discountAmount)) * 100) / 100);
+            }
+            return gross;
+          };
+          const prevEstimate = existingRow?.estimated_price != null ? Math.round(Number(existingRow.estimated_price) * 100) / 100 : null;
+          const postedPrimary = posMoney(primaryLinePrice);
+          const postedAddonTotal = Array.isArray(addons)
+            ? addons.reduce((sum, a) => sum + addonNet(a), 0)
+            : 0;
+          const postedTotal = (postedPrimary != null || postedAddonTotal > 0)
+            ? Math.round(((postedPrimary || 0) + postedAddonTotal) * 100) / 100
+            : posMoney(estimatedPrice);
+          const explicitNewCharge = postedTotal != null && postedTotal > 0
+            && (prevEstimate == null || Math.abs(postedTotal - prevEstimate) >= 0.005);
+          reServiceConversionZeroPrice = customerEligibleForFreeCallback(customerRow || {}) && !explicitNewCharge;
+        }
+      } catch { /* columns may not exist pre-migration — non-blocking */ }
+    }
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
     if (windowStart !== undefined) updates.window_start = windowStart || null;
@@ -2505,6 +2646,26 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
       } catch {}
     }
+    // Converting an existing priced visit to a WaveGuard re-service: the price
+    // handling above may have stored the prior service's carried-over price.
+    // Zero it (callbacks default to $0) unless the operator entered an explicit
+    // new charge, which the reclassification block already detected.
+    if (reServiceConversionZeroPrice) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        if (cols.estimated_price) updates.estimated_price = 0;
+        if (cols.primary_line_price) updates.primary_line_price = 0;
+        if (cols.discount_dollars) updates.discount_dollars = null;
+      } catch { /* non-blocking */ }
+      // Also zero any carried-over add-on line prices so the visit total stays
+      // $0 — leaving priced add-on rows while estimated_price=0 would let
+      // completion re-bill them on a free callback.
+      if (Array.isArray(replaceAddons)) {
+        replaceAddons = replaceAddons.map((line) => ({
+          ...line, base: line.base != null ? 0 : line.base, price: line.price != null ? 0 : line.price, discount: null,
+        }));
+      }
+    }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
     let assignmentChanged = false;
@@ -2583,6 +2744,87 @@ router.put('/:id/update-details', async (req, res, next) => {
           await trx('scheduled_service_addons')
             .where({ scheduled_service_id: req.params.id })
             .update(addonUpdates);
+        }
+      }
+
+      // Converting an already-invoiced visit to a free re-service: charge-now and
+      // completion reuse any non-void invoice by scheduled_service_id BEFORE
+      // considering the new zero price, so a stale charge could still be
+      // presented/collected. Void unpaid invoices for this visit so the
+      // conversion actually takes effect. Paid/prepaid are left alone.
+      if (reServiceConversionZeroPrice) {
+        const hasInvoiceLink = await trx.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
+        if (hasInvoiceLink) {
+          const voidUpdate = { status: 'void' };
+          if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidUpdate.updated_at = trx.fn.now();
+          await trx('invoices')
+            .where({ scheduled_service_id: req.params.id })
+            .whereNotIn('status', ['paid', 'prepaid', 'void'])
+            .update(voidUpdate)
+            .catch(() => {});
+        }
+      }
+
+      // Propagate a re-service conversion to the rest of a recurring series. The
+      // cadence-rewrite block below only touches dates/cadence, so without this
+      // the already-seeded pending children/boosters keep the old service_id /
+      // is_callback / label / price and would bill as regular visits (and drop
+      // out of callback reporting) once the converted parent completes.
+      if (reServiceConversion) {
+        const seriesCols = await trx('scheduled_services').columnInfo();
+        const self = seriesCols.recurring_parent_id
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('recurring_parent_id')
+          : null;
+        // ONLY a parent/template edit converts the whole series. Service edits
+        // expose no apply-scope and the cadence rewrite below is parent-only, so
+        // converting a single child occurrence must not flip its siblings and
+        // stop billing the rest of the regular series.
+        const isTemplateEdit = !!seriesCols.recurring_parent_id && !self?.recurring_parent_id;
+        if (isTemplateEdit) {
+          const seriesUpdates = {};
+          if (seriesCols.is_callback && updates.is_callback !== undefined) seriesUpdates.is_callback = updates.is_callback;
+          if (seriesCols.service_id && updates.service_id !== undefined) seriesUpdates.service_id = updates.service_id;
+          // Carry the re-service label too — DTOs + completion/report descriptions
+          // read scheduled_services.service_type, so without it siblings would
+          // display/report as the old service while billed as no-charge callbacks.
+          if (updates.service_type !== undefined) seriesUpdates.service_type = updates.service_type;
+          if (reServiceConversionZeroPrice) {
+            if (seriesCols.estimated_price) seriesUpdates.estimated_price = 0;
+            if (seriesCols.primary_line_price) seriesUpdates.primary_line_price = 0;
+            if (seriesCols.discount_dollars) seriesUpdates.discount_dollars = null;
+          }
+          if (Object.keys(seriesUpdates).length > 0) {
+            const siblingIds = await trx('scheduled_services')
+              .where({ recurring_parent_id: req.params.id })
+              .whereIn('status', ['pending', 'confirmed'])
+              .pluck('id');
+            if (siblingIds.length > 0) {
+              await trx('scheduled_services').whereIn('id', siblingIds).update(seriesUpdates);
+              if (reServiceConversionZeroPrice) {
+                // Zero carried-over add-on prices on those siblings.
+                const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
+                const addonZero = {};
+                if (addonCols.estimated_price) addonZero.estimated_price = 0;
+                if (addonCols.base_price) addonZero.base_price = 0;
+                if (Object.keys(addonZero).length > 0) {
+                  await trx('scheduled_service_addons').whereIn('scheduled_service_id', siblingIds).update(addonZero).catch(() => {});
+                }
+                // Void siblings' stale unpaid invoices too — same rationale as the
+                // edited row: charge-now/completion reuse a non-void invoice by
+                // scheduled_service_id before the new $0 is considered.
+                const hasInvLink = await trx.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
+                if (hasInvLink) {
+                  const voidSiblings = { status: 'void' };
+                  if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidSiblings.updated_at = trx.fn.now();
+                  await trx('invoices')
+                    .whereIn('scheduled_service_id', siblingIds)
+                    .whereNotIn('status', ['paid', 'prepaid', 'void'])
+                    .update(voidSiblings)
+                    .catch(() => {});
+                }
+              }
+            }
+          }
         }
       }
 
@@ -3120,9 +3362,15 @@ router.post('/:id/invoice', async (req, res, next) => {
       });
     }
 
+    // Callbacks (re-services) are free by definition for recurring/WaveGuard
+    // customers — they must NOT fall back to the customer's monthly_rate, or a
+    // "Charge now" before completion would bill a full month's dues for a
+    // no-charge re-service. Mirrors the completion-path suppression in
+    // admin-dispatch.js. Honour an explicit positive price if one was set;
+    // otherwise the visit is $0.
     const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
       ? Number(svc.estimated_price)
-      : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+      : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
 
     // Mobile checkout sheet can append extra services + discount lines before
     // minting. Each extra is { description, quantity, unit_price, amount,
