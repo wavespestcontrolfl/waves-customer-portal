@@ -104,10 +104,13 @@ export default function MobileCheckoutSheet({
   const totalBeforePrepaid = Math.max(0, servicesSubtotal + extraDiscountsTotal);
   const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
-  // A $0 visit (e.g. a free callback with no added extras) has nothing to mint —
-  // the invoice endpoint rejects a zero charge — so disable the Charge button and
-  // point the tech at completing the job instead of a failing "Charge $0.00".
-  const nothingToCharge = total <= 0;
+  // A genuinely $0 visit (e.g. a free callback with no added extras) has nothing
+  // to mint — the invoice endpoint rejects a zero charge — so disable the Charge
+  // button and point the tech at completing the job. Base this on the PRE-prepaid
+  // chargeable amount: a positive-price visit that's fully prepaid still needs to
+  // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
+  // it must stay enabled even though `total` nets to $0.
+  const nothingToCharge = totalBeforePrepaid <= 0;
 
   const startTime = formatTime(service.windowStart);
   const duration = service.estimatedDuration ? `${service.estimatedDuration} mins` : '';

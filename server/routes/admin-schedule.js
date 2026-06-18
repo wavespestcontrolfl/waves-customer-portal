@@ -17,6 +17,7 @@ const {
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { isReService } = require('../services/re-service');
+const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const {
   isNewRecurringSignupCandidate,
@@ -668,14 +669,13 @@ function parseMoneyInput(value, fieldName) {
   return Math.round(num * 100) / 100;
 }
 
-// A re-service callback is free for customers on a recurring plan — a WaveGuard
-// tier OR a positive monthly_rate (mirrors project-completion's hasMembership).
-// Used to decide whether to zero a re-service's price at create/edit time.
+// A re-service callback is free for customers on a recurring plan. Delegate to
+// project-completion's hasMembership so tier normalization + non-membership
+// sentinels ('none' / 'onetime' / 'na' / 'no' / 'notset') and the monthly_rate
+// fallback stay in ONE place — a bespoke `tier !== 'none'` check here would let
+// "One-Time" / "N/A" customers slip through and get their priced visit zeroed.
 function customerEligibleForFreeCallback(customer = {}) {
-  const tier = String(customer.waveguard_tier ?? customer.waveguardTier ?? '').trim().toLowerCase();
-  if (tier && tier !== 'none') return true;
-  const monthly = Number(customer.monthly_rate ?? customer.monthlyRate ?? 0);
-  return Number.isFinite(monthly) && monthly > 0;
+  return hasMembership(customer || {});
 }
 
 function normalizeDiscountAmount(row, clientAmount) {
@@ -2768,45 +2768,59 @@ router.put('/:id/update-details', async (req, res, next) => {
       // Propagate a re-service conversion to the rest of a recurring series. The
       // cadence-rewrite block below only touches dates/cadence, so without this
       // the already-seeded pending children/boosters keep the old service_id /
-      // is_callback / price and would bill as regular visits (and drop out of
-      // callback reporting) once the converted parent completes.
+      // is_callback / label / price and would bill as regular visits (and drop
+      // out of callback reporting) once the converted parent completes.
       if (reServiceConversion) {
         const seriesCols = await trx('scheduled_services').columnInfo();
-        if (seriesCols.recurring_parent_id) {
-          const self = await trx('scheduled_services').where({ id: req.params.id })
-            .first('recurring_parent_id');
-          const seriesParentId = self?.recurring_parent_id || req.params.id;
+        const self = seriesCols.recurring_parent_id
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('recurring_parent_id')
+          : null;
+        // ONLY a parent/template edit converts the whole series. Service edits
+        // expose no apply-scope and the cadence rewrite below is parent-only, so
+        // converting a single child occurrence must not flip its siblings and
+        // stop billing the rest of the regular series.
+        const isTemplateEdit = !!seriesCols.recurring_parent_id && !self?.recurring_parent_id;
+        if (isTemplateEdit) {
           const seriesUpdates = {};
           if (seriesCols.is_callback && updates.is_callback !== undefined) seriesUpdates.is_callback = updates.is_callback;
           if (seriesCols.service_id && updates.service_id !== undefined) seriesUpdates.service_id = updates.service_id;
+          // Carry the re-service label too — DTOs + completion/report descriptions
+          // read scheduled_services.service_type, so without it siblings would
+          // display/report as the old service while billed as no-charge callbacks.
+          if (updates.service_type !== undefined) seriesUpdates.service_type = updates.service_type;
           if (reServiceConversionZeroPrice) {
             if (seriesCols.estimated_price) seriesUpdates.estimated_price = 0;
             if (seriesCols.primary_line_price) seriesUpdates.primary_line_price = 0;
             if (seriesCols.discount_dollars) seriesUpdates.discount_dollars = null;
           }
           if (Object.keys(seriesUpdates).length > 0) {
-            await trx('scheduled_services')
-              .where(function () {
-                this.where({ recurring_parent_id: seriesParentId }).orWhere({ id: seriesParentId });
-              })
-              .whereNot({ id: req.params.id })
+            const siblingIds = await trx('scheduled_services')
+              .where({ recurring_parent_id: req.params.id })
               .whereIn('status', ['pending', 'confirmed'])
-              .update(seriesUpdates);
-            if (reServiceConversionZeroPrice) {
-              // Zero carried-over add-on prices on those pending series rows too.
-              const seriesIds = await trx('scheduled_services')
-                .where(function () {
-                  this.where({ recurring_parent_id: seriesParentId }).orWhere({ id: seriesParentId });
-                })
-                .whereIn('status', ['pending', 'confirmed'])
-                .pluck('id');
-              if (seriesIds.length > 0) {
+              .pluck('id');
+            if (siblingIds.length > 0) {
+              await trx('scheduled_services').whereIn('id', siblingIds).update(seriesUpdates);
+              if (reServiceConversionZeroPrice) {
+                // Zero carried-over add-on prices on those siblings.
                 const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
                 const addonZero = {};
                 if (addonCols.estimated_price) addonZero.estimated_price = 0;
                 if (addonCols.base_price) addonZero.base_price = 0;
                 if (Object.keys(addonZero).length > 0) {
-                  await trx('scheduled_service_addons').whereIn('scheduled_service_id', seriesIds).update(addonZero).catch(() => {});
+                  await trx('scheduled_service_addons').whereIn('scheduled_service_id', siblingIds).update(addonZero).catch(() => {});
+                }
+                // Void siblings' stale unpaid invoices too — same rationale as the
+                // edited row: charge-now/completion reuse a non-void invoice by
+                // scheduled_service_id before the new $0 is considered.
+                const hasInvLink = await trx.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
+                if (hasInvLink) {
+                  const voidSiblings = { status: 'void' };
+                  if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidSiblings.updated_at = trx.fn.now();
+                  await trx('invoices')
+                    .whereIn('scheduled_service_id', siblingIds)
+                    .whereNotIn('status', ['paid', 'prepaid', 'void'])
+                    .update(voidSiblings)
+                    .catch(() => {});
                 }
               }
             }
