@@ -16,6 +16,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { isReService } = require('../services/re-service');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const {
   isNewRecurringSignupCandidate,
@@ -1675,8 +1676,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       customer,
     });
 
+    // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
+    // definition — the new-appointment modal never sends `isCallback`, so
+    // derive it server-side from the catalog row. Persisted `is_callback`
+    // drives callback reporting + completion invoice suppression downstream.
+    const resolvedIsCallback = isCallback
+      || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
+
     let finalPrice = pricing.finalPrice;
-    if (isCallback && customer?.waveguard_tier) finalPrice = 0;
+    if (resolvedIsCallback && customer?.waveguard_tier) finalPrice = 0;
     const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
     const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
     const createdAppointments = [];
@@ -1705,7 +1713,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
-      if (cols.is_callback) insertData.is_callback = isCallback || false;
+      if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.source_estimate_id && linkedEstimateId) insertData.source_estimate_id = linkedEstimateId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;

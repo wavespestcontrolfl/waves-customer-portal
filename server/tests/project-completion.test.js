@@ -130,6 +130,16 @@ describe('project completion helpers', () => {
       scheduledService: { create_invoice_on_complete: true },
       customer: { monthly_rate: '99.00' },
     })).toBe(99);
+    // Callbacks (re-services) are free — never fall back to monthly dues...
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { is_callback: true, create_invoice_on_complete: true },
+      customer: { monthly_rate: '99.00' },
+    })).toBe(0);
+    // ...but still bill an explicit positive price if the operator set one.
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { is_callback: true, estimated_price: '75.00' },
+      customer: { monthly_rate: '99.00' },
+    })).toBe(75);
     expect(prepaidCoversAmount({ prepaid_amount: '350.00' }, 350)).toBe(true);
     expect(prepaidCoversAmount({ prepaid_amount: '100.00' }, 350)).toBe(false);
   });

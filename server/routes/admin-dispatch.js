@@ -3651,9 +3651,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     //     unless the visit is already covered by prepay/paid invoice/autopay.
     //   - Otherwise send the plain service-complete SMS (report link only).
     const hasVisitPrice = svc.estimated_price != null && Number(svc.estimated_price) > 0;
+    // Callbacks (re-services) are free by definition for recurring/WaveGuard
+    // customers — they must NOT fall back to the customer's monthly_rate, or a
+    // no-charge re-service would bill a full month's dues. Honour an explicit
+    // positive price if the operator set one; otherwise the visit is $0.
     const invoiceAmount = hasVisitPrice
       ? Number(svc.estimated_price)
-      : (svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+      : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
     const customerAutopayActive = await customerOnAutopay({
       id: svc.customer_id,
       autopay_enabled: svc.cust_autopay_enabled,
