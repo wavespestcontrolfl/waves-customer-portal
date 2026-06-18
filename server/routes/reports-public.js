@@ -340,6 +340,10 @@ router.get('/project/:token/data', async (req, res, next) => {
     // snapshot). Pre-archive sends have no snapshot and fall back to live.
     let viewerFindings = project.findings;
     let viewerProjectDate = project.project_date || project.created_at;
+    // Whether the filled FDACS-13645 PDF can be served (a filing was archived
+    // to S3 at send time) — the viewer gates its "View FDACS-13645" link on this
+    // so it never opens a 404 for a pre-archive/legacy report.
+    let fdacsPdfAvailable = false;
     if (project.project_type === 'wdo_inspection') {
       let filings = project.wdo_sent_filings;
       if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
@@ -348,10 +352,12 @@ router.get('/project/:token/data', async (req, res, next) => {
         viewerFindings = lastFiling.findings;
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
       }
+      fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket);
     }
 
     res.json({
       projectType: project.project_type,
+      fdacsPdfAvailable,
       status: project.status,
       title: project.title,
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
@@ -374,6 +380,61 @@ router.get('/project/:token/data', async (req, res, next) => {
       } : null,
       photos: photosWithUrls,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/project/:token/fdacs-pdf — the filled, signed FDACS-13645
+// PDF for a WDO report, so the public report page can show the official form
+// instead of a blank template. Serves the exact archived filing that was
+// emailed (same source the /data viewer reads its as-sent snapshot from), so
+// the downloadable form can never diverge from what was filed. The token gates
+// access; the S3 object itself is private and streamed through the server.
+router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
+  if (!extractProjectReportTokenLookup(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const project = await findProjectByReportSegment(req.params.token);
+    if (!project || project.project_type !== 'wdo_inspection') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    let filings = project.wdo_sent_filings;
+    if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
+    const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+    if (!lastFiling?.s3_key || !config.s3?.bucket) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+    const s3 = new S3Client({
+      region: config.s3?.region,
+      credentials: config.s3?.accessKeyId
+        ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+        : undefined,
+    });
+    let object;
+    try {
+      object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: lastFiling.s3_key }));
+    } catch (err) {
+      // The /data viewer already advertised the PDF as available; if the private
+      // object is missing/purged, return the same generic 404 (not a 500) so a
+      // stale archive reads as "not found" rather than an internal error.
+      if (err?.name === 'NoSuchKey' || err?.name === 'NotFound' || err?.$metadata?.httpStatusCode === 404) {
+        return res.status(404).json({ error: 'Report not found' });
+      }
+      throw err;
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="FDACS-13645.pdf"');
+    // Signed legal filing behind a long-lived token — never cache, index, or leak the URL.
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    object.Body.on('error', (err) => {
+      logger.warn(`[reports-public] FDACS filing stream failed for ${project.id}: ${err.message}`);
+      if (!res.headersSent) res.status(502).end();
+      else res.destroy(err);
+    });
+    object.Body.pipe(res);
   } catch (err) { next(err); }
 });
 

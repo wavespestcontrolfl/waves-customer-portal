@@ -497,6 +497,146 @@ describe('WDO signature content binding', () => {
     });
   });
 
+  // Section 2 completeness gate: the core finding must be present — and a
+  // "visible activity" finding must carry a description — or the official form
+  // files with a blank Section 2. Hard 422, never overridable (an override
+  // reason is supplied here to prove it does NOT slip through).
+  test('/send 422s incomplete_findings when no Section 2 finding was captured', async () => {
+    // Only the auto-filled Section-1 administrative fields — exactly the
+    // empty-inspection-body case that filed a blank FDACS-13645.
+    const findings = {
+      property_address: '123 Test St, Bradenton, FL 34211',
+      structures_inspected: 'Single-family home',
+      requested_by: 'Realtor',
+    };
+    const project = wdoProject({
+      findings,
+      wdo_signature: JSON.stringify({
+        image: PNG_DATA_URL,
+        signer_name: 'A',
+        content_hash: expectedContentHash(findings, '2026-06-10'),
+      }),
+    });
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ override_reason: 'realtor in a hurry' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('incomplete_findings');
+    });
+  });
+
+  test('/send-with-invoice 422s incomplete_findings when a visible finding has no description', async () => {
+    const findings = {
+      property_address: '123 Test St',
+      wdo_finding: 'Visible evidence of WDO observed',
+      // no live_wdo / wdo_evidence / wdo_damage — box would print over blank lines
+    };
+    const project = wdoProject({
+      findings,
+      wdo_signature: JSON.stringify({
+        image: PNG_DATA_URL,
+        signer_name: 'A',
+        content_hash: expectedContentHash(findings, '2026-06-10'),
+      }),
+    });
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ override_reason: 'x' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('incomplete_findings');
+    });
+  });
+
+  test('/send 422s incomplete_findings when wdo_finding maps to no Section 2 box', async () => {
+    // A non-canonical value (typo/legacy) the PDF mapper checks no box for —
+    // a description does NOT rescue it; the form would file with Section 2 blank.
+    const findings = {
+      property_address: '123 Test St',
+      wdo_finding: 'WDO present',
+      wdo_evidence: 'Frass at garage door frame',
+    };
+    const project = wdoProject({
+      findings,
+      wdo_signature: JSON.stringify({
+        image: PNG_DATA_URL,
+        signer_name: 'A',
+        content_hash: expectedContentHash(findings, '2026-06-10'),
+      }),
+    });
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ override_reason: 'x' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('incomplete_findings');
+    });
+  });
+
+  test('a fully described visible finding passes the completeness gate (reaches readiness)', async () => {
+    // wdo_finding + a description present — the completeness gate must let it
+    // through; the readiness gate (no `code`) then catches other missing fields.
+    const findings = {
+      wdo_finding: 'Visible evidence of WDO observed',
+      wdo_evidence: 'Frass at garage door frame',
+    };
+    const project = wdoProject({
+      findings,
+      wdo_signature: JSON.stringify({
+        image: PNG_DATA_URL,
+        signer_name: 'A',
+        content_hash: expectedContentHash(findings, '2026-06-10'),
+      }),
+    });
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(project) });
+    const customerRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', email: 'c@example.com' }) });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBeUndefined();
+      expect(body.missing.map((m) => m.key)).toEqual(expect.arrayContaining(['wdo_property_address']));
+    });
+  });
+
   test('"No visible signs" with clean Section 2.B lines passes the gate (reaches readiness)', async () => {
     // Same shape as the fresh-signature pass-through test: getting the
     // readiness 422 (no `code`) proves the contradiction gate let it through.
