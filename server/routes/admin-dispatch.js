@@ -4591,7 +4591,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // invoiceAlreadySent suppressed the homeowner link). Re-sending would
     // duplicate the AP billing email. Fresh completion invoices are `draft`.
     const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
-      || ['sent', 'viewed', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
+      || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
         .includes(String(invoice?.status || '').toLowerCase());
     if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered) {
       try {

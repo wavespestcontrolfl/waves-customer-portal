@@ -17,6 +17,14 @@ const logger = require('./logger');
 
 const PAYMENT_TERMS = ['due_on_receipt', 'net15', 'net30'];
 
+// An invoice's AP delivery email is "frozen" to the snapshot once the invoice has
+// been issued/delivered (or reached a terminal state). Before that — while it's
+// still draft/scheduled/sending — the live active payer's current AP email wins
+// so an operator's correction takes effect on a resend.
+const AP_FROZEN_INVOICE_STATUSES = new Set([
+  'sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled',
+]);
+
 function clean(value) {
   if (value == null) return '';
   return String(value).trim();
@@ -211,14 +219,16 @@ async function attachToInvoice(invoice, database = db) {
     // (persistPayerApIfNeeded) must still see that the stored snapshot lacked an
     // AP email to know it needs to freeze the recovered one.
     const snap = { ...parsed };
-    // The snapshot freezes the bill-to identity (name/address) at creation, but
-    // a usable AP email is delivery infrastructure, not identity. If the invoice
-    // was minted before ops filled in the AP email, the frozen snapshot has a
-    // null/invalid ap_email and — since sendInvoiceEmail no longer falls back to
-    // the homeowner — delivery is stranded forever even after the operator adds
-    // the AP email in /admin/payers. Recover the live AP email from the still-
-    // active payer row in that case, without disturbing the frozen identity.
-    if ((!snap.ap_email || !isEmailLike(snap.ap_email)) && invoice.payer_id) {
+    // The snapshot freezes the bill-to IDENTITY (name/address) at creation, but
+    // the AP *email* is the delivery address and is only frozen once the invoice
+    // has actually been ISSUED/delivered (the round-3 intent: "an issued invoice
+    // keeps its Bill-To"). For an undelivered invoice (draft/scheduled/sending)
+    // prefer the live ACTIVE payer's current AP email, so an operator's
+    // correction takes effect on a resend; for an issued invoice the snapshot AP
+    // is authoritative. We also recover a live AP whenever the snapshot never had
+    // a usable one (minted before the AP email was set), issued or not.
+    const apIsFrozen = AP_FROZEN_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase());
+    if ((!apIsFrozen || !isEmailLike(snap.ap_email)) && invoice.payer_id) {
       try {
         const live = await getPayer(invoice.payer_id, database);
         if (live && live.active !== false && live.ap_email && isEmailLike(live.ap_email)) {
@@ -244,6 +254,30 @@ async function attachToInvoice(invoice, database = db) {
   return invoice;
 }
 
+/**
+ * Freeze the AP email an invoice was actually DELIVERED to onto its
+ * payer_snapshot, so the (async) receipt + pay/receipt pages keep routing to the
+ * same AP contact even if the payer row is later edited/deactivated. Covers a
+ * live-recovered email, an operator one-off, or the first send of a legacy
+ * invoice. No-ops once the snapshot already carries the delivered address. Never
+ * throws — a bookkeeping write must not break a successful send.
+ */
+async function freezeApEmail(invoice, deliveredEmail, database = db) {
+  try {
+    if (!invoice || !invoice.payer_id) return;
+    const email = cleanEmail(deliveredEmail);
+    if (!email || !isEmailLike(email)) return;
+    const stored = parseSnapshot(invoice.payer_snapshot);
+    if (stored && cleanEmail(stored.ap_email) === email) return; // already frozen with this AP email
+    const base = (invoice.payer && typeof invoice.payer === 'object') ? invoice.payer : (stored || {});
+    const snap = { ...base, ap_email: email };
+    await database('invoices').where({ id: invoice.id }).update({ payer_snapshot: JSON.stringify(snap) });
+    invoice.payer = snap;
+  } catch (err) {
+    logger.warn(`[payer] freezeApEmail failed for invoice ${invoice && invoice.id}: ${err.message}`);
+  }
+}
+
 // Recipient object for the invoice email reroute. Returns null when the payer
 // has no usable AP email (caller then falls back to the customer billing
 // contact, so a misconfigured payer never strands the invoice with no path).
@@ -267,6 +301,7 @@ module.exports = {
   updatePayer,
   resolveForInvoice,
   attachToInvoice,
+  freezeApEmail,
   payerRecipient,
   payerSnapshot,
   _private: { isEmailLike, normalizeTerms, parseSnapshot },

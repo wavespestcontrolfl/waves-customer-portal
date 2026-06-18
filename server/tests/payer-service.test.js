@@ -120,14 +120,27 @@ describe('PayerService.attachToInvoice', () => {
     expect(inv.payer).toBeUndefined();
   });
 
-  test('prefers the frozen payer_snapshot and never queries the live payer', async () => {
-    const database = jest.fn(() => { throw new Error('should not query when a snapshot exists'); });
+  test('an ISSUED invoice uses the frozen snapshot AP email (does not query the live payer)', async () => {
+    const database = jest.fn(() => { throw new Error('should not query the live payer for an issued invoice'); });
     const inv = {
-      id: 'i1', payer_id: 7,
-      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com' },
+      id: 'i1', payer_id: 7, status: 'paid',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
     };
     await PayerService.attachToInvoice(inv, database);
-    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay' }));
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' }));
+  });
+
+  test('an UNDELIVERED invoice prefers the live active payer AP email over a stale snapshot', async () => {
+    // Snapshot froze a (now-corrected) AP email at creation; ops fixed the live
+    // payer. A draft/undelivered invoice should resend to the corrected inbox.
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: true, ap_email: 'corrected@westbay.com' }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'draft',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'stale@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    // Identity stays frozen; AP email tracks the live payer until delivery.
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'corrected@westbay.com' }));
   });
 
   test('parses a JSON-string snapshot', async () => {

@@ -674,6 +674,13 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
     // Downloaded/printed PDF must show the same Bill-To = payer block as the
     // emailed copy (getByToken doesn't attach the payer on its own).
     await require('../services/payer').attachToInvoice(data);
+    // Fail closed: a payer-billed invoice whose payer can't attach (legacy, no
+    // snapshot, inactive/deleted) must NOT render the homeowner as Bill-To on
+    // the printable PDF. Synthesize a third-party placeholder so the bill-to
+    // block stays non-self-pay (mirrors the JSON pay-page fail-closed state).
+    if (!data.payer && data.payer_id) {
+      data.payer = { company_name: 'Third-party payer', ap_email: null };
+    }
     generateInvoicePDF(data, res);
   } catch (err) {
     next(err);

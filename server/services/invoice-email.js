@@ -142,32 +142,10 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const recipientPayload = publicRecipient(recipient);
 
   // Freeze the AP email this invoice was actually DELIVERED to onto the payer
-  // snapshot, so the (async) receipt and the pay page route to the same AP
-  // contact even if the payer row is later edited/deactivated. Covers all the
-  // ways the delivered AP email can differ from a frozen snapshot that lacked
-  // one: an operator one-off override, a live-recovered AP email (round 5), or
-  // the first send of a legacy invoice with no snapshot. No-ops once the
-  // snapshot already carries the delivered address. Only runs on a successful send.
-  async function persistPayerApIfNeeded() {
-    try {
-      if (!invoice.payer_id || !invoice.payer) return;
-      const deliveredEmail = cleanEmail(recipient.email);
-      if (!deliveredEmail || !isEmailLike(deliveredEmail)) return;
-      let stored = null;
-      if (invoice.payer_snapshot) {
-        stored = typeof invoice.payer_snapshot === 'object'
-          ? invoice.payer_snapshot
-          : (() => { try { return JSON.parse(invoice.payer_snapshot); } catch { return null; } })();
-      }
-      if (stored && cleanEmail(stored.ap_email) === deliveredEmail) return; // already frozen with this AP email
-      const base = (invoice.payer && typeof invoice.payer === 'object') ? invoice.payer : (stored || {});
-      const snap = { ...base, ap_email: deliveredEmail };
-      await db('invoices').where({ id: invoice.id }).update({ payer_snapshot: JSON.stringify(snap) });
-      invoice.payer = snap;
-    } catch (err) {
-      logger.warn(`[invoice-email] payer AP-email persist failed for ${invoice.invoice_number}: ${err.message}`);
-    }
-  }
+  // snapshot (shared with the project combined-send path), so the (async)
+  // receipt and the pay page route to the same AP contact even if the payer row
+  // is later edited/deactivated. Only runs on a successful send.
+  const persistPayerApIfNeeded = () => PayerService.freezeApEmail(invoice, recipient.email);
 
   const domain = publicPortalUrl();
   const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, options.payUrlParams);

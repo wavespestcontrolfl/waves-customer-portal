@@ -3011,6 +3011,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         channels.payer_email = result.ok
           ? { ok: true, recipient: billingCopyEmail }
           : { ok: false, recipient: billingCopyEmail, error: projectEmailFailureMessage(result) };
+        // Freeze the AP email we actually delivered to onto the snapshot (same
+        // as sendInvoiceEmail), so the receipt + pay page keep routing to it even
+        // if the payer row is later edited/deactivated.
+        if (result.ok) {
+          await require('../services/payer').freezeApEmail(invoice, billingCopyEmail);
+        }
       } catch (e) {
         logger.error(`[projects] combined send payer copy failed: ${e.message}`);
         channels.payer_email = { ok: false, recipient: billingCopyEmail, error: e.message };

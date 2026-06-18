@@ -94,7 +94,22 @@ router.get('/:token', async (req, res, next) => {
             zip: data.payer.billing_zip || null,
             poNumber: data.po_number || null,
           }
-        : null,
+        // Fail closed: this receipt IS payer-billed (payer_id set) but the payer
+        // couldn't be attached (legacy, no snapshot, inactive/deleted payer).
+        // Serialize a third-party placeholder rather than null so the receipt
+        // page does NOT render the homeowner as "Billed to" alongside the
+        // payer's payment-method details.
+        : data.payer_id
+          ? {
+              name: 'Third-party payer',
+              email: null,
+              address: null,
+              city: null,
+              state: null,
+              zip: null,
+              poNumber: data.po_number || null,
+            }
+          : null,
       payment: payment
         ? {
           amount: totalPaid,
@@ -133,6 +148,11 @@ router.get('/:token/pdf', async (req, res, next) => {
     // Keep the receipt's Bill-To consistent with the invoice (payer, not the
     // homeowner, when the job was third-party-billed).
     await require('../services/payer').attachToInvoice(data);
+    // Fail closed: don't render the homeowner as Bill-To on a payer-billed
+    // receipt PDF when the payer can't attach (legacy/inactive/deleted).
+    if (!data.payer && data.payer_id) {
+      data.payer = { company_name: 'Third-party payer', ap_email: null };
+    }
     generateReceiptPDF(data, payment, res);
   } catch (err) {
     next(err);
