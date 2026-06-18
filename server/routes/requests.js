@@ -130,7 +130,7 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     // the create-request validation above.
     try {
       const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
-      await NotificationService.notifyAdmin(
+      const notif = await NotificationService.notifyAdmin(
         'service',
         `${urgencyTag}New service request from ${customerName}`,
         `Category: ${categoryLabel}\n` +
@@ -150,6 +150,20 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
           },
         }
       );
+      // notifyAdmin swallows DB errors and returns null instead of throwing, so a
+      // failed insert won't hit the catch below. With the dedicated Requests page
+      // gone, this notification is the primary triage surface — a silent miss
+      // would leave the request unsurfaced in the feed. The row is still durable
+      // in service_requests (and reachable from the customer profile), so don't
+      // fail the customer's submission; instead emit an explicit, recoverable
+      // error so it pages through to Sentry and ops can re-surface it.
+      if (!notif) {
+        logger.error(
+          `Admin notification did not persist for service request ${request.id} ` +
+            `(customer ${req.customer.id}); request is durable in service_requests ` +
+            `but may be unsurfaced in the admin feed.`
+        );
+      }
     } catch (notifErr) {
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }
