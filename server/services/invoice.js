@@ -2338,6 +2338,16 @@ const InvoiceService = {
     // without stamping the invoice, so it isn't visible as a column here). If
     // any predicate no longer holds the update matches zero rows and we fail
     // closed instead of rewriting money.
+    //
+    // KNOWN LIMITATION (accepted): these predicates only see committed state.
+    // POST /:id/payment-plan and POST /:id/annual-prepay read invoice.total
+    // without locking the invoice row, so if one of those creations is in
+    // flight (uncommitted) while this edit commits, the plan/term can be born
+    // with the pre-edit total. Closing it fully would mean locking + re-reading
+    // the invoice (SELECT ... FOR UPDATE) inside those two creation
+    // transactions. Left as-is on purpose: it needs two admins on the SAME
+    // draft within a sub-second window, the already-exists cases are blocked
+    // above, and any resulting total mismatch is visible and recoverable.
     const [invoice] = await db("invoices")
       .where({ id })
       .whereIn("status", ["draft", "scheduled"])
