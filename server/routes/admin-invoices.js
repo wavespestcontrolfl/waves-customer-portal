@@ -313,7 +313,7 @@ function publicEmailRecipient(recipient) {
 async function getInvoiceDeliveryRecipients(invoiceId) {
   const invoice = await db('invoices')
     .where({ id: invoiceId })
-    .select('id', 'customer_id', 'invoice_number')
+    .select('id', 'customer_id', 'invoice_number', 'payer_id', 'payer_snapshot', 'status', 'sent_at')
     .first();
   if (!invoice) return null;
 
@@ -322,6 +322,38 @@ async function getInvoiceDeliveryRecipients(invoiceId) {
     .select('id', 'first_name', 'last_name', 'company_name', 'email', 'phone')
     .first();
   if (!customer) return null;
+
+  // Third-party Bill-To: a payer-billed invoice is delivered to the payer's AP
+  // inbox, never the homeowner — homeowner SMS is suppressed server-side (it
+  // would expose the payer's pay link / card last4). Report the payer AP as the
+  // only email recipient and NO SMS recipient, so the admin UI gates Send
+  // Invoice / Send Receipt / Record-Payment-receipt correctly. A payer with no
+  // usable AP email (or an unattachable/deactivated payer) reports no recipient
+  // → Send stays disabled until the operator adds an AP email or one-off.
+  if (invoice.payer_id) {
+    const PayerService = require('../services/payer');
+    await PayerService.attachToInvoice(invoice);
+    const payerRcpt = invoice.payer ? PayerService.payerRecipient(invoice.payer) : null;
+    return {
+      invoiceId: invoice.id,
+      invoiceNumber: invoice.invoice_number,
+      customerId: customer.id,
+      customerName: fullName(customer),
+      payerBilled: true,
+      primaryContact: {
+        name: payerRcpt?.name || '',
+        email: payerRcpt?.email || '',
+        phone: '',
+        role: 'payer',
+      },
+      smsRecipient: null,
+      emailRecipient: payerRcpt,
+      billingPreference: {
+        name: payerRcpt?.name || '',
+        email: payerRcpt?.email || '',
+      },
+    };
+  }
 
   const prefs = await db('notification_prefs')
     .where({ customer_id: invoice.customer_id })
