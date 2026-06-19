@@ -195,6 +195,16 @@ function shouldInsertNoActivityFinding({
     && !String(concernText || '').trim();
 }
 
+// Whether a completion should produce a service-report EMAIL, decoupled from
+// the completion-SMS toggle: an email-only customer (or a completion where SMS
+// was skipped) should still get the report. Gates on the report being a real,
+// non-suppressed customer report — internal_only / disabled typed reports
+// (suppressTypedCustomerComms) are still silenced. The email feature flag is
+// applied by the caller. Pure for testability (see _test).
+function serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms } = {}) {
+  return Boolean(serviceReportV1Delivery && !suppressTypedCustomerComms);
+}
+
 function lawnAssessmentCompletionBlockPayload({
   reportServiceLine,
   isIncompleteVisit,
@@ -4426,7 +4436,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           false,
         )
       : false;
-    if (serviceReportV1Delivery && effectiveSendCompletionSms && !serviceReportEmailEnabled) {
+    // Email delivery is gated independently of the completion-SMS toggle (see
+    // serviceReportEmailEligible) so email-only customers still get the report.
+    if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
       if (!latestNotes.serviceReportV1EmailStatus) {
         const disabledNotes = {
@@ -4441,7 +4453,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    if (serviceReportV1Delivery && effectiveSendCompletionSms && serviceReportEmailEnabled) {
+    if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
       const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
       if (!emailAlreadyHandled) {
@@ -6300,4 +6312,5 @@ module.exports = router;
 module.exports._test = {
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
+  serviceReportEmailEligible,
 };
