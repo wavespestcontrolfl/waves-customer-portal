@@ -181,6 +181,40 @@ const TAX_SECTIONS = [
   { key: "ar", label: "A/R", Icon: Receipt },
 ];
 
+// The 13-tab bar is grouped into parent sections, each revealing its leaf tabs
+// in a sub-row. `activeTab` still holds the LEAF key, so every
+// {activeTab === "..."} render block below is unchanged.
+const TAX_TAB_GROUPS = [
+  { key: "overview", label: "Overview", Icon: LayoutDashboard, tabs: ["overview"] },
+  {
+    key: "setup",
+    label: "Tax Setup",
+    Icon: ShieldCheck,
+    tabs: ["rates", "services", "exemptions"],
+  },
+  { key: "expenses", label: "Expenses", Icon: ListChecks, tabs: ["expenses"] },
+  { key: "revenue", label: "Revenue", Icon: DollarSign, tabs: ["revenue"] },
+  {
+    key: "assets",
+    label: "Assets",
+    Icon: Package,
+    tabs: ["equipment", "mileage"],
+  },
+  {
+    key: "reports",
+    label: "Reports",
+    Icon: BarChart3,
+    tabs: ["pnl", "filings", "advisor"],
+  },
+  {
+    key: "compliance",
+    label: "Exports & A/R",
+    Icon: Download,
+    tabs: ["exports", "ar"],
+  },
+];
+const TAX_LEAF_BY_KEY = Object.fromEntries(TAX_SECTIONS.map((s) => [s.key, s]));
+
 // ═══════════════════════════════════════════════════════════════
 // TAX RATES TAB
 // ═══════════════════════════════════════════════════════════════
@@ -3393,6 +3427,8 @@ function AccountsReceivableTab() {
 
 export default function TaxPage() {
   const [activeTab, setActiveTab] = useState("overview");
+  const activeGroup =
+    TAX_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) || TAX_TAB_GROUPS[0];
   const [dashboard, setDashboard] = useState(null);
   const [quickPnl, setQuickPnl] = useState(null);
   const [arSummary, setArSummary] = useState(null);
@@ -3417,15 +3453,60 @@ export default function TaxPage() {
       <AdminCommandHeader
         title="Taxes"
         icon={Receipt}
-        sections={TAX_SECTIONS.map((section) =>
-          section.key === "advisor" && d?.pendingAlerts?.high
-            ? { ...section, label: `AI Advisor (${d.pendingAlerts.high})` }
-            : section,
+        sections={TAX_TAB_GROUPS.map((g) =>
+          g.tabs.includes("advisor") && d?.pendingAlerts?.high
+            ? { key: g.key, label: `${g.label} (${d.pendingAlerts.high})`, Icon: g.Icon }
+            : { key: g.key, label: g.label, Icon: g.Icon },
         )}
-        activeKey={activeTab}
-        onSectionChange={setActiveTab}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = TAX_TAB_GROUPS.find((x) => x.key === key);
+          if (g) setActiveTab(g.tabs[0]);
+        }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((key) => {
+            const leaf = TAX_LEAF_BY_KEY[key];
+            const active = activeTab === key;
+            const LeafIcon = leaf.Icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setActiveTab(key)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                <LeafIcon size={14} strokeWidth={1.9} />
+                {leaf.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {/* Dashboard stats */}
       {d && activeTab === "overview" && (
         <>
