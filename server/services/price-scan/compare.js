@@ -15,12 +15,20 @@ function rankCandidates(candidates, { excludeOutOfStock = true } = {}) {
   return (candidates || [])
     .map((c) => ({ ...c, perOz: deriveNormalizedUnitPrice(c.price, c.quantity) }))
     .filter((c) => c.perOz != null && c.perOz > 0)
-    .filter((c) => !(excludeOutOfStock && c.availability_status === 'out_of_stock'))
+    .filter((c) => !(excludeOutOfStock && isOutOfStock(c)))
     .sort((a, b) => a.perOz - b.perOz);
 }
 
+// The two field names a candidate may carry availability under: `availability`
+// straight off the extractor (extract.js) or `availability_status` once it's a
+// /report-shaped candidate. Tolerate both so a raw extractor offer can't slip a
+// sold-out item into the ranking.
+function isOutOfStock(c) {
+  return c.availability_status === 'out_of_stock' || c.availability === 'out_of_stock';
+}
+
 // baseline:   { price, quantity, vendor }   (SiteOne — what Adam pays today)
-// candidates: [{ price, quantity, vendor, source_url, availability_status }]
+// candidates: [{ price, quantity, vendor, source_url, availability_status|availability }]
 function findOpportunity(baseline, candidates, opts = {}) {
   const cfg = { ...DEFAULTS, ...opts };
   const basePerOz = deriveNormalizedUnitPrice(baseline && baseline.price, baseline && baseline.quantity);

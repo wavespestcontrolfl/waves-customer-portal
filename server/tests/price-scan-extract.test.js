@@ -128,6 +128,14 @@ describe('price-scan extract', () => {
       const r = verifyMatch({ name: 'Termidor SC Foam', quantity: '78 oz' }, expected);
       expect(r.matched).toBe(false);
     });
+    test('generic subset name (brand missing) -> not matched even at right size', () => {
+      // "Termiticide 78 oz" shares only the category word with the expected
+      // "Taurus SC Termiticide". Without an EPA hit the trust gate must reject it,
+      // even though the pack size lines up.
+      const r = verifyMatch({ name: 'Termiticide 78 oz', quantity: '78 oz' }, expected);
+      expect(r.signals.name).toBe(false);
+      expect(r.matched).toBe(false);
+    });
     test('epa reg in text rescues a weak name', () => {
       const r = verifyMatch({ name: 'Generic Fipronil 78oz', text: 'EPA Reg No 53883-279', quantity: '78 oz' }, expected);
       expect(r.signals.epa).toBe(true);

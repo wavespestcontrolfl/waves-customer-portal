@@ -137,6 +137,18 @@ function tokenOverlap(a, b) {
   for (const t of A) if (B.has(t)) inter += 1;
   return inter / Math.min(A.size, B.size);
 }
+
+// Shared distinctive-token count + the expected name's token count. verifyMatch
+// scores coverage of the EXPECTED (branded) name rather than the smaller set —
+// otherwise a generic subset like "Termiticide 78 oz" scores a perfect overlap
+// against "Taurus SC Termiticide" and slips past the trust gate.
+function sharedTokenStats(scrapedName, expectedName) {
+  const A = nameTokens(scrapedName);
+  const B = nameTokens(expectedName);
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter += 1;
+  return { inter, expectedSize: B.size };
+}
 const digitsOnly = (s) => String(s || '').replace(/[^0-9]/g, '');
 
 // The trust gate before believing any scraped price for a product.
@@ -159,7 +171,14 @@ function verifyMatch(scraped = {}, expected = {}, opts = {}) {
 
   const expName = expected.vendorProductName || expected.productName || expected.name;
   if (scraped.name && expName) {
-    signals.name = tokenOverlap(scraped.name, expName) >= nameThreshold;
+    const { inter, expectedSize } = sharedTokenStats(scraped.name, expName);
+    // Coverage of the EXPECTED name (not the smaller token set), AND at least 2
+    // shared distinctive tokens when the expected name has them — so a lone
+    // category word ("Termiticide") can't satisfy the name signal on its own.
+    // Single-token brands still match on that one brand token. Erring toward a
+    // miss (no savings alert) is the safe direction vs. trusting a wrong price.
+    const coverage = expectedSize ? inter / expectedSize : 0;
+    signals.name = coverage >= nameThreshold && inter >= Math.min(2, expectedSize);
   }
 
   const expEpa = digitsOnly(expected.epaReg);

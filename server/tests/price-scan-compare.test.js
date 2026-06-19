@@ -39,6 +39,16 @@ describe('price-scan compare', () => {
     expect(r.best.vendor).toBe('InStock');
   });
 
+  test('out-of-stock via raw extractor field (availability) is also excluded', () => {
+    // extract.js emits the enum under `availability`; compare must honor both
+    // field names so a raw extractor offer cannot win while sold out.
+    const ranked = rankCandidates([
+      { price: 50, quantity: '78 oz', vendor: 'Sold', availability: 'out_of_stock' },
+      { price: 89, quantity: '78 oz', vendor: 'InStock', availability: 'in_stock' },
+    ]);
+    expect(ranked.map((c) => c.vendor)).toEqual(['InStock']);
+  });
+
   test('ranks candidates cheapest-first on $/oz', () => {
     const ranked = rankCandidates([
       { price: 95, quantity: '78 oz', vendor: 'A' },
