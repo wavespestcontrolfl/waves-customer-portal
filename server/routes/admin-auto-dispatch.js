@@ -18,7 +18,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { runAutoDispatch } = require('../services/auto-dispatch');
-const { VALID_MODES } = require('../services/auto-dispatch/config');
+const { VALID_MODES, isApplyAllowed } = require('../services/auto-dispatch/config');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -71,6 +71,11 @@ router.post('/run', async (req, res) => {
   const mode = (req.body && req.body.mode) || 'dry_run';
   if (!VALID_MODES.has(mode)) {
     return res.status(400).json({ error: `mode must be one of: ${Array.from(VALID_MODES).join(', ')}` });
+  }
+  // Apply must clear the server-side gate even for requireAdmin callers, so the
+  // dry-run validation period can't be bypassed via the manual endpoint.
+  if (mode === 'apply' && !isApplyAllowed()) {
+    return res.status(403).json({ error: 'Apply mode is disabled. Set AUTO_DISPATCH_ALLOW_APPLY=true to enable.' });
   }
   try {
     logger.info(`[auto-dispatch] manual run requested by tech ${req.technicianId} mode=${mode}`);

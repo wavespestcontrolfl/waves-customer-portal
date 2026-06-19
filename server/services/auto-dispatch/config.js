@@ -27,16 +27,34 @@ function boolEnv(name, def) {
 const VALID_MODES = new Set(['dry_run', 'apply']);
 
 /**
+ * Server-side master switch for actually mutating appointments. Apply mode is
+ * IMPOSSIBLE — from cron OR a manual admin run — unless this is explicitly set.
+ * Keeps the dry-run validation period safe even though requireAdmin callers can
+ * pass {mode:'apply'}: an overrides.mode of 'apply' is downgraded to dry_run
+ * here when the gate is off (defense in depth; the route also 403s).
+ */
+function isApplyAllowed() {
+  return process.env.AUTO_DISPATCH_ALLOW_APPLY === 'true';
+}
+
+/**
  * Resolve the effective config. `overrides` (e.g. from the manual-run admin
- * endpoint) win over env; `mode` is always validated to dry_run|apply.
+ * endpoint) win over env; `mode` is always validated to dry_run|apply and is
+ * force-downgraded to dry_run unless the server apply gate is enabled.
  */
 function getAutoDispatchConfig(overrides = {}) {
   const envMode = process.env.AUTO_DISPATCH_MODE;
   let mode = overrides.mode || (VALID_MODES.has(envMode) ? envMode : 'dry_run');
   if (!VALID_MODES.has(mode)) mode = 'dry_run';
 
+  const applyAllowed = isApplyAllowed();
+  const applyBlocked = mode === 'apply' && !applyAllowed;
+  if (applyBlocked) mode = 'dry_run'; // hard safety: never mutate without the gate
+
   return {
     mode,
+    applyAllowed,
+    applyBlocked,
     lockWindowDays: overrides.lockWindowDays
       ?? intEnv('AUTO_DISPATCH_LOCK_WINDOW_DAYS', 14, { min: 0, max: 365 }),
     lookaheadDays: overrides.lookaheadDays
@@ -57,4 +75,4 @@ function getAutoDispatchConfig(overrides = {}) {
   };
 }
 
-module.exports = { getAutoDispatchConfig, VALID_MODES };
+module.exports = { getAutoDispatchConfig, isApplyAllowed, VALID_MODES };

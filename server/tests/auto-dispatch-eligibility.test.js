@@ -107,13 +107,10 @@ describe('isRecurringPlanActive', () => {
     expect(r).toMatchObject({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE' });
   });
 
-  test('inactive when ALL subscriptions are paused/cancelled', async () => {
+  test('does NOT veto on legacy paused/cancelled customer_subscriptions', async () => {
+    // active recurring plans are driven by scheduled_services; stale legacy subs
+    // must not exclude an otherwise-valid recurring visit.
     const r = await isRecurringPlanActive(svc(), fakeDb({ subs: [{ status: 'paused' }, { status: 'cancelled' }] }));
-    expect(r.active).toBe(false);
-  });
-
-  test('active when at least one subscription is active', async () => {
-    const r = await isRecurringPlanActive(svc(), fakeDb({ subs: [{ status: 'paused' }, { status: 'active' }] }));
     expect(r.active).toBe(true);
   });
 });

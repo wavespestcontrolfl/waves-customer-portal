@@ -343,9 +343,13 @@ function initScheduledJobs() {
     if (!isEnabled('autoDispatch')) return;
     logger.info('Running: Auto-Dispatch recurring optimizer');
     try {
-      const { runAutoDispatch } = require('./auto-dispatch');
-      const result = await runAutoDispatch({ triggeredBy: 'cron' });
-      logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+      // runExclusive: read-then-act job — a Railway deploy overlap or a slow
+      // prior tick must not double-run and bypass the per-run change cap.
+      await runExclusive('auto-dispatch-recurring', async () => {
+        const { runAutoDispatch } = require('./auto-dispatch');
+        const result = await runAutoDispatch({ triggeredBy: 'cron' });
+        logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+      });
     } catch (err) {
       logger.error(`Auto-Dispatch run failed: ${err.message}`);
     }

@@ -77,11 +77,30 @@ test('dry_run recommends a clearly-better slot without applying', async () => {
 });
 
 test('apply mode moves the visit and logs a changed decision', async () => {
-  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
-  const res = await runAutoDispatch({ mode: 'apply' });
-  expect(res).toMatchObject({ changed: 1 });
-  expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
-  expect(lastDecision('changed').reason_code).toBe('CHANGE_APPLIED');
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true'; // apply gate must be on to mutate
+  try {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    const res = await runAutoDispatch({ mode: 'apply' });
+    expect(res).toMatchObject({ changed: 1 });
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(lastDecision('changed').reason_code).toBe('CHANGE_APPLIED');
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
+test('apply requested without the server gate is downgraded to a dry-run recommendation', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  delete process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  try {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    const res = await runAutoDispatch({ mode: 'apply' });
+    expect(res).toMatchObject({ changed: 0, recommended: 1 });
+    expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
 });
 
 test('below-threshold improvement is left unchanged', async () => {

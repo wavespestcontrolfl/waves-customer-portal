@@ -60,11 +60,17 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
 
 /**
  * Is the recurring plan behind this service still active?
- * Primary signal: an unresolved plan_lapsed/plan_ending alert on this series
- * (joinable directly on recurring_parent_id). Secondary: every one of the
- * customer's subscriptions is paused/cancelled. Both tables are best-effort —
- * a missing table or query error is treated as "active" (fail open: don't block
- * optimization on a bookkeeping gap), never as inactive.
+ *
+ * Signal: an unresolved plan_lapsed/plan_ending alert on this series (joinable
+ * directly on recurring_parent_id). We deliberately do NOT veto on
+ * customer_subscriptions: active recurring plans in this app are driven by the
+ * scheduled_services rows themselves (the future recurring row loadEligible-
+ * Services already found), while customer_subscriptions is a legacy/Square
+ * table that can hold stale paused/cancelled rows for an otherwise-active
+ * customer — vetoing on it would silently exclude valid recurring visits.
+ *
+ * Best-effort: a missing table or query error is treated as "active" (fail
+ * open — don't block optimization on a bookkeeping gap), never as inactive.
  */
 async function isRecurringPlanActive(service, db) {
   const parentId = service.recurring_parent_id || service.id;
@@ -77,15 +83,6 @@ async function isRecurringPlanActive(service, db) {
       .first('id', 'alert_type');
     if (alert) {
       return { active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: `Unresolved ${alert.alert_type} alert on series` };
-    }
-  } catch (_) { /* table optional — fail open */ }
-
-  try {
-    const subs = await db('customer_subscriptions')
-      .where('customer_id', service.customer_id)
-      .select('status');
-    if (subs.length && subs.every((s) => ['paused', 'cancelled'].includes(String(s.status)))) {
-      return { active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'All customer subscriptions paused/cancelled' };
     }
   } catch (_) { /* table optional — fail open */ }
 

@@ -48,14 +48,32 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     && String(best.technician_id) !== String(service.technician_id || '');
   if (techChanged) options.technicianId = best.technician_id;
 
+  // Stale-recommendation guard: the row was loaded + scored earlier this run.
+  // reschedule() reloads it but only guards status — if staff or another run
+  // moved its date/window/tech since, do NOT overwrite that newer placement.
+  const fresh = await db('scheduled_services')
+    .where({ id: service.id })
+    .first('scheduled_date', 'window_start', 'technician_id');
+  if (!fresh) {
+    throw Object.assign(new Error('Service no longer exists'), { code: 'STALE_PLACEMENT' });
+  }
+  const norm = (t) => (t ? String(t).slice(0, 5) : null);
+  const changed = String(fresh.scheduled_date).split('T')[0] !== String(service.scheduled_date).split('T')[0]
+    || norm(fresh.window_start) !== norm(service.window_start)
+    || String(fresh.technician_id || '') !== String(service.technician_id || '');
+  if (changed) {
+    throw Object.assign(new Error('Placement changed since it was scored — skipping stale move'), { code: 'STALE_PLACEMENT' });
+  }
+
   // Canonical move — transactional, overlap-checked, silent.
   await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
 
-  // Stamp auto-dispatch bookkeeping (separate from the rebooker's own writes).
+  // Stamp auto-dispatch bookkeeping. Atomic increment avoids a lost update if
+  // two runs (manual + cron) touch the same row before either re-reads it.
   await db('scheduled_services').where({ id: service.id }).update({
     last_auto_dispatch_at: db.fn.now(),
     last_auto_dispatch_run_id: runId,
-    auto_dispatch_change_count: (service.auto_dispatch_change_count || 0) + 1,
+    auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
     updated_at: db.fn.now(),
   });
 
