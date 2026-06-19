@@ -120,22 +120,24 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
 
     const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
     const categoryLabel = category.replace(/_/g, ' ');
-    const descPreview = cleanDescription.slice(0, 100);
     const photoCount = photoData.length;
     const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
 
     // Internal admin alert only. Service requests should surface in the admin
-    // notification feed, not text the office number.
+    // notification feed, not text the office number. The notification is now
+    // the primary triage surface (there is no dedicated Requests page), so the
+    // full request description goes in the body — it's capped at 500 chars by
+    // the create-request validation above.
     try {
       const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
-      await NotificationService.notifyAdmin(
+      const notif = await NotificationService.notifyAdmin(
         'service',
         `${urgencyTag}New service request from ${customerName}`,
         `Category: ${categoryLabel}\n` +
           `Subject: ${cleanSubject}` +
           (locationLabel ? `\nLocation: ${locationLabel}` : '') +
           (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
-          (descPreview ? `\n\n"${descPreview}${cleanDescription.length > 100 ? '...' : ''}"` : ''),
+          (cleanDescription ? `\n\n"${cleanDescription}"` : ''),
         {
           icon: validUrgency === 'urgent' ? '🚨' : '🏠',
           link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
@@ -148,6 +150,20 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
           },
         }
       );
+      // notifyAdmin swallows DB errors and returns null instead of throwing, so a
+      // failed insert won't hit the catch below. With the dedicated Requests page
+      // gone, this notification is the primary triage surface — a silent miss
+      // would leave the request unsurfaced in the feed. The row is still durable
+      // in service_requests (and reachable from the customer profile), so don't
+      // fail the customer's submission; instead emit an explicit, recoverable
+      // error so it pages through to Sentry and ops can re-surface it.
+      if (!notif) {
+        logger.error(
+          `Admin notification did not persist for service request ${request.id} ` +
+            `(customer ${req.customer.id}); request is durable in service_requests ` +
+            `but may be unsurfaced in the admin feed.`
+        );
+      }
     } catch (notifErr) {
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }

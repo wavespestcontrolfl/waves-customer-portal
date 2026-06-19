@@ -10182,8 +10182,12 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 }
 
 // =========================================================================
-// MY REQUESTS CARD — shows on dashboard when customer has open requests
+// MY REQUESTS CARD — a short-lived receipt for recently submitted requests
 // =========================================================================
+// Requests are no longer tracked through an admin status pipeline; each one
+// fires an admin notification and the office follows up directly (call/text).
+// So this card is just an acknowledgment of recent submissions (last 14 days)
+// rather than a New→Reviewed→Scheduled→Resolved tracker.
 function MyRequestsCard() {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -10196,17 +10200,16 @@ function MyRequestsCard() {
 
   if (loading) return null;
 
-  const open = requests.filter(r => r.status !== 'resolved');
-  if (!open.length) return null;
+  const RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+  const recent = requests
+    .filter(r => {
+      if (r.status === 'resolved') return false; // dropped once the office marks it handled
+      const created = new Date(r.createdAt).getTime();
+      return Number.isFinite(created) && Date.now() - created < RECENT_WINDOW_MS;
+    })
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  if (!recent.length) return null;
 
-  const statusConfig = {
-    new: { label: 'New', color: B.wavesBlue, bg: '#F8FCFE', border: '#A7DDF8' },
-    acknowledged: { label: 'Reviewed', color: B.orange, bg: '#FFFBEB', border: '#FDE68A' },
-    scheduled: { label: 'Scheduled', color: B.teal, bg: '#F0F9FF', border: '#BAE6FD' },
-    resolved: { label: 'Resolved', color: B.green, bg: '#F0FDF4', border: '#BBF7D0' },
-  };
-
-  const STATUS_ORDER = ['new', 'acknowledged', 'scheduled', 'resolved'];
   const muted = '#6B7280';
 
   return (
@@ -10217,43 +10220,29 @@ function MyRequestsCard() {
       border: '1px solid #E7E2D7',
       boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
     }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <span style={{
-            width: 38,
-            height: 38,
-            borderRadius: 8,
-            background: '#F8FCFE',
-            color: B.blueDeeper,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}>
-            <Icon name="clipboard" size={18} strokeWidth={2} />
-          </span>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>My Requests</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Open service and account requests</div>
-          </div>
-        </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, marginBottom: 12 }}>
         <span style={{
-          fontSize: 12,
-          fontWeight: 850,
-          padding: '5px 9px',
+          width: 38,
+          height: 38,
           borderRadius: 8,
           background: '#F8FCFE',
           color: B.blueDeeper,
-          border: '1px solid #CFE7F5',
-          whiteSpace: 'nowrap',
-        }}>{open.length} open</span>
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          <Icon name="clipboard" size={18} strokeWidth={2} />
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>My Requests</div>
+          <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>We've got your recent requests — our team will follow up directly.</div>
+        </div>
       </div>
 
       <div style={{ display: 'grid', gap: 8 }}>
-        {open.slice(0, 3).map(r => {
-          const s = statusConfig[r.status] || statusConfig.new;
+        {recent.slice(0, 3).map(r => {
           const created = new Date(r.createdAt);
-          const currentStep = Math.max(0, STATUS_ORDER.indexOf(r.status));
           return (
             <article key={r.id} style={{
               border: '1px solid #E7E2D7',
@@ -10266,30 +10255,18 @@ function MyRequestsCard() {
                   <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.35 }}>{r.subject}</div>
                   <div style={{ fontSize: 12, color: muted, marginTop: 4 }}>
                     {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    {r.assignedTechnician && <span> · {r.assignedTechnician}</span>}
                   </div>
                 </div>
                 <span style={{
                   fontSize: 12,
                   fontWeight: 850,
-                  textTransform: 'uppercase',
-                  letterSpacing: 0,
                   padding: '5px 8px',
                   borderRadius: 8,
-                  background: s.bg,
-                  color: s.color,
-                  border: `1px solid ${s.border}`,
+                  background: '#F0FDF4',
+                  color: B.green,
+                  border: '1px solid #BBF7D0',
                   whiteSpace: 'nowrap',
-                }}>{s.label}</span>
-              </div>
-              <div aria-hidden="true" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 4, marginTop: 10 }}>
-                {STATUS_ORDER.map((st, i) => (
-                  <div key={st} style={{
-                    height: 4,
-                    borderRadius: 999,
-                    background: currentStep >= i ? s.color : '#E7E2D7',
-                  }} />
-                ))}
+                }}>Received</span>
               </div>
               {r.urgency === 'urgent' && (
                 <div style={{ marginTop: 8, fontSize: 12, color: B.red, fontWeight: 850, display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -10299,11 +10276,6 @@ function MyRequestsCard() {
             </article>
           );
         })}
-        {open.length > 3 && (
-          <div style={{ fontSize: 12, color: muted, padding: '2px 2px 0' }}>
-            Showing the latest 3 of {open.length} open requests.
-          </div>
-        )}
       </div>
     </section>
   );

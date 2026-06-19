@@ -127,6 +127,18 @@ describe('notification trigger push tags', () => {
       body: 'Added Lawn Care \u2192 Silver @ $112.50/mo',
       link: '/admin/estimates?estimateId=estimate-123',
     });
+
+    // When the customer is known, deep-link to the Customer 360 requests panel \u2014
+    // that's the only surface where staff can mark the add-on request handled now
+    // that /admin/requests is gone.
+    const withCustomer = TRIGGER_REGISTRY.bundle_quote_requested.build({
+      customerName: 'Existing Appointment Demo',
+      suggestedService: 'Lawn Care',
+      previousTier: 'Bronze',
+      estimateId: 'estimate-123',
+      customerId: 'cust-789',
+    });
+    expect(withCustomer.link).toBe('/admin/customers?customerId=cust-789');
   });
 
   test('notification body sanitizer redacts customer contact details across triggers', () => {

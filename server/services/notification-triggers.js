@@ -305,7 +305,15 @@ const TRIGGER_REGISTRY = {
       body: p.bundled
         ? `Added ${p.suggestedService || 'service'} → ${p.newTier || p.tier || 'new tier'} @ $${Number(p.newMonthly || 0).toFixed(2)}/mo`
         : `Interested in adding ${p.suggestedService || 'a service'} to ${p.previousTier || p.tier || 'current'} plan`,
-      link: p.estimateId ? `/admin/estimates?estimateId=${encodeURIComponent(p.estimateId)}` : '/admin/estimates',
+      // Add-on inquiries create a service_requests row; the only place staff can
+      // mark it handled (releasing uniq_service_requests_open_estimate_requested_service)
+      // is the requests panel on the Customer 360 overview, so deep-link there when
+      // we know the customer. Fall back to the estimate when there's no linked customer.
+      link: p.customerId
+        ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}`
+        : p.estimateId
+          ? `/admin/estimates?estimateId=${encodeURIComponent(p.estimateId)}`
+          : '/admin/estimates',
     }),
   },
   credential_expiring_soon: {

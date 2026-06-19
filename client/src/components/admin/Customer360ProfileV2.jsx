@@ -81,6 +81,7 @@ import {
   cn,
 } from "../ui";
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
+import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -4243,6 +4244,7 @@ export default function Customer360ProfileV2({
           {/* OVERVIEW */}
           {activeTab === "overview" && (
             <div>
+              <CustomerRequestsPanel customerId={customerId} />
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}
