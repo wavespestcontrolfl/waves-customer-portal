@@ -6489,9 +6489,14 @@ export function CompletionPanel({
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
   // only free-text input — the AI report copy is generated from it + photos.)
-  const dictation = useSpeechDictation((text) =>
-    setNotes((b) => (b ? `${b} ${text}` : text)),
-  );
+  // Ignore any chunk that lands once an AI draft is in flight: SpeechRecognition
+  // .stop() can still deliver a final result asynchronously, which would mutate
+  // notes after the payload was snapshotted and then be lost when the response
+  // replaces the notes.
+  const dictation = useSpeechDictation((text) => {
+    if (generating) return;
+    setNotes((b) => (b ? `${b} ${text}` : text));
+  });
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
   const [soilTemp, setSoilTemp] = useState("");
@@ -7729,10 +7734,21 @@ export function CompletionPanel({
     );
   }
   function labelsStillInNotes(labels) {
-    const currentNotes = notes.toLowerCase();
+    // A selected label only counts as still-active if it appears inside one of
+    // the bracketed chip-marker lines ([Protocol]/[Protocol optional]/[Action]/
+    // [Found]/[Next] …) — NOT in arbitrary prose. The label arrays are only ever
+    // populated alongside a marker (the chip handlers, or a restored draft whose
+    // saved notes carry the markers), so this matches the same items as before
+    // for normal completions, but makes the deselect handle reliable after
+    // Generate: deleting the marker truly removes the item even when the AI prose
+    // happens to repeat the label text verbatim.
+    const markerLines = notes
+      .split("\n")
+      .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
+      .map((line) => line.toLowerCase());
     return (Array.isArray(labels) ? labels : []).filter((label) => {
-      const text = String(label || "").trim();
-      return text && currentNotes.includes(text.toLowerCase());
+      const text = String(label || "").trim().toLowerCase();
+      return text && markerLines.some((line) => line.includes(text));
     });
   }
   // Generate AI report replaces the notes wholesale with AI prose, which would
@@ -7906,6 +7922,10 @@ export function CompletionPanel({
     }
   }
   function addProduct(product) {
+    // No payload-feeding mutations while an AI draft is in flight — a product
+    // added now would land in the submitted structured data but not in the prose
+    // the response is about to write (built from the pre-draft snapshot).
+    if (generating) return;
     if (selectedProducts.find((p) => p.productId === product.id)) return;
     const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
     const areaRequirement = requiredApplicationArea(
@@ -7952,6 +7972,7 @@ export function CompletionPanel({
     });
   }
   function removeProduct(productId) {
+    if (generating) return;
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
     );
@@ -7987,6 +8008,7 @@ export function CompletionPanel({
     );
   }
   function toggleArea(area) {
+    if (generating) return;
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
@@ -10009,16 +10031,16 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={async () => {
+                  // Stop dictation BEFORE snapshotting notes for the payload, so
+                  // a final spoken chunk lands in serviceNotes rather than after
+                  // the snapshot. Once generating flips true the dictation
+                  // callback ignores any late chunk (and the mic is disabled).
+                  if (dictation.listening) dictation.toggle();
                   const { payload, hasReportInput } = buildAiReportPayload();
                   if (!hasReportInput) {
                     alert("Add service notes, products, or visit details first.");
                     return;
                   }
-                  // Stop any in-flight dictation first: the mic is disabled while
-                  // generating, so leaving it running would keep appending
-                  // transcript chunks into notes the response is about to replace,
-                  // with no way to stop it until generation finishes.
-                  if (dictation.listening) dictation.toggle();
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
@@ -12145,16 +12167,16 @@ export function CompletionPanel({
             <button
               type="button"
               onClick={async () => {
+                // Stop dictation BEFORE snapshotting notes for the payload, so
+                // a final spoken chunk lands in serviceNotes rather than after
+                // the snapshot. Once generating flips true the dictation
+                // callback ignores any late chunk (and the mic is disabled).
+                if (dictation.listening) dictation.toggle();
                 const { payload, hasReportInput } = buildAiReportPayload();
                 if (!hasReportInput) {
                   alert("Add service notes, products, or visit details first.");
                   return;
                 }
-                // Stop any in-flight dictation first: the mic is disabled while
-                // generating, so leaving it running would keep appending
-                // transcript chunks into notes the response is about to replace,
-                // with no way to stop it until generation finishes.
-                if (dictation.listening) dictation.toggle();
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
