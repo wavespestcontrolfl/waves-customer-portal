@@ -77,6 +77,7 @@ async function withServer(fn) {
 const BILLABLE_VISIT = {
   scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service',
   estimated_price: '129.00', prepaid_amount: null, ss_callback: false, sr_callback: false,
+  sr_status: 'completed', service_date: '2026-04-14', completed_at: '2026-04-14T15:00:00Z',
   customer_id: 'cust-1', monthly_rate: '0', property_type: 'residential', payer_id: null,
   autopay_enabled: true, autopay_paused_until: null, ach_status: null,
 };
@@ -132,7 +133,7 @@ describe('admin billing-recovery routes', () => {
       });
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ useScheduledReplay: true }));
+      expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ useScheduledReplay: true, dueDate: '2026-04-14' }));
       expect(dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({
         scheduled_service_id: 'ss-1', disposition: 'billed', invoice_id: 'inv-1', actor_user_id: 'admin-1',
       }));
@@ -170,6 +171,21 @@ describe('admin billing-recovery routes', () => {
       const body = await res.json();
       expect(res.status).toBe(409);
       expect(body.error).toMatch(/partial prepayment/i);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
+  test('billing an incomplete (office-handoff) visit is blocked', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, sr_status: 'incomplete' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(false);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(422);
       expect(InvoiceService.createFromService).not.toHaveBeenCalled();
     });
   });

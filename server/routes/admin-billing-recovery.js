@@ -109,6 +109,16 @@ function clampDays(raw) {
   return Math.min(365, Math.max(1, n));
 }
 
+// Match the completion path's due date (the service date), so a recovered
+// 60/90-day-old visit ages correctly instead of resetting to today+30. A
+// date-only string is used as-is; a timestamp is normalized to its ET date.
+function dueDateFromVisit(v) {
+  const raw = v.service_date || v.completed_at;
+  if (!raw) return undefined;
+  if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  return etDateString(new Date(raw));
+}
+
 // Shared base query for uninvoiced completed visits, with the full no-cost
 // allowlist applied. Returns priced visits only (estimated_price > 0). All
 // req-derived values are bound, never interpolated.
@@ -121,6 +131,7 @@ function uninvoicedLeakQuery(days) {
     .whereRaw("ss.completed_at >= now() - (? * interval '1 day')", [days])
     .whereRaw('COALESCE(ss.estimated_price, 0) > 0')
     .whereNull('d.id')                                   // not already dispositioned
+    .whereRaw("sr.status = 'completed'")                 // completed record only (excludes office-handoff 'incomplete' + missing)
     .whereRaw(`NOT ${HAS_INVOICE_SQL}`)                  // no existing invoice
     .whereRaw('COALESCE(ss.is_callback, false) = false') // not a callback (free re-treat)
     .whereRaw('COALESCE(sr.is_callback, false) = false')
@@ -250,6 +261,9 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
         db.raw('COALESCE(ss.payer_id, c.payer_id) as payer_id'),
         db.raw('COALESCE(ss.is_callback, false) as ss_callback'),
         db.raw('COALESCE(sr.is_callback, false) as sr_callback'),
+        'sr.status as sr_status',
+        'sr.service_date',
+        'ss.completed_at',
         'c.id as customer_id',
         'c.monthly_rate',
         'c.property_type',
@@ -262,6 +276,11 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     if (!visit) return res.status(404).json({ error: 'Visit not found' });
     if (!visit.service_record_id) {
       return res.status(422).json({ error: 'Visit has no completion record — cannot invoice' });
+    }
+    // Office-handoff visits write service_records.status='incomplete' and the
+    // completion flow intentionally skips invoicing — never bill those here.
+    if (visit.sr_status !== 'completed') {
+      return res.status(422).json({ error: 'Visit completion record is incomplete (office-handoff) — cannot invoice.' });
     }
 
     // Canonical autopay double-bill guard (keyed on the default payment_methods
@@ -342,6 +361,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
         description: visit.service_type,
         taxRate: visit.property_type === 'commercial' ? 0.07 : 0,
         useScheduledReplay: true,
+        dueDate: dueDateFromVisit(visit), // age from the service date, not today+30
       });
 
       await trx('visit_billing_dispositions').insert({
