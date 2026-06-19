@@ -6666,7 +6666,19 @@ router.put('/:token/accept', async (req, res, next) => {
     // the ADMIN copy still correctly reflects that the invoice was sent.
     let invoiceIsPayerBilled = false;
     if (invoiceId) {
-      const payerCheck = await db('invoices').where({ id: invoiceId }).first('payer_id').catch(() => null);
+      let payerCheck = null;
+      try {
+        payerCheck = await db('invoices').where({ id: invoiceId }).first('payer_id');
+      } catch (e) {
+        // Fail closed: if we can't verify the final invoice's payer status, do
+        // NOT leave a homeowner pay URL that might be the payer's bearer
+        // /pay/:token. Suppressing a genuine self-pay link on a rare read error
+        // is recoverable (the customer pays from the portal billing tab); leaking
+        // the payer's token is not. pay_invoice is gated on the URL client-side,
+        // so nulling it also drops the spurious next-step.
+        invoicePayUrl = null;
+        logger.warn(`[estimate-accept] payer status check failed for invoice ${invoiceId}; failing closed (suppressed pay URL): ${e.message}`);
+      }
       if (payerCheck?.payer_id) {
         invoiceIsPayerBilled = true;
         invoicePayUrl = null;
