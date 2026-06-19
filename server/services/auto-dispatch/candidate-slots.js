@@ -133,6 +133,18 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
   const category = prefs.service_category;
 
+  // Dates already occupied by another occurrence of THIS recurring series. The
+  // rebooker only checks tech-time overlap, so without this two visits from the
+  // same series could land on the same day (different time/tech). HARD filter.
+  const parentId = service.recurring_parent_id || service.id;
+  const siblingRows = await ctx.db('scheduled_services')
+    .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+    .whereNot('id', service.id)
+    .whereNotIn('status', ['cancelled'])
+    .whereBetween('scheduled_date', [dateFrom, dateTo])
+    .select('scheduled_date');
+  const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
+
   const res = await findAvailableSlots({
     lat: geo.lat,
     lng: geo.lng,
@@ -148,6 +160,7 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const candidates = [];
   for (const slot of slots) {
     if (inBlackout(slot.date, prefs.blackout)) continue;                // HARD: blackout
+    if (siblingDates.has(slot.date)) continue;                          // HARD: same-series occurrence that day
     const techId = slot.technician && slot.technician.id;
     const cap = ctx.capabilityFor(techId, category);
     if (cap === 'deactivated') continue;                                // HARD: tech turned off for this category

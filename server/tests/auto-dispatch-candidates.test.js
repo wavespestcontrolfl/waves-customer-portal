@@ -8,14 +8,14 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { findValidCandidateSlots, inBlackout } = require('../services/auto-dispatch/candidate-slots');
 
 function neighborDbStub() {
-  // computeCurrentPlacement queries same-day siblings — return none.
-  return () => ({
-    where() { return this; },
-    whereNot() { return this; },
-    whereNotIn() { return this; },
-    leftJoin() { return this; },
-    select: async () => [],
-  });
+  // computeCurrentPlacement + the same-series sibling query — return none.
+  return () => {
+    const c = {};
+    ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach((m) => { c[m] = () => c; });
+    c.select = async () => [];
+    return c;
+  };
 }
 
 const SERVICE = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1', window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
@@ -74,6 +74,26 @@ describe('findValidCandidateSlots', () => {
     // not the whole horizon — so cadence isn't collapsed.
     expect(args.dateFrom).toBe('2026-07-28');
     expect(args.dateTo).toBe('2026-08-11');
+  });
+
+  test('drops candidate dates already occupied by a same-series sibling', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
+        { date: '2026-08-07', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 },
+      ],
+    });
+    // 1st ctx.db call = sibling-date query (return a sibling on 08-05); later calls = none.
+    let call = 0;
+    const db = () => {
+      call += 1;
+      const c = {};
+      ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+      c.select = async () => (call === 1 ? [{ scheduled_date: '2026-08-05' }] : []);
+      return c;
+    };
+    const { candidates } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, { ...ctx(), db });
+    expect(candidates.map((x) => x.date)).toEqual(['2026-08-07']);
   });
 
   test('returns no candidates (and no_geo note) when the service has no usable coordinates', async () => {

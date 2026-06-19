@@ -50,10 +50,9 @@ function makeCapabilityFn(map) {
 function loadEligibleServices(lockBoundary, lookaheadEnd) {
   return db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .where(function () {
-      this.where('scheduled_services.is_recurring', true)
-        .orWhereNotNull('scheduled_services.recurring_parent_id');
-    })
+    // is_recurring=true only — booster-month rows carry a recurring_parent_id but
+    // is_recurring=false and must not be swept (see waveguard-existing-services.js).
+    .where('scheduled_services.is_recurring', true)
     .whereIn('scheduled_services.status', ['pending', 'confirmed'])
     .where('scheduled_services.scheduled_date', '>', lockBoundary)
     .where('scheduled_services.scheduled_date', '<=', lookaheadEnd)

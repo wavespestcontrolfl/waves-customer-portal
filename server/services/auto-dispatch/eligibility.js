@@ -37,8 +37,10 @@ function deny(reason_code, reason_description) {
 function isEligibleForAutoDispatch(service, ctx = {}) {
   if (!service) return deny('NOT_FOUND', 'Service row missing');
 
-  const isRecurring = service.is_recurring === true || service.recurring_parent_id != null;
-  if (!isRecurring) return deny('NON_RECURRING', 'Not a recurring visit');
+  // is_recurring ONLY — booster-month visits carry a recurring_parent_id but are
+  // stored is_recurring=false precisely so cadence maintenance ignores them
+  // (see services/waveguard-existing-services.js). Don't move those.
+  if (service.is_recurring !== true) return deny('NON_RECURRING', 'Not a recurring cadence visit');
 
   const status = String(service.status || '');
   if (!VALID_STATUSES.has(status)) {

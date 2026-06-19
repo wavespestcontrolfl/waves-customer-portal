@@ -27,7 +27,7 @@ beforeEach(() => {
 test('applies the move and atomically increments the change count', async () => {
   const update = jest.fn().mockResolvedValue(1);
   const queue = [
-    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
     { where() { return this; }, update },
   ];
   db.mockImplementation(() => queue.shift());
@@ -40,13 +40,19 @@ test('applies the move and atomically increments the change count', async () => 
 });
 
 test('aborts (STALE_PLACEMENT) when the visit was locked after scoring', async () => {
-  db.mockImplementation(() => readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', auto_dispatch_locked: true, auto_dispatch_excluded: false }));
+  db.mockImplementation(() => readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: true, auto_dispatch_excluded: false }));
+  await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('aborts when status flipped to rescheduled (customer request) after scoring', async () => {
+  db.mockImplementation(() => readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'rescheduled', auto_dispatch_locked: false, auto_dispatch_excluded: false }));
   await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
   expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });
 
 test('aborts when window_end changed since scoring', async () => {
-  db.mockImplementation(() => readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '10:00', technician_id: 't1', auto_dispatch_locked: false, auto_dispatch_excluded: false }));
+  db.mockImplementation(() => readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '10:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }));
   await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
   expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });

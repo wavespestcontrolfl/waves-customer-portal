@@ -15,6 +15,7 @@ const {
   timeWindowForPreferenceKey,
   classifyServiceCategory,
 } = require('./service-category');
+const { toDateStr } = require('./dates');
 
 const DAY_NAME_TO_INDEX = {
   sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
@@ -38,8 +39,10 @@ function normalizePreferences(prefs, serviceType) {
 
   const blackout = (prefs && prefs.blackout_start && prefs.blackout_end)
     ? {
-        start: String(prefs.blackout_start).split('T')[0],
-        end: String(prefs.blackout_end).split('T')[0],
+        // pg returns DATE columns as Date objects — normalize so inBlackout's
+        // string comparison actually matches (else the HARD filter never fires).
+        start: toDateStr(prefs.blackout_start),
+        end: toDateStr(prefs.blackout_end),
       }
     : null;
 

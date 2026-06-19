@@ -54,13 +54,19 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // or moved its date/window/tech since, do NOT overwrite that newer state.
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
-    .first('scheduled_date', 'window_start', 'window_end', 'technician_id',
+    .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
       'auto_dispatch_locked', 'auto_dispatch_excluded');
   if (!fresh) {
     throw Object.assign(new Error('Service no longer exists'), { code: 'STALE_PLACEMENT' });
   }
   if (fresh.auto_dispatch_locked === true || fresh.auto_dispatch_excluded === true) {
     throw Object.assign(new Error('Visit was locked/excluded from auto-dispatch after scoring'), { code: 'STALE_PLACEMENT' });
+  }
+  // A customer reschedule request flips status→'rescheduled' (which the rebooker
+  // still treats as movable) without changing the date/window. Require it to
+  // still be a live pending/confirmed visit before moving.
+  if (!['pending', 'confirmed'].includes(String(fresh.status))) {
+    throw Object.assign(new Error(`Visit status changed to '${fresh.status}' after scoring`), { code: 'STALE_PLACEMENT' });
   }
   const norm = (t) => (t ? String(t).slice(0, 5) : null);
   const changed = toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)

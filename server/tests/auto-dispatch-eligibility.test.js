@@ -25,9 +25,11 @@ describe('isEligibleForAutoDispatch', () => {
     expect(isEligibleForAutoDispatch(svc(), CTX)).toMatchObject({ eligible: true });
   });
 
-  test('recurring visit linked only by recurring_parent_id is eligible', () => {
+  test('booster-month row (is_recurring=false but has a parent) is NON_RECURRING', () => {
+    // booster visits carry recurring_parent_id but is_recurring=false on purpose;
+    // they must NOT be auto-dispatched.
     const r = isEligibleForAutoDispatch(svc({ is_recurring: false, recurring_parent_id: 'p1' }), CTX);
-    expect(r.eligible).toBe(true);
+    expect(r).toMatchObject({ eligible: false, reason_code: 'NON_RECURRING' });
   });
 
   test('one-time visit is NON_RECURRING', () => {
