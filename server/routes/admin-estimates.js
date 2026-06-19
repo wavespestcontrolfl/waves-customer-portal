@@ -325,7 +325,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
-        templateKey: 'estimate.delivery',
+        templateKey: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery',
         to: estimate.customer_email,
         payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
@@ -336,9 +336,9 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         attachments: Array.isArray(attachments) ? attachments : [],
       });
       if (result.blocked) {
-        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: 'estimate.delivery' };
+        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: 'estimate.delivery' };
+      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -533,22 +533,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // estimate emails are unchanged. PDF failure is non-fatal: the link-based
   // email still goes out. SMS can't carry attachments (carrier MMS limits),
   // so the texted estimate link remains the SMS channel's payload.
-  const proposalMode = normalizeProposal(estimate).enabled;
-  let proposalAttachments = [];
-  try {
-    if (proposalMode) {
-      // Build the PDF from the row as it will be persisted by this send —
-      // nextExpiresAt is the validity window the customer's link gets, so the
-      // attached proposal must advertise the same "valid through" date rather
-      // than the pre-update row's (usually empty) expires_at.
-      proposalAttachments = [await buildEstimateProposalEmailAttachment({
-        ...estimate,
-        expires_at: nextExpiresAt,
-      })];
-    }
-  } catch (e) {
-    logger.warn(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
-  }
+  // The commercial proposal PDF attachment is built later, from a fresh row
+  // read taken right before the email send (see the email branch below), so a
+  // proposal saved during this send — the immediate-send PUT race that the
+  // `sending`-status guard can't catch, since immediate sends don't claim the
+  // row — is reflected in the attachment rather than a stale pre-send copy.
 
   const channels = {};
 
@@ -613,6 +602,24 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
       channels.email = { ok: false, error: 'No email on file' };
     } else {
       try {
+        // Read the row fresh right before sending so the proposal state (and
+        // its PDF) reflects any save that landed during this send. nextExpiresAt
+        // is the validity window the link gets, so the attached PDF advertises
+        // the same "valid through" date. PDF failure is non-fatal — the
+        // link-based email still goes out.
+        const freshEstimate = await db('estimates').where({ id: estimate.id }).first() || estimate;
+        const proposalMode = normalizeProposal(freshEstimate).enabled;
+        let proposalAttachments = [];
+        if (proposalMode) {
+          try {
+            proposalAttachments = [await buildEstimateProposalEmailAttachment({
+              ...freshEstimate,
+              expires_at: nextExpiresAt,
+            })];
+          } catch (e) {
+            logger.warn(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
+          }
+        }
         const result = await sendEstimateEmail({
           estimate,
           firstName,
