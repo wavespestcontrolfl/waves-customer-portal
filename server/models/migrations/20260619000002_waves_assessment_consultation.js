@@ -34,11 +34,28 @@
  * newer Service Library UI edits, and the typed lawn-findings cutover this
  * replaces was itself a forward-only migration.
  */
-const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'rescheduled', 'no_show'];
 const OLD_ASSESSMENT_LABELS = ['Lawn Assessment', 'Lawn Assessment Service'];
+// Open (still-to-be-completed) visit statuses — the only rows whose
+// denormalized label we relabel. An explicit allowlist (rather than a
+// terminal denylist) guarantees we never rewrite a closed visit's history
+// (completed / cancelled / rescheduled / skipped / no_show), even if new
+// closed statuses are added later.
+const OPEN_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+
+const WAVES_ASSESSMENT_DESCRIPTION =
+  'Advisory walkthrough of the property to evaluate lawn and/or pest conditions and recommend a plan. Findings are reviewed with the customer; no treatment is performed during the visit.';
 
 exports.up = async function (knex) {
   // ── 1) Rename Lawn Assessment → Waves Assessment (capture the real key) ──
+  // Also replace the old lawn-specific description: the public tracker
+  // (track-public.js) surfaces services.description as the customer-facing
+  // summary, so stale "comprehensive lawn evaluation" copy would mislead on
+  // the new catch-all assessment.
+  const renameFields = {
+    name: 'Waves Assessment',
+    short_name: 'Waves Assess',
+    description: WAVES_ASSESSMENT_DESCRIPTION,
+  };
   let serviceKey = null;
   const byKey = await knex('services').where('service_key', 'lawn_inspection').first('service_key', 'id');
   let serviceId = null;
@@ -47,7 +64,7 @@ exports.up = async function (knex) {
     serviceId = byKey.id;
     await knex('services')
       .where('service_key', serviceKey)
-      .update({ name: 'Waves Assessment', short_name: 'Waves Assess' });
+      .update(renameFields);
   } else {
     // Fallback for any env where the key drifted: match the post-#1912 name.
     const byName = await knex('services').where('name', 'Lawn Assessment').first('service_key', 'id');
@@ -56,7 +73,7 @@ exports.up = async function (knex) {
       serviceId = byName.id;
       await knex('services')
         .where('service_key', serviceKey)
-        .update({ name: 'Waves Assessment', short_name: 'Waves Assess' });
+        .update(renameFields);
     }
   }
 
@@ -98,19 +115,19 @@ exports.up = async function (knex) {
     }
   }
 
-  // ── 3) Backfill the denormalized label on non-terminal scheduled visits ──
+  // ── 3) Backfill the denormalized label on OPEN scheduled visits only ──
   if (await knex.schema.hasColumn('scheduled_services', 'service_type')) {
     // Linked rows (reliable): match by service_id.
     if (serviceId) {
       await knex('scheduled_services')
         .where({ service_id: serviceId })
-        .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+        .whereIn('status', OPEN_VISIT_STATUSES)
         .update({ service_type: 'Waves Assessment' });
     }
     // Legacy/unlinked rows: match by the old denormalized label.
     await knex('scheduled_services')
       .whereIn('service_type', OLD_ASSESSMENT_LABELS)
-      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .whereIn('status', OPEN_VISIT_STATUSES)
       .update({ service_type: 'Waves Assessment' });
   }
 };

@@ -1818,27 +1818,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
     // Photo captions land on the customer report for EVERY completion
     // (caption || stateBadge under each photo), typed or not — sanitize to
-    // the column budget and banned-copy validate them HERE, not just in the
-    // typed customerCopySources block, or a legacy completion could carry
-    // banned wording onto a report.
+    // the column budget HERE. The banned-copy REJECTION is deferred until the
+    // completion's delivery posture is known: internal-only consultations mint
+    // no customer report, so customer-copy bans must not block an internal
+    // assessment photo (the check is re-applied below for any other path).
+    const captionBannedViolations = new Set();
     if (Array.isArray(completionPhotos)) {
-      const captionViolations = new Set();
       for (const photo of completionPhotos) {
         if (photo && photo.caption != null) {
           photo.caption = String(photo.caption).trim().slice(0, 200) || null;
           if (photo.caption) {
             for (const v of ActivityIndicators.findBannedCustomerCopy(photo.caption)) {
-              captionViolations.add(v);
+              captionBannedViolations.add(v);
             }
           }
         }
-      }
-      if (captionViolations.size) {
-        return res.status(422).json({
-          error: `Photo captions contain wording we can't put on a customer report (${[...captionViolations].join(', ')}).`,
-          code: 'photo_caption_banned_copy',
-          violations: [...captionViolations],
-        });
       }
     }
     // The summary renders inside the Field Photos section — without photos
@@ -2188,6 +2182,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // posture is frozen on the record so resumed side effects and downstream
     // customer-facing gates (documents, paid-invoice review) honor it.
     const isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
+
+    // Deferred photo-caption banned-copy gate (sanitized above). Skip it for
+    // internal-only consultations — they produce no customer-facing report, so
+    // banned customer-copy wording can't reach a customer here.
+    if (!isInternalOnlyCompletion && captionBannedViolations.size) {
+      return res.status(422).json({
+        error: `Photo captions contain wording we can't put on a customer report (${[...captionBannedViolations].join(', ')}).`,
+        code: 'photo_caption_banned_copy',
+        violations: [...captionBannedViolations],
+      });
+    }
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
