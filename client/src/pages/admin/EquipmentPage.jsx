@@ -170,6 +170,29 @@ const EQUIPMENT_TAB_ALIASES = {
   mileage: "maintenance",
 };
 const EQUIPMENT_TAB_KEYS = new Set(EQUIPMENT_SECTIONS.map((s) => s.key));
+const EQUIPMENT_LEAF_BY_KEY = Object.fromEntries(
+  EQUIPMENT_SECTIONS.map((s) => [s.key, s]),
+);
+
+// The flat tab bar is grouped into ~4 parent sections, each revealing its leaf
+// tabs in a sub-row. `tab` still holds the LEAF key, so every
+// {tab === "..."} render block below is unchanged.
+const EQUIPMENT_TAB_GROUPS = [
+  { key: "assets", label: "Assets", Icon: Wrench, tabs: ["assets"] },
+  {
+    key: "maintenance",
+    label: "Maintenance",
+    Icon: Wrench,
+    tabs: ["maintenance", "calibrations"],
+  },
+  { key: "tank-mixes", label: "Tank Mixes", Icon: Beaker, tabs: ["tank-mixes"] },
+  {
+    key: "costs",
+    label: "Costs",
+    Icon: Calculator,
+    tabs: ["job-costs", "analytics"],
+  },
+];
 
 function normalizeEquipmentTab(value) {
   const key = EQUIPMENT_TAB_ALIASES[value] || value;
@@ -187,13 +210,20 @@ export default function EquipmentPage() {
     setToast(m);
     setTimeout(() => setToast(""), 3500);
   };
-  const handleSectionChange = (nextTab) => {
+  const activeGroup =
+    EQUIPMENT_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    EQUIPMENT_TAB_GROUPS[0];
+  const selectLeaf = (nextTab) => {
     const normalized = normalizeEquipmentTab(nextTab);
     const params = new URLSearchParams(searchParams);
     if (normalized === "assets") params.delete("tab");
     else params.set("tab", normalized);
     setTab(normalized);
     setSearchParams(params, { replace: true });
+  };
+  const handleSectionChange = (key) => {
+    const g = EQUIPMENT_TAB_GROUPS.find((x) => x.key === key);
+    if (g) selectLeaf(g.tabs[0]);
   };
 
   useEffect(() => {
@@ -212,11 +242,15 @@ export default function EquipmentPage() {
       <AdminCommandHeader
         title="Equipment"
         icon={Wrench}
-        sections={EQUIPMENT_SECTIONS}
-        activeKey={tab}
+        sections={EQUIPMENT_TAB_GROUPS.map((g) => ({
+          key: g.key,
+          label: g.label,
+          Icon: g.Icon,
+        }))}
+        activeKey={activeGroup.key}
         onSectionChange={handleSectionChange}
         ariaLabel="Equipment section"
-        navGridClassName="grid-cols-2 lg:grid-cols-6"
+        navGridClassName="grid-cols-2 lg:grid-cols-4"
         action={
           tab === "assets"
             ? {
@@ -227,6 +261,48 @@ export default function EquipmentPage() {
             : null
         }
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((key) => {
+            const leaf = EQUIPMENT_LEAF_BY_KEY[key];
+            const active = tab === key;
+            const LeafIcon = leaf.Icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => selectLeaf(key)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                <LeafIcon size={14} strokeWidth={1.9} />
+                {leaf.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {tab === "assets" && (
         <EquipmentTab
           showToast={showToast}
