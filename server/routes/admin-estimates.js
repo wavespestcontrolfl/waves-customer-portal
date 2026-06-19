@@ -39,6 +39,11 @@ const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
+const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+const {
+  generateEstimateProposalPDF,
+  buildEstimateProposalEmailAttachment,
+} = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
   buildPricingBundle,
@@ -265,7 +270,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [] }) {
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -277,6 +282,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         triggerEventId: `estimate_delivery:${estimate.id}`,
         idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
         categories: ['estimate_delivery'],
+        attachments: Array.isArray(attachments) ? attachments : [],
       });
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: 'estimate.delivery' };
@@ -334,12 +340,20 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     '- Waves Pest Control',
   ]);
+  // Convert SendGrid-shaped attachments ({ content: base64, type }) to
+  // nodemailer's shape ({ content: Buffer, contentType }) for the SMTP path.
+  const smtpAttachments = (Array.isArray(attachments) ? attachments : []).map((a) => ({
+    filename: a.filename,
+    content: Buffer.from(a.content, 'base64'),
+    contentType: a.type || 'application/pdf',
+  }));
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
     to: estimate.customer_email,
     subject: 'Your Waves Pest Control Estimate is Ready',
     html,
     text,
+    ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
   });
   return { ok: true, provider: 'smtp_fallback' };
 }
@@ -450,6 +464,21 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   const annualTotal = parseFloat(estimate.annual_total || 0);
   const priceLine = monthlyTotal > 0 ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr` : '';
 
+  // Commercial proposal PDF — attached to the delivery email only when the
+  // operator has authored a multi-building proposal (proposal.enabled). A
+  // synthesized fallback proposal is NOT attached, so ordinary residential
+  // estimate emails are unchanged. PDF failure is non-fatal: the link-based
+  // email still goes out. SMS can't carry attachments (carrier MMS limits),
+  // so the texted estimate link remains the SMS channel's payload.
+  let proposalAttachments = [];
+  try {
+    if (normalizeProposal(estimate).enabled) {
+      proposalAttachments = [await buildEstimateProposalEmailAttachment(estimate)];
+    }
+  } catch (e) {
+    logger.warn(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
+  }
+
   const channels = {};
 
   // Send SMS
@@ -519,6 +548,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           viewUrl,
           priceLine,
           idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
+          attachments: proposalAttachments,
         });
         channels.email = result.ok
           ? { ok: true, provider: result.template || result.provider || 'email' }
@@ -974,6 +1004,77 @@ router.get('/:id/pricing-audit', async (req, res, next) => {
     const audit = await buildEstimatePricingAudit(estimate);
     audit.snapshot = await getLatestEstimatePricingAuditSnapshot(estimate.id);
     res.json(audit);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/proposal — read the normalized commercial
+// proposal (multi-building line items) + computed totals. Always returns a
+// proposal: an authored one if present, otherwise a synthesized single-
+// building fallback the operator can promote to a real proposal.
+router.get('/:id/proposal', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const proposal = normalizeProposal(estimate);
+    res.json({ proposal, totals: computeProposalTotals(proposal) });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/estimates/:id/proposal — author/replace the commercial
+// proposal. Persisted into estimate_data.proposal (JSONB, no migration).
+// The operator-entered line items ARE the commercial quote, so the three
+// authoritative total columns are recomputed from them — that's what makes
+// a manual-quote commercial estimate sendable.
+router.put('/:id/proposal', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (estimate.archived_at) return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
+
+    const incoming = req.body?.proposal || req.body || {};
+    if (!Array.isArray(incoming.buildings) || incoming.buildings.length === 0) {
+      return res.status(400).json({ error: 'proposal.buildings must be a non-empty array.' });
+    }
+
+    // Normalize through the shared model so what we store matches what the
+    // PDF and totals read. Force enabled:true — an explicit PUT means the
+    // operator is authoring a real proposal (not the synthesized fallback).
+    const normalized = normalizeProposal({
+      ...estimate,
+      estimate_data: { proposal: { ...incoming, enabled: true } },
+    });
+    normalized.enabled = true;
+    normalized.synthesized = false;
+    const totals = computeProposalTotals(normalized);
+
+    const existingData = parseEstimateData(estimate.estimate_data) || {};
+    const nextData = {
+      ...existingData,
+      proposal: { ...normalized, updatedAt: new Date().toISOString() },
+    };
+
+    await db('estimates').where({ id: estimate.id }).update({
+      estimate_data: JSON.stringify(nextData),
+      category: 'COMMERCIAL',
+      monthly_total: totals.monthlyEquivalent,
+      annual_total: totals.annualRecurring,
+      onetime_total: totals.oneTime,
+      updated_at: db.fn.now(),
+    });
+
+    logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);
+    res.json({ success: true, proposal: normalized, totals });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/proposal.pdf — branded commercial proposal
+// PDF (inline). Reuses the same generator that produces the email
+// attachment, so the download and the emailed copy are byte-identical.
+router.get('/:id/proposal.pdf', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    generateEstimateProposalPDF(estimate, res);
   } catch (err) { next(err); }
 });
 
