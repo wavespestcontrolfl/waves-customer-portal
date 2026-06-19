@@ -1009,17 +1009,23 @@ function LawnWaterBalance({ water = {}, grassLabel = 'lawn', mode = 'live', over
 
   const applied = formatWaterInches(advice.appliedInchesPerWeek);
   const gap = formatWaterInches(Math.abs(Number(advice.differentialInchesPerWeek) || 0));
+  // When rainfall is known, `applied` is the total water on the lawn (irrigation
+  // + rain); when it isn't (a surplus driven by irrigation alone), `applied` is
+  // irrigation only — so don't claim rain is part of the number in that case.
+  const gettingPhrase = advice.rainKnown
+    ? <>Your lawn is getting about <strong>{applied}/week</strong> of water (irrigation + rain)</>
+    : <>You're applying about <strong>{applied}/week</strong> of irrigation</>;
   let message;
   if (advice.status === 'surplus') {
     message = overwateringObserved
-      ? <>You're applying about <strong>{applied}/week</strong> — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season, and the fungal/mushroom signs in today's photos line up with over-watering. Easing back should reduce them along with weed pressure.</>
-      : <>You're applying about <strong>{applied}/week</strong> — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season. Easing back can reduce fungus, mushrooms, and weed pressure.</>;
+      ? <>{gettingPhrase} — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season, and the fungal/mushroom signs in today's photos line up with over-watering. Easing back on irrigation should reduce them along with weed pressure.</>
+      : <>{gettingPhrase} — roughly {gap} more than the ~{recommended} your {grassLabel} needs this season. Easing back on irrigation can reduce fungus, mushrooms, and weed pressure.</>;
   } else if (advice.status === 'deficit') {
-    message = <>You're applying about <strong>{applied}/week</strong> — roughly {gap} short of the ~{recommended} your {grassLabel} needs this season.</>;
+    message = <>{gettingPhrase} — roughly {gap} short of the ~{recommended} your {grassLabel} needs this season.</>;
   } else if (advice.status === 'rain_unknown') {
     message = <>You're applying about <strong>{applied}/week</strong> of irrigation. We couldn't read recent rainfall to finish the water balance — the seasonal target for your {grassLabel} is about {recommended}/week.</>;
   } else {
-    message = <>You're applying about <strong>{applied}/week</strong>, right around the ~{recommended} target for this season.</>;
+    message = <>{gettingPhrase}, right around the ~{recommended} target for this season.</>;
   }
   return <div className="lawn-water-line lawn-water-balance" data-water-status={advice.status}>{message}</div>;
 }

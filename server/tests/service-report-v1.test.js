@@ -324,6 +324,10 @@ describe('service report v1', () => {
     expect(context.percentChange).toBe(50);
     expect(context.current.mainDriver).toBe('Active trail at entry');
     expect(context.customerSummary).toContain('down 50%');
+    // The baseline is the oldest of the recent window, not the true first
+    // visit — the copy must not overclaim "first WaveGuard service".
+    expect(context.customerSummary).toContain('over your recent visits');
+    expect(context.customerSummary).not.toMatch(/first WaveGuard service/i);
   });
 
   test('dynamic pressure trend avoids odd percentages from low baseline and handles first visit', () => {
@@ -564,7 +568,7 @@ describe('service report v1', () => {
         pressureTrend: {
           direction: 'down',
           percentChange: 53,
-          customerSummary: 'Pest pressure is down 53% since your first WaveGuard service.',
+          customerSummary: 'Pest pressure is down 53% over your recent visits.',
           current: { pressureIndex: 1.6 },
           points: [
             { serviceRecordId: 'service-1', pressureIndex: 3.4 },
