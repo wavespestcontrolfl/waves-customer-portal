@@ -60,10 +60,15 @@ const LatePaymentService = {
       const daysSince = Math.floor((now - refDate) / 86400000);
       if (daysSince < daysOverdue) continue;
 
-      // Skip if a per-invoice follow-up sequence is already handling this invoice
+      // Skip if a per-invoice follow-up sequence is already handling this invoice,
+      // or if an admin explicitly STOPPED that sequence. A stop is a deliberate
+      // "stop dunning this invoice" instruction (e.g. customer is mailing a check);
+      // honoring it only in the per-invoice engine but not here would let this
+      // legacy reminder keep texting them after follow-ups were turned off.
       try {
         const InvoiceFollowUps = require('./invoice-followups');
         if (await InvoiceFollowUps.hasActiveSequence(inv.id)) { skipped++; continue; }
+        if (await InvoiceFollowUps.isDunningStopped(inv.id)) { skipped++; continue; }
       } catch { /* fall through if module unavailable */ }
 
       // Key the dedupe on the computed escalation tier (the same value that
