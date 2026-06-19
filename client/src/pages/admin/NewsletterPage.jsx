@@ -72,6 +72,30 @@ const TABS = [
   { key: "automations", label: "Automations", desc: "Drips", Icon: Zap },
 ];
 
+const TAB_BY_KEY = Object.fromEntries(TABS.map((t) => [t.key, t]));
+
+// The 7-tab bar is grouped into parent sections, each revealing its leaf
+// tabs in a sub-row. `tab` still holds the LEAF key (URL ?tab=…), so every
+// {tab === "..."} render block below is unchanged. Default/primary tab
+// (dashboard) is the first group.
+const NEWSLETTER_TAB_GROUPS = [
+  { key: "dashboard", label: "Dashboard", Icon: TrendingUp, tabs: ["dashboard"] },
+  { key: "compose", label: "Compose", Icon: MailPlus, tabs: ["compose"] },
+  {
+    key: "schedule",
+    label: "Schedule",
+    Icon: CalendarDays,
+    tabs: ["calendar", "history"],
+  },
+  {
+    key: "automation",
+    label: "Automation",
+    Icon: Zap,
+    tabs: ["automations", "events"],
+  },
+  { key: "audience", label: "Audience", Icon: Users, tabs: ["subscribers"] },
+];
+
 function StatTile({ icon: Icon, label, value, sub }) {
   return (
     <Card>
@@ -1571,29 +1595,93 @@ export default function NewsletterPage() {
   };
   const clearPendingDraftEvent = () => setPendingDraftEvent(null);
 
+  // `tab` holds the LEAF key; resolve its parent group for the top-level nav.
+  const activeGroup =
+    NEWSLETTER_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    NEWSLETTER_TAB_GROUPS[0];
+
+  // Dynamic header badges (history "sent" count, subscribers "active" count)
+  // live on leaves — surface them on their owning parent group's label.
+  const groupBadgeLabel = (g) => {
+    const badged = g.tabs.find((k) => tabCounts[k] != null);
+    return badged != null
+      ? `${g.label} (${Number(tabCounts[badged]).toLocaleString()})`
+      : g.label;
+  };
+
   return (
     <div className="space-y-0">
       {" "}
       <AdminCommandHeader
         title="Newsletter"
         icon={MailPlus}
-        sections={TABS.map((t) => ({
-          ...t,
-          label:
-            tabCounts[t.key] != null
-              ? `${t.label} (${Number(tabCounts[t.key]).toLocaleString()})`
-              : t.label,
+        sections={NEWSLETTER_TAB_GROUPS.map((g) => ({
+          key: g.key,
+          label: groupBadgeLabel(g),
+          Icon: g.Icon,
         }))}
-        activeKey={tab}
-        onSectionChange={setTab}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = NEWSLETTER_TAB_GROUPS.find((x) => x.key === key);
+          if (g) setTab(g.tabs[0]);
+        }}
         ariaLabel="Newsletter section"
-        navGridClassName="grid-cols-2 md:grid-cols-4 lg:grid-cols-7"
+        navGridClassName="grid-cols-2 md:grid-cols-3 lg:grid-cols-5"
         action={{
           label: "New Campaign",
           icon: MailPlus,
           onClick: () => setTab("compose"),
         }}
       />
+      {/* Leaf sub-tab pill row — only when the active group has >1 leaf. */}
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            margin: "16px 0 4px",
+          }}
+        >
+          {activeGroup.tabs.map((leafKey) => {
+            const leaf = TAB_BY_KEY[leafKey];
+            if (!leaf) return null;
+            const LeafIcon = leaf.Icon;
+            const active = tab === leafKey;
+            const badge =
+              tabCounts[leafKey] != null
+                ? ` (${Number(tabCounts[leafKey]).toLocaleString()})`
+                : "";
+            return (
+              <button
+                key={leafKey}
+                type="button"
+                onClick={() => setTab(leafKey)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: active ? "1px solid #18181B" : "1px solid #E4E4E7",
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                {LeafIcon && <LeafIcon size={14} strokeWidth={1.9} aria-hidden />}
+                {leaf.label}
+                {badge}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {/* Tab content */}
       {tab === "dashboard" && (
         <DashboardView
