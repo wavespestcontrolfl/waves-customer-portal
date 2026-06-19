@@ -85,6 +85,11 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     auto_dispatch_locked: false,
     auto_dispatch_excluded: false,
     scheduled_date: toDateStr(fresh.scheduled_date),
+    // Full original placement too, so a same-date window/tech edit by an operator
+    // also fails the atomic match (knex renders null as IS NULL — verified).
+    window_start: fresh.window_start,
+    window_end: fresh.window_end,
+    technician_id: fresh.technician_id,
   };
 
   // Canonical move — transactional, overlap-checked, silent.

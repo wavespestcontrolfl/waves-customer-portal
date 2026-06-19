@@ -189,6 +189,7 @@ async function runAutoDispatch(opts = {}) {
 
         // apply mode
         if (totals.changed >= config.maxChangesPerRun) {
+          totals.recommended++; // cap-held but still a found move — count it in the summary
           await audit.logDecision(runId, { action: 'recommended', service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached`, newPlacement, scores, prefsSnapshot, routeMetrics, constraints });
           continue;
         }

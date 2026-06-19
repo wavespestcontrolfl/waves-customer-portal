@@ -103,6 +103,20 @@ test('apply requested without the server gate is downgraded to a dry-run recomme
   }
 });
 
+test('apply mode honors the per-run change cap and counts cap-held moves as recommended', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 0 });
+    expect(res).toMatchObject({ changed: 0, recommended: 1 });
+    expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(lastDecision('recommended').reason_code).toBe('MAX_CHANGES_REACHED');
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
 test('below-threshold improvement is left unchanged', async () => {
   candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [CAND_SMALL] });
   const res = await runAutoDispatch({ mode: 'apply' });
