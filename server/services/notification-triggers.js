@@ -145,6 +145,32 @@ const TRIGGER_REGISTRY = {
       link: '/admin/estimates',
     }),
   },
+  // Fired by the service-report delivery queue when an email report has
+  // exhausted its retries — the customer never received their report.
+  service_report_delivery_failed: {
+    label: 'Service report email failed to send',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: 'Service report not delivered',
+      body: `${p.customerName || 'A customer'} did not receive their service report email${p.serviceLabel ? ` (${p.serviceLabel})` : ''} after ${p.attempts || 'multiple'} attempts${p.errorMessage ? ` — ${p.errorMessage}` : ''}. Re-send it from the customer's service.`,
+      link: p.link || '/admin/dispatch',
+    }),
+  },
+  // Fired by the PDF render queue when a report PDF can't be generated. The
+  // report link still works; the attachment/share copy is missing until re-rendered.
+  service_report_pdf_failed: {
+    label: 'Service report PDF render failed',
+    category: 'system',
+    priority: 'normal',
+    group: 'Alerts',
+    build: (p) => ({
+      title: 'Service report PDF could not be generated',
+      body: `The PDF for ${p.customerName || 'a customer'}'s service report${p.serviceLabel ? ` (${p.serviceLabel})` : ''} failed to render after ${p.attempts || 'multiple'} attempts${p.errorMessage ? ` — ${p.errorMessage}` : ''}. The report link still works; re-render to restore the PDF.`,
+      link: p.link || '/admin/dispatch',
+    }),
+  },
   twilio_failure: {
     label: 'Twilio call/SMS failure',
     category: 'system',

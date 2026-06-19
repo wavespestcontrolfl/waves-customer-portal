@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { sendServiceReportV1Email } = require('./email-delivery');
+const { alertServiceReportDeliveryFailed } = require('./failure-alerts');
 
 const CLAIM_LIMIT = 10;
 const STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -195,6 +196,11 @@ async function markDeliveryFailed(delivery, err, knex = db) {
     serviceReportV1EmailNextAttemptAt: exhausted ? null : nextServiceReportDeliveryAttemptAt(now, attempts).toISOString(),
     serviceReportV1EmailError: err?.message || err?.error || String(err || 'Delivery failed'),
   }, knex);
+  // Terminal failure: surface it on the admin bell so the report can be re-sent
+  // manually. Best-effort — never let a notification problem break the queue.
+  if (exhausted) {
+    await alertServiceReportDeliveryFailed({ delivery, error: err }, { knex });
+  }
   return exhausted ? 'failed' : 'queued';
 }
 
