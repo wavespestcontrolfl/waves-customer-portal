@@ -47,6 +47,7 @@ const {
   clearQuoteRequirementFlags,
   resolveBlockingAutomationForProposal,
   estimateDataHasBlockingLeadAutomation,
+  assertEstimateSendable,
 } = require('../routes/admin-estimates')._internals;
 const { estimateDataHasQuoteRequirement } = require('../services/estimate-delivery-options');
 
@@ -97,5 +98,39 @@ describe('resolveBlockingAutomationForProposal', () => {
     const data = { automation: { draftEstimateAutomation: { status: 'generated' } } };
     resolveBlockingAutomationForProposal(data);
     expect(data.automation.draftEstimateAutomation.status).toBe('generated');
+  });
+});
+
+describe('assertEstimateSendable proposal exemption', () => {
+  // The send snapshot re-derives quoteRequired:true from proposal.enabled, so
+  // the gate must exempt authored proposals rather than rely on scrubbed flags
+  // — otherwise resends/follow-ups of a sent proposal would re-block.
+  const sentProposalRow = (extraData = {}) => ({
+    status: 'sent',
+    monthly_total: 583,
+    estimate_data: {
+      proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] },
+      // mimic what a send snapshot leaves behind
+      sendSnapshot: { pricingBundle: { quoteRequired: true } },
+      ...extraData,
+    },
+  });
+
+  it('allows resending a sent proposal even when the snapshot is quote-required', () => {
+    expect(() => assertEstimateSendable(sentProposalRow())).not.toThrow();
+  });
+
+  it('still blocks a quote-required estimate that is NOT an authored proposal', () => {
+    expect(() => assertEstimateSendable({
+      status: 'sent',
+      monthly_total: 100,
+      estimate_data: { result: { recurring: { services: [{ quoteRequired: true }] } } },
+    })).toThrow(/quote-required|manual review/i);
+  });
+
+  it('exempts authored proposals from the blocking lead-automation gate', () => {
+    expect(() => assertEstimateSendable(sentProposalRow({
+      automation: { draftEstimateAutomation: { status: 'manual_review_required' } },
+    }))).not.toThrow();
   });
 });

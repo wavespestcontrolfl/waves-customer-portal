@@ -226,7 +226,12 @@ function estimateSendableAmount(estimate = {}) {
   );
 }
 
-function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine }) {
+// Commercial proposals are accepted manually (no online checkout), so the
+// "accept it online" next-step copy would point the customer at a flow that
+// is intentionally rejected for them. Use proposal-specific copy instead.
+const PROPOSAL_NEXT_STEP_SUMMARY = 'Your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement. Call (941) 297-5749 anytime.';
+
+function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false }) {
   const serviceSummary = inferEstimateServiceInterest({
     ...estimate,
     estimateData: estimate.estimate_data,
@@ -237,7 +242,9 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine }) {
     price_summary: priceLine || moneySummary(estimate),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
-    next_step_summary: 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.',
+    next_step_summary: proposalMode
+      ? PROPOSAL_NEXT_STEP_SUMMARY
+      : 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.',
   };
 }
 
@@ -252,12 +259,19 @@ function assertEstimateSendable(estimate) {
     err.statusCode = 400;
     throw err;
   }
-  if (estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
+  // An authored commercial proposal IS the manual-review output — its line
+  // items are the quote — so it is sendable even though it is intentionally
+  // surfaced as quote-required to the customer for manual acceptance. Exempt it
+  // at the gate rather than only scrubbing stored flags: the send snapshot
+  // re-derives quoteRequired:true from proposal.enabled (via buildPricingBundle
+  // → attachQuoteRequirement), which would otherwise re-block every resend.
+  const isAuthoredProposal = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
+  if (!isAuthoredProposal && estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
     throw err;
   }
-  if (estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {
+  if (!isAuthoredProposal && estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Automated lead estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
     throw err;
@@ -307,13 +321,13 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [] }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false }) {
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'estimate.delivery',
         to: estimate.customer_email,
-        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine }),
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,
@@ -356,18 +370,30 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       pass: process.env.GOOGLE_SMTP_PASSWORD,
     },
   });
-  const heading = 'Your Waves estimate is ready';
-  const intro = `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
+  const heading = proposalMode ? 'Your Waves proposal is ready' : 'Your Waves estimate is ready';
+  const intro = proposalMode
+    ? `Hi ${firstName}, your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement.`
+    : `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
   const html = wrapEmail({
-    preheader: priceLine
-      ? `Your Waves estimate is ready — ${priceLine}.`
-      : 'Your Waves estimate is ready to review.',
+    preheader: proposalMode
+      ? 'Your Waves commercial proposal is attached.'
+      : (priceLine ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
     heading,
     intro,
     ctaHref: viewUrl,
-    ctaLabel: 'View Your Estimate',
+    ctaLabel: proposalMode ? 'View Proposal Details' : 'View Your Estimate',
   });
-  const text = plainText([
+  const text = plainText(proposalMode ? [
+    `Hi ${firstName},`,
+    '',
+    'Your formal commercial proposal is attached as a PDF.',
+    'There is no online checkout for a commercial bid — your Waves account manager will follow up to finalize the agreement.',
+    '',
+    `Proposal details: ${viewUrl}`,
+    '',
+    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+    '- Waves Pest Control',
+  ] : [
     `Hi ${firstName},`,
     '',
     'Your customized service estimate is ready for review.',
@@ -507,9 +533,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // estimate emails are unchanged. PDF failure is non-fatal: the link-based
   // email still goes out. SMS can't carry attachments (carrier MMS limits),
   // so the texted estimate link remains the SMS channel's payload.
+  const proposalMode = normalizeProposal(estimate).enabled;
   let proposalAttachments = [];
   try {
-    if (normalizeProposal(estimate).enabled) {
+    if (proposalMode) {
       // Build the PDF from the row as it will be persisted by this send —
       // nextExpiresAt is the validity window the customer's link gets, so the
       // attached proposal must advertise the same "valid through" date rather
@@ -593,6 +620,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           priceLine,
           idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
           attachments: proposalAttachments,
+          proposalMode,
         });
         channels.email = result.ok
           ? { ok: true, provider: result.template || result.provider || 'email' }
@@ -627,8 +655,13 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     last_send_error: null,
     updated_at: db.fn.now(),
   };
+  // Re-read the row before snapshotting so a proposal the operator saved
+  // during this send (the PUT-vs-send race) is preserved rather than clobbered
+  // by stale estimate_data from the pre-send read. The snapshot is layered onto
+  // the freshest estimate_data; status/timestamps below are still authoritative.
+  const freshEstimate = await db('estimates').where({ id: estimate.id }).first();
   const estimateForSnapshot = {
-    ...estimate,
+    ...(freshEstimate || estimate),
     expires_at: nextExpiresAt,
   };
   try {
@@ -1077,14 +1110,18 @@ router.put('/:id/proposal', async (req, res, next) => {
 
     // Re-pricing guard. Acceptance locks the price (price_locked_at) and spins
     // up downstream records (onboarding / invoice / booking); declined and
-    // expired are closed. Saving a proposal rewrites the authoritative
-    // monthly/annual/one-time totals, so block it once the estimate has left
-    // the editable window — otherwise a late edit silently corrupts a locked,
-    // already-accepted price.
-    if (estimate.price_locked_at || ['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // expired are closed; `sending` means a send is mid-flight (scheduled-send
+    // cron claims the row as `sending` before dispatching, and that sender
+    // rewrites estimate_data from its pre-send read). Saving a proposal rewrites
+    // the authoritative totals + proposal JSON, so block it once the estimate
+    // has left the editable window — otherwise a late edit corrupts a locked
+    // accepted price, or races a send into a stale-PDF / clobbered-proposal split.
+    if (estimate.price_locked_at || ['accepted', 'declined', 'expired', 'sending'].includes(estimate.status)) {
       return res.status(409).json({
         error: estimate.price_locked_at
           ? 'This estimate is price-locked (accepted) and can no longer be re-priced.'
+          : estimate.status === 'sending'
+          ? 'This estimate is being sent right now. Wait for the send to finish, then retry.'
           : `A ${estimate.status} estimate can no longer be re-priced.`,
       });
     }
@@ -1125,7 +1162,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     const updatedCount = await db('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
-      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending'])
       .update({
         estimate_data: JSON.stringify(nextData),
         category: 'COMMERCIAL',
