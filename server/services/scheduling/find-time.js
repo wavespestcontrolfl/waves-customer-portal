@@ -93,7 +93,15 @@ async function findAvailableSlots(opts) {
     dayStartHour = DAY_START_HOUR,
     dayEndHour = DAY_END_HOUR,
     includeWeekends = false,
+    // Service ids to drop from the occupied-route set — used when relocating an
+    // existing visit so its own current row isn't counted as a stop blocking the
+    // slot it's being moved out of. Default [] = identical legacy behavior.
+    excludeServiceIds = [],
+    // Snap proposed start times up to this minute granularity (e.g. 60 = on the
+    // hour). Default 1 = exact earliest-feasible minute (identical legacy behavior).
+    slotStepMinutes = 1,
   } = opts;
+  const excludeSet = new Set((excludeServiceIds || []).map(String));
 
   if (lat == null || lng == null) {
     return { error: 'lat/lng required', slots: [] };
@@ -156,6 +164,7 @@ async function findAvailableSlots(opts) {
       // Pull this tech's stops for this day
       const dayStops = services
         .filter(s => {
+          if (excludeSet.has(String(s.id))) return false;
           const sd = toDateStr(s.scheduled_date);
           return sd === date && s.technician_id === tech.id;
         })
@@ -196,7 +205,13 @@ async function findAvailableSlots(opts) {
           prev.endMin + driveMin(prev, newStop),
           date === todayEt ? todayFloorMin : 0,
         );
-        const earliestEnd = earliestStart + durationMinutes;
+        // Snap up to the requested granularity (e.g. on-the-hour). The gap
+        // checks below then re-validate the snapped time, so a snap that no
+        // longer fits before the next stop is correctly rejected.
+        const startMin = slotStepMinutes > 1
+          ? Math.ceil(earliestStart / slotStepMinutes) * slotStepMinutes
+          : earliestStart;
+        const earliestEnd = startMin + durationMinutes;
         // Must allow drive from new → next before next.startMin
         const latestEnd = next.startMin - driveMin(newStop, next);
 
@@ -211,7 +226,7 @@ async function findAvailableSlots(opts) {
         candidates.push({
           date,
           technician: { id: tech.id, name: tech.name },
-          start_time: minutesToTime(earliestStart),
+          start_time: minutesToTime(startMin),
           end_time: minutesToTime(earliestEnd),
           detour_minutes: extraDrive,
           baseline_drive_minutes: baselineDrive,

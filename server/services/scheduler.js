@@ -334,6 +334,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:10AM — Auto-Dispatch: optimize FUTURE recurring visits more than
+  // 14 days out (route proximity + customer scheduling preferences). Double-
+  // gated (cronJobs AND autoDispatch). Runs in the configured mode — dry_run
+  // by default; it only applies moves when AUTO_DISPATCH_MODE=apply.
+  // =========================================================================
+  cron.schedule('10 4 * * *', async () => {
+    if (!isEnabled('autoDispatch')) return;
+    logger.info('Running: Auto-Dispatch recurring optimizer');
+    try {
+      // runExclusive: read-then-act job — a Railway deploy overlap or a slow
+      // prior tick must not double-run and bypass the per-run change cap.
+      await runExclusive('auto-dispatch-recurring', async () => {
+        const { runAutoDispatch } = require('./auto-dispatch');
+        const result = await runAutoDispatch({ triggeredBy: 'cron' });
+        logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+      });
+    } catch (err) {
+      logger.error(`Auto-Dispatch run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // SEO COMMAND CENTER CRONS (gated behind GATE_SEO_INTELLIGENCE)
   // =========================================================================
 
