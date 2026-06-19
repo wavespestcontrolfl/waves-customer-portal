@@ -43,7 +43,11 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => fals
 
 // NOTE: estimate-delivery-options is intentionally NOT mocked — we assert the
 // real send gate against the real flag clearer.
-const { clearQuoteRequirementFlags } = require('../routes/admin-estimates')._internals;
+const {
+  clearQuoteRequirementFlags,
+  resolveBlockingAutomationForProposal,
+  estimateDataHasBlockingLeadAutomation,
+} = require('../routes/admin-estimates')._internals;
 const { estimateDataHasQuoteRequirement } = require('../services/estimate-delivery-options');
 
 describe('clearQuoteRequirementFlags (authored proposal send gate)', () => {
@@ -68,5 +72,30 @@ describe('clearQuoteRequirementFlags (authored proposal send gate)', () => {
     const data = { proposal: { enabled: true, buildings: [] } };
     clearQuoteRequirementFlags(data);
     expect(data).toEqual({ proposal: { enabled: true, buildings: [] } });
+  });
+});
+
+describe('resolveBlockingAutomationForProposal', () => {
+  it('clears a blocking lead/draft automation status so the proposal can send', () => {
+    const data = {
+      automation: {
+        draftEstimateAutomation: { status: 'manual_review_required', generated: true },
+        leadEstimateAutomation: { status: 'blocked' },
+      },
+      proposal: { enabled: true, buildings: [{ name: 'A', lineItems: [] }] },
+    };
+    expect(estimateDataHasBlockingLeadAutomation(data)).toBe(true);
+
+    resolveBlockingAutomationForProposal(data);
+
+    expect(estimateDataHasBlockingLeadAutomation(data)).toBe(false);
+    expect(data.automation.draftEstimateAutomation.status).toBe('manual_review_complete');
+    expect(data.automation.leadEstimateAutomation.status).toBe('manual_review_complete');
+  });
+
+  it('leaves a non-blocking automation status untouched', () => {
+    const data = { automation: { draftEstimateAutomation: { status: 'generated' } } };
+    resolveBlockingAutomationForProposal(data);
+    expect(data.automation.draftEstimateAutomation.status).toBe('generated');
   });
 });

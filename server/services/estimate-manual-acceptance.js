@@ -199,8 +199,15 @@ async function markEstimateManuallyAccepted({
       billingTerm: normalizedBillingTerm,
     });
 
+    // A commercial proposal's pricing lives in estimate_data.proposal.buildings,
+    // which EstimateConverter does not read — it converts from the legacy
+    // result/recurring service mix. Auto-converting here would activate the
+    // wrong (or empty) service mix and drop the proposal's tax/cadence, so for
+    // a proposal-enabled estimate we record the win (status + linked-lead) and
+    // leave commercial onboarding/billing to the operator.
+    const isCommercialProposal = parseEstimateData(updatedEstimate.estimate_data)?.proposal?.enabled === true;
     let conversion = null;
-    if (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected) {
+    if (!isCommercialProposal && (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected)) {
       try {
         // Manual Mark Won keeps scheduling under operator control. Standard
         // verbal wins also skip the setup invoice. Annual-prepay verbal wins

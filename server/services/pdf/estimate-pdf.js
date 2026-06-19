@@ -283,12 +283,17 @@ function termsBlock(ctx, proposal, totals, y) {
   lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
   if (proposal.terms) lines.push(proposal.terms);
 
-  y = ensureSpace(ctx, y, 30 + lines.length * 26);
+  y = ensureSpace(ctx, y, 26);
   y = sectionLabel(doc, 'Terms & assurances', L, y);
-  doc.fontSize(9).font('Helvetica').fillColor(BODY);
+  // Page-break per line on its measured height — a long operator-entered terms
+  // string (up to 2000 chars) would otherwise run through the branded footer.
   for (const line of lines) {
+    doc.fontSize(9).font('Helvetica').fillColor(BODY);
+    const lineH = doc.heightOfString(line, { width: W, lineGap: 1.5 });
+    y = ensureSpace(ctx, y, lineH + 6);
+    doc.fontSize(9).font('Helvetica').fillColor(BODY);
     doc.text(line, L, y, { width: W, lineGap: 1.5 });
-    y += doc.heightOfString(line, { width: W, lineGap: 1.5 }) + 6;
+    y += lineH + 6;
   }
   return y;
 }

@@ -116,6 +116,24 @@ function clearQuoteRequirementFlags(value, depth = 0) {
   for (const v of Object.values(value)) clearQuoteRequirementFlags(v, depth + 1);
 }
 
+// Lead-created manual-quote estimates carry a blocking draft/lead automation
+// status (manual_review_required / blocked / generation_failed) that
+// assertEstimateSendable also rejects. The authored proposal IS that manual
+// review output, so mark those automation nodes resolved when it's saved —
+// otherwise the operator's finished proposal still can't be sent.
+const BLOCKING_AUTOMATION_STATUSES = new Set(['manual_review_required', 'blocked', 'generation_failed']);
+function resolveBlockingAutomationForProposal(data) {
+  const automation = data?.automation;
+  if (!automation || typeof automation !== 'object') return;
+  for (const key of ['draftEstimateAutomation', 'leadEstimateAutomation']) {
+    const node = automation[key];
+    if (node && typeof node === 'object' && BLOCKING_AUTOMATION_STATUSES.has(node.status)) {
+      node.status = 'manual_review_complete';
+      node.resolvedByProposalAt = new Date().toISOString();
+    }
+  }
+}
+
 function leadEstimateAutomationSummary(estimateData) {
   const data = parseEstimateData(estimateData) || {};
   const automation = data.automation || {};
@@ -1093,19 +1111,32 @@ router.put('/:id/proposal', async (req, res, next) => {
       proposal: { ...normalized, updatedAt: new Date().toISOString() },
     };
     // Make the authored proposal sendable: clear the auto-quote-required
-    // booleans the commercial estimate was created with. proposal.enabled (set
-    // above) is what keeps acceptance manual in the public view, so this only
-    // unblocks the admin send gate — it does not re-enable self-serve accept.
+    // booleans the commercial estimate was created with, and resolve any
+    // blocking lead/draft automation status. proposal.enabled (set above) is
+    // what keeps acceptance manual in the public view, so this only unblocks
+    // the admin send gate — it does not re-enable self-serve accept.
     clearQuoteRequirementFlags(nextData);
+    resolveBlockingAutomationForProposal(nextData);
 
-    await db('estimates').where({ id: estimate.id }).update({
-      estimate_data: JSON.stringify(nextData),
-      category: 'COMMERCIAL',
-      monthly_total: totals.monthlyEquivalent,
-      annual_total: totals.annualRecurring,
-      onetime_total: totals.oneTime,
-      updated_at: db.fn.now(),
-    });
+    // Atomic re-pricing guard. The status/price-lock check above runs on a
+    // pre-read; scope the UPDATE to the same editable conditions so a customer
+    // accept or another admin's Mark accepted landing between SELECT and UPDATE
+    // can't overwrite the locked accepted price/proposal. 409 when it loses.
+    const updatedCount = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNull('price_locked_at')
+      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .update({
+        estimate_data: JSON.stringify(nextData),
+        category: 'COMMERCIAL',
+        monthly_total: totals.monthlyEquivalent,
+        annual_total: totals.annualRecurring,
+        onetime_total: totals.oneTime,
+        updated_at: db.fn.now(),
+      });
+    if (!updatedCount) {
+      return res.status(409).json({ error: 'Estimate was accepted or locked while you were editing. Refresh and retry.' });
+    }
 
     logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);
     res.json({ success: true, proposal: normalized, totals });
@@ -1612,6 +1643,7 @@ router.post('/cleanup-demo', async (req, res, next) => {
 
 router._internals = {
   clearQuoteRequirementFlags,
+  resolveBlockingAutomationForProposal,
   assertEstimateSendable,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
