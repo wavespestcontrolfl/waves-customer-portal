@@ -49,17 +49,33 @@ test('applies the move and atomically increments the change count', async () => 
   expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', { sendNotification: false });
 });
 
-test('preserves pending status (restores it after the rebooker forces confirmed)', async () => {
+test('preserves pending: restores pending + writes a compensating history row', async () => {
   const update = jest.fn().mockResolvedValue(1);
+  const insert = jest.fn().mockResolvedValue();
   const queue = [
     readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'pending', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
     { where() { return this; }, update },
+    { insert }, // job_status_history compensating row
   ];
   db.mockImplementation(() => queue.shift());
 
   const res = await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
   expect(res.post_status).toBe('pending');
   expect(update.mock.calls[0][0].status).toBe('pending');
+  expect(insert).toHaveBeenCalledWith({ job_id: 's1', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
+});
+
+test('does not undo a concurrent confirm: scored pending but fresh confirmed stays confirmed', async () => {
+  const update = jest.fn().mockResolvedValue(1);
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update },
+  ];
+  db.mockImplementation(() => queue.shift());
+
+  const res = await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
+  expect(res.post_status).toBe('confirmed');
+  expect(update.mock.calls[0][0].status).toBeUndefined(); // no pending restore
 });
 
 test('aborts (STALE_PLACEMENT) when the visit was locked after scoring', async () => {

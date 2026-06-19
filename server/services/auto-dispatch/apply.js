@@ -42,7 +42,6 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
 }
 
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
-  const preStatus = service.status;
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
   const techChanged = !!best.technician_id
@@ -97,10 +96,11 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
 
   // reschedule() forces status→'confirmed'. The recurring-lifecycle code counts
-  // only PENDING recurring rows to decide plan-extend / plan_ending, so silently
-  // confirming an optimized future visit can make a plan look depleted. Preserve
-  // the original pending status.
-  const postStatus = preStatus === 'pending' ? 'pending' : 'confirmed';
+  // only PENDING recurring rows for plan-extend / plan_ending, so silently
+  // confirming an optimized future visit can make a plan look depleted. Restore
+  // pending — but base it on the FRESH status (which options.expect made atomic),
+  // NOT the stale scored status, so we don't undo a concurrent operator confirm.
+  const postStatus = fresh.status === 'pending' ? 'pending' : 'confirmed';
 
   // Stamp auto-dispatch bookkeeping (+ restore pending). The move already
   // committed; a stamp failure must NOT flip the result to "failed" (that loses
@@ -114,6 +114,13 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     };
     if (postStatus === 'pending') stamp.status = 'pending';
     await db('scheduled_services').where({ id: service.id }).update(stamp);
+    if (postStatus === 'pending') {
+      // The rebooker just logged pending→confirmed; record the compensating
+      // confirmed→pending so the job_status_history timeline stays consistent.
+      await db('job_status_history').insert({
+        job_id: service.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
+      });
+    }
   } catch (stampErr) {
     logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
   }
@@ -139,7 +146,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.error(`[auto-dispatch] notify hook failed for ${service.id}: ${err.message}`);
   }
 
-  return { ok: true, pre_status: preStatus, post_status: postStatus, technician_changed: techChanged, notification };
+  return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification };
 }
 
 module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged };

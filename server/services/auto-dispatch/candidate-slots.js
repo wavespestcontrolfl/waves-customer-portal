@@ -150,7 +150,9 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const siblingRows = await ctx.db('scheduled_services')
     .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
     .whereNot('id', service.id)
-    .whereNotIn('status', ['cancelled'])
+    // 'rescheduled' siblings are phantom customer requests on a stale date, so
+    // they must NOT block an actually-open day (mirrors the seeder's dedup).
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .select('scheduled_date');
   const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
