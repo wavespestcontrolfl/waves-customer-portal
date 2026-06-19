@@ -142,22 +142,58 @@ const tdS = {
   color: D.text,
 };
 
+// The flat 13-tab bar is organized into parent groups, each revealing its leaf
+// tabs in a sub-row. `tab` state still holds the LEAF key, so every
+// {tab === "..."} render block below is unchanged.
+const TAB_GROUPS = [
+  { key: "products", label: "Products", Icon: Package, tabs: ["products"] },
+  {
+    key: "vendors",
+    label: "Vendors & Pricing",
+    Icon: Store,
+    tabs: ["price-sync", "approvals", "vendors", "scrape"],
+  },
+  {
+    key: "planning",
+    label: "Planning",
+    Icon: ShoppingCart,
+    tabs: ["forecast", "unit-review", "restock"],
+  },
+  {
+    key: "content",
+    label: "Content",
+    Icon: ClipboardList,
+    tabs: ["registry", "lawnFacts", "lawnContent"],
+  },
+  {
+    key: "protocols",
+    label: "Protocols",
+    Icon: FileText,
+    tabs: ["protocols", "margins"],
+  },
+];
+
+const LEAF_META = {
+  products: { label: "Products", Icon: Package },
+  "price-sync": { label: "Price Sync", Icon: Store },
+  approvals: { label: "Approvals", Icon: CheckCircle2 },
+  vendors: { label: "Vendors", Icon: Store },
+  scrape: { label: "Scrape Health", Icon: ShieldCheck },
+  forecast: { label: "Forecast", Icon: ShoppingCart },
+  "unit-review": { label: "Unit Review", Icon: ClipboardList },
+  restock: { label: "Restock", Icon: ShoppingCart },
+  registry: { label: "Registry", Icon: ClipboardList },
+  lawnFacts: { label: "Lawn Facts", Icon: ShieldCheck },
+  lawnContent: { label: "Lawn Content", Icon: FileText },
+  protocols: { label: "Protocols", Icon: FileText },
+  margins: { label: "Service Margins", Icon: Percent },
+};
+
+const ALL_LEAF_TABS = TAB_GROUPS.flatMap((g) => g.tabs);
+
 export default function InventoryPage() {
   const [searchParams] = useSearchParams();
-  const initialTab = [
-    "products",
-    "lawnFacts",
-    "lawnContent",
-    "price-sync",
-    "vendors",
-    "approvals",
-    "protocols",
-    "forecast",
-    "unit-review",
-    "restock",
-    "margins",
-    "scrape",
-  ].includes(searchParams.get("tab"))
+  const initialTab = ALL_LEAF_TABS.includes(searchParams.get("tab"))
     ? searchParams.get("tab")
     : "products";
   const [tab, setTab] = useState(initialTab);
@@ -178,34 +214,25 @@ export default function InventoryPage() {
     setTimeout(() => setToast(""), 3500);
   };
 
-  const tabs = [
-    { key: "products", label: "Products", Icon: Package },
-    { key: "lawnFacts", label: "Lawn Facts", Icon: ShieldCheck },
-    { key: "lawnContent", label: "Lawn Content", Icon: FileText },
-    { key: "price-sync", label: "Price Sync", Icon: Store },
-    { key: "vendors", label: "Vendors", Icon: Store },
-    {
-      key: "approvals",
-      label:
-        stats?.approvals?.pending > 0
-          ? `Approvals (${stats.approvals.pending})`
-          : "Approvals",
-      Icon: CheckCircle2,
-    },
-    { key: "registry", label: "Registry", Icon: ClipboardList },
-    { key: "protocols", label: "Protocols", Icon: FileText },
-    { key: "forecast", label: "Forecast", Icon: ShoppingCart },
-    { key: "unit-review", label: "Unit Review", Icon: ClipboardList },
-    {
-      key: "restock",
-      label: stats?.restockRequests?.open > 0
-        ? `Restock (${stats.restockRequests.open})`
-        : "Restock",
-      Icon: ShoppingCart,
-    },
-    { key: "margins", label: "Service Margins", Icon: Percent },
-    { key: "scrape", label: "Scrape Health", Icon: ShieldCheck },
-  ];
+  const activeGroup =
+    TAB_GROUPS.find((g) => g.tabs.includes(tab)) || TAB_GROUPS[0];
+  const groupSections = TAB_GROUPS.map((g) => {
+    let pending = 0;
+    if (g.tabs.includes("approvals")) pending += stats?.approvals?.pending || 0;
+    if (g.tabs.includes("restock")) pending += stats?.restockRequests?.open || 0;
+    return {
+      key: g.key,
+      label: pending > 0 ? `${g.label} (${pending})` : g.label,
+      Icon: g.Icon,
+    };
+  });
+  const leafLabel = (key) => {
+    if (key === "approvals" && stats?.approvals?.pending > 0)
+      return `Approvals (${stats.approvals.pending})`;
+    if (key === "restock" && stats?.restockRequests?.open > 0)
+      return `Restock (${stats.restockRequests.open})`;
+    return LEAF_META[key].label;
+  };
 
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
@@ -213,11 +240,14 @@ export default function InventoryPage() {
       <AdminCommandHeader
         title="Inventory"
         icon={Package}
-        sections={tabs}
-        activeKey={tab}
-        onSectionChange={setTab}
+        sections={groupSections}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = TAB_GROUPS.find((x) => x.key === key);
+          if (g) setTab(g.tabs[0]);
+        }}
         ariaLabel="Inventory section"
-        navGridClassName="grid-cols-2 md:grid-cols-5 xl:grid-cols-10"
+        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
         action={
           tab === "products"
             ? {
@@ -228,6 +258,47 @@ export default function InventoryPage() {
             : null
         }
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((key) => {
+            const active = tab === key;
+            const LeafIcon = LEAF_META[key].Icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                <LeafIcon size={14} strokeWidth={1.9} />
+                {leafLabel(key)}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {stats && (
         <div
           style={{
