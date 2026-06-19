@@ -63,7 +63,9 @@ async function executeBITool(toolName, input) {
         // Real customers only (pipeline_stage), not leads — active=true defaults
         // true for new_lead rows. Consistent with the dashboard customer KPIs.
         db('customers').modify(whereLiveCustomer).count('* as count').first(),
-        db('customers').modify(whereLiveCustomer).where('created_at', '>=', somDate).count('* as count').first(),
+        db('customers').modify(whereLiveCustomer)
+          .whereRaw("created_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${somDate}T00:00:00`])
+          .count('* as count').first(),
         db('customers').where('pipeline_stage', 'churned').where('pipeline_stage_changed_at', '>=', somDate).count('* as count').first(),
         db('leads').where('first_contact_at', '>=', somDate).select('status').count('* as count').groupBy('status'),
         // Top 5 at-risk by value — 'high' included because the v3 scorer
