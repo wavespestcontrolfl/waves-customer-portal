@@ -110,6 +110,10 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
     if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
     if (invoice.status === 'processing') return res.status(409).json({ error: 'Bank payment is already processing' });
+    // Third-party Bill-To: never mint an in-person collection handoff for a
+    // payer-billed invoice — the tech must not collect the AP's invoice from the
+    // service recipient. AR routes to the payer AP inbox.
+    if (invoice.payer_id) return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
 
     const amount_cents = Math.round(Number(invoice.total) * 100);
     if (!amount_cents || amount_cents < 50) {

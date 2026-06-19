@@ -84,6 +84,14 @@ router.post('/reconcile', async (req, res, next) => {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Third-party Bill-To: a payer-billed invoice is owed by the payer's AP
+    // inbox, not the service recipient. Off-platform reconciliation (cash /
+    // check / Tap-to-Pay) settled from the homeowner would collect the wrong
+    // party's money and mark the AP invoice paid — reject it here, mirroring
+    // the Terminal-handoff payer guard.
+    if (invoice.payer_id) {
+      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect or reconcile it against the service recipient' });
+    }
     // Uncollectible invoices (paid/processing/void/refunded/canceled) can't be
     // reconciled — 'processing' especially: an ACH payment in flight will
     // settle on its own, so a cash/check reconcile would double-collect.

@@ -32,6 +32,10 @@ router.get('/:token', async (req, res, next) => {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Receipt not found' });
 
+    // Third-party Bill-To: the AP contact opening the receipt link must see the
+    // payer as "Billed to" (the emailed receipt PDF already does).
+    await require('../services/payer').attachToInvoice(data);
+
     const customer = data.customer || {};
     const lineItems = data.line_items || [];
     const payment = await loadPaymentForInvoice(data.id, data.customer_id);
@@ -80,6 +84,32 @@ router.get('/:token', async (req, res, next) => {
         email: customer.email,
         isCommercial: customer.property_type === 'commercial' || customer.property_type === 'business',
       },
+      payer: data.payer
+        ? {
+            name: data.payer.company_name || data.payer.display_name || null,
+            email: data.payer.ap_email || null,
+            address: data.payer.billing_address_line1 || null,
+            city: data.payer.billing_city || null,
+            state: data.payer.billing_state || null,
+            zip: data.payer.billing_zip || null,
+            poNumber: data.po_number || null,
+          }
+        // Fail closed: this receipt IS payer-billed (payer_id set) but the payer
+        // couldn't be attached (legacy, no snapshot, inactive/deleted payer).
+        // Serialize a third-party placeholder rather than null so the receipt
+        // page does NOT render the homeowner as "Billed to" alongside the
+        // payer's payment-method details.
+        : data.payer_id
+          ? {
+              name: 'Third-party payer',
+              email: null,
+              address: null,
+              city: null,
+              state: null,
+              zip: null,
+              poNumber: data.po_number || null,
+            }
+          : null,
       payment: payment
         ? {
           amount: totalPaid,
@@ -115,6 +145,14 @@ router.get('/:token/pdf', async (req, res, next) => {
     if (data.status !== 'paid') return res.status(409).json({ error: 'Receipt not available — invoice unpaid' });
 
     const payment = await loadPaymentForInvoice(data.id, data.customer_id);
+    // Keep the receipt's Bill-To consistent with the invoice (payer, not the
+    // homeowner, when the job was third-party-billed).
+    await require('../services/payer').attachToInvoice(data);
+    // Fail closed: don't render the homeowner as Bill-To on a payer-billed
+    // receipt PDF when the payer can't attach (legacy/inactive/deleted).
+    if (!data.payer && data.payer_id) {
+      data.payer = { company_name: 'Third-party payer', ap_email: null };
+    }
     generateReceiptPDF(data, payment, res);
   } catch (err) {
     next(err);

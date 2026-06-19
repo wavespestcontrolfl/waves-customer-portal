@@ -34,6 +34,11 @@ const LatePaymentService = {
     try {
       invoices = await db('invoices')
         .whereIn('status', ['sent', 'viewed', 'overdue'])
+        // Third-party Bill-To: a payer-billed invoice's AR rolls to the payer,
+        // never the homeowner — exclude it from the legacy late-payment reminder
+        // path (which texts/emails the customer a pay link). Payer dunning is
+        // Phase 2.
+        .whereNull('payer_id')
         .where(function () {
           this.where('due_date', '<=', cutoff)
             .orWhere(function () {

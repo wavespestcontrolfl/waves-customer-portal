@@ -764,6 +764,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     technicianId: service.technicianId || "",
     routeOrder: service.routeOrder || "",
     notes: service.notes || "",
+    // Per-job third-party Bill-To override + PO. Empty payerId = inherit the
+    // customer's default payer (or self-pay). Round-trips via ...form on save.
+    payerId: service.payerId != null ? String(service.payerId) : "",
+    poNumber: service.poNumber || "",
     // The editable primary "Price" must be the primary line price, NOT the
     // whole-visit total. When the appointment has add-on lines, estimatedPrice
     // is the combined total, so prefer the API's primary_line_price; fall back
@@ -880,6 +884,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   );
   const [customerData, setCustomerData] = useState(null);
   const [customerLoading, setCustomerLoading] = useState(false);
+  const [payers, setPayers] = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -888,6 +893,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         if (r.groups?.length) setServiceGroups(r.groups);
       } catch {
         /* keep fallback */
+      }
+    })();
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/payers");
+        if (Array.isArray(r?.payers)) setPayers(r.payers);
+      } catch {
+        /* payers optional — self-pay still works */
       }
     })();
     (async () => {
@@ -2550,6 +2563,73 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   Create invoice on completion
                 </span>{" "}
               </label>
+              <div style={{ marginTop: 14 }}>
+                <label style={labelStyle}>Bill to (third-party payer)</label>
+                <select
+                  value={form.payerId}
+                  onChange={(e) => update("payerId", e.target.value)}
+                  className="font-bold"
+                  style={inputStyle}
+                >
+                  <option value="">
+                    {(() => {
+                      const def = customer.payerId
+                        ? payers.find(
+                            (p) => String(p.id) === String(customer.payerId),
+                          )
+                        : null;
+                      return def
+                        ? `Use account default — ${def.display_name}`
+                        : "Customer pays (self)";
+                    })()}
+                  </option>
+                  {payers.map((p) => (
+                    <option key={p.id} value={String(p.id)}>
+                      {p.display_name}
+                      {p.company_name && p.company_name !== p.display_name
+                        ? ` — ${p.company_name}`
+                        : ""}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                  {customer.payerId
+                    ? "Blank inherits this customer’s default payer; pick a payer to override for just this visit."
+                    : "Routes this visit’s invoice to a builder / property manager instead of the customer."}{" "}
+                  Manage payers in Finance &rarr; Payers.
+                </div>
+                {(form.payerId || customer.payerId) && (() => {
+                  // PO applies to the EFFECTIVE payer — the per-job override if
+                  // set, otherwise the customer's inherited default — so a
+                  // default-payer job can still capture a PO.
+                  const effectivePayerId = form.payerId || customer.payerId;
+                  const selectedPayer = payers.find(
+                    (p) => String(p.id) === String(effectivePayerId),
+                  );
+                  const needsPo =
+                    selectedPayer?.requires_po &&
+                    !String(form.poNumber || "").trim();
+                  return (
+                    <div style={{ marginTop: 10 }}>
+                      <label style={labelStyle}>PO number (optional)</label>
+                      <input
+                        type="text"
+                        value={form.poNumber}
+                        onChange={(e) => update("poNumber", e.target.value)}
+                        placeholder="Purchase order #"
+                        className="font-bold"
+                        style={inputStyle}
+                      />
+                      {needsPo && (
+                        <div style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>
+                          This payer usually requires a PO — consider adding one
+                          before billing.
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
               {service.createdAt && (
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 14 }}>
                   Booked on {new Date(service.createdAt).toLocaleString()}

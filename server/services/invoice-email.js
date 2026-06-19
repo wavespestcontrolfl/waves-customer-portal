@@ -19,6 +19,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatDateOnly } = require('../utils/date-only');
 const { getInvoiceEmailRecipients, getReceiptEmailRecipients } = require('./customer-contact');
+const PayerService = require('./payer');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
@@ -97,7 +98,7 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
       recipient: {
         email: overrideEmail,
         name: clean(recipientOverride?.name).slice(0, 120),
-        role: 'invoice_override',
+        role: clean(recipientOverride?.role) || 'invoice_override',
       },
     };
   }
@@ -113,10 +114,49 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     .first();
   if (!customer) return { ok: false, error: 'Customer not found' };
   const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
-  const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, options.recipientOverride);
+
+  // Third-party Bill-To reroute. When this invoice carries a payer snapshot,
+  // attach the payer (for the PDF bill-to block) and — unless the operator
+  // passed an explicit one-off override — route the email to the payer's AP
+  // inbox automatically. A payer with no usable AP email must NOT fall back to
+  // the homeowner billing contact: that would bill the wrong party and expose
+  // the third-party bill (PDF + pay link). Instead we fail so the operator can
+  // add the payer's AP email (or set an explicit recipient) and resend.
+  await PayerService.attachToInvoice(invoice);
+  // Fail-safe for the PDF Bill-To: a payer-billed invoice whose payer can't
+  // attach (legacy/no-snapshot, or the payer was deactivated) leaves
+  // invoice.payer unset, and billBlock would then render the HOMEOWNER as
+  // Bill-To. With an explicit AP-recipient override the payer guard below is
+  // skipped, so the AP would receive a payer invoice billed to the homeowner.
+  // Synthesize the same "Third-party payer" placeholder the public PDF routes
+  // use so the bill-to is never the homeowner. payerRecipient() of this
+  // placeholder is null, so the no-override branch below still fails closed.
+  if (invoice.payer_id && !invoice.payer) {
+    invoice.payer = { company_name: 'Third-party payer', ap_email: null };
+  }
+  let effectiveOverride = options.recipientOverride || null;
+  if (!effectiveOverride && invoice.payer_id) {
+    // Keyed on payer_id (the column), NOT the attached object: a payer-billed
+    // invoice whose payer can't be attached (no snapshot + live payer
+    // inactive/missing) must still route to the payer AP only. Fail CLOSED when
+    // no payer recipient resolves — never fall through to the homeowner.
+    effectiveOverride = (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null) || null;
+    if (!effectiveOverride) {
+      logger.warn(`[invoice-email] Payer invoice ${invoice.invoice_number} has no usable AP recipient — not sending (operator must add a payer AP email or specify a recipient).`);
+      return { ok: false, error: 'Payer invoice has no usable AP recipient; not sent. Add an AP email to the payer or specify a recipient.' };
+    }
+  }
+
+  const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, effectiveOverride);
   if (recipientError) return { ok: false, error: recipientError };
   if (!recipient?.email) return { ok: false, error: 'No invoice recipient email' };
   const recipientPayload = publicRecipient(recipient);
+
+  // Freeze the AP email this invoice was actually DELIVERED to onto the payer
+  // snapshot (shared with the project combined-send path), so the (async)
+  // receipt and the pay page route to the same AP contact even if the payer row
+  // is later edited/deactivated. Only runs on a successful send.
+  const persistPayerApIfNeeded = () => PayerService.freezeApEmail(invoice, recipient.email);
 
   const domain = publicPortalUrl();
   const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, options.payUrlParams);
@@ -208,6 +248,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         categories: ['invoice_sent'],
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
       });
+      // A suppressed/blocked recipient (unsubscribed, on the suppression list)
+      // resolves with sent:false — it was NOT delivered, so don't report ok:true.
+      // Callers that finalize an invoice off `.ok` (e.g. the dispatch
+      // payer-completion send, where the homeowner SMS path is suppressed) would
+      // otherwise mark a never-delivered invoice as sent.
+      if (result?.sent === false) {
+        logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${result.reason || 'blocked/suppressed'})`);
+        return { ok: false, blocked: !!result.blocked, error: result.reason || 'Email suppressed', recipient: recipientPayload };
+      }
+      await persistPayerApIfNeeded();
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
       return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl };
     } catch (err) {
@@ -240,6 +290,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         contentType: 'application/pdf',
       }],
     });
+    await persistPayerApIfNeeded();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
     return { ok: true, recipient: recipientPayload, payUrl };
   } catch (err) {
@@ -265,7 +316,20 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
-  const [recipient] = getReceiptEmailRecipients(customer, prefs || {});
+  // Third-party Bill-To: a payer-billed receipt may go ONLY to the payer's AP
+  // inbox — the receipt PDF/page exposes the payer's payment-method last4, so we
+  // never fall back to the homeowner. No usable AP email => no recipient
+  // (returned as the standard "No receipt recipient email" skip, which the
+  // receipt delivery queue treats as an expected non-actionable skip rather than
+  // retrying forever); the operator fixes the AP email.
+  await PayerService.attachToInvoice(invoice);
+  // Keyed on payer_id (the column), not the attached object: a payer-billed
+  // invoice whose payer can't be attached (inactive/missing live payer, no
+  // snapshot) must still NEVER fall back to the homeowner (would leak the
+  // payer's card last4). No payer recipient → standard no-recipient skip.
+  const recipient = invoice.payer_id
+    ? (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null)
+    : getReceiptEmailRecipients(customer, prefs || {})[0];
   if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
 
   const payment = await db('payments')

@@ -2891,6 +2891,43 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       const [previewBilling] = getInvoiceEmailRecipients(customer, previewPrefs || {});
       const previewRecipientEmail = String(previewRecipient.email || '').trim().toLowerCase();
       const previewBillingEmail = String(previewBilling?.email || '').trim().toLowerCase();
+
+      // Third-party Bill-To: mirror the real send's routing so the confirm dialog
+      // is accurate. For a payer-billed invoice the homeowner gets the report
+      // ONLY (no invoice PDF / pay link / billing copy) and the invoice + pay link
+      // route to the payer AP inbox. Resolve the payer from the persisted preview
+      // invoice's snapshot, or — for a brand-new non-persisted preview — the
+      // customer/per-job default the real create() will use (mirroring its
+      // serviceRecordId → scheduled_service_id derivation).
+      const PreviewPayerService = require('../services/payer');
+      let previewPayerApEmail = null;
+      let isPayerBilledPreview = false;
+      if (invoice.payer_id || invoice.payer_snapshot) {
+        await PreviewPayerService.attachToInvoice(invoice);
+        isPayerBilledPreview = !!invoice.payer_id;
+        previewPayerApEmail = invoice.payer ? (PreviewPayerService.payerRecipient(invoice.payer)?.email || null) : null;
+      } else {
+        let previewSsId = project.scheduled_service_id || null;
+        if (!previewSsId && project.service_record_id) {
+          const srLink = await db('service_records')
+            .where({ id: project.service_record_id, customer_id: customer.id })
+            .first('scheduled_service_id').catch(() => null);
+          if (srLink?.scheduled_service_id) previewSsId = srLink.scheduled_service_id;
+        }
+        const resolvedPreviewPayer = await PreviewPayerService.resolveForInvoice({
+          customerId: customer.id,
+          scheduledServiceId: previewSsId,
+        }).catch(() => null);
+        if (resolvedPreviewPayer?.payerId) {
+          isPayerBilledPreview = true;
+          previewPayerApEmail = resolvedPreviewPayer.snapshot
+            ? (PreviewPayerService.payerRecipient(resolvedPreviewPayer.snapshot)?.email || null)
+            : null;
+        }
+      }
+      const previewReportCopies = isWdoProject
+        ? wdoReportCopyEmails(parseFindings(project), [previewRecipientEmail, customer?.email, previewBillingEmail])
+        : [];
       return res.json({
         dry_run: true,
         invoice: {
@@ -2900,13 +2937,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           status: invoice.status,
           created,
         },
-        email_routing: {
+        email_routing: isPayerBilledPreview ? {
+          // Homeowner gets the report ONLY; the invoice + pay link go to the payer
+          // AP inbox — no homeowner billing copy for a payer invoice.
+          recipient: previewRecipient.email || null,
+          report_only: true,
+          payer_billed: true,
+          payer: previewPayerApEmail,
+          billing_copy: null,
+          report_copies: previewReportCopies,
+        } : {
           recipient: previewRecipient.email || null,
           billing_copy: previewBillingEmail && previewBillingEmail !== previewRecipientEmail ? previewBillingEmail : null,
           // Same exclusion set the send applies: recipient, primary, billing.
-          report_copies: isWdoProject
-            ? wdoReportCopyEmails(parseFindings(project), [previewRecipientEmail, customer?.email, previewBillingEmail])
-            : [],
+          report_copies: previewReportCopies,
         },
       });
     }
@@ -2988,12 +3032,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
     try {
+      await require('../services/payer').attachToInvoice(invoice);
       const invoiceForPdf = { ...invoice, customer, line_items: normalizeInvoiceLineItemsForPdf(invoice.line_items) };
       const invoiceBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
       attachments.push(pdfEmailAttachment(`invoice-${invoice.invoice_number}.pdf`, invoiceBuffer));
     } catch (err) {
       logger.error(`[projects] invoice PDF build failed for ${invoice.invoice_number}: ${err.message}`);
     }
+
+    // For a third-party-billed invoice the homeowner gets a report-ONLY email
+    // (FDACS PDF for WDO + report link, no invoice PDF / pay link); the invoice
+    // + pay link go to the payer's AP inbox. `isPayerInvoice` keys off the
+    // invoice's payer snapshot — NOT AP-email availability — so a misconfigured
+    // payer (active, no usable ap_email) still never bills the homeowner.
+    const reportAttachments = wdoPdf ? [wdoPdf.attachment] : [];
+    const isPayerInvoice = !!invoice.payer_id;
 
     const typeLabel = getProjectType(project.project_type)?.label || 'Report';
     const firstName = customer.first_name || 'there';
@@ -3008,13 +3061,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
     if (emailRecipient.email) {
       try {
-        const result = await ProjectEmail.sendProjectReportWithInvoice({
-          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-          // Only WDO attaches a report PDF (the FDACS-13645); non-WDO attaches
-          // just the invoice PDF and delivers the report as a link. Drives the
-          // template's attachments sentence so the copy matches reality.
-          reportAttached: isWdoProject,
-        });
+        const result = isPayerInvoice
+          // Payer-billed: homeowner gets the report only (FDACS PDF for WDO +
+          // report link) — never the invoice PDF or pay link.
+          ? await ProjectEmail.sendProjectReportReady({
+              project: refreshed, customer, reportUrl,
+              attachments: reportAttachments,
+              isResend: Boolean(project.sent_at || project.status === 'sent'),
+            })
+          : await ProjectEmail.sendProjectReportWithInvoice({
+              project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+              // Only WDO attaches a report PDF (the FDACS-13645); non-WDO
+              // attaches just the invoice PDF and delivers the report as a
+              // link. Drives the template's attachments sentence.
+              reportAttached: isWdoProject,
+            });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
           : { ok: false, error: projectEmailFailureMessage(result) };
@@ -3034,7 +3095,59 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // recorded on channels but never change delivered/claim semantics — the
     // customer copy governs.
     let billingCopyEmail = '';
-    if (channels.email?.ok) {
+    // Bill-To delivery. For a third-party-billed invoice the payer AP inbox is
+    // the PRIMARY invoice/pay-link delivery — send it INDEPENDENTLY of whether
+    // the customer/report email succeeded (a homeowner with no/failed email
+    // must not strand the payer invoice), and require it for invoice
+    // finalization below. For self-pay, the billing-contact copy stays a
+    // best-effort courtesy copy gated on the customer email succeeding.
+    const payerBilling = invoice.payer
+      ? require('../services/payer').payerRecipient(invoice.payer)
+      : null;
+    const payerBilled = !!payerBilling?.email;
+    if (payerBilled) {
+      billingCopyEmail = String(payerBilling.email).trim().toLowerCase();
+      try {
+        const result = await ProjectEmail.sendProjectReportWithInvoice({
+          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+          reportAttached: isWdoProject,
+          recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
+          // Stable-per-recipient key: dedupes the AP copy after the first success
+          // so a /send-with-invoice retry (the invoice can finalize off the payer
+          // delivery even when the homeowner report leg fails) doesn't re-bill the
+          // AP a duplicate — BUT keys on a hash of the AP email so that after an
+          // operator corrects a wrong/blocked AP address, the retry produces a new
+          // key and actually delivers to the corrected inbox instead of returning
+          // the old terminal (blocked/bounced) result.
+          idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer:${require('crypto').createHash('sha1').update(billingCopyEmail).digest('hex').slice(0, 12)}`,
+        });
+        channels.payer_email = result.ok
+          ? { ok: true, recipient: billingCopyEmail }
+          : { ok: false, recipient: billingCopyEmail, error: projectEmailFailureMessage(result) };
+        // Freeze the AP email we actually delivered to onto the snapshot (same
+        // as sendInvoiceEmail), so the receipt + pay page keep routing to it even
+        // if the payer row is later edited/deactivated.
+        if (result.ok) {
+          await require('../services/payer').freezeApEmail(invoice, billingCopyEmail);
+        }
+      } catch (e) {
+        logger.error(`[projects] combined send payer copy failed: ${e.message}`);
+        channels.payer_email = { ok: false, recipient: billingCopyEmail, error: e.message };
+      }
+    } else if (isPayerInvoice) {
+      // Payer-billed but no usable AP email: the bill-to party can't be reached.
+      // Record an explicit payer_email failure so the combined send is treated as
+      // partial/failed (below) and the UI doesn't claim "Report + invoice
+      // delivered" while the invoice is silently restored to draft — the operator
+      // must fix the payer AP email and resend.
+      channels.payer_email = { ok: false, recipient: null, error: 'Payer has no usable AP email — invoice not delivered to the bill-to party' };
+    } else if (channels.email?.ok) {
+      // Self-pay only. A payer-billed invoice must NEVER route the invoice/pay
+      // link to the homeowner's billing contact — when the payer has no usable
+      // AP email (payerBilled false), the invoice is simply not delivered (and
+      // not finalized below) so the operator fixes the payer AP email. Falling
+      // through here would expose the third-party bill + pay link to the
+      // homeowner.
       const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
       const [billing] = getInvoiceEmailRecipients(customer, prefs || {});
       const billingEmail = String(billing?.email || '').trim().toLowerCase();
@@ -3088,7 +3201,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
     } else {
       try {
-        const smsBody = `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
+        // Payer-billed: the homeowner still gets the report link (their
+        // service) but NOT the pay link — AR routes to the payer's AP inbox.
+        const smsBody = isPayerInvoice
+          ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
+          : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
         const result = await sendCustomerMessage({
           to: normalized,
           body: smsBody,
@@ -3123,9 +3240,17 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // not-sent (claim released below, nothing finalized). A non-WDO report
     // carries its link + pay link in either channel, so any successful channel
     // counts as delivered (mirrors /send).
-    const delivered = isWdoProject ? !!channels.email?.ok : successfulChannelCount > 0;
+    const delivered_report = isWdoProject ? !!channels.email?.ok : successfulChannelCount > 0;
+    // For a payer-billed invoice the AP (bill-to) leg is part of "delivered": the
+    // project isn't fully delivered until BOTH the homeowner report and the payer
+    // invoice go out. A missing/failed AP recipient makes it partial/failed even
+    // when the homeowner report succeeded, so the UI never claims delivered while
+    // the bill-to party never received the invoice.
+    const payerLegOk = !isPayerInvoice || !!channels.payer_email?.ok;
+    const delivered = delivered_report && payerLegOk;
+    const anySuccess = successfulChannelCount > 0 || (isPayerInvoice && !!channels.payer_email?.ok);
     const deliveryStatus = !delivered
-      ? (successfulChannelCount === 0 ? 'failed' : 'partial')
+      ? (anySuccess ? 'partial' : 'failed')
       : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
 
     // Finalize the invoice as delivered (it went out alongside the report).
@@ -3134,10 +3259,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // scheduled-review fields), so a 'scheduled' invoice can't be re-sent later
     // by processScheduledSends. It does NOT send anything itself, so the
     // invoice's own SMS path never fires a second, duplicate text.
-    if (delivered) {
+    // Invoice finalization is keyed on BILL-TO delivery, not report delivery:
+    // a payer-billed invoice is "sent" only when the payer AP send succeeds
+    // (so it can't be marked sent off the back of the customer/report email),
+    // and conversely the payer send standing alone is enough even if the
+    // homeowner report email failed. Self-pay keeps the report-delivery rule.
+    const invoiceDelivered = isPayerInvoice ? !!channels.payer_email?.ok : delivered;
+    if (invoiceDelivered) {
       await InvoiceService.markDeliverySent(invoice.id, {
         sms: !!channels.sms?.ok,
-        email: !!channels.email?.ok,
+        email: isPayerInvoice ? !!channels.payer_email?.ok : !!channels.email?.ok,
         source: 'project_report_with_invoice',
         payUrl,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));

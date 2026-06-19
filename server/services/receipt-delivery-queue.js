@@ -94,7 +94,10 @@ function expectedEmailSkip(result) {
 }
 
 function actionableSmsFailure(result) {
-  return result?.sent === false && !['already-sent', 'no-phone'].includes(result.reason);
+  // 'payer_billed' is an intentional suppression (third-party Bill-To invoices
+  // never text the homeowner a receipt), not a delivery failure — treat it like
+  // the other expected skips so the queue doesn't retry/fail the job forever.
+  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed'].includes(result.reason);
 }
 
 function actionableEmailFailure(result) {
@@ -175,6 +178,19 @@ async function processReceiptDeliveryJob(job) {
 
     if (shouldRetryReceiptDelivery({ smsResult, emailResult })) {
       throw receiptDeliveryFailureError({ smsResult, emailResult });
+    }
+
+    // Third-party Bill-To: a payer-billed receipt skips the homeowner SMS path
+    // (InvoiceService.sendReceipt returns `payer_billed` before it stamps
+    // receipt_sent_at), so stamp it here when the payer AP email delivered.
+    // Otherwise the invoice stays in the `needs_receipt` filter forever and a
+    // batch/manual resend texts/emails the AP a duplicate receipt.
+    if (smsResult?.reason === 'payer_billed' && emailResult?.ok && !invoice.receipt_sent_at) {
+      await db('invoices')
+        .where({ id: invoice.id })
+        .whereNull('receipt_sent_at')
+        .update({ receipt_sent_at: db.fn.now() })
+        .catch((e) => logger.warn(`[receipt-delivery-queue] receipt_sent_at stamp failed for ${invoice.invoice_number}: ${e.message}`));
     }
 
     await markJobCompleted(job, { smsResult, emailResult });

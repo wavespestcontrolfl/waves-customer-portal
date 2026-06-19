@@ -6655,6 +6655,36 @@ router.put('/:token/accept', async (req, res, next) => {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }
 
+    // Third-party Bill-To: never advertise a payer-billed invoice to the
+    // homeowner. InvoiceService.create() and the EstimateConverter auto-resolve a
+    // default payer, so the FINAL invoice from any path above may be payer-billed
+    // — it was emailed to the payer AP (sendViaSMSAndEmail already suppressed the
+    // homeowner SMS). Null the customer pay URL AND flag the accept as
+    // payer-billed so the success/notification builders don't promise a pay link
+    // or a pay_invoice next-step the homeowner can't use (they get the report;
+    // nothing is due from them). invoiceMode/invoiceLinkDelivered stay intact so
+    // the ADMIN copy still correctly reflects that the invoice was sent.
+    let invoiceIsPayerBilled = false;
+    if (invoiceId) {
+      let payerCheck = null;
+      try {
+        payerCheck = await db('invoices').where({ id: invoiceId }).first('payer_id');
+      } catch (e) {
+        // Fail closed: if we can't verify the final invoice's payer status, do
+        // NOT leave a homeowner pay URL that might be the payer's bearer
+        // /pay/:token. Suppressing a genuine self-pay link on a rare read error
+        // is recoverable (the customer pays from the portal billing tab); leaking
+        // the payer's token is not. pay_invoice is gated on the URL client-side,
+        // so nulling it also drops the spurious next-step.
+        invoicePayUrl = null;
+        logger.warn(`[estimate-accept] payer status check failed for invoice ${invoiceId}; failing closed (suppressed pay URL): ${e.message}`);
+      }
+      if (payerCheck?.payer_id) {
+        invoiceIsPayerBilled = true;
+        invoicePayUrl = null;
+      }
+    }
+
     // Exempt-path deposit sweep: the customer paid a deposit and then
     // accepted through a path that owes none (switched to prepay-annual, or
     // membership made them exempt). The webhook's staleness gate only
@@ -6690,6 +6720,7 @@ router.put('/:token/accept', async (req, res, next) => {
         invoiceMode,
         invoiceLinkDelivered,
         invoicePayUrl,
+        payerBilled: invoiceIsPayerBilled,
         reservationCommitted,
         bookingUrl,
         billingTerm,
@@ -6740,6 +6771,7 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceId,
       invoiceAmount,
       invoicePayUrl,
+      payerBilled: invoiceIsPayerBilled,
       invoiceKind,
       invoiceServiceLabel,
       billingTerm,
@@ -8006,6 +8038,7 @@ function buildAcceptSuccessPayload({
   invoiceId = null,
   invoiceAmount = null,
   invoicePayUrl = null,
+  payerBilled = false,
   invoiceKind = null,
   invoiceServiceLabel = null,
   billingTerm = 'standard',
@@ -8015,9 +8048,13 @@ function buildAcceptSuccessPayload({
   reservationCommitted = false,
 } = {}) {
   let nextStep = 'confirmed';
-  if (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl)) nextStep = 'pay_invoice';
+  // Third-party Bill-To: a payer-billed invoice is the payer's to pay — the
+  // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
+  if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
-  else if (!treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
+  // A payer-billed annual-prepay accept also has no homeowner step — the prepay
+  // invoice went to the payer AP inbox, so don't surface prepay follow-up copy.
+  else if (!payerBilled && !treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
 
   const decoratedInvoicePayUrl = decorateEstimateInvoicePayUrl(invoicePayUrl, {
     billingTerm,
@@ -8144,11 +8181,45 @@ function buildAcceptNotificationPayload({
   invoiceMode = false,
   invoiceLinkDelivered = false,
   invoicePayUrl = null,
+  payerBilled = false,
   reservationCommitted = false,
   bookingUrl = null,
   billingTerm = 'standard',
   annualPrepayAmount = null,
 } = {}) {
+  // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
+  // the homeowner gets the report and owes nothing, so never advertise a
+  // customer pay link. This must precede every billing-term branch below — the
+  // converter auto-resolves a default payer even when billByInvoice is false
+  // (standard / annual recurring accepts), so a payer-billed invoice can reach
+  // here with billByInvoice unset; its invoicePayUrl is already nulled, but the
+  // term branches below would still tell the homeowner to use the pay link.
+  // Admin copy still reflects that the invoice was sent.
+  if (payerBilled) {
+    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+    // Mirror the non-payer invoice-mode paths: only claim the invoice reached the
+    // billing contact when delivery actually succeeded. A payer with no usable AP
+    // email fails sendViaSMSAndEmail (invoiceLinkDelivered=false) — surface that
+    // as office follow-up rather than a false "sent" state. The homeowner owes
+    // nothing either way.
+    if (!invoiceLinkDelivered) {
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${planLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${planLabel} is approved. We'll coordinate billing with your billing contact — nothing is due from you.`,
+        customerLink: '/?tab=billing',
+      };
+    }
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${planLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
   if (billByInvoice) {
     if (treatAsOneTime) {
       if (!invoiceMode || !invoiceLinkDelivered) {

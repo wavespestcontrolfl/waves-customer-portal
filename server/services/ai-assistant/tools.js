@@ -129,9 +129,17 @@ async function lookupCustomer(input, contextCustomerId) {
 
   if (!customer) return { found: false };
 
-  const balance = await db('payments').where('customer_id', customer.id)
+  // Third-party Bill-To: exclude payer-billed payment rows (stored under the
+  // homeowner but owed by the payer) so an AP failure never surfaces as the
+  // homeowner's balance — same exclusion as getBillingInfo + /api/billing.
+  const payerInvoiceIds = await payerInvoiceIdSet(customer.id);
+  const balanceRows = await db('payments').where('customer_id', customer.id)
     .whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id')
-    .sum('amount as total').first();
+    .select('amount', 'metadata');
+  const outstandingBalance = balanceRows.reduce(
+    (sum, p) => (isPayerPaymentRow(p, payerInvoiceIds) ? sum : sum + parseFloat(p.amount || 0)),
+    0,
+  );
 
   return {
     found: true,
@@ -143,7 +151,7 @@ async function lookupCustomer(input, contextCustomerId) {
     tier: customer.waveguard_tier,
     monthlyRate: parseFloat(customer.monthly_rate || 0),
     memberSince: customer.member_since,
-    outstandingBalance: parseFloat(balance?.total || 0),
+    outstandingBalance,
   };
 }
 
@@ -192,11 +200,35 @@ async function getServiceHistory(customerId, limit = 5) {
   };
 }
 
+// Third-party Bill-To: a payment row stored under the homeowner's customer_id
+// but linked (via metadata.invoice_id) to a payer-billed invoice belongs to the
+// payer (AP contact), not the homeowner — drop those rows so the assistant never
+// surfaces the payer's payment or inflates the homeowner's balance. Mirrors the
+// /api/billing (billing-v2.js) filter. payerInvoiceIdSet() returns the customer's
+// payer-billed invoice ids; isPayerPaymentRow() tests a payment against that set.
+async function payerInvoiceIdSet(customerId) {
+  const rows = await db('invoices').where({ customer_id: customerId }).whereNotNull('payer_id').select('id');
+  return new Set(rows.map((r) => String(r.id)));
+}
+function isPayerPaymentRow(payment, payerInvoiceIds) {
+  if (!payerInvoiceIds || !payerInvoiceIds.size) return false;
+  let m = payment.metadata;
+  if (typeof m === 'string') { try { m = JSON.parse(m); } catch { m = null; } }
+  const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
+  return !!(invId && payerInvoiceIds.has(invId));
+}
+
 async function getBillingInfo(customerId) {
   if (!customerId) return { error: 'No customer ID' };
 
   const customer = await db('customers').where('id', customerId).first();
-  const payments = await db('payments').where('customer_id', customerId).orderBy('payment_date', 'desc').limit(5);
+  const payerInvoiceIds = await payerInvoiceIdSet(customerId);
+  // Over-fetch when payer rows exist, then filter, so we still return up to 5.
+  const rawPayments = await db('payments')
+    .where('customer_id', customerId)
+    .orderBy('payment_date', 'desc')
+    .limit(payerInvoiceIds.size ? 30 : 5);
+  const payments = rawPayments.filter((p) => !isPayerPaymentRow(p, payerInvoiceIds)).slice(0, 5);
   const cards = await db('payment_methods').where('customer_id', customerId);
   // Superseded failed attempts were collected by their retry's own row —
   // counting them would tell the customer they owe money already taken.

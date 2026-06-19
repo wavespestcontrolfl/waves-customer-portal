@@ -272,7 +272,7 @@ export default function ReceiptPage() {
     );
   }
 
-  const { invoice, service, customer, payment } = data;
+  const { invoice, service, customer, payment, payer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const paid = invoice.status === 'paid';
@@ -527,11 +527,31 @@ export default function ReceiptPage() {
             marginBottom: 20,
           }}>
             <DetailBlock label="Billed to">
-              <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
-              {customer.address && <div>{customer.address}</div>}
-              {locationLine && <div>{locationLine}</div>}
-              {customer.email && <div style={{ color: 'var(--text-muted)' }}>{customer.email}</div>}
+              {payer ? (
+                <>
+                  <div style={{ fontWeight: 800 }}>{payer.name}</div>
+                  {payer.address && <div>{payer.address}</div>}
+                  {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
+                    <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
+                  )}
+                  {payer.poNumber && <div style={{ color: 'var(--text-muted)' }}>PO: {payer.poNumber}</div>}
+                </>
+              ) : (
+                <>
+                  <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                  {customer.address && <div>{customer.address}</div>}
+                  {locationLine && <div>{locationLine}</div>}
+                  {customer.email && <div style={{ color: 'var(--text-muted)' }}>{customer.email}</div>}
+                </>
+              )}
             </DetailBlock>
+            {payer && (
+              <DetailBlock label="Service address">
+                <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                {customer.address && <div>{customer.address}</div>}
+                {locationLine && <div>{locationLine}</div>}
+              </DetailBlock>
+            )}
 
             <DetailBlock label="Payment details">
               {paidAt && (

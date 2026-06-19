@@ -862,6 +862,12 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
+    // Third-party Bill-To: never charge a card on file for a payer-billed
+    // invoice — the saved card belongs to invoice.customer_id (the homeowner),
+    // but this bill is the payer's. AR routes to the payer AP inbox.
+    if (invoice.payer_id) {
+      throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+    }
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
     if (!card) throw new Error('Payment method not found');
@@ -1123,8 +1129,8 @@ const StripeService = {
   /**
    * Get payment history with payment method details (both processors)
    */
-  async getPaymentHistory(customerId, limit = 20) {
-    return db('payments')
+  async getPaymentHistory(customerId, limit = 20, offset = 0) {
+    let q = db('payments')
       .where({ 'payments.customer_id': customerId })
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
@@ -1137,6 +1143,8 @@ const StripeService = {
       )
       .orderBy('payments.payment_date', 'desc')
       .limit(limit);
+    if (offset > 0) q = q.offset(offset);
+    return q;
   },
 
   // =========================================================================
@@ -1235,7 +1243,11 @@ const StripeService = {
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
 
-    const saveCard = !!opts.saveCard;
+    // Never save the payer's payment method onto the homeowner's account.
+    // For a third-party-billed invoice the person paying is the builder/AP
+    // contact, not invoice.customer_id — opting them into "save card" would
+    // attach their card to the homeowner for future off-session charges.
+    const saveCard = !!opts.saveCard && !invoice.payer_id;
     const stripeCustomerId = saveCard && invoice.customer_id
       ? await this.ensureStripeCustomer(invoice.customer_id)
       : null;
@@ -1409,7 +1421,10 @@ const StripeService = {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
 
-    const saveCard = !!opts.saveCard;
+    // Never save a third-party payer's card onto the homeowner account (see
+    // createInvoicePaymentIntent) — the AP user can toggle this after the
+    // Element loads, so guard the update path too.
+    const saveCard = !!opts.saveCard && !invoice.payer_id;
     const selectedMethodCategory = methodCategory || 'card';
     const base = parseFloat(invoice.total);
     const baseCents = Math.round(base * 100);
@@ -1699,7 +1714,8 @@ const StripeService = {
 
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
     const usePreview = !!surchargeDetails;
-    const saveCard = !!opts.saveCard;
+    // Payer invoices never save the payer's card to the homeowner account.
+    const saveCard = !!opts.saveCard && !invoice.payer_id;
 
     // Update PI with final amount, attach PM, then confirm server-side
     const updateParams = {
