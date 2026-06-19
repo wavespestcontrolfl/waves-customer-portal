@@ -4601,16 +4601,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && !suppressCompletionInvoiceLink;
     // Referral reward: if this customer was referred and just completed their
     // FIRST recurring service, credit both the referrer and the referee $25 to
-    // their account. Self-contained + idempotent; never blocks completion.
-    try {
-      const referralEngine = require('../services/referral-engine');
-      await referralEngine.creditReferralOnFirstService({
-        customerId: svc.customer_id,
-        // Canonical recurring signal in this codebase (matches the parent-job check).
-        isRecurring: !!(svc.is_recurring || svc.recurring_pattern),
-      });
-    } catch (referralErr) {
-      logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
+    // their account. Only a genuinely PERFORMED visit qualifies — an
+    // inspection-only, customer-declined, or incomplete outcome must not earn
+    // the reward or burn the single-use guard. The helper re-confirms THIS
+    // visit is recurring + handles idempotency itself; never blocks completion.
+    const referralVisitPerformed = visitOutcome !== 'inspection_only'
+      && visitOutcome !== 'customer_declined'
+      && !isIncompleteVisit;
+    if (referralVisitPerformed) {
+      try {
+        const referralEngine = require('../services/referral-engine');
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
+      } catch (referralErr) {
+        logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
+      }
     }
 
     const responsePayload = {

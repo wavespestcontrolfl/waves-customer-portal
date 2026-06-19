@@ -363,6 +363,18 @@ async function submitRecap({
     return { ok: false, reason: rejectReason };
   }
 
+  // Referral reward: a recap completes a PERFORMED visit (we're past the
+  // cancelled/skipped reject guard above), so a referred customer's first
+  // *recurring* service can land here. The helper re-confirms THIS visit is
+  // recurring — a one-time pest visit never qualifies — and handles idempotency
+  // itself. Best-effort; never blocks.
+  try {
+    const referralEngine = require('./referral-engine');
+    await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId });
+  } catch (referralErr) {
+    logger.warn(`[pest-recap] referral first-service credit failed for customer=${svc.customer_id}: ${referralErr.message}`);
+  }
+
   // 4. Customer-facing track_state -> complete (best-effort, post-trx).
   let trackCompleted = false;
   try {
