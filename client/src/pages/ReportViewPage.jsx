@@ -4091,7 +4091,9 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
     serviceType,
   });
   const events = timeline.events;
-  const timeOnSiteDisplay = timeline.durationMinutes ? formatCompactDurationMinutes(timeline.durationMinutes) : '';
+  // WaveGuard memberships don't account for an hourly/per-visit time figure on customer-facing
+  // service reports — the "Time on site" duration is intentionally suppressed (reads as zero).
+  const timeOnSiteDisplay = '';
 
   if (loading) {
     return (
