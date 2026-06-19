@@ -32,6 +32,13 @@ describe('price-scan extract', () => {
       expect(parsePriceText('20% off')).toBeNull();
       expect(parsePriceText('$95.00')).toBe(95);
     });
+    test('rejects per-unit / unit prices', () => {
+      expect(parsePriceText('$1.22 / oz')).toBeNull();
+      expect(parsePriceText('$1.22/oz')).toBeNull();
+      expect(parsePriceText('$0.94 per lb')).toBeNull();
+      expect(parsePriceText('$50 each')).toBeNull();
+      expect(parsePriceText('$95.00')).toBe(95); // package price still fine
+    });
   });
 
   describe('mapAvailability', () => {
@@ -255,6 +262,9 @@ describe('price-scan extract', () => {
     test('no price -> null', () => {
       expect(extractDomPrice({ priceTexts: ['Call for price'], title: 'X' })).toBeNull();
       expect(extractDomPrice({})).toBeNull();
+    });
+    test('skips a unit-price snippet to find the package price', () => {
+      expect(extractDomPrice({ priceTexts: ['$1.22 / oz', '$95.00'], title: 'X', availabilityText: 'In Stock' }).price).toBe(95);
     });
     test('skips a discount badge to find the real price', () => {
       expect(extractDomPrice({ priceTexts: ['Save 20%', '$95.00'], title: 'X', availabilityText: 'In Stock' }).price).toBe(95);

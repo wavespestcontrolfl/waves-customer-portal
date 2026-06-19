@@ -43,6 +43,11 @@ function parsePriceText(text) {
   // Reject discount badges ("Save 20%", "20% off") — a percentage is not a price,
   // and a DOM priceTexts array often lists the badge before the real price.
   if (/\d\s*%/.test(s)) return null;
+  // Reject per-unit / unit-price snippets ("$1.22 / oz", "$1.22 per lb", "each").
+  // A DOM list can show the unit price before the package price; we want the
+  // package price (normalization divides by size again), so skip these.
+  if (/\beach\b/i.test(s)) return null;
+  if (/(?:\/|\bper\b)\s*(?:fl\.?\s*oz|ounce|oz|gallon|gal|quart|qt|pint|pt|pound|lb|liter|litre|ml|kg|gram|unit)\b/i.test(s)) return null;
   // Numbers, allowing thousands separators: "1,234.50" is one token.
   const numbers = s.match(/\d[\d,]*(?:\.\d+)?/g);
   if (!numbers || numbers.length !== 1) return null; // 0 = no price, >1 = range/ambiguous
