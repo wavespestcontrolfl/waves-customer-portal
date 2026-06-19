@@ -683,16 +683,18 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       return { skipped: true };
     }
 
-    // Use the reward amount FROZEN on the referral at conversion (base + any tier
-    // bonus) — not the current setting — so a settings change between signup and
-    // first service can't over/under-credit, and the pending drain matches exactly.
-    // Finite-check (not `||`) so an intentional $0.00 frozen reward stays $0,
-    // rather than falling through to the current setting.
-    const frozenReward = Number(referral.referrer_reward_amount);
-    const referrerDollars = round2(Number.isFinite(frozenReward)
-      ? frozenReward
-      : ((Number(settings.referrer_reward_cents) / 100) || 0));
-    const referrerCents = Math.round(referrerDollars * 100);
+    // Real account credit = the FLAT referrer reward, symmetric with the referee
+    // credit below (which uses the current referee_discount setting). WaveGuard
+    // tier bonuses (bonus_<tier>_cents) live ONLY in the bypassed promoter-balance
+    // ledger and must never inflate the real account credit — the agreed reward is
+    // a flat $25, so a Silver/Gold/Platinum signup still credits a flat $25.
+    const referrerDollars = round2((Number(settings.referrer_reward_cents) / 100) || 0);
+    // The pending DRAIN, by contrast, uses the exact amount staged into the
+    // promoter's pending at conversion (base + any tier bonus, FROZEN on the
+    // referral) so the non-cashable tracker zeroes out. Finite-check so a frozen
+    // $0 doesn't fall back to the current setting.
+    const frozenStaked = Number(referral.referrer_reward_amount);
+    const referrerCents = Math.round((Number.isFinite(frozenStaked) ? frozenStaked : referrerDollars) * 100);
 
     // Referee — the customer who just completed their first recurring service.
     if (refereeDollars > 0) {
