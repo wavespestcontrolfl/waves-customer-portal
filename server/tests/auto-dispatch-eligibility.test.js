@@ -8,7 +8,7 @@ function svc(overrides = {}) {
     id: 's1',
     customer_id: 'c1',
     is_recurring: true,
-    recurring_parent_id: null,
+    recurring_parent_id: 'p1', // a child occurrence (parents are excluded)
     status: 'confirmed',
     scheduled_date: '2026-07-20', // 20+ days out
     auto_dispatch_locked: false,
@@ -35,6 +35,11 @@ describe('isEligibleForAutoDispatch', () => {
   test('one-time visit is NON_RECURRING', () => {
     expect(isEligibleForAutoDispatch(svc({ is_recurring: false, recurring_parent_id: null }), CTX))
       .toMatchObject({ eligible: false, reason_code: 'NON_RECURRING' });
+  });
+
+  test('recurring parent/template row (no recurring_parent_id) is excluded', () => {
+    expect(isEligibleForAutoDispatch(svc({ recurring_parent_id: null }), CTX))
+      .toMatchObject({ eligible: false, reason_code: 'PARENT_TEMPLATE_ROW' });
   });
 
   test('inside the 14-day lock window is INSIDE_LOCK_WINDOW', () => {

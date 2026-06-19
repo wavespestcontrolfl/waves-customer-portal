@@ -37,6 +37,12 @@ function inBlackout(dateStr, blackout) {
   return !!(blackout && dateStr >= blackout.start && dateStr <= blackout.end);
 }
 
+// find-time suppresses Sundays by default but NOT Saturdays; honor skip_weekends.
+function isSaturday(dateStr) {
+  const d = new Date(`${String(dateStr).split('T')[0]}T12:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.getUTCDay() === 6;
+}
+
 /**
  * Marginal drive minutes the visit adds to its CURRENT day's route, plus how
  * many stops share that day. HQ book-ends the day. Mirrors find-time's gap math.
@@ -136,10 +142,13 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   // Dates already occupied by another occurrence of THIS recurring series. The
   // rebooker only checks tech-time overlap, so without this two visits from the
   // same series could land on the same day (different time/tech). HARD filter.
+  // ALL non-cancelled rows of the series — including booster-month rows. The
+  // scheduler dedupes base recurring dates against boosters to avoid a
+  // base+booster same-day double-booking, and the rebooker only checks
+  // technician-time overlap, so boosters must block candidate dates too.
   const parentId = service.recurring_parent_id || service.id;
   const siblingRows = await ctx.db('scheduled_services')
     .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
-    .where('is_recurring', true) // cadence occurrences only — boosters aren't dispatchable, so don't let them block
     .whereNot('id', service.id)
     .whereNotIn('status', ['cancelled'])
     .whereBetween('scheduled_date', [dateFrom, dateTo])
@@ -162,6 +171,7 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   for (const slot of slots) {
     if (inBlackout(slot.date, prefs.blackout)) continue;                // HARD: blackout
     if (siblingDates.has(slot.date)) continue;                          // HARD: same-series occurrence that day
+    if (service.skip_weekends === true && isSaturday(slot.date)) continue; // HARD: skip_weekends series
     const techId = slot.technician && slot.technician.id;
     const cap = ctx.capabilityFor(techId, category);
     if (cap === 'deactivated') continue;                                // HARD: tech turned off for this category

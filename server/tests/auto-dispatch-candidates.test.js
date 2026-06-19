@@ -96,6 +96,17 @@ describe('findValidCandidateSlots', () => {
     expect(candidates.map((x) => x.date)).toEqual(['2026-08-07']);
   });
 
+  test('drops Saturday slots for a skip_weekends series', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-08', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 }, // Saturday
+        { date: '2026-08-10', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 }, // Monday
+      ],
+    });
+    const { candidates } = await findValidCandidateSlots({ ...SERVICE, skip_weekends: true }, { service_category: 'general', blackout: null }, ctx());
+    expect(candidates.map((c) => c.date)).toEqual(['2026-08-10']);
+  });
+
   test('returns no candidates (and no_geo note) when the service has no usable coordinates', async () => {
     const r = await findValidCandidateSlots({ ...SERVICE, lat: null, lng: null }, prefs, ctx());
     expect(r.candidates).toEqual([]);

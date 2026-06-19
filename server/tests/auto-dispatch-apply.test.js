@@ -3,9 +3,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
+jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue() }));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
+const AppointmentReminders = require('../services/appointment-reminders');
 const { applyAutoDispatchMove } = require('../services/auto-dispatch/apply');
 
 const SERVICE = {
@@ -36,13 +38,28 @@ test('applies the move and atomically increments the change count', async () => 
 
   const callArgs = SmartRebooker.reschedule.mock.calls[0];
   expect(callArgs.slice(0, 5)).toEqual(['s1', '2026-08-11', { start: '08:00', end: '10:00' }, 'auto_dispatch', 'auto_dispatch']);
-  // atomic expect predicate (full original placement) carried into the rebooker's move transaction
+  // atomic expect predicate (full original placement + status) carried into the rebooker's move transaction
   expect(callArgs[5].expect).toMatchObject({
-    auto_dispatch_locked: false, auto_dispatch_excluded: false, scheduled_date: '2026-08-04',
+    auto_dispatch_locked: false, auto_dispatch_excluded: false, status: 'confirmed', scheduled_date: '2026-08-04',
     window_start: '09:00', window_end: '11:00', technician_id: 't1',
   });
   expect(res).toMatchObject({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
   expect(update.mock.calls[0][0].auto_dispatch_change_count).toEqual({ raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' });
+  // reminders re-aligned to the new slot (non-notifying)
+  expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', { sendNotification: false });
+});
+
+test('preserves pending status (restores it after the rebooker forces confirmed)', async () => {
+  const update = jest.fn().mockResolvedValue(1);
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'pending', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update },
+  ];
+  db.mockImplementation(() => queue.shift());
+
+  const res = await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
+  expect(res.post_status).toBe('pending');
+  expect(update.mock.calls[0][0].status).toBe('pending');
 });
 
 test('aborts (STALE_PLACEMENT) when the visit was locked after scoring', async () => {

@@ -84,6 +84,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   options.expect = {
     auto_dispatch_locked: false,
     auto_dispatch_excluded: false,
+    status: fresh.status, // original status too — a flip to 'rescheduled' fails the match → 409
     scheduled_date: toDateStr(fresh.scheduled_date),
     // Full original placement too, so a same-date window/tech edit by an operator
     // also fails the atomic match (knex renders null as IS NULL — verified).
@@ -95,18 +96,40 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // Canonical move — transactional, overlap-checked, silent.
   await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
 
-  // Stamp auto-dispatch bookkeeping. The move already committed; a stamp failure
-  // must NOT flip the result to "failed" (that loses the move in run totals and
-  // skips the stability stamp). Best-effort, atomic increment.
+  // reschedule() forces status→'confirmed'. The recurring-lifecycle code counts
+  // only PENDING recurring rows to decide plan-extend / plan_ending, so silently
+  // confirming an optimized future visit can make a plan look depleted. Preserve
+  // the original pending status.
+  const postStatus = preStatus === 'pending' ? 'pending' : 'confirmed';
+
+  // Stamp auto-dispatch bookkeeping (+ restore pending). The move already
+  // committed; a stamp failure must NOT flip the result to "failed" (that loses
+  // the move in run totals and skips the stability stamp). Best-effort.
   try {
-    await db('scheduled_services').where({ id: service.id }).update({
+    const stamp = {
       last_auto_dispatch_at: db.fn.now(),
       last_auto_dispatch_run_id: runId,
       auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
       updated_at: db.fn.now(),
-    });
+    };
+    if (postStatus === 'pending') stamp.status = 'pending';
+    await db('scheduled_services').where({ id: service.id }).update(stamp);
   } catch (stampErr) {
     logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
+  }
+
+  // Keep appointment_reminders aligned with the new date/time — otherwise the
+  // 72h/24h reminder cron can still fire for the OLD slot. Non-notifying sync
+  // (same as the dispatch reschedule path); best-effort.
+  try {
+    const AppointmentReminders = require('../appointment-reminders');
+    await AppointmentReminders.handleReschedule(
+      service.id,
+      `${best.date}T${best.start_time || '08:00'}`,
+      { sendNotification: false },
+    );
+  } catch (remErr) {
+    logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
   }
 
   let notification = null;
@@ -116,7 +139,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.error(`[auto-dispatch] notify hook failed for ${service.id}: ${err.message}`);
   }
 
-  return { ok: true, pre_status: preStatus, post_status: 'confirmed', technician_changed: techChanged, notification };
+  return { ok: true, pre_status: preStatus, post_status: postStatus, technician_changed: techChanged, notification };
 }
 
 module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged };

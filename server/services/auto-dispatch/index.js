@@ -53,6 +53,9 @@ function loadEligibleServices(lockBoundary, lookaheadEnd) {
     // is_recurring=true only — booster-month rows carry a recurring_parent_id but
     // is_recurring=false and must not be swept (see waveguard-existing-services.js).
     .where('scheduled_services.is_recurring', true)
+    // Child occurrences only — the parent row is the generation template (see
+    // eligibility PARENT_TEMPLATE_ROW).
+    .whereNotNull('scheduled_services.recurring_parent_id')
     // Archiving a customer sets customers.deleted_at without clearing `active`,
     // so filter it here like the reminder/billing crons do.
     .whereNull('customers.deleted_at')

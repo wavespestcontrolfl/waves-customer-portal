@@ -42,6 +42,11 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
   // (see services/waveguard-existing-services.js). Don't move those.
   if (service.is_recurring !== true) return deny('NON_RECURRING', 'Not a recurring cadence visit');
 
+  // Child occurrences only. The parent row (recurring_parent_id null) is also the
+  // template for future generation (recurringTemplateTechnicianId / anchor date),
+  // so moving it would shift not-yet-generated occurrences. Optimize children.
+  if (service.recurring_parent_id == null) return deny('PARENT_TEMPLATE_ROW', 'Recurring parent/template row — children only');
+
   const status = String(service.status || '');
   if (!VALID_STATUSES.has(status)) {
     return deny(STATUS_REASON[status] || 'INVALID_STATUS', `Status '${status}' is not auto-dispatchable`);
