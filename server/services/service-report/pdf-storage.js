@@ -5,6 +5,7 @@ const {
   S3Client,
 } = require('@aws-sdk/client-s3');
 const config = require('../../config');
+const db = require('../../models/db');
 const logger = require('../logger');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
@@ -29,8 +30,27 @@ function reportPdfStorageKey(serviceRecordId, { visibilitySignature = '' } = {})
   // requireRecurringFrequency invalidates cached PDFs automatically (the
   // key changes → cache miss → re-render). When omitted (legacy / non-
   // pest-pressure callers), the key keeps its pre-Pest-Pressure shape.
+  //
+  // INVARIANT: this key is content-INSENSITIVE apart from the pest-pressure
+  // signature. The cache hit check (pdf-queue.js / reports-public.js) only
+  // compares the stored key to the expected key, so any code path that edits
+  // content the report renders — technician notes, findings, products, areas,
+  // photos, scores — MUST call invalidateServiceReportPdfCache() after the
+  // edit, or the next view/email keeps serving the stale cached PDF.
   const sigPart = visibilitySignature ? `-pp${visibilitySignature}` : '';
   return `reports/${serviceRecordId}/report-${SERVICE_REPORT_PDF_STORAGE_VERSION}${sigPart}.pdf`;
+}
+
+// Drop the cached-PDF hint for a service record so the next render rebuilds it
+// from live data. Best-effort: a failure here must never fail the content edit
+// that triggered it (the renderer falls back to re-rendering on the next view).
+async function invalidateServiceReportPdfCache(serviceRecordId, knex = db) {
+  if (!serviceRecordId) return;
+  try {
+    await knex('service_records').where({ id: serviceRecordId }).update({ pdf_storage_key: null });
+  } catch (err) {
+    logger.warn(`[service-report-pdf-storage] cache invalidation failed for ${serviceRecordId}: ${err.message}`);
+  }
 }
 
 async function streamToBuffer(stream) {
@@ -124,6 +144,7 @@ module.exports = {
   getHealthyStoredReportPdf,
   getReportPdf,
   headReportPdf,
+  invalidateServiceReportPdfCache,
   putReportPdf,
   reportPdfBufferHasFallbackMarker,
   reportPdfStorageKey,
