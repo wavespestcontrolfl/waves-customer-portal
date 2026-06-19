@@ -22,6 +22,31 @@ const D = {
 };
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 
+// Flat leaf sections (one per content tab). `activeTab` holds a LEAF key, so
+// every {activeTab === "..."} render block below is unchanged.
+const REVIEWS_LEAF_SECTIONS = [
+  { key: "reviews", label: "Reviews", Icon: Star },
+  { key: "gbp", label: "GBP Management", Icon: Building2 },
+  { key: "outreach", label: "Review Outreach", Icon: Send },
+  { key: "incentives", label: "Incentives", Icon: Award },
+];
+
+// The flat leaf bar is grouped into parent sections, each revealing its leaf
+// tabs in a sub-row. The primary "reviews" group stays first.
+const REVIEWS_TAB_GROUPS = [
+  { key: "reviews", label: "Reviews", Icon: Star, tabs: ["reviews"] },
+  {
+    key: "outreach",
+    label: "Outreach",
+    Icon: Send,
+    tabs: ["outreach", "incentives"],
+  },
+  { key: "gbp", label: "GBP", Icon: Building2, tabs: ["gbp"] },
+];
+const REVIEWS_LEAF_BY_KEY = Object.fromEntries(
+  REVIEWS_LEAF_SECTIONS.map((s) => [s.key, s]),
+);
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -3247,12 +3272,9 @@ export default function ReviewsPage() {
     { value: "responded", label: "Responded" },
     { value: "needs-reply", label: "Needs Reply" },
   ];
-  const reviewSections = [
-    { key: "reviews", label: "Reviews", Icon: Star },
-    { key: "gbp", label: "GBP Management", Icon: Building2 },
-    { key: "outreach", label: "Review Outreach", Icon: Send },
-    { key: "incentives", label: "Incentives", Icon: Award },
-  ];
+  const activeGroup =
+    REVIEWS_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) ||
+    REVIEWS_TAB_GROUPS[0];
   const fallbackLocations = locations.filter(
     (l) => l.reviewsSource && l.reviewsSource !== "gbp",
   );
@@ -3263,12 +3285,61 @@ export default function ReviewsPage() {
       <AdminCommandHeader
         title="Reviews"
         icon={Star}
-        sections={reviewSections}
-        activeKey={activeTab}
-        onSectionChange={setActiveTab}
+        sections={REVIEWS_TAB_GROUPS.map((g) => ({
+          key: g.key,
+          label: g.label,
+          Icon: g.Icon,
+        }))}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = REVIEWS_TAB_GROUPS.find((x) => x.key === key);
+          if (g) setActiveTab(g.tabs[0]);
+        }}
         ariaLabel="Reviews section"
-        navGridClassName="grid-cols-1 md:grid-cols-4"
+        navGridClassName="grid-cols-1 md:grid-cols-3"
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((key) => {
+            const leaf = REVIEWS_LEAF_BY_KEY[key];
+            const active = activeTab === key;
+            const LeafIcon = leaf.Icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setActiveTab(key)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                <LeafIcon size={14} strokeWidth={1.9} />
+                {leaf.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {/* ====================== TAB: REVIEWS ====================== */}
       {activeTab === "reviews" && (
         <div>
