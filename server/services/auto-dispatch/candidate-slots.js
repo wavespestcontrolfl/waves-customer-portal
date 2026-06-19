@@ -136,6 +136,7 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     dateTo,
     topN: ctx.fetchCap || FETCH_CAP, // full feasible set; HARD filters run before trim
     excludeServiceIds: [service.id],
+    slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
   });
 
   const slots = (res && res.slots) || [];
