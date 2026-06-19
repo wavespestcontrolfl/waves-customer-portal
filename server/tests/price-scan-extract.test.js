@@ -4,6 +4,7 @@ const {
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,
+  offerFromSnapshot,
   quantityToOz,
   deriveNormalizedUnitPrice,
   tokenOverlap,
@@ -25,6 +26,11 @@ describe('price-scan extract', () => {
     test('rejects zero', () => {
       expect(parsePriceText('$0.00')).toBeNull();
       expect(parsePriceText('0')).toBeNull();
+    });
+    test('rejects discount percentages', () => {
+      expect(parsePriceText('Save 20%')).toBeNull();
+      expect(parsePriceText('20% off')).toBeNull();
+      expect(parsePriceText('$95.00')).toBe(95);
     });
   });
 
@@ -106,9 +112,138 @@ describe('price-scan extract', () => {
       const ld = JSON.stringify({ '@type': 'Product', name: 'Z', offers: { price: 10, priceCurrency: 'CAD' } });
       expect(extractJsonLdOffer([ld]).currency).toBe('CAD');
     });
+    test('top-level Offer node (itemOffered name) is read', () => {
+      const ld = JSON.stringify({
+        '@type': 'Offer', price: '95', priceCurrency: 'USD', availability: 'InStock',
+        itemOffered: { '@type': 'Product', name: 'Taurus SC Termiticide 78 oz' },
+      });
+      const got = extractJsonLdOffer([ld], { targetOz: 78 });
+      expect(got.price).toBe(95);
+      expect(got.name).toMatch(/78 oz/);
+    });
+    test('Product nested under WebPage.mainEntity is traversed', () => {
+      const ld = JSON.stringify({
+        '@type': 'WebPage',
+        mainEntity: { '@type': 'Product', name: 'Y', offers: { price: 42, priceCurrency: 'USD' } },
+      });
+      expect(extractJsonLdOffer([ld]).price).toBe(42);
+    });
+    test('prefers a limited-stock offer over an earlier sold-out one', () => {
+      const ld = JSON.stringify({
+        '@type': 'Product', name: 'A',
+        offers: [
+          { '@type': 'Offer', price: 80, availability: 'OutOfStock' },
+          { '@type': 'Offer', price: 90, availability: 'LimitedAvailability' },
+        ],
+      });
+      const got = extractJsonLdOffer([ld]);
+      expect(got.price).toBe(90);
+      expect(got.availability).toBe('limited');
+    });
     test('no priced offer -> null', () => {
       expect(extractJsonLdOffer([JSON.stringify({ '@type': 'Product', name: 'NoPrice' })])).toBeNull();
       expect(extractJsonLdOffer(['not json'])).toBeNull();
+    });
+
+    // Real DoMyOwn shape: one Product, an offers[] of every size variant.
+    const multiSize = JSON.stringify({
+      '@type': 'Product', name: 'Taurus SC Termiticide',
+      offers: [
+        { '@type': 'Offer', name: 'Taurus SC Termiticide', price: '48.48', priceCurrency: 'USD', availability: 'https://schema.org/InStock' },
+        { '@type': 'Offer', name: 'Taurus SC Termiticide 78 oz.', price: '95', priceCurrency: 'USD', availability: 'https://schema.org/InStock' },
+        { '@type': 'Offer', name: 'Taurus SC Termiticide 2.5 Gallons', price: '380.5', priceCurrency: 'USD', availability: 'https://schema.org/InStock' },
+      ],
+    });
+    test('targetOz selects the matching variant offer', () => {
+      const got = extractJsonLdOffer([multiSize], { targetOz: 78 });
+      expect(got.price).toBe(95);
+      expect(got.name).toMatch(/78 oz/);
+    });
+    test('targetOz for the drum picks the 2.5 gal offer', () => {
+      expect(extractJsonLdOffer([multiSize], { targetOz: 320 }).price).toBe(380.5);
+    });
+    test('without targetOz, first priced offer wins (back-compat)', () => {
+      expect(extractJsonLdOffer([multiSize]).price).toBe(48.48);
+    });
+    test('a single AggregateOffer lowPrice is rejected for a size-specific scan', () => {
+      const agg = JSON.stringify({
+        '@type': 'Product', name: 'Taurus SC Termiticide',
+        offers: { '@type': 'AggregateOffer', lowPrice: '48.48', priceCurrency: 'USD', availability: 'InStock' },
+      });
+      expect(extractJsonLdOffer([agg], { targetOz: 78 })).toBeNull();
+      expect(extractJsonLdOffer([agg]).price).toBe(48.48); // usable without a target
+    });
+    test('targetOz with no matching variant -> null (never guess a size)', () => {
+      // 12 oz isn't offered; returning the 20 oz price as the 12 oz would be a lie.
+      expect(extractJsonLdOffer([multiSize], { targetOz: 12 })).toBeNull();
+    });
+    test('a CASE/multipack offer does not match a single-size scan', () => {
+      const withCase = JSON.stringify({
+        '@type': 'Product', name: 'Taurus SC Termiticide',
+        offers: [
+          { '@type': 'Offer', name: 'Taurus SC Termiticide 78 oz.', price: '95', priceCurrency: 'USD', availability: 'InStock' },
+          { '@type': 'Offer', name: 'Taurus SC Termiticide 78 oz. CASE (4 x 78 oz. bottles)', price: '380', priceCurrency: 'USD', availability: 'InStock' },
+        ],
+      });
+      // single 78 oz wins; the 4 x 78 oz (312 oz) case is excluded
+      expect(extractJsonLdOffer([withCase], { targetOz: 78 }).price).toBe(95);
+      // …and is itself matchable as a 312 oz case scan
+      expect(extractJsonLdOffer([withCase], { targetOz: 312 }).price).toBe(380);
+    });
+    test('nameless multi-offers do not inherit the product size for matching', () => {
+      // Product node carries "78 oz", offers are nameless with different prices.
+      // No offer has its OWN size evidence, so a size-specific scan must NOT
+      // pair any of them with 78 oz.
+      const ld = JSON.stringify({
+        '@type': 'Product', name: 'Taurus SC Termiticide 78 oz',
+        offers: [
+          { '@type': 'Offer', price: '48.48', priceCurrency: 'USD', availability: 'InStock' },
+          { '@type': 'Offer', price: '95', priceCurrency: 'USD', availability: 'InStock' },
+        ],
+      });
+      expect(extractJsonLdOffer([ld], { targetOz: 78 })).toBeNull();
+      // …but a SINGLE nameless offer is the product itself — size from the node ok.
+      const single = JSON.stringify({
+        '@type': 'Product', name: 'Taurus SC Termiticide 78 oz',
+        offers: { '@type': 'Offer', price: '95', priceCurrency: 'USD', availability: 'InStock' },
+      });
+      expect(extractJsonLdOffer([single], { targetOz: 78 }).price).toBe(95);
+    });
+    test('tolerates raw control characters in the JSON-LD (real vendor markup)', () => {
+      // Unescaped newline/tab inside a description string — strict JSON.parse
+      // throws on this; the parser must strip-and-retry, not drop the block.
+      const dirty = '{"@type":"Product","name":"Taurus SC","description":"line1\n\tline2",'
+        + '"offers":{"@type":"Offer","price":"95","priceCurrency":"USD","availability":"InStock"}}';
+      expect(() => JSON.parse(dirty)).toThrow(); // precondition: genuinely invalid
+      expect(extractJsonLdOffer([dirty]).price).toBe(95);
+    });
+  });
+
+  describe('offerFromSnapshot (size-gated DOM fallback)', () => {
+    const variantLd = JSON.stringify({
+      '@type': 'Product', name: 'Taurus SC Termiticide',
+      offers: [
+        { '@type': 'Offer', name: 'Taurus SC Termiticide', price: '48.48', priceCurrency: 'USD', availability: 'InStock' },
+        { '@type': 'Offer', name: 'Taurus SC Termiticide 78 oz.', price: '95', priceCurrency: 'USD', availability: 'InStock' },
+      ],
+    });
+    test('JSON-LD variant match wins', () => {
+      const snap = { jsonLd: [variantLd], priceTexts: ['$48.48'], title: 'Taurus SC Termiticide' };
+      expect(offerFromSnapshot(snap, { targetOz: 78 }).price).toBe(95);
+    });
+    test('JSON-LD has offers but none match target -> null, NOT the DOM default', () => {
+      // Without the gate this would return the $48.48 DOM price as the 78 oz.
+      const snap = { jsonLd: [variantLd], priceTexts: ['$48.48'], title: 'Taurus SC Termiticide' };
+      expect(offerFromSnapshot(snap, { targetOz: 12 })).toBeNull();
+    });
+    test('no JSON-LD offers -> DOM fallback is used', () => {
+      const snap = { jsonLd: [], priceTexts: ['$89.00'], title: 'Taurus SC 78 oz', availabilityText: 'In Stock' };
+      const got = offerFromSnapshot(snap, { targetOz: 78 });
+      expect(got.price).toBe(89);
+      expect(got.availability).toBe('in_stock');
+    });
+    test('no JSON-LD and no DOM price -> null', () => {
+      expect(offerFromSnapshot({ jsonLd: [], priceTexts: ['Call for price'] }, { targetOz: 78 })).toBeNull();
     });
   });
 
@@ -120,6 +255,9 @@ describe('price-scan extract', () => {
     test('no price -> null', () => {
       expect(extractDomPrice({ priceTexts: ['Call for price'], title: 'X' })).toBeNull();
       expect(extractDomPrice({})).toBeNull();
+    });
+    test('skips a discount badge to find the real price', () => {
+      expect(extractDomPrice({ priceTexts: ['Save 20%', '$95.00'], title: 'X', availabilityText: 'In Stock' }).price).toBe(95);
     });
   });
 
@@ -134,6 +272,19 @@ describe('price-scan extract', () => {
       expect(quantityToOz('each')).toBeNull();
       expect(quantityToOz('6 bait stations')).toBeNull();
       expect(quantityToOz('')).toBeNull();
+    });
+    test('multipack totals apply the count', () => {
+      expect(quantityToOz('4 x 78 oz')).toBe(312); // a case of four 78 oz bottles
+      expect(quantityToOz('2 x 2.5 gal')).toBe(640);
+    });
+    test('mixed number ("2 1/2 gal") is the whole amount, not the fraction', () => {
+      expect(quantityToOz('2 1/2 gal')).toBe(320); // 2.5 gal, NOT 0.5 gal (64)
+    });
+    test('fractional multipack ("2 x 1/2 gal") applies count AND fraction', () => {
+      expect(quantityToOz('2 x 1/2 gal')).toBe(128); // 2 * 0.5 gal, NOT 512 or 64
+    });
+    test('fl oz normalizes (extractSizeToken strips the dot upstream)', () => {
+      expect(quantityToOz('30 fl oz')).toBe(30);
     });
   });
 
@@ -172,6 +323,38 @@ describe('price-scan extract', () => {
       const r = verifyMatch({ name: 'Termidor SC Foam', quantity: '78 oz' }, expected);
       expect(r.matched).toBe(false);
     });
+    test('same brand, different formulation (SC vs CS) -> not matched without EPA', () => {
+      // "Taurus CS" shares the brand token but is a different formulation; the
+      // short SC/CS codes the tokenizer drops must still block a name match.
+      const r = verifyMatch({ name: 'Taurus CS Termiticide 78 oz', quantity: '78 oz' }, expected);
+      expect(r.signals.name).toBe(false);
+      expect(r.matched).toBe(false);
+    });
+    test('same brand same formulation still matches', () => {
+      const r = verifyMatch({ name: 'Taurus SC Termiticide 78 oz', quantity: '78 oz' }, expected);
+      expect(r.signals.name).toBe(true);
+      expect(r.matched).toBe(true);
+    });
+    test('single-char formulation marker (Demand CS vs Demand G) blocks name-only match', () => {
+      const demand = { vendorProductName: 'Demand CS', epaReg: '100-1066', packSizeValue: 8, packSizeUnit: 'oz' };
+      const r = verifyMatch({ name: 'Demand G 8 oz', quantity: '8 oz' }, demand);
+      expect(r.signals.name).toBe(false);
+      expect(r.matched).toBe(false);
+      const ok = verifyMatch({ name: 'Demand CS 8 oz', quantity: '8 oz', text: 'EPA Reg. No. 100-1066' }, demand);
+      expect(ok.matched).toBe(true);
+    });
+    test('different formulation marker (Bifen I/T vs XTS) needs EPA, not name+size', () => {
+      // Brand + "Insecticide" overlap + same size would otherwise pass; the I/T
+      // vs XTS formulation marker (a slashed / 3-char code) must block it.
+      const bifen = { vendorProductName: 'Bifen I/T Insecticide', epaReg: '279-3206', packSizeValue: 96, packSizeUnit: 'oz' };
+      const r = verifyMatch({ name: 'Bifen XTS Insecticide 96 oz', quantity: '96 oz' }, bifen);
+      expect(r.signals.name).toBe(false);
+      expect(r.matched).toBe(false);
+      // the correct formulation at the same size still matches
+      const ok = verifyMatch({ name: 'Bifen I/T Insecticide 96 oz', quantity: '96 oz' }, bifen);
+      expect(ok.signals.name).toBe(true);
+      expect(ok.matched).toBe(true);
+    });
     test('generic subset name (brand missing) -> not matched even at right size', () => {
       // "Termiticide 78 oz" shares only the category word with the expected
       // "Taurus SC Termiticide". Without an EPA hit the trust gate must reject it,
@@ -189,6 +372,20 @@ describe('price-scan extract', () => {
       const r = verifyMatch({ name: 'Generic Fipronil 78oz', text: 'EPA Reg No 53883-279', quantity: '78 oz' }, expected);
       expect(r.signals.epa).toBe(true);
       expect(r.matched).toBe(true);
+    });
+    test('epa matches the distributor-suffixed reg by company-product key', () => {
+      const r = verifyMatch({ name: 'X', text: 'EPA Reg. No. 53883-279-83979', quantity: '78 oz' }, expected);
+      expect(r.signals.epa).toBe(true);
+    });
+    test('epa does NOT match across unrelated adjacent numbers', () => {
+      // Whole-page digit concat would have spuriously matched 53883279 here; the
+      // tokenized check must not. Wrong product, right size -> rejected.
+      const r = verifyMatch(
+        { name: 'Termidor SC 20 oz $538.83 SKU 2790011', text: 'Order 53,883 units. Call 279-0000.', quantity: '78 oz' },
+        expected,
+      );
+      expect(r.signals.epa).toBe(false);
+      expect(r.matched).toBe(false);
     });
     test('no known size -> needs both name and epa', () => {
       const noSize = { productName: 'Taurus SC', vendorProductName: 'Taurus SC Termiticide' };

@@ -35,11 +35,14 @@ function mapAvailability(value) {
 }
 
 // Parse a price string into a positive number, or null. Strict: rejects ranges,
-// "call for price", empty, and non-positive. "$1,234.50" -> 1234.5.
+// "call for price", empty, non-positive, and percentages. "$1,234.50" -> 1234.5.
 function parsePriceText(text) {
   if (text == null) return null;
   const s = String(text).trim();
   if (!s) return null;
+  // Reject discount badges ("Save 20%", "20% off") — a percentage is not a price,
+  // and a DOM priceTexts array often lists the badge before the real price.
+  if (/\d\s*%/.test(s)) return null;
   // Numbers, allowing thousands separators: "1,234.50" is one token.
   const numbers = s.match(/\d[\d,]*(?:\.\d+)?/g);
   if (!numbers || numbers.length !== 1) return null; // 0 = no price, >1 = range/ambiguous
@@ -64,63 +67,163 @@ function offerPrice(offer) {
   return parsePriceText(raw);
 }
 
-function readOffer(node) {
-  const offers = node && node.offers;
-  if (!offers) return null;
-  const list = Array.isArray(offers) ? offers : [offers];
-  let best = null;
-  for (const o of list) {
-    const price = offerPrice(o);
-    if (price == null) continue;
-    const cand = {
-      price,
-      currency: o.priceCurrency
-        || (o.priceSpecification && o.priceSpecification.priceCurrency)
-        || null,
-      availability: o.availability || o.availabilityStatus || null,
-    };
-    // Prefer an in-stock offer over an earlier sold-out one in the same array,
-    // so a leading out-of-stock offer can't shadow a valid in-stock price.
-    if (!best) best = cand;
-    else if (mapAvailability(best.availability) !== 'in_stock'
-      && mapAvailability(cand.availability) === 'in_stock') best = cand;
+// Parse one JSON-LD block, tolerating the raw control characters (unescaped
+// newlines/tabs inside description strings) that real vendor markup ships and
+// strict JSON.parse rejects. Returns null if it's genuinely unparseable.
+function safeJsonParse(raw) {
+  try { return JSON.parse(raw); } catch {
+    try { return JSON.parse(String(raw).replace(/[\u0000-\u001F]+/g, ' ')); } catch { return null; }
   }
-  return best;
 }
 
-// Given an array of raw JSON-LD <script> string contents, find the best
-// Product/Offer and return { price, currency, availability, name } or null.
-// Prefers an in-stock priced offer over an out-of-stock one.
-function extractJsonLdOffer(jsonLdStrings) {
+// Collect EVERY priced offer across all JSON-LD blocks as
+// { price, currency, availabilityRaw, name }. The name prefers the per-offer
+// name (which carries the variant size on a multi-size page, e.g.
+// "Taurus SC Termiticide 78 oz."), falling back to the product node's name.
+function collectJsonLdOffers(jsonLdStrings) {
   const blocks = Array.isArray(jsonLdStrings) ? jsonLdStrings : [jsonLdStrings];
-  let best = null;
+  const offers = [];
   for (const raw of blocks) {
-    let parsed;
-    try { parsed = JSON.parse(raw); } catch { continue; }
+    const parsed = safeJsonParse(raw);
+    if (!parsed) continue;
     const nodes = [];
     const walk = (n) => {
       if (Array.isArray(n)) { n.forEach(walk); return; }
       if (n && typeof n === 'object') {
         nodes.push(n);
+        // Product JSON-LD is commonly nested under @graph or WebPage.mainEntity.
         if (Array.isArray(n['@graph'])) n['@graph'].forEach(walk);
+        if (n.mainEntity) walk(n.mainEntity);
       }
     };
     walk(parsed);
     for (const node of nodes) {
-      const offer = readOffer(node);
-      if (!offer) continue;
-      const cand = {
-        price: offer.price,
-        currency: offer.currency || 'USD',
-        availability: mapAvailability(offer.availability),
-        name: typeof node.name === 'string' ? node.name
-          : (typeof node.title === 'string' ? node.title : null),
-      };
-      if (!best) best = cand;
-      else if (best.availability !== 'in_stock' && cand.availability === 'in_stock') best = cand;
+      const nodeType = node['@type'];
+      let list;
+      if (node.offers) {
+        list = Array.isArray(node.offers) ? node.offers : [node.offers];
+      } else if (nodeType === 'Offer' || nodeType === 'AggregateOffer' || offerPrice(node) != null) {
+        // The node IS a top-level / @graph Offer (price + itemOffered), not a
+        // Product wrapping an offers array.
+        list = [node];
+      } else {
+        continue;
+      }
+      const nodeName = typeof node.name === 'string' ? node.name
+        : (typeof node.title === 'string' ? node.title : null);
+      for (const o of list) {
+        const price = offerPrice(o);
+        if (price == null) continue;
+        // Prefer the offer's own name (variant size), then its itemOffered.name
+        // (top-level Offer pages), then the product node's name.
+        const offerName = (typeof o.name === 'string' && o.name)
+          || (o.itemOffered && typeof o.itemOffered.name === 'string' && o.itemOffered.name)
+          || null;
+        offers.push({
+          price,
+          currency: o.priceCurrency
+            || (o.priceSpecification && o.priceSpecification.priceCurrency)
+            || 'USD',
+          availabilityRaw: o.availability || o.availabilityStatus || null,
+          // name = display name (offer's own / itemOffered, else product node).
+          // ownName = ONLY the per-offer size evidence — a nameless offer must
+          // NOT inherit the product node's size, or every nameless/AggregateOffer
+          // price would appear to match the requested pack size.
+          name: offerName || nodeName,
+          ownName: offerName,
+          // AggregateOffer.lowPrice is a cheapest-variant price, not proof of any
+          // one pack size — flagged so a size-specific scan won't accept it.
+          aggregate: o['@type'] === 'AggregateOffer' || (o.price == null && o.lowPrice != null),
+        });
+      }
+    }
+  }
+  return offers;
+}
+
+// Buyability rank for choosing among same-pool offers: a limited-stock price is
+// still purchasable and must beat a sold-out one (which ranking later drops).
+const AVAIL_RANK = { in_stock: 3, limited: 2, unknown: 1, backorder: 1, out_of_stock: 0 };
+
+// Choose, by buyability then order, one offer from a pool and shape it.
+function pickBestOffer(pool) {
+  let best = null;
+  let bestRank = -1;
+  for (const o of pool) {
+    const availability = mapAvailability(o.availabilityRaw);
+    const rank = AVAIL_RANK[availability] ?? 1;
+    if (!best || rank > bestRank) {
+      best = { price: o.price, currency: o.currency || 'USD', availability, name: o.name };
+      bestRank = rank;
     }
   }
   return best;
+}
+
+// Find the best Product/Offer across raw JSON-LD <script> strings and return
+// { price, currency, availability, name } or null.
+//   opts.targetOz: size-specific scan. Match ONLY on per-offer size evidence
+//   (ownName). On a multi-offer page, a nameless/AggregateOffer price can't be
+//   attributed to a size, so we never guess — if nothing substantiates the
+//   target size we return null rather than pairing a wrong-size price with the
+//   requested quantity. A single offer is the product itself, so its display
+//   name (which may come from the product node) is allowed as size evidence.
+// Within the chosen pool, prefers an in-stock priced offer over an out-of-stock.
+function extractJsonLdOffer(jsonLdStrings, opts = {}) {
+  const offers = collectJsonLdOffers(jsonLdStrings);
+  if (!offers.length) return null;
+
+  if (opts.targetOz && opts.targetOz > 0) {
+    const tol = opts.sizeTolerance ?? 0.05;
+    const matchesTarget = (sizeText) => {
+      const oz = quantityToOz(extractSizeToken(sizeText));
+      return !!oz && Math.abs(oz - opts.targetOz) / opts.targetOz <= tol;
+    };
+    // Trustworthy variant matches: the offer's OWN name parses to the size.
+    let pool = offers.filter((o) => o.ownName && matchesTarget(o.ownName));
+    if (!pool.length && offers.length === 1) {
+      // Single CONCRETE offer = the whole product; its display name is the size
+      // evidence. Accept if it matches the target, or carries no size at all (let
+      // the downstream title/quantity check verify). An AggregateOffer lowPrice is
+      // never accepted this way — it's a cheapest-variant price, not this size.
+      const only = offers[0];
+      if (!only.aggregate && (!extractSizeToken(only.name) || matchesTarget(only.name))) pool = offers;
+    }
+    return pool.length ? pickBestOffer(pool) : null;
+  }
+
+  return pickBestOffer(offers);
+}
+
+// Pull the first pack-size-looking token ("78 oz", "2.5 gal", "1/2 gal",
+// "18 lb") out of a free product title, for the quantity field. Returns the raw
+// substring (final parse happens via quantityToOz) or null. Longer unit spellings
+// are listed first so "gallon" isn't clipped to "gal". Bare single-letter g / l
+// are intentionally excluded — pesticide names are full of formulation codes
+// ("Dominion 2L", "2G granular", "4F") that would misread as 2 liters / 2 grams.
+const SIZE_UNITS = 'fl\\.?\\s*oz|ounce|oz|gallon|gal|quart|qt|pint|pt|pound|lb|liter|litre|ml|kg|gram';
+// Multi-pack first: "4 x 78 oz", "4x30g", "2 x 2.5 gal". Returned whole ("4 x 78
+// oz") so quantityToOz -> parsePackSize applies the multiplier (a 4 x 78 oz CASE
+// is 312 oz, NOT a single 78 oz — critical so a case can't match a single-size
+// scan). Bare g/l are allowed HERE because the "N x M unit" shape disambiguates
+// them from formulation codes ("Dominion 2L", "2G").
+const MULTIPACK_RE = new RegExp(`(\\d+)\\s*x\\s*(\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?)\\s*(${SIZE_UNITS}|gram|g|l)s?\\b`, 'i');
+// Mixed number: "2 1/2 gal" -> 2.5 gal. Matched whole before the fraction
+// fallback, which would otherwise read just the "1/2 gal" tail (0.5 gal).
+const MIXED_RE = new RegExp(`(\\d+)\\s+(\\d+\\s*\\/\\s*\\d+)\\s*(${SIZE_UNITS})s?\\b`, 'i');
+const SIZE_UNIT_RE = new RegExp(`(\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?)\\s*(${SIZE_UNITS})s?\\b`, 'i');
+// Normalize a captured unit: drop the dot in "fl. oz" and collapse spaces, so
+// parsePackSize (which only knows alpha/space units) can resolve it.
+const cleanUnit = (u) => String(u).replace(/\./g, '').replace(/\s+/g, ' ').trim();
+function extractSizeToken(text) {
+  const s = String(text || '');
+  const mp = s.match(MULTIPACK_RE);
+  if (mp) return `${mp[1]} x ${mp[2].replace(/\s+/g, '')} ${cleanUnit(mp[3])}`.trim();
+  const mx = s.match(MIXED_RE);
+  if (mx) return `${mx[1]} ${mx[2].replace(/\s+/g, '')} ${cleanUnit(mx[3])}`.trim();
+  const m = s.match(SIZE_UNIT_RE);
+  if (!m) return null;
+  return `${m[1].replace(/\s+/g, '')} ${cleanUnit(m[2])}`.trim();
 }
 
 // DOM fallback when JSON-LD has no price. `snapshot` is a small object the
@@ -136,6 +239,20 @@ function extractDomPrice(snapshot = {}) {
     availability: mapAvailability(snapshot.availabilityText),
     name: typeof snapshot.title === 'string' ? snapshot.title : null,
   };
+}
+
+// Pick the offer from a scraped snapshot { jsonLd, priceTexts, title,
+// availabilityText }. Size-aware JSON-LD first; fall back to a DOM price ONLY
+// when the JSON-LD carried NO offers at all. If JSON-LD HAD offers but none
+// substantiate opts.targetOz, return null — the structured data is authoritative
+// and simply doesn't list our size, so a DOM price (almost always a different /
+// default variant) must not be reported as the requested pack.
+function offerFromSnapshot(snapshot = {}, opts = {}) {
+  const jsonLd = snapshot.jsonLd || [];
+  const ldOffer = extractJsonLdOffer(jsonLd, opts);
+  if (ldOffer) return ldOffer;
+  if (collectJsonLdOffers(jsonLd).length > 0) return null;
+  return extractDomPrice(snapshot);
 }
 
 // $ per oz-equivalent, matching the inventory pipeline's basis
@@ -174,7 +291,61 @@ function sharedTokenStats(scrapedName, expectedName) {
   for (const t of A) if (B.has(t)) inter += 1;
   return { inter, expectedSize: B.size };
 }
-const digitsOnly = (s) => String(s || '').replace(/[^0-9]/g, '');
+
+// Pesticide formulation codes (SC, CS, EC, WP, 2L, XTS, I/T, …) are the short
+// tokens nameTokens drops, yet they separate otherwise same-brand products
+// (Taurus SC vs Taurus CS, Bifen I/T vs Bifen XTS). Collect them so verifyMatch
+// can require a confirmed formulation, not just brand + generic-category overlap.
+// Excludes unit abbreviations and generic category/marketing words so they're
+// not treated as a formulation.
+const UNIT_ABBREVS = new Set(['oz', 'ml', 'lb', 'pt', 'qt', 'fl', 'cc', 'kg', 'gm', 'gr', 'gal']);
+const GENERIC_WORDS = new Set([
+  'pro', 'max', 'plus', 'the', 'and', 'for', 'with', 'kit', 'new', 'bug', 'pest',
+  'lawn', 'turf', 'use', 'gel', 'dry', 'wet', 'oil',
+  // packaging descriptors — not a formulation ('cs' is intentionally NOT here;
+  // it's the CS formulation code, e.g. Taurus CS)
+  'jug', 'can', 'bag', 'box', 'pak', 'tub', 'jar', 'ea',
+]);
+// Single-letter formulation suffixes that genuinely separate products:
+// G granular, D dust, F flowable, L liquid, W wettable (Demand CS vs Demand G).
+const SINGLE_CHAR_FORM = new Set(['g', 'd', 'f', 'l', 'w']);
+function formulationCodes(name) {
+  const raw = String(name || '').toLowerCase();
+  const codes = new Set();
+  // Slashed markers like "I/T", "F/C" -> "it", "fc" (lost when slashes are
+  // stripped to spaces and the letters become 1-char tokens).
+  for (const m of raw.matchAll(/\b([a-z])\s*\/\s*([a-z])\b/g)) codes.add(m[1] + m[2]);
+  for (const tok of raw.replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)) {
+    // 2-3 char alphanumeric codes (must contain a letter), minus units / generics
+    // / pure numbers (a bare size like "78" or "96" isn't a formulation).
+    if (tok.length >= 2 && tok.length <= 3 && /[a-z]/.test(tok)
+      && !/^\d+$/.test(tok) && !UNIT_ABBREVS.has(tok) && !GENERIC_WORDS.has(tok)) {
+      codes.add(tok);
+    } else if (tok.length === 1 && SINGLE_CHAR_FORM.has(tok)) {
+      codes.add(tok);
+    }
+  }
+  return codes;
+}
+// Normalize an EPA registration to its company-product key ("53883-279-1234" ->
+// "53883-279"). The first two segments identify the product; a trailing
+// distributor segment is dropped. Returns null if it isn't reg-shaped.
+function epaKey(reg) {
+  const segs = String(reg || '').match(/\d+/g);
+  if (!segs || segs.length < 2) return null;
+  if (segs[0].length < 2 || segs[0].length > 7 || segs[1].length > 4) return null;
+  return `${segs[0]}-${segs[1]}`;
+}
+
+// True if any EPA-reg-shaped token in `text` has the same company-product key as
+// the expected reg. Tokenizes (with boundaries) rather than concatenating every
+// digit on the page, so a match can't span unrelated prices / SKUs / addresses.
+function epaInText(text, expectedReg) {
+  const want = epaKey(expectedReg);
+  if (!want) return false;
+  const tokens = String(text || '').match(/\d{2,7}-\d{1,4}(?:-\d{1,5})?/g) || [];
+  return tokens.some((tok) => epaKey(tok) === want);
+}
 
 // The trust gate before believing any scraped price for a product.
 // scraped:  { name, text?, quantity }
@@ -204,12 +375,19 @@ function verifyMatch(scraped = {}, expected = {}, opts = {}) {
     // miss (no savings alert) is the safe direction vs. trusting a wrong price.
     const coverage = expectedSize ? inter / expectedSize : 0;
     signals.name = coverage >= nameThreshold && inter >= Math.min(2, expectedSize);
+    // Formulation guard: if the expected name carries a formulation code that the
+    // scraped name doesn't, it's a different formulation of the same brand
+    // (Taurus SC vs Taurus CS) — drop the name signal so it can only verify via
+    // EPA, never on brand overlap alone.
+    if (signals.name) {
+      const expCodes = formulationCodes(expName);
+      const scrCodes = formulationCodes(scraped.name);
+      if (expCodes.size && ![...expCodes].every((c) => scrCodes.has(c))) signals.name = false;
+    }
   }
 
-  const expEpa = digitsOnly(expected.epaReg);
-  if (expEpa && expEpa.length >= 5) {
-    const hay = digitsOnly(`${scraped.name || ''} ${scraped.text || ''}`);
-    signals.epa = hay.includes(expEpa);
+  if (epaKey(expected.epaReg)) {
+    signals.epa = epaInText(`${scraped.name || ''} ${scraped.text || ''}`, expected.epaReg);
   }
 
   // With a known pack size: size must match AND (name OR epa).
@@ -229,6 +407,8 @@ module.exports = {
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,
+  offerFromSnapshot,
+  extractSizeToken,
   quantityToOz,
   deriveNormalizedUnitPrice,
   tokenOverlap,

@@ -6,24 +6,29 @@ const { deriveNormalizedUnitPrice, quantityToOz } = require('./extract');
 const DEFAULTS = {
   minSavingsPct: 0.02, // 2%
   minSavingsUsd: 1.0, // $1 on a baseline-size purchase
-  excludeOutOfStock: true,
+  excludeUnavailable: true,
 };
 
+// Availability states that aren't buyable now — never the basis for a savings
+// alert. limited / unknown stay eligible (limited is buyable; unknown can't be
+// proven unavailable).
+const UNAVAILABLE = new Set(['out_of_stock', 'backorder']);
+
 // Attach perOz to each candidate, drop unparseable / out-of-stock, sort cheapest first.
-function rankCandidates(candidates, { excludeOutOfStock = true } = {}) {
+function rankCandidates(candidates, { excludeUnavailable = true } = {}) {
   return (candidates || [])
     .map((c) => ({ ...c, perOz: deriveNormalizedUnitPrice(c.price, c.quantity) }))
     .filter((c) => c.perOz != null && c.perOz > 0)
-    .filter((c) => !(excludeOutOfStock && isOutOfStock(c)))
+    .filter((c) => !(excludeUnavailable && isUnavailable(c)))
     .sort((a, b) => a.perOz - b.perOz);
 }
 
 // The two field names a candidate may carry availability under: `availability`
 // straight off the extractor (extract.js) or `availability_status` once it's a
-// /report-shaped candidate. Tolerate both so a raw extractor offer can't slip a
-// sold-out item into the ranking.
-function isOutOfStock(c) {
-  return c.availability_status === 'out_of_stock' || c.availability === 'out_of_stock';
+// /report-shaped candidate. Tolerate both so a raw extractor offer can't slip an
+// unbuyable (sold-out / backordered) item into the ranking.
+function isUnavailable(c) {
+  return UNAVAILABLE.has(c.availability_status) || UNAVAILABLE.has(c.availability);
 }
 
 // baseline:   { price, quantity, vendor }   (SiteOne — what Adam pays today)
@@ -63,4 +68,6 @@ function findOpportunity(baseline, candidates, opts = {}) {
   return result;
 }
 
-module.exports = { DEFAULTS, rankCandidates, findOpportunity };
+module.exports = {
+  DEFAULTS, UNAVAILABLE, isUnavailable, rankCandidates, findOpportunity,
+};

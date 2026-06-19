@@ -39,6 +39,14 @@ describe('price-scan compare', () => {
     expect(r.best.vendor).toBe('InStock');
   });
 
+  test('backorder is excluded from the winner (not buyable now)', () => {
+    const r = findOpportunity(baseline, [
+      { price: 60, quantity: '78 oz', vendor: 'Back', availability: 'backorder' },
+      { price: 89, quantity: '78 oz', vendor: 'InStock', availability: 'in_stock' },
+    ]);
+    expect(r.best.vendor).toBe('InStock');
+  });
+
   test('out-of-stock via raw extractor field (availability) is also excluded', () => {
     // extract.js emits the enum under `availability`; compare must honor both
     // field names so a raw extractor offer cannot win while sold out.

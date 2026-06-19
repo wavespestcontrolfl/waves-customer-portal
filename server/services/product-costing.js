@@ -86,6 +86,19 @@ function parsePackSize(quantity) {
   const raw = String(quantity || '').toLowerCase().trim();
   if (!raw) return null;
 
+  // Multipack with a fractional unit size: "2 x 1/2 gal" -> 2 * 0.5 gal.
+  // Resolve before the pair scan, which would otherwise read the fraction's
+  // denominator as the amount ("2 gal") and miss the multiplier.
+  const multiFrac = raw.match(/^\s*([\d.]+)\s*x\s*([\d.]+)\s*\/\s*([\d.]+)\s*([a-z].*)$/);
+  if (multiFrac) {
+    const count = Number(multiFrac[1]);
+    const num = Number(multiFrac[2]);
+    const den = Number(multiFrac[3]);
+    const unit = resolveUnitToken(multiFrac[4]);
+    if (unit && count > 0 && den > 0 && num >= 0) return { amount: count * (num / den), unit };
+    return null;
+  }
+
   // Mixed number: "2 1/2 gal" -> 2.5 gal. Resolve before the plain-fraction and
   // pair scans, which would otherwise read the denominator as the amount.
   const mixed = raw.match(/^([\d.]+)\s+([\d.]+)\s*\/\s*([\d.]+)\s*([a-z].*)$/);
