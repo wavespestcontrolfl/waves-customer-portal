@@ -10,6 +10,7 @@ const {
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
+const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -80,11 +81,9 @@ function applyETTimestampWindow(qb, column, from, to) {
 const ET_MIDNIGHT_TS = "?::timestamp AT TIME ZONE 'America/New_York'";
 function etDayStart(dateStr) { return `${dateStr}T00:00:00`; }
 
-// A "customer" for dashboard counts = a converted pipeline stage, NOT a lead.
-// `customers.active` defaults to true for leads too, so it can't distinguish
-// them. Matches the app's existing real-customer predicate (admin-customers.js,
-// pipeline-manager.js, document-template-bulk-send.js) — owner-confirmed.
-const CUSTOMER_STAGES = ['active_customer', 'won', 'at_risk'];
+// Real-customer stages live in a shared module so the dashboard, Intelligence
+// Bar, and BI agent can't drift. `customers.active` defaults true for leads, so
+// pipeline_stage is what distinguishes a customer from a lead.
 function whereRealCustomer(qb) { return qb.whereIn('pipeline_stage', CUSTOMER_STAGES); }
 
 async function paidRevenueTotal(from, to) {
@@ -468,31 +467,30 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
-    // Retention — of the real customers active at the START of the window, how
-    // many are still here. Churn is read from CURRENT state: churning moves the
-    // row to pipeline_stage='churned' (admin-customers PUT /:id/stage) and
-    // reactivation moves it back, so the LIVE stage — not the sticky churned_at,
-    // which isn't cleared on reactivation — is the source of truth. Churn time =
-    // pipeline_stage_changed_at (when the row entered its current stage), which
-    // also dates a re-churn by its most recent event.
+    // Retention — of the customers who were live at the START of the window,
+    // how many are STILL live now. "Retained" is read from current state
+    // (active + not-deleted + a customer stage), so every loss type — churn
+    // (stage→churned), soft-delete (deleted_at), and deactivation (active=false)
+    // — is counted as a loss uniformly, and reactivation is handled because the
+    // live state is the source of truth (not the sticky churned_at).
     let retentionPct = null, churned = 0;
     try {
       const enteredInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
       const enteredBeforeWindow = `(pipeline_stage_changed_at < ${ET_MIDNIGHT_TS} OR pipeline_stage_changed_at IS NULL)`;
-      // Cohort = a customer (not a lead) that existed before the window, wasn't
-      // deleted before it, and was a customer AT the start: either still in a
-      // retained stage entered before the window, OR currently churned but only
-      // on/after the window start (a churn before the window means they weren't
+      // Cohort = "was a live customer at the window start": existed before the
+      // window, not deleted before it, and either in a customer stage entered
+      // before the window, OR churned on/after the window start (so it was still
       // a customer at the start). No per-stage history, so entry time is a proxy
-      // — a customer→customer move mid-window is excluded from the base;
-      // acceptable until a customer_since signal exists. ET-anchored throughout.
+      // — a customer→customer move mid-window is excluded from the base, and a
+      // pre-window deactivation (no timestamp) can leak in as a loss; both
+      // bounded by, and pending, a persisted customer_since signal. ET-anchored.
       const cohort = () => db('customers')
         .whereRaw(`created_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
         .where(function notDeletedBeforeStart() {
           this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
         })
         .where(function wasCustomerAtStart() {
-          this.where(function retainedFromBeforeStart() {
+          this.where(function customerStageBeforeStart() {
             this.whereIn('pipeline_stage', CUSTOMER_STAGES)
               .whereRaw(enteredBeforeWindow, [etDayStart(start)]);
           })
@@ -501,21 +499,19 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
             });
         });
 
-      // Churned during the window = the churned subset of that same cohort.
-      const churnedRow = await cohort()
-        .where('pipeline_stage', 'churned')
-        .whereRaw(enteredInWindow, [etDayStart(start)])
+      const baseRow = await cohort().count('* as c').first();
+      const base = parseInt(baseRow?.c || 0);
+
+      // Retained = the cohort members still live now (active, not deleted, still
+      // a customer stage). Everyone else who was a customer at the start —
+      // churned, deleted, or deactivated since — is a loss for the period.
+      const retainedRow = await cohort()
+        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
         .count('* as c').first();
-      churned = parseInt(churnedRow?.c || 0);
+      const retained = parseInt(retainedRow?.c || 0);
+      churned = Math.max(0, base - retained);
 
-      // Base = everyone who was a customer at the window start (retained + churned-in-window).
-      const activeAtStartRow = await cohort().count('* as c').first();
-      const activeAtStart = parseInt(activeAtStartRow?.c || 0);
-
-      // churned ⊆ base, so the clamp is just belt-and-suspenders.
-      retentionPct = activeAtStart > 0
-        ? Math.max(0, Math.round(((activeAtStart - churned) / activeAtStart) * 1000) / 10)
-        : null;
+      retentionPct = base > 0 ? Math.max(0, Math.round((retained / base) * 1000) / 10) : null;
     } catch (err) {
       logger.error(`[admin-dashboard] retention failed: ${err.message}`);
     }

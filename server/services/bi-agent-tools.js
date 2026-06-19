@@ -5,6 +5,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { whereLiveCustomer } = require('./customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etWeekStart, addETDays } = require('../utils/datetime-et');
 
 function som() { return etMonthStart(); }
@@ -59,8 +60,10 @@ async function executeBITool(toolName, input) {
       const somDate = som();
 
       const [active, newThisMonth, churned, pipeline, atRisk] = await Promise.all([
-        db('customers').where({ active: true }).count('* as count').first(),
-        db('customers').where({ active: true }).where('created_at', '>=', somDate).count('* as count').first(),
+        // Real customers only (pipeline_stage), not leads — active=true defaults
+        // true for new_lead rows. Consistent with the dashboard customer KPIs.
+        db('customers').modify(whereLiveCustomer).count('* as count').first(),
+        db('customers').modify(whereLiveCustomer).where('created_at', '>=', somDate).count('* as count').first(),
         db('customers').where('pipeline_stage', 'churned').where('pipeline_stage_changed_at', '>=', somDate).count('* as count').first(),
         db('leads').where('first_contact_at', '>=', somDate).select('status').count('* as count').groupBy('status'),
         // Top 5 at-risk by value — 'high' included because the v3 scorer
