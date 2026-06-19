@@ -88,6 +88,38 @@ function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, o
   };
 }
 
+// Resolve the scheduled_service whose payer the eventual invoice will use, so a
+// per-job payer (scheduled_services.payer_id) exempts the deposit even when the
+// customer has no default payer. Precedence: an explicit/committed appointment
+// (already validated live by the accept flow), else the estimate's live linked
+// appointment. The linked lookup REUSES findLinkedUpcomingAppointment — which
+// matches BOTH estimate_data.scheduled_service_id and source_estimate_id under
+// the same live constraints (pending|confirmed, future-dated, non-expired
+// reservation, customer-scoped, earliest first) — so a stale/cancelled/past
+// appointment can never set a payer scope the accept flow wouldn't treat as
+// active. resolveForInvoice then derives the actual payer from the returned id.
+// `strict` re-throws lookup errors for fail-closed callers (the nudge); default
+// fail-soft to null for collection paths.
+async function linkedScheduledServiceId(estimate, explicitId = null, { strict = false, fallback = true } = {}) {
+  if (explicitId) return String(explicitId);
+  // fallback=false: the caller knows the exact appointment being accepted (or that
+  // none applies — e.g. a fresh-slot accept) and must NOT resolve an unrelated
+  // linked/source appointment.
+  if (!fallback || !estimate?.id) return null;
+  try {
+    // Lazy require to avoid a service→route load cycle (same pattern as the
+    // eligibility gates below).
+    const gates = require('../routes/estimate-public');
+    const appt = typeof gates.findLinkedUpcomingAppointment === 'function'
+      ? await gates.findLinkedUpcomingAppointment(estimate)
+      : null;
+    return appt?.id ? String(appt.id) : null;
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+}
+
 // Policy resolution with the LIVE existing-plan-customer fallback. The
 // pricing snapshot (estimate_data.membershipSnapshot) is deliberately frozen
 // at save time and absent on legacy customer-linked estimates, so exempting
@@ -97,7 +129,7 @@ function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, o
 // CURRENT qualifying recurring services. A failed live check falls back to
 // requiring the deposit — wrongly charged money still credits forward,
 // while a wrongly granted exemption silently loses the commitment gate.
-async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false }) {
+async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false, scheduledServiceId = null, useLinkedFallback = true }) {
   let member = membership;
   if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
     try {
@@ -110,7 +142,35 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
       logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });
     }
   }
-  return resolveDepositPolicy({ estimate, paymentMethodPreference, membership: member, oneTime, oneTimeUninvoiced });
+  const policy = resolveDepositPolicy({ estimate, paymentMethodPreference, membership: member, oneTime, oneTimeUninvoiced });
+  // Third-party Bill-To: a payer-billed customer's invoices route to the payer's
+  // AP inbox, and payer invoices reject homeowner deposit credit (invoice.create
+  // skips depositCredit when a payer resolves) — so an acceptance deposit
+  // collected from the homeowner could never be applied and would strand. When a
+  // deposit WOULD be required, exempt it at the source (no prompt) if the customer
+  // resolves to a payer. Only the `required` gate is overridden — slotRequired and
+  // any already-exempt policy (e.g. existing_plan_customer's booking gate) are
+  // left intact, so we never override a policy that isn't charging a deposit.
+  // resolveForInvoice never throws (fails soft to self-pay); a miss/error falls
+  // through to the computed policy, the safe direction (a wrongly-charged self-pay
+  // deposit still credits forward; only a wrongly-granted exemption is unsafe).
+  if (policy.required && estimate?.customer_id) {
+    try {
+      const PayerService = require('./payer');
+      // Match the eventual invoice's payer precedence (scheduled_services.payer_id
+      // ?? customers.payer_id): scope by the appointment the estimate is tied to
+      // (committed > persisted link > source_estimate_id) so a per-job payer with
+      // no customer default is still caught.
+      const linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
+      const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId });
+      if (resolved?.payerId) {
+        return { enforced: policy.enforced, required: false, slotRequired: policy.slotRequired, exemptReason: 'payer_billed' };
+      }
+    } catch (err) {
+      logger.warn('[estimate-deposits] payer check failed — deposit policy unchanged', { error: err.message });
+    }
+  }
+  return policy;
 }
 
 // Money the customer has paid and still holds with us: received/credited
@@ -388,6 +448,28 @@ async function assessDepositFollowUpEligibility(estimateId, now = new Date()) {
     }
     const structuralOneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'
       && gates.isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // Third-party Bill-To: a payer-billed customer is exempt (deposit-intent and
+    // accept both skip the deposit), so never nudge them about an "outstanding
+    // deposit". Fail-closed (throwOnError): a payer-lookup failure re-throws and
+    // the outer catch returns eligibility_unverified — we must not text a
+    // payer-billed homeowner just because verification blipped. Match invoice
+    // precedence via the estimate's linked appointment (catches a per-job payer
+    // with no customer default).
+    if (estimate.customer_id) {
+      const PayerService = require('./payer');
+      // strict: a DB error in the linked-appointment lookup re-throws (→ outer
+      // catch → eligibility_unverified), so a source-linked per-job payer is never
+      // missed by a swallowed error and a payer-billed homeowner is never nudged.
+      const linkedSsId = await linkedScheduledServiceId(estimate, null, { strict: true });
+      const resolvedPayer = await PayerService.resolveForInvoice({
+        customerId: estimate.customer_id,
+        scheduledServiceId: linkedSsId,
+        throwOnError: true,
+      });
+      if (resolvedPayer?.payerId) {
+        return { eligible: false, reason: 'payer_billed' };
+      }
+    }
     const policy = resolveDepositPolicy({
       estimate,
       paymentMethodPreference: null,
@@ -1002,6 +1084,7 @@ module.exports = {
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
+  linkedScheduledServiceId,
   restoreDepositCreditForVoidedInvoice,
   sweepTerminalEstimateDeposits,
   _private: {

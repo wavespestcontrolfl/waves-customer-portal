@@ -157,8 +157,15 @@ function parseSnapshot(value) {
   }
 }
 
-async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null } = {}) {
+async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null, throwOnError = false } = {}) {
   const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false, snapshot: null };
+  // throwOnError: callers whose contract is "skip on uncertainty" (e.g. the
+  // deposit-abandonment nudge must NOT text a payer-billed homeowner just because
+  // a lookup blipped) pass this to get a genuine DB/schema failure re-thrown
+  // instead of the silent self-pay fallback. The per-query .catch guards are
+  // lifted in that mode so those errors reach the throwing path. Default false =
+  // unchanged fail-soft behavior for every existing caller.
+  const softNull = (p) => (throwOnError ? p : p.catch(() => null));
   try {
     let payerId = null;
     let poNumber = null;
@@ -171,10 +178,9 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
     if (scheduledServiceId) {
       const ssWhere = { id: scheduledServiceId };
       if (ownerCustomerId) ssWhere.customer_id = ownerCustomerId;
-      const ss = await database('scheduled_services')
+      const ss = await softNull(database('scheduled_services')
         .where(ssWhere)
-        .first('payer_id', 'po_number')
-        .catch(() => null);
+        .first('payer_id', 'po_number'));
       if (ss) {
         if (ss.payer_id) payerId = ss.payer_id;
         if (clean(ss.po_number)) poNumber = clean(ss.po_number);
@@ -184,7 +190,7 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
     if (!payerId) {
       let cust = customer;
       if (!cust && customerId) {
-        cust = await database('customers').where({ id: customerId }).first('payer_id').catch(() => null);
+        cust = await softNull(database('customers').where({ id: customerId }).first('payer_id'));
       }
       if (cust && cust.payer_id) payerId = cust.payer_id;
     }
@@ -193,11 +199,12 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
 
     // Only honor an ACTIVE payer link. A deactivated payer falls back to
     // self-pay rather than silently sending invoices to a dead AP inbox.
-    const payer = await getPayer(payerId, database).catch(() => null);
+    const payer = await softNull(getPayer(payerId, database));
     if (!payer || payer.active === false) return SELF_PAY;
 
     return { payerId, poNumber, taxExempt: !!payer.tax_exempt, snapshot: payerSnapshot(payer) };
   } catch (err) {
+    if (throwOnError) throw err;
     logger.warn(`[payer] resolveForInvoice failed (falling back to self-pay): ${err.message}`);
     return SELF_PAY;
   }
