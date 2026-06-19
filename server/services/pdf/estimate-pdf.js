@@ -277,7 +277,7 @@ function termsBlock(ctx, proposal, totals, y) {
   const { doc } = ctx;
   const lines = [];
   if (totals.hasTax || (proposal.buildings || []).some((b) => b.lineItems.some((i) => i.taxable))) {
-    lines.push('* Taxable line. Residential HOA pest service and all lawn care are non-taxable in Florida; tax applies only to genuinely taxable lines at the county-keyed rate.');
+    lines.push('* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.');
   }
   lines.push(`Licensed & insured — Florida FDACS #${WAVES_FDACS_LICENSE_NUMBER}. Certificate of Insurance available on request.`);
   lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');

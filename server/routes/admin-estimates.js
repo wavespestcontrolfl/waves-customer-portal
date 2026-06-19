@@ -610,6 +610,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         const freshEstimate = await db('estimates').where({ id: estimate.id }).first() || estimate;
         const proposalMode = normalizeProposal(freshEstimate).enabled;
         let proposalAttachments = [];
+        let proposalPdfFailed = false;
         if (proposalMode) {
           try {
             proposalAttachments = [await buildEstimateProposalEmailAttachment({
@@ -617,21 +618,35 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
               expires_at: nextExpiresAt,
             })];
           } catch (e) {
-            logger.warn(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
+            proposalPdfFailed = true;
+            logger.error(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
           }
         }
-        const result = await sendEstimateEmail({
-          estimate,
-          firstName,
-          viewUrl,
-          priceLine,
-          idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
-          attachments: proposalAttachments,
-          proposalMode,
-        });
-        channels.email = result.ok
-          ? { ok: true, provider: result.template || result.provider || 'email' }
-          : { ok: false, error: result.error || 'Email send failed' };
+        if (proposalPdfFailed) {
+          // The proposal email + template promise an attached PDF, and the
+          // public link doesn't expose it, so never send proposal copy with
+          // nothing attached — fail the channel and let the operator retry.
+          channels.email = { ok: false, error: 'Proposal PDF generation failed; proposal email not sent' };
+        } else {
+          // Render the email from the fresh row when it's a proposal, so the
+          // SendGrid price summary / details match the attached PDF if totals
+          // changed mid-send. The PDF was built from freshEstimate above.
+          const fm = parseFloat(freshEstimate.monthly_total || 0);
+          const fa = parseFloat(freshEstimate.annual_total || 0);
+          const freshPriceLine = fm > 0 ? `$${fm.toFixed(0)}/mo · $${fa.toLocaleString()}/yr` : priceLine;
+          const result = await sendEstimateEmail({
+            estimate: proposalMode ? freshEstimate : estimate,
+            firstName,
+            viewUrl,
+            priceLine: proposalMode ? freshPriceLine : priceLine,
+            idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
+            attachments: proposalAttachments,
+            proposalMode,
+          });
+          channels.email = result.ok
+            ? { ok: true, provider: result.template || result.provider || 'email' }
+            : { ok: false, error: result.error || 'Email send failed' };
+        }
       } catch (e) {
         logger.error(`Estimate email failed: ${e.message}`);
         channels.email = { ok: false, error: e.message };
@@ -662,17 +677,19 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     last_send_error: null,
     updated_at: db.fn.now(),
   };
-  // Re-read the row before snapshotting so a proposal the operator saved
-  // during this send (the PUT-vs-send race) is preserved rather than clobbered
-  // by stale estimate_data from the pre-send read. The snapshot is layered onto
-  // the freshest estimate_data; status/timestamps below are still authoritative.
-  const freshEstimate = await db('estimates').where({ id: estimate.id }).first();
-  const estimateForSnapshot = {
-    ...(freshEstimate || estimate),
-    expires_at: nextExpiresAt,
-  };
+  // Persist only the send-time pricing snapshot, merged into estimate_data via
+  // a jsonb || merge rather than a full overwrite. Immediate sends don't claim
+  // the row, so a proposal save can commit between this read and the write; the
+  // merge replaces just the `sendSnapshot` key and preserves any concurrently
+  // saved top-level keys (proposal/etc.), so the send can't clobber it. Totals
+  // live in columns and are intentionally left untouched here.
+  const freshForSnapshot = await db('estimates').where({ id: estimate.id }).first() || estimate;
   try {
-    updatePayload.estimate_data = JSON.stringify(await buildEstimateSendSnapshot(estimateForSnapshot, now));
+    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now);
+    updatePayload.estimate_data = db.raw(
+      "COALESCE(estimate_data, '{}'::jsonb) || jsonb_build_object('sendSnapshot', ?::jsonb)",
+      [JSON.stringify(snapshot.sendSnapshot || {})],
+    );
   } catch (e) {
     logger.warn(`[admin-estimates] estimate_data snapshot update failed for estimate ${estimate.id}: ${e.message}`);
   }

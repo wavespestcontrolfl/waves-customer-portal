@@ -3014,6 +3014,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
   const quoteRequired = est.quoteRequired === true || est.status === 'quote_required';
+  // An authored commercial proposal is quote-required by design (manual
+  // acceptance), but its public copy must describe the emailed PDF + account-
+  // manager follow-up, NOT the generic "inspection required" field-review state.
+  const commercialProposal = estData?.proposal?.enabled === true;
   const quoteRequirementForDisplay = quoteRequired ? resolveEstimateQuoteRequirement(null, estData) : { reason: null };
   const quoteDisplayReason = quoteRequired
     ? quoteRequiredReasonText({ reason: est.quoteRequiredReason || quoteRequirementForDisplay.reason })
@@ -3912,7 +3916,9 @@ ${shellTopBar()}
 <div class="wrap">
 
   ${est.status === 'accepted' ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
-  ${quoteRequired ? `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>` : ''}
+  ${quoteRequired ? (commercialProposal
+    ? `<div class="quote-required-banner">Your formal proposal is attached to the email we sent as a PDF. There\u2019s no online checkout for a commercial bid \u2014 your Waves account manager will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
+    : `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>`) : ''}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
@@ -4054,7 +4060,15 @@ ${shellTopBar()}
     </div>
   </div>
 
-  ${quoteRequired ? `
+  ${quoteRequired ? (commercialProposal ? `
+  <div class="final">
+    <h2>Your commercial proposal is ready</h2>
+    <p>We’ve emailed your formal proposal as a PDF. There’s no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement.</p>
+    <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
+    <div style="margin-top:20px;font-size:14px">
+      Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
+    </div>
+  </div>` : `
   <div class="final">
     <h2>Inspection required to finish this quote</h2>
     <p>${escapeHtml(quoteDisplayReason || 'This treatment needs a field review before we can finalize pricing or book it online.')}</p>
@@ -4062,7 +4076,7 @@ ${shellTopBar()}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
     </div>
-  </div>` : `
+  </div>`) : `
   <div class="final">
     <h2${isOneTimeOnly ? '' : ' data-mode-only="recurring"'}>${escapeHtml(isOneTimeOnly ? 'Ready to book?' : pageCopy.finalHeading)}</h2>
     ${pageCopy.finalSubhead && !isOneTimeOnly ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
