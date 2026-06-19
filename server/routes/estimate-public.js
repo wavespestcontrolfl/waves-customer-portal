@@ -6655,16 +6655,22 @@ router.put('/:token/accept', async (req, res, next) => {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }
 
-    // Third-party Bill-To: never return the payer's bearer /pay/:token link (or
-    // a pay_invoice next-step) to the homeowner from the public accept response.
-    // InvoiceService.create() and the EstimateConverter auto-resolve a default
-    // payer, so the FINAL invoice from any path above may be payer-billed — it
-    // was emailed to the payer AP and sendViaSMSAndEmail already suppressed the
-    // homeowner SMS. Resolve the final invoice once and suppress the customer pay
-    // URL when it's payer-billed (the client gates the pay-link next-step on it).
-    if (invoiceId && invoicePayUrl) {
+    // Third-party Bill-To: never advertise a payer-billed invoice to the
+    // homeowner. InvoiceService.create() and the EstimateConverter auto-resolve a
+    // default payer, so the FINAL invoice from any path above may be payer-billed
+    // — it was emailed to the payer AP (sendViaSMSAndEmail already suppressed the
+    // homeowner SMS). Null the customer pay URL AND flag the accept as
+    // payer-billed so the success/notification builders don't promise a pay link
+    // or a pay_invoice next-step the homeowner can't use (they get the report;
+    // nothing is due from them). invoiceMode/invoiceLinkDelivered stay intact so
+    // the ADMIN copy still correctly reflects that the invoice was sent.
+    let invoiceIsPayerBilled = false;
+    if (invoiceId) {
       const payerCheck = await db('invoices').where({ id: invoiceId }).first('payer_id').catch(() => null);
-      if (payerCheck?.payer_id) invoicePayUrl = null;
+      if (payerCheck?.payer_id) {
+        invoiceIsPayerBilled = true;
+        invoicePayUrl = null;
+      }
     }
 
     // Exempt-path deposit sweep: the customer paid a deposit and then
@@ -6702,6 +6708,7 @@ router.put('/:token/accept', async (req, res, next) => {
         invoiceMode,
         invoiceLinkDelivered,
         invoicePayUrl,
+        payerBilled: invoiceIsPayerBilled,
         reservationCommitted,
         bookingUrl,
         billingTerm,
@@ -6752,6 +6759,7 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceId,
       invoiceAmount,
       invoicePayUrl,
+      payerBilled: invoiceIsPayerBilled,
       invoiceKind,
       invoiceServiceLabel,
       billingTerm,
@@ -8018,6 +8026,7 @@ function buildAcceptSuccessPayload({
   invoiceId = null,
   invoiceAmount = null,
   invoicePayUrl = null,
+  payerBilled = false,
   invoiceKind = null,
   invoiceServiceLabel = null,
   billingTerm = 'standard',
@@ -8027,7 +8036,9 @@ function buildAcceptSuccessPayload({
   reservationCommitted = false,
 } = {}) {
   let nextStep = 'confirmed';
-  if (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl)) nextStep = 'pay_invoice';
+  // Third-party Bill-To: a payer-billed invoice is the payer's to pay — the
+  // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
+  if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
   else if (!treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
 
@@ -8156,12 +8167,26 @@ function buildAcceptNotificationPayload({
   invoiceMode = false,
   invoiceLinkDelivered = false,
   invoicePayUrl = null,
+  payerBilled = false,
   reservationCommitted = false,
   bookingUrl = null,
   billingTerm = 'standard',
   annualPrepayAmount = null,
 } = {}) {
   if (billByInvoice) {
+    // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
+    // the homeowner gets the report and owes nothing, so never advertise a
+    // customer pay link. Admin copy still reflects that the invoice was sent.
+    if (payerBilled) {
+      const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+      return {
+        adminTitle: `Estimate accepted: ${customerName}`,
+        adminBody: `${planLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
+        customerTitle: 'Estimate accepted',
+        customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
+        customerLink: '/?tab=billing',
+      };
+    }
     if (treatAsOneTime) {
       if (!invoiceMode || !invoiceLinkDelivered) {
         return {

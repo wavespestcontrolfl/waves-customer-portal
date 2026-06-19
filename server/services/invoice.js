@@ -502,9 +502,23 @@ async function calculateUpdateFinancials({
   const isCommercial =
     customer?.property_type === "commercial" ||
     customer?.property_type === "business";
+  // Third-party Bill-To: a tax-exempt payer zeroes tax on its invoices (create()
+  // forces rate 0). Preserve that on edit — otherwise re-taxing a commercial
+  // invoice here would put tax back on a tax-exempt payer's AP total that
+  // creation/preview correctly omitted. Read the exemption off the invoice's
+  // FROZEN payer_id (honors a per-job payer); degrades to normal tax if the
+  // payers table doesn't exist yet (migration not run) or the payer is inactive.
+  let payerTaxExempt = false;
+  if (invoice?.payer_id) {
+    const payerRow = await db("payers")
+      .where({ id: invoice.payer_id })
+      .first("tax_exempt", "active")
+      .catch(() => null);
+    payerTaxExempt = !!(payerRow && payerRow.active !== false && payerRow.tax_exempt);
+  }
   let rate = 0;
   let taxAmount = 0;
-  if (isCommercial) {
+  if (isCommercial && !payerTaxExempt) {
     const defaultRate =
       invoice?.tax_rate != null ? Number(invoice.tax_rate) : 0.07;
     rate = taxRate !== undefined ? Number(taxRate) : defaultRate;
