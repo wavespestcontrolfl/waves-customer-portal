@@ -9,6 +9,7 @@ const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
+const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -149,7 +150,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
 
     const [
       revMTD, revLastMonth, activeCustomers, newThisMonth,
-      estimatesPending, servicesWeek, avgResponse, mrr, oneTimeMonth,
+      estimatesPending, servicesWeek, avgResponse, mrrBreakdown, oneTimeMonth,
       todaysSchedule, recentActivity, tierRevenue, reviewStats
     ] = await Promise.all([
       paidRevenueTotal(som, today),
@@ -163,7 +164,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
       ).first(),
       db('estimates').where({ status: 'accepted' }).whereNotNull('accepted_at').whereNotNull('sent_at').where('accepted_at', '>=', som)
         .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first(),
-      db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
+      computeMrrBreakdown(db, today),
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
       // Today's schedule
       db('scheduled_services')
@@ -246,7 +247,11 @@ router.get('/', dashboardCache, async (req, res, next) => {
         googleReviewCount: parseInt(reviewStats?.total || 0) || 0,
         googleUnresponded: parseInt(reviewStats?.unresponded || 0),
       },
-      mrr: parseFloat(mrr?.total || 0),
+      // `mrr` stays the full run-rate for backward compat; `mrrBreakdown`
+      // splits it into the portion that's actually going to bill (committed)
+      // vs. paused-autopay / overdue accounts (atRisk).
+      mrr: mrrBreakdown.total,
+      mrrBreakdown,
       oneTimeThisMonth: parseFloat(oneTimeMonth?.total || 0),
       revenueChart: { daily: dailyRevenue.map(d => ({ date: d.date, total: parseFloat(d.total || 0) })) },
       todaysSchedule: todaysSchedule.map(s => ({
