@@ -98,6 +98,53 @@ const DAYS = [
   "sunday",
 ];
 
+// The 9 GBP sub-tabs are grouped into 4 parent sections with a leaf sub-row.
+// `subTab` state still holds the LEAF key, so every {subTab === "..."} block
+// below is unchanged.
+const GBP_TAB_GROUPS = [
+  { key: "overview", label: "Overview", tabs: ["overview"] },
+  {
+    key: "profile",
+    label: "Profile",
+    tabs: ["info", "hours", "services", "photos"],
+  },
+  { key: "updates", label: "Updates", tabs: ["updates", "history", "bulk"] },
+  { key: "alerts", label: "Alerts", tabs: ["notifications"] },
+];
+const gbpPillRow = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+  marginBottom: 20,
+  background: "#F4F4F5",
+  borderRadius: 10,
+  padding: 4,
+  border: "1px solid #E4E4E7",
+};
+const gbpPill = (isActive) => ({
+  padding: "10px 24px",
+  borderRadius: 8,
+  border: "none",
+  cursor: "pointer",
+  background: isActive ? "#18181B" : "transparent",
+  color: isActive ? "#FFFFFF" : "#A1A1AA",
+  fontSize: 14,
+  fontWeight: 700,
+  transition: "all 0.2s",
+  fontFamily: "'Roboto', Arial, sans-serif",
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+});
+const gbpPillBadge = (isActive) => ({
+  fontSize: 9,
+  padding: "1px 6px",
+  borderRadius: 10,
+  background: isActive ? "rgba(255,255,255,0.2)" : "#E4E4E7",
+  color: isActive ? "#FFFFFF" : "#A1A1AA",
+  fontWeight: 700,
+});
+
 // ══════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ══════════════════════════════════════════════════════════════
@@ -265,6 +312,9 @@ export default function GBPManagement() {
     { key: "bulk", label: "Bulk Edit" },
     { key: "notifications", label: "Alerts" },
   ];
+  const subTabByKey = Object.fromEntries(subTabs.map((t) => [t.key, t]));
+  const activeGroup =
+    GBP_TAB_GROUPS.find((g) => g.tabs.includes(subTab)) || GBP_TAB_GROUPS[0];
 
   if (loading)
     return (
@@ -365,58 +415,46 @@ export default function GBPManagement() {
           {syncing ? "Syncing..." : "Sync All"}
         </button>{" "}
       </div>
-      {/* Sub-tabs */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 4,
-          marginBottom: 20,
-          background: "#F4F4F5",
-          borderRadius: 10,
-          padding: 4,
-          border: "1px solid #E4E4E7",
-        }}
-      >
-        {subTabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setSubTab(t.key)}
-            style={{
-              padding: "10px 24px",
-              borderRadius: 8,
-              border: "none",
-              cursor: "pointer",
-              background: subTab === t.key ? "#18181B" : "transparent",
-              color: subTab === t.key ? "#FFFFFF" : "#A1A1AA",
-              fontSize: 14,
-              fontWeight: 700,
-              transition: "all 0.2s",
-              fontFamily: "'Roboto', Arial, sans-serif",
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-            }}
-          >
-            {t.label}
-            {t.badge > 0 && (
-              <span
-                style={{
-                  fontSize: 9,
-                  padding: "1px 6px",
-                  borderRadius: 10,
-                  background:
-                    subTab === t.key ? "rgba(255,255,255,0.2)" : "#E4E4E7",
-                  color: subTab === t.key ? "#FFFFFF" : "#A1A1AA",
-                  fontWeight: 700,
-                }}
-              >
-                {t.badge}
-              </span>
-            )}
-          </button>
-        ))}
+      {/* Sub-tabs: parent groups + leaf sub-row */}
+      <div style={gbpPillRow}>
+        {GBP_TAB_GROUPS.map((g) => {
+          const badge = g.tabs.reduce(
+            (s, k) => s + (subTabByKey[k]?.badge || 0),
+            0,
+          );
+          const isActive = activeGroup.key === g.key;
+          return (
+            <button
+              key={g.key}
+              onClick={() => setSubTab(g.tabs[0])}
+              style={gbpPill(isActive)}
+            >
+              {g.label}
+              {badge > 0 && <span style={gbpPillBadge(isActive)}>{badge}</span>}
+            </button>
+          );
+        })}
       </div>
+      {activeGroup.tabs.length > 1 && (
+        <div style={gbpPillRow}>
+          {activeGroup.tabs.map((k) => {
+            const t = subTabByKey[k];
+            const isActive = subTab === k;
+            return (
+              <button
+                key={k}
+                onClick={() => setSubTab(k)}
+                style={gbpPill(isActive)}
+              >
+                {t.label}
+                {t.badge > 0 && (
+                  <span style={gbpPillBadge(isActive)}>{t.badge}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {!loc ? (
         <div
           style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
