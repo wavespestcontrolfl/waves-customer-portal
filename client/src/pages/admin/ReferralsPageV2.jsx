@@ -209,6 +209,37 @@ const btnSmall = (color) => ({
   cursor: "pointer",
 });
 
+// The flat 6-tab bar is grouped into parent sections, each revealing its leaf
+// tabs in a sub-row. `tab` still holds the LEAF key, so every {tab === "..."}
+// render block below is unchanged.
+const REFERRALS_TAB_LEAVES = [
+  { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard },
+  { key: "queue", label: "Queue", Icon: ListChecks },
+  { key: "promoters", label: "Promoters", Icon: Users },
+  { key: "payouts", label: "Payouts", Icon: DollarSign },
+  { key: "analytics", label: "Analytics", Icon: BarChart3 },
+  { key: "settings", label: "Settings", Icon: Settings },
+];
+const REFERRALS_TAB_GROUPS = [
+  {
+    key: "overview",
+    label: "Overview",
+    Icon: LayoutDashboard,
+    tabs: ["dashboard", "analytics"],
+  },
+  { key: "queue", label: "Queue", Icon: ListChecks, tabs: ["queue"] },
+  {
+    key: "promoters",
+    label: "Promoters",
+    Icon: Users,
+    tabs: ["promoters", "payouts"],
+  },
+  { key: "settings", label: "Settings", Icon: Settings, tabs: ["settings"] },
+];
+const REFERRALS_LEAF_BY_KEY = Object.fromEntries(
+  REFERRALS_TAB_LEAVES.map((l) => [l.key, l]),
+);
+
 export default function ReferralsPageV2() {
   const [tab, setTab] = useState("dashboard");
   const [stats, setStats] = useState(null);
@@ -402,14 +433,9 @@ export default function ReferralsPageV2() {
     );
   }
 
-  const tabs = [
-    { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard },
-    { key: "queue", label: `Queue (${queue.length})`, Icon: ListChecks },
-    { key: "promoters", label: "Promoters", Icon: Users },
-    { key: "payouts", label: "Payouts", Icon: DollarSign },
-    { key: "settings", label: "Settings", Icon: Settings },
-    { key: "analytics", label: "Analytics", Icon: BarChart3 },
-  ];
+  const activeGroup =
+    REFERRALS_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    REFERRALS_TAB_GROUPS[0];
 
   const filteredPromoters = search
     ? promoters.filter((p) =>
@@ -425,12 +451,61 @@ export default function ReferralsPageV2() {
       <AdminCommandHeader
         title="Referrals"
         icon={Gift}
-        sections={tabs}
-        activeKey={tab}
-        onSectionChange={setTab}
+        sections={REFERRALS_TAB_GROUPS.map((g) =>
+          g.key === "queue"
+            ? { key: g.key, label: `${g.label} (${queue.length})`, Icon: g.Icon }
+            : { key: g.key, label: g.label, Icon: g.Icon },
+        )}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = REFERRALS_TAB_GROUPS.find((x) => x.key === key);
+          if (g) setTab(g.tabs[0]);
+        }}
         ariaLabel="Referrals section"
-        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
+        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((key) => {
+            const leaf = REFERRALS_LEAF_BY_KEY[key];
+            const active = tab === key;
+            const LeafIcon = leaf.Icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                <LeafIcon size={14} strokeWidth={1.9} />
+                {leaf.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {msg && (
         <div
           style={{
