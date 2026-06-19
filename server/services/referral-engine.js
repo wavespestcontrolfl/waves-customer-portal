@@ -444,14 +444,40 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   // Post-commit side effects — NON money-critical (the milestone award already
   // committed in the transaction above). Wrapped so a transient failure here can't
   // bubble a 500: on retry the admin would hit the alreadyConverted no-op and these
-  // would be skipped for good. The referrer's reward SMS + the real money are issued
-  // later, when the referee completes their first recurring service — see
-  // creditReferralOnFirstService.
-  if (referral.promoter_id && outcome.milestoneAward) {
+  // would be skipped for good.
+  //
+  // Reward SMS routing depends on WHEN the reward is earned:
+  //  - require_service_completion ON  → deferred: the referrer's reward SMS + the
+  //    real money are issued when the referee completes their first recurring
+  //    service (see creditReferralOnFirstService).
+  //  - require_service_completion OFF → immediate: the promoter was already
+  //    credited in the transaction above and never reaches that helper, so the
+  //    reward SMS must be sent here or the immediate-earned referrer is paid silently.
+  if (referral.promoter_id && (outcome.milestoneAward || !settings.require_service_completion)) {
     try {
       const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
       if (promoter) {
-        await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
+        if (!settings.require_service_completion && promoter.customer_phone) {
+          const rewardSms = await renderReferralSms('referral_reward', {
+            referrer_name: promoter.first_name,
+            referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
+            reward_amount: `$${Math.round(rewardDollars)}`,
+          }, settings.reward_sms_template, {
+            workflow: 'referral_reward',
+            entity_type: 'referral',
+            entity_id: referral.id,
+          });
+          await sendSMS(promoter.customer_phone, rewardSms, {
+            customerId: promoter.customer_id,
+            messageType: 'referral_reward',
+            referralId: referral.id,
+            promoterId: promoter.id,
+            entryPoint: 'referral_engine_convert',
+          });
+        }
+        if (outcome.milestoneAward) {
+          await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
+        }
       }
     } catch (sideErr) {
       logger.warn(`[ReferralEngine] convert post-commit notify failed for referral ${referral.id}: ${sideErr.message}`);
