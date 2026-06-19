@@ -1519,6 +1519,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
           error: e,
         });
       }
+      // Referral reward: marking a recurring first visit completed via this status
+      // action completes the service too, so it must credit like /complete + the
+      // recap path. The helper self-gates (recurring + first-time + once-per-
+      // referee + idempotent); best-effort, never blocks the status change.
+      try {
+        const referralEngine = require('../services/referral-engine');
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
+      } catch (referralErr) {
+        logger.warn(`[referral] status-complete credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
+      }
     } else if (toStatus === 'cancelled') {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');

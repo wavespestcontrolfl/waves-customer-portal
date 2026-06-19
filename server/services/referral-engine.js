@@ -560,6 +560,50 @@ async function confirmFirstService(customerId) {
   return { referralId: matchedReferral.id, promoterId: matchedReferral.promoter_id, rewardCents };
 }
 
+// Retire (mark 'superseded') every still-uncredited pending_service referral for
+// a referee phone and unwind the promoter pending+earned cents staged at
+// conversion — so a same-phone duplicate (referred by another promoter) can never
+// pay a second time and never leaves stale pending/earned on its promoter. Used
+// both when a referral earns (excludeId = the winner) and when the referee
+// already earned earlier and a duplicate converted late (no excludeId). Idempotent.
+async function supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId = null }) {
+  let q = trx('referrals')
+    .where('status', 'signed_up')
+    .where('first_service_completed', false)
+    .where('referrer_reward_status', 'pending_service')
+    .where(matchesPhone);
+  if (excludeId) q = q.whereNot('id', excludeId);
+  const siblings = await q.select('id', 'promoter_id', 'referrer_reward_amount');
+  if (!siblings.length) return;
+
+  await trx('referrals')
+    .whereIn('id', siblings.map((s) => s.id))
+    .update({
+      first_service_completed: true,
+      referrer_reward_status: 'superseded',
+      updated_at: new Date(),
+    });
+
+  // Each sibling's promoter had pending_earnings_cents AND total_earned_cents
+  // staged at conversion (convertReferral, require_service_completion path). A
+  // superseded reward can never pay, so unwind BOTH. submitReferral dedupes per
+  // promoter, so siblings have distinct promoters; group defensively anyway.
+  const drainByPromoter = new Map();
+  for (const s of siblings) {
+    if (!s.promoter_id) continue;
+    const cents = Math.round((Number(s.referrer_reward_amount) || 0) * 100);
+    if (cents <= 0) continue;
+    drainByPromoter.set(s.promoter_id, (drainByPromoter.get(s.promoter_id) || 0) + cents);
+  }
+  for (const [promoterId, cents] of drainByPromoter) {
+    await trx('referral_promoters').where({ id: promoterId }).update({
+      pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [cents]),
+      total_earned_cents: db.raw('GREATEST(total_earned_cents - ?, 0)', [cents]),
+      updated_at: new Date(),
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 4b. creditReferralOnFirstService — issue the real $25-each account credits
 // ---------------------------------------------------------------------------
@@ -603,7 +647,13 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     .where('first_service_completed', true)
     .where(matchesPhone)
     .first('id');
-  if (alreadyRewarded) return null;
+  if (alreadyRewarded) {
+    // A duplicate for this phone may have converted AFTER the first credit (so the
+    // sibling sweep below didn't catch it). Retire + unwind it now instead of
+    // leaving it stuck as pending_service with stale promoter pending/earned.
+    await db.transaction((trx) => supersedeAndUnwindSiblings(trx, { matchesPhone }));
+    return null;
+  }
 
   // Map the completing customer back to the referral that brought them in (by
   // phone — the referee's customer_id is not persisted on the referral row).
@@ -678,52 +728,13 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       updated_at: new Date(),
     });
 
-    // De-dupe: a referee phone can carry multiple signed_up referrals
-    // (submitReferral only dedupes per promoter). Reward exactly once per
-    // referee — retire the other uncredited signed_up referrals for this phone
-    // so a later completion can't pay the referee (or a second referrer) again.
-    // Scope to 'pending_service' ONLY: an immediately-earned referral
-    // (require_service_completion off) is also status='signed_up' +
-    // first_service_completed=false but was already paid at conversion — it must
-    // not be clobbered to 'superseded', which would corrupt reward history.
-    const supersededSiblings = await trx('referrals')
-      .whereNot('id', referral.id)
-      .where('status', 'signed_up')
-      .where('first_service_completed', false)
-      .where('referrer_reward_status', 'pending_service')
-      .where(matchesPhone)
-      .select('id', 'promoter_id', 'referrer_reward_amount');
-
-    if (supersededSiblings.length) {
-      await trx('referrals')
-        .whereIn('id', supersededSiblings.map((s) => s.id))
-        .update({
-          first_service_completed: true,
-          referrer_reward_status: 'superseded',
-          updated_at: new Date(),
-        });
-
-      // Each sibling's promoter had pending_earnings_cents AND total_earned_cents
-      // staged at conversion (convertReferral, require_service_completion path).
-      // A superseded reward can never pay, so unwind BOTH staked counters or the
-      // promoter keeps stale pending/earned for money they'll never receive.
-      // (submitReferral dedupes per promoter, so siblings have distinct promoters
-      // and never collide with the winning referral's promoter; group defensively.)
-      const drainByPromoter = new Map();
-      for (const s of supersededSiblings) {
-        if (!s.promoter_id) continue;
-        const cents = Math.round((Number(s.referrer_reward_amount) || 0) * 100);
-        if (cents <= 0) continue;
-        drainByPromoter.set(s.promoter_id, (drainByPromoter.get(s.promoter_id) || 0) + cents);
-      }
-      for (const [promoterId, cents] of drainByPromoter) {
-        await trx('referral_promoters').where({ id: promoterId }).update({
-          pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [cents]),
-          total_earned_cents: db.raw('GREATEST(total_earned_cents - ?, 0)', [cents]),
-          updated_at: new Date(),
-        });
-      }
-    }
+    // De-dupe: a referee phone can carry multiple signed_up/pending_service
+    // referrals (submitReferral only dedupes per promoter). Reward exactly once —
+    // retire the other uncredited pending_service referrals for this phone (and
+    // unwind their promoters' staged pending/earned) so a later completion can't
+    // pay the referee or a second referrer again. Scoped to pending_service so an
+    // immediately-earned referral (already paid at conversion) is never clobbered.
+    await supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId: referral.id });
 
     // Promoter bookkeeping: drain the exact pending amount staged at conversion.
     if (referral.promoter_id) {
@@ -973,10 +984,10 @@ async function getProgramAnalytics(startDate, endDate) {
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'signed_up' OR status = 'credited') as converted"),
+        db.raw("COUNT(*) FILTER (WHERE (status = 'signed_up' OR status = 'credited') AND referrer_reward_status IS DISTINCT FROM 'superseded') as converted"),
         db.raw("COUNT(*) FILTER (WHERE status = 'rejected' OR lost_reason IS NOT NULL) as lost"),
-        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards_dollars"),
-        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
+        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards_dollars"),
+        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
       ).first(),
     db('referral_clicks')
       .where('created_at', '>=', start)
