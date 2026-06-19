@@ -810,6 +810,42 @@ async function resolveExistingAstroFile(pathOrBase) {
   return null;
 }
 
+// Normalize a slug / canonical / URL to its bare route path (no origin, query,
+// hash, surrounding slashes, lowercased) for route-equality comparison.
+function blogRouteKey(value) {
+  return String(value || '')
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .split(/[?#]/)[0]
+    .replace(/^\/+|\/+$/g, '')
+    .toLowerCase();
+}
+
+// Return the first existing blog file (across candidate base paths) that already
+// renders `routeSlug` — i.e. whose own frontmatter slug normalizes to the same
+// route. A candidate whose slug points at a DIFFERENT route (a post that merely
+// shares the topic leaf — e.g. a different category) is skipped so we never
+// clobber it; a candidate with no readable slug is adopted (it occupies the path
+// we resolved it from). Lets publishOrUpdatePage update/migrate an existing post
+// in place whether it lives at the flat or the category path.
+async function firstExistingRouteFile(basePaths, routeSlug) {
+  const want = blogRouteKey(routeSlug);
+  const seen = new Set();
+  for (const base of basePaths) {
+    if (!base || seen.has(base)) continue;
+    seen.add(base);
+    const found = await resolveExistingAstroFile(base);
+    if (!found) continue;
+    let existingSlug = '';
+    try {
+      existingSlug = fm.parse(found.file && found.file.content)?.data?.slug || '';
+    } catch {
+      existingSlug = '';
+    }
+    if (!existingSlug || blogRouteKey(existingSlug) === want) return found;
+  }
+  return null;
+}
+
 async function resolveExistingAstroFileForTarget(targetUrlOrPath) {
   const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
   if (target) {
@@ -986,9 +1022,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   }
 
   const sourceFrontmatter = { ...(draft.frontmatter || {}) };
-  const slug = slugPathFromFrontmatter(sourceFrontmatter);
-  const branchSlug = slugify(slug.replace(/\//g, '-'));
-  const branch = `content/autonomous-${branchSlug}-${shortId()}`;
+  const rawSlug = slugPathFromFrontmatter(sourceFrontmatter);
   const body = String(draft.body || '').trim();
   // MDX guard: autonomous posts are written as .mdx, where `{{ }}` is parsed as a
   // JS expression — NOT a token (remark-token-substitution only rewrites .md text
@@ -1008,23 +1042,23 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const spokeTarget = resolveSpokeTarget(brief);
   const blogOrigin = blogOriginForSpoke(spokeTarget);
   if (spokeTarget) {
-    sourceFrontmatter.canonical = canonicalUrlForSlug(slug, blogOrigin);
+    sourceFrontmatter.canonical = canonicalUrlForSlug(rawSlug, blogOrigin);
   }
-  // Validate the writer's slug↔canonical self-consistency first (a genuinely
-  // mismatched draft still throws → review). Then enforce the blog URL protocol
-  // (/{category}/{slug}/) on the PUBLIC route: realign slug + canonical onto the
-  // post's own category so a flat writer slug (e.g. /plaster-bagworms-southwest-
-  // florida/) still satisfies the astro blog-slug-protocol guardrail instead of
-  // failing every Pages build and parking the PR. The committed file/hero/branch
-  // keep using the raw `slug` (the live flat-file / prefixed-URL convention), so
-  // only the URL changes — not where bytes are committed.
-  assertCanonicalMatchesSlug(sourceFrontmatter, slug, blogOrigin);
-  const routeSlug = categoryRouteSlug(slug, normalizeAutonomousCategory(sourceFrontmatter, brief));
-  const canonical = canonicalUrlForSlug(routeSlug, blogOrigin);
+  // Validate the writer's slug↔canonical self-consistency on the EMITTED slug (a
+  // genuinely mismatched draft still throws → review). THEN enforce the blog URL
+  // protocol: the published slug, canonical, committed FILE, hero, and branch all
+  // live under the post's own category route (/{category}/{slug}/). The writer
+  // occasionally emits a FLAT top-level slug (e.g. /plaster-bagworms-southwest-
+  // florida/), which renders locally but THROWS at the astro blog-slug-protocol
+  // guardrail → fails every Pages build and parks the PR after a full generation
+  // spend. Keying everything on the category route keeps file location 1:1 with
+  // the URL, so a flat/nested duplicate of the same route can never be committed.
+  assertCanonicalMatchesSlug(sourceFrontmatter, rawSlug, blogOrigin);
+  const slug = categoryRouteSlug(rawSlug, normalizeAutonomousCategory(sourceFrontmatter, brief));
+  const canonical = canonicalUrlForSlug(slug, blogOrigin);
+  const branchSlug = slugify(slug.replace(/\//g, '-'));
+  const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const frontmatter = normalizeAutonomousBlogFrontmatter(sourceFrontmatter, brief, body, { slug, canonical });
-  // normalizeAutonomousBlogFrontmatter derives the frontmatter slug from the raw
-  // path slug; realign it to the category route so slug + canonical agree.
-  frontmatter.slug = `/${routeSlug}/`;
   stampBlogDomains(frontmatter, spokeTarget);
   // Keep the persisted run payload consistent with what we ACTUALLY publish.
   // The runner stores this same `draft` object in autonomous_runs.draft_payload,
@@ -1063,21 +1097,24 @@ async function publishOrUpdatePage(draft, brief = {}) {
   ));
 
   // New autonomous posts are written as .mdx so they can embed MDX infographic
-  // components. If a post already exists as .mdx, update it in place. If a
-  // LEGACY .md post exists at this slug, MIGRATE it to .mdx (the body may carry
-  // MDX-only components that would render broken in a .md file): write the
-  // .mdx and delete the stale .md in the same branch — never leave both.
-  // Find an existing file that already renders this post's ROUTE — and update it
-  // in place rather than opening a duplicate. The route can resolve under a
-  // category (routeSlug) while the writer's slug is flat, so probe the category
-  // path FIRST: otherwise an existing /{category}/{slug}/ post that lives at a
-  // nested file (e.g. src/content/blog/pest-control/drain-flies-sarasota…mdx)
-  // is missed and a SECOND flat file is committed with the same Astro
-  // slug/canonical → duplicate-route build conflict. Fall back to the raw slug
-  // path (the common flat-file posts whose file name equals the route leaf).
-  const existingFile =
-    (routeSlug !== slug ? await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${routeSlug}`) : null)
-    || await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+  // components. If a post already exists, update it in place; if a LEGACY .md
+  // post exists, MIGRATE it to .mdx (write the .mdx and delete the stale .md in
+  // the same branch — never leave both).
+  //
+  // An existing post that renders this route may sit at the category path
+  // (src/content/blog/pest-control/foo.mdx) OR the flat path
+  // (src/content/blog/foo.mdx — the older live convention), both carrying the
+  // same /pest-control/foo/ slug. Probe the category path (= `slug` now) AND the
+  // flat leaf path and adopt whichever ALREADY renders this exact route, so we
+  // update it in place instead of committing a SECOND file with the same Astro
+  // slug/canonical (a duplicate-route build conflict, in either direction). A
+  // same-leaf file under a DIFFERENT category is skipped (not our post). When
+  // nothing matches, a NEW post is written at the category route path — 1:1 with
+  // its URL, so it can never collide with an unrelated leaf.
+  const existingFile = await firstExistingRouteFile(
+    [`${ASTRO_BLOG_DIR}/${slug}`, `${ASTRO_BLOG_DIR}/${slugLeafOf(slug)}`],
+    slug,
+  );
   const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
   const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 

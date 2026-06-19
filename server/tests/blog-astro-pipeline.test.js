@@ -408,11 +408,11 @@ describe('blog Astro frontmatter validation', () => {
       { action_type: 'new_supporting_blog' }
     );
 
-    expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-ant-trails-bradenton-/));
+    expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-pest-control-ant-trails-bradenton-/));
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/ant-trails-bradenton.mdx',
+      path: 'src/content/blog/pest-control/ant-trails-bradenton.mdx',
       content: expect.stringContaining('Waves Pest Control guidance'),
-      message: 'feat(blog): publish ant-trails-bradenton',
+      message: 'feat(blog): publish pest-control/ant-trails-bradenton',
       sha: undefined,
     }));
     expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
@@ -556,9 +556,9 @@ describe('blog Astro frontmatter validation', () => {
     // passes instead of failing every Pages build.
     expect(parsed.data.slug).toBe('/pest-control/banana-spiders-in-florida/');
     expect(parsed.data.category).toBe('pest-control');
-    // …while the committed markdown FILE keeps the flat path (URL ≠ file location,
-    // matching the live flat-file / prefixed-URL posts) — not a category subdir.
-    expect(markdownCall[0].path).toBe('src/content/blog/banana-spiders-in-florida.mdx');
+    // …and the committed markdown FILE lives at the category route path (1:1 with
+    // the URL), so no flat/nested duplicate of the same route can be committed.
+    expect(markdownCall[0].path).toBe('src/content/blog/pest-control/banana-spiders-in-florida.mdx');
     expect(validateBlogFrontmatter(parsed.data)).toEqual({ ok: true, errors: [] });
     expect(parsed.data).not.toHaveProperty('tags');
   });
@@ -706,8 +706,8 @@ describe('Astro publisher autonomous draft adapter', () => {
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
     });
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/autonomous-ant-control-bradenton.mdx',
-      branch: expect.stringMatching(/^content\/autonomous-autonomous-ant-control-bradenton-/),
+      path: 'src/content/blog/pest-control/autonomous-ant-control-bradenton.mdx',
+      branch: expect.stringMatching(/^content\/autonomous-pest-control-autonomous-ant-control-bradenton-/),
       sha: undefined,
     }));
     expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
@@ -744,12 +744,13 @@ describe('Astro publisher autonomous draft adapter', () => {
       { action_type: 'new_supporting_blog' }
     );
 
-    // Writes the .mdx (no sha — it is a new file), not the legacy .md.
+    // Writes the .mdx at the category route path (no sha — it is a new file),
+    // migrating the post off the flat legacy .md.
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/legacy-ant-post.mdx',
+      path: 'src/content/blog/pest-control/legacy-ant-post.mdx',
       sha: undefined,
     }));
-    // Deletes the superseded .md so we never leave both.
+    // Deletes the superseded flat .md so we never leave both.
     expect(gh.deleteFile).toHaveBeenCalledWith(expect.objectContaining({
       path: 'src/content/blog/legacy-ant-post.md',
       sha: 'legacy-md-sha',
@@ -908,8 +909,8 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
       title: 'Dollar Spot in Venice',
     }));
     expect(gh.putBinary).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'public/images/blog/dollar-spot-venice/hero.webp',
-      branch: expect.stringMatching(/^content\/autonomous-dollar-spot-venice-/),
+      path: 'public/images/blog/pest-control/dollar-spot-venice/hero.webp',
+      branch: expect.stringMatching(/^content\/autonomous-pest-control-dollar-spot-venice-/),
       sha: undefined,
     }));
     // Compressed to WebP (RIFF/WEBP container) before commit — LCP path.
@@ -922,10 +923,10 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
     // Frontmatter stamped with the path that was actually committed.
     const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
     expect(parsed.data.hero_image).toEqual({
-      src: '/images/blog/dollar-spot-venice/hero.webp',
+      src: '/images/blog/pest-control/dollar-spot-venice/hero.webp',
       alt: 'Dollar spot lesions on a Venice lawn',
     });
-    expect(parsed.data.og_image).toBe('/images/blog/dollar-spot-venice/hero.webp');
+    expect(parsed.data.og_image).toBe('/images/blog/pest-control/dollar-spot-venice/hero.webp');
   });
 
   test('existing post with a committed hero: reuses it, no regeneration, no binary commit', async () => {
@@ -982,8 +983,8 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
     const content = gh.putFile.mock.calls[0][0].content;
     expect(content).not.toContain('hero.png');
     const parsed = fmModule.parse(content);
-    expect(parsed.data.hero_image.src).toBe('/images/blog/dollar-spot-venice/hero.webp');
-    expect(parsed.data.og_image).toBe('/images/blog/dollar-spot-venice/hero.webp');
+    expect(parsed.data.hero_image.src).toBe('/images/blog/pest-control/dollar-spot-venice/hero.webp');
+    expect(parsed.data.og_image).toBe('/images/blog/pest-control/dollar-spot-venice/hero.webp');
   });
 
   test('an agent hero path that DOES exist in the repo is kept (no regeneration)', async () => {
