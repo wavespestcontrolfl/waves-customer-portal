@@ -283,7 +283,14 @@ export default function DashboardPageV2() {
     {
       label: "MRR",
       value: fmtMoney(data.mrr),
-      sub: `ARR ${fmtMoneyCompact(data.mrr * 12)}`,
+      // Headline MRR counts every recurring account, but paused-autopay and
+      // overdue accounts aren't actually going to bill. When any MRR is at
+      // risk, surface the committed-vs-at-risk split instead of ARR so the
+      // headline doesn't silently overstate the run-rate.
+      sub:
+        data.mrrBreakdown?.atRisk > 0
+          ? `${fmtMoneyCompact(data.mrrBreakdown.committed)} committed · ${fmtMoneyCompact(data.mrrBreakdown.atRisk)} at risk`
+          : `ARR ${fmtMoneyCompact(data.mrr * 12)}`,
     },
     {
       label: "Review Index",
