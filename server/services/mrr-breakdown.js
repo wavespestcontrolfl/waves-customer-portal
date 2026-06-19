@@ -20,16 +20,22 @@ const { etDateString } = require('../utils/datetime-et');
 //      `pending`, …) that's past due is still caught. Past-due test matches
 //      command-center: status='overdue' OR due_date < today.
 //
+// A fourth at-risk signal — annual-prepay terms in `payment_pending` (prepay
+// invoice sent but unpaid) — can't be expressed against `customers` alone, so
+// it's unioned in below via the billing cron's own
+// getPaymentPendingCustomerIds() helper (reused, not re-implemented, so the two
+// definitions can't drift).
+//
 // Autopay being *disabled* is deliberately NOT at-risk: many Waves customers
 // are invoiced after each visit and pay on receipt, so a disabled autopay
-// flag is a billing *method*, not a billing *risk*. Annual-prepay-covered
-// customers (also skipped by the monthly cron) are likewise NOT at-risk —
-// they have already paid for the period, so that revenue is collected, not
-// uncertain.
+// flag is a billing *method*, not a billing *risk*. Annual-prepay customers
+// whose term is PAID/active (also skipped by the monthly cron) are likewise
+// NOT at-risk — they have already paid for the period, so that revenue is
+// collected, not uncertain. Only the sent-but-unpaid (payment_pending) prepay
+// state is at-risk.
 //
-// `iv` is correlated to the outer `customers c`, so the predicate works both
-// inside a SUM(...) FILTER and as a standalone WHERE. Two `?` bindings, both
-// `asOf`.
+// `iv` is correlated to the outer `customers c`, so the predicate works as a
+// per-row boolean and as a standalone WHERE. Two `?` bindings, both `asOf`.
 const AT_RISK_PREDICATE = `(
   c.service_paused_at IS NOT NULL
   OR (
@@ -57,10 +63,16 @@ const AT_RISK_PREDICATE = `(
  * This splits the SAME population (active, deleted_at IS NULL,
  * monthly_rate > 0 — identical to the headline) into:
  *   - committed: monthly_rate of accounts with nothing blocking the next bill
- *   - atRisk:    monthly_rate of accounts that are autopay-paused OR overdue
+ *   - atRisk:    monthly_rate of accounts that are service-paused, autopay-paused,
+ *                overdue, or sitting on a sent-but-unpaid annual-prepay invoice
  *
- * An account is counted in at-risk AT MOST ONCE even when it is both paused
- * and overdue, so `committed + atRisk === total` by construction.
+ * Evaluated per-customer and reduced in JS so the annual-prepay payment-pending
+ * set (which can't be expressed against `customers` alone) can be unioned in
+ * without double-counting — committed then matches what the billing cron will
+ * actually attempt to charge. An account is counted in at-risk AT MOST ONCE, so
+ * `committed + atRisk === total` by construction. (Customer counts here are in
+ * the hundreds and the calling endpoint is 60s-cached, so the per-row scan is
+ * cheap.)
  *
  * @param {import('knex')} [dbConn]  Knex instance (defaults to the app db; lazy-loaded).
  * @param {string} asOf              ET calendar date (YYYY-MM-DD). Defaults to today ET.
@@ -70,30 +82,46 @@ async function computeMrrBreakdown(dbConn, asOf = etDateString()) {
   // Lazy-require so the helper (and its tests) can load without pulling in
   // knex when a connection is injected.
   const conn = dbConn || require('../models/db');
-  const row = await conn('customers as c')
-    .where('c.active', true)
-    .whereNull('c.deleted_at')
-    .where('c.monthly_rate', '>', 0)
-    .select(
-      conn.raw('COALESCE(SUM(c.monthly_rate), 0) as total'),
-      conn.raw('COUNT(*) as total_count'),
-      conn.raw(`COALESCE(SUM(c.monthly_rate) FILTER (WHERE ${AT_RISK_PREDICATE}), 0) as at_risk`, [asOf, asOf]),
-      conn.raw(`COUNT(*) FILTER (WHERE ${AT_RISK_PREDICATE}) as at_risk_count`, [asOf, asOf]),
-    )
-    .first();
+  const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
 
-  const total = parseFloat(row?.total || 0);
-  const atRisk = parseFloat(row?.at_risk || 0);
+  const [rows, pendingSet] = await Promise.all([
+    conn('customers as c')
+      .where('c.active', true)
+      .whereNull('c.deleted_at')
+      .where('c.monthly_rate', '>', 0)
+      .select(
+        'c.id as id',
+        'c.monthly_rate as monthly_rate',
+        conn.raw(`(${AT_RISK_PREDICATE}) as at_risk`, [asOf, asOf]),
+      ),
+    // Sent-but-unpaid annual-prepay commitments — the cron suppresses their
+    // monthly charge while the prepay cash hasn't landed. Reuse the cron's own
+    // helper so the two definitions can't drift; fail soft to an empty set so a
+    // prepay-table hiccup never blanks the dashboard MRR tile.
+    Promise.resolve()
+      .then(() => getPaymentPendingCustomerIds(asOf, conn))
+      .catch(() => new Set()),
+  ]);
+
+  let total = 0;
+  let atRisk = 0;
+  let totalCount = 0;
+  let atRiskCount = 0;
+  for (const r of rows) {
+    const rate = parseFloat(r.monthly_rate || 0);
+    total += rate;
+    totalCount += 1;
+    // pg returns boolean columns as JS booleans; tolerate 't'/1 from other drivers.
+    const sqlAtRisk = r.at_risk === true || r.at_risk === 't' || r.at_risk === 1;
+    if (sqlAtRisk || pendingSet.has(String(r.id))) {
+      atRisk += rate;
+      atRiskCount += 1;
+    }
+  }
   // Clamp so float dust can never produce a negative committed figure.
   const committed = Math.max(0, total - atRisk);
 
-  return {
-    total,
-    committed,
-    atRisk,
-    totalCount: parseInt(row?.total_count || 0, 10),
-    atRiskCount: parseInt(row?.at_risk_count || 0, 10),
-  };
+  return { total, committed, atRisk, totalCount, atRiskCount };
 }
 
 module.exports = { computeMrrBreakdown, AT_RISK_PREDICATE };

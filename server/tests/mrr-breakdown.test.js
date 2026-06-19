@@ -1,16 +1,21 @@
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getPaymentPendingCustomerIds: jest.fn(),
+}));
+
+const { getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
 const { computeMrrBreakdown, AT_RISK_PREDICATE } = require('../services/mrr-breakdown');
 
-// Minimal fake Knex: the helper only chains where/whereNull/where/select/first
-// off the table builder and calls db.raw() for the aggregate columns. We
-// capture every raw() call so we can assert the asOf date is bound into the
-// FILTER predicates, and resolve .first() to a canned aggregate row.
-function makeFakeDb(row) {
+// Minimal fake Knex: the helper chains where/whereNull/where/select off the
+// table builder and then awaits it for an array of {id, monthly_rate, at_risk}
+// rows. We make the builder thenable so `await` / Promise.all resolve it to the
+// canned rows, and capture raw() calls to assert the asOf binding.
+function makeFakeDb(rows) {
   const rawCalls = [];
   const builder = {
     where: () => builder,
     whereNull: () => builder,
     select: () => builder,
-    first: async () => row,
+    then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
   };
   const db = () => builder;
   db.raw = (sql, bindings) => {
@@ -22,40 +27,63 @@ function makeFakeDb(row) {
 }
 
 describe('computeMrrBreakdown', () => {
+  beforeEach(() => {
+    getPaymentPendingCustomerIds.mockResolvedValue(new Set());
+  });
+
   test('splits total into committed + at-risk with counts', async () => {
-    const db = makeFakeDb({ total: '12500.50', at_risk: '2200.50', total_count: '40', at_risk_count: '6' });
+    const db = makeFakeDb([
+      { id: 1, monthly_rate: '100', at_risk: false },
+      { id: 2, monthly_rate: '50', at_risk: true },
+      { id: 3, monthly_rate: '25.50', at_risk: false },
+    ]);
     const out = await computeMrrBreakdown(db, '2026-06-19');
     expect(out).toEqual({
-      total: 12500.5,
-      committed: 10300,
-      atRisk: 2200.5,
-      totalCount: 40,
-      atRiskCount: 6,
+      total: 175.5,
+      committed: 125.5,
+      atRisk: 50,
+      totalCount: 3,
+      atRiskCount: 1,
     });
-    // committed + atRisk reconstructs total exactly.
     expect(out.committed + out.atRisk).toBeCloseTo(out.total, 2);
   });
 
-  test('null/empty aggregates collapse to zero, not NaN', async () => {
-    const db = makeFakeDb({ total: null, at_risk: null, total_count: null, at_risk_count: null });
+  test('empty population collapses to zero, not NaN', async () => {
+    const db = makeFakeDb([]);
     const out = await computeMrrBreakdown(db, '2026-06-19');
     expect(out).toEqual({ total: 0, committed: 0, atRisk: 0, totalCount: 0, atRiskCount: 0 });
   });
 
-  test('committed is clamped at zero even if at-risk somehow exceeds total', async () => {
-    const db = makeFakeDb({ total: '100', at_risk: '130', total_count: '5', at_risk_count: '5' });
+  test('annual-prepay payment-pending customer is at-risk even when the SQL predicate says committed', async () => {
+    getPaymentPendingCustomerIds.mockResolvedValue(new Set(['7']));
+    const db = makeFakeDb([{ id: 7, monthly_rate: '80', at_risk: false }]);
     const out = await computeMrrBreakdown(db, '2026-06-19');
+    expect(out.atRisk).toBe(80);
     expect(out.committed).toBe(0);
+    expect(out.atRiskCount).toBe(1);
   });
 
-  test('asOf date is bound into both at-risk FILTER predicates', async () => {
-    const db = makeFakeDb({ total: '0', at_risk: '0', total_count: '0', at_risk_count: '0' });
+  test('a customer flagged by BOTH the SQL predicate and the pending set counts once', async () => {
+    getPaymentPendingCustomerIds.mockResolvedValue(new Set(['7']));
+    const db = makeFakeDb([{ id: 7, monthly_rate: '80', at_risk: true }]);
+    const out = await computeMrrBreakdown(db, '2026-06-19');
+    expect(out.atRisk).toBe(80);
+    expect(out.atRiskCount).toBe(1);
+  });
+
+  test('asOf flows into the predicate binding and the prepay helper', async () => {
+    const db = makeFakeDb([]);
     await computeMrrBreakdown(db, '2026-06-19');
-    const filtered = db._rawCalls.filter(c => c.sql.includes('FILTER'));
-    expect(filtered).toHaveLength(2);
-    for (const c of filtered) {
-      expect(c.bindings).toEqual(['2026-06-19', '2026-06-19']);
-    }
+    const atRiskRaw = db._rawCalls.find(c => c.sql.includes('at_risk'));
+    expect(atRiskRaw.bindings).toEqual(['2026-06-19', '2026-06-19']);
+    expect(getPaymentPendingCustomerIds).toHaveBeenCalledWith('2026-06-19', db);
+  });
+
+  test('a prepay-helper failure fails soft (does not throw, no false at-risk)', async () => {
+    getPaymentPendingCustomerIds.mockRejectedValue(new Error('prepay table missing'));
+    const db = makeFakeDb([{ id: 1, monthly_rate: '100', at_risk: false }]);
+    const out = await computeMrrBreakdown(db, '2026-06-19');
+    expect(out).toEqual({ total: 100, committed: 100, atRisk: 0, totalCount: 1, atRiskCount: 0 });
   });
 });
 
@@ -81,8 +109,6 @@ describe('AT_RISK_PREDICATE definition', () => {
   });
 
   test('does NOT treat autopay-disabled (invoice-on-receipt customers) as at-risk', () => {
-    // Only a *paused* future date counts — there is no bare
-    // "autopay_enabled = false" branch in the predicate.
     expect(AT_RISK_PREDICATE).not.toContain('autopay_enabled = false');
   });
 });
