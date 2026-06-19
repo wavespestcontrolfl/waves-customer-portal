@@ -573,7 +573,10 @@ async function supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId = null 
     .where('referrer_reward_status', 'pending_service')
     .where(matchesPhone);
   if (excludeId) q = q.whereNot('id', excludeId);
-  const siblings = await q.select('id', 'promoter_id', 'referrer_reward_amount');
+  // forUpdate: serialize concurrent cleanup runs for the same phone so a second
+  // run blocks, then re-evaluates the pending_service predicate (now false for
+  // rows this run superseded) and can't drain the same promoter cents twice.
+  const siblings = await q.forUpdate().select('id', 'promoter_id', 'referrer_reward_amount');
   if (!siblings.length) return;
 
   await trx('referrals')
@@ -869,11 +872,13 @@ async function getSettings() {
     if (row) return { ...row, base_url: normalizeReferralBaseUrl(row.base_url) };
   } catch { /* table may not exist yet */ }
 
-  // Defaults
+  // Defaults. referrer_reward_cents matches the agreed flat $25 (the prod row +
+  // migration 20260529000006 are 2500); the historical 5000 seed would credit a
+  // referrer $50 if this fallback were ever hit, so keep it symmetric at 2500.
   return {
     program_active: true,
     base_url: normalizeReferralBaseUrl(DEFAULT_REFERRAL_BASE_URL),
-    referrer_reward_cents: 5000,
+    referrer_reward_cents: 2500,
     referee_discount_cents: 2500,
     bonus_silver_cents: 5000,
     bonus_gold_cents: 7500,
