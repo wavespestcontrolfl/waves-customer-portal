@@ -330,13 +330,28 @@ router.get('/balance', async (req, res, next) => {
     // completed attempt failed — not when there's any failed row in history.
     // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
     // banner.
-    const recentAttempts = await db('payments')
+    // Bounded scan: with no payer rows to skip, the most-recent attempt is just
+    // the first row (the pre-payer-filter behavior). Only when payer rows exist
+    // do we look past them — page in small batches (capped) so this billing-page
+    // load never scales with the customer's full ledger.
+    const recentAttemptsQuery = () => db('payments')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['paid', 'failed', 'refunded'])
       .whereNull('superseded_by_payment_id')
       .orderBy('payment_date', 'desc')
       .select('status', 'metadata');
-    const mostRecentAttempt = recentAttempts.find((p) => !isPayerPayment(p)) || null;
+    let mostRecentAttempt = null;
+    if (payerInvoiceIds.size === 0) {
+      mostRecentAttempt = await recentAttemptsQuery().first();
+    } else {
+      const PAGE = 50;
+      for (let offset = 0; offset < 500; offset += PAGE) {
+        const batch = await recentAttemptsQuery().limit(PAGE).offset(offset);
+        if (!batch.length) break;
+        mostRecentAttempt = batch.find((p) => !isPayerPayment(p)) || null;
+        if (mostRecentAttempt || batch.length < PAGE) break;
+      }
+    }
 
     res.json({
       currentBalance: failedTotal + parseFloat(unpaidInvoices?.total || 0),

@@ -2891,6 +2891,43 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       const [previewBilling] = getInvoiceEmailRecipients(customer, previewPrefs || {});
       const previewRecipientEmail = String(previewRecipient.email || '').trim().toLowerCase();
       const previewBillingEmail = String(previewBilling?.email || '').trim().toLowerCase();
+
+      // Third-party Bill-To: mirror the real send's routing so the confirm dialog
+      // is accurate. For a payer-billed invoice the homeowner gets the report
+      // ONLY (no invoice PDF / pay link / billing copy) and the invoice + pay link
+      // route to the payer AP inbox. Resolve the payer from the persisted preview
+      // invoice's snapshot, or — for a brand-new non-persisted preview — the
+      // customer/per-job default the real create() will use (mirroring its
+      // serviceRecordId → scheduled_service_id derivation).
+      const PreviewPayerService = require('../services/payer');
+      let previewPayerApEmail = null;
+      let isPayerBilledPreview = false;
+      if (invoice.payer_id || invoice.payer_snapshot) {
+        await PreviewPayerService.attachToInvoice(invoice);
+        isPayerBilledPreview = !!invoice.payer_id;
+        previewPayerApEmail = invoice.payer ? (PreviewPayerService.payerRecipient(invoice.payer)?.email || null) : null;
+      } else {
+        let previewSsId = project.scheduled_service_id || null;
+        if (!previewSsId && project.service_record_id) {
+          const srLink = await db('service_records')
+            .where({ id: project.service_record_id, customer_id: customer.id })
+            .first('scheduled_service_id').catch(() => null);
+          if (srLink?.scheduled_service_id) previewSsId = srLink.scheduled_service_id;
+        }
+        const resolvedPreviewPayer = await PreviewPayerService.resolveForInvoice({
+          customerId: customer.id,
+          scheduledServiceId: previewSsId,
+        }).catch(() => null);
+        if (resolvedPreviewPayer?.payerId) {
+          isPayerBilledPreview = true;
+          previewPayerApEmail = resolvedPreviewPayer.snapshot
+            ? (PreviewPayerService.payerRecipient(resolvedPreviewPayer.snapshot)?.email || null)
+            : null;
+        }
+      }
+      const previewReportCopies = isWdoProject
+        ? wdoReportCopyEmails(parseFindings(project), [previewRecipientEmail, customer?.email, previewBillingEmail])
+        : [];
       return res.json({
         dry_run: true,
         invoice: {
@@ -2900,13 +2937,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           status: invoice.status,
           created,
         },
-        email_routing: {
+        email_routing: isPayerBilledPreview ? {
+          // Homeowner gets the report ONLY; the invoice + pay link go to the payer
+          // AP inbox — no homeowner billing copy for a payer invoice.
+          recipient: previewRecipient.email || null,
+          report_only: true,
+          payer_billed: true,
+          payer: previewPayerApEmail,
+          billing_copy: null,
+          report_copies: previewReportCopies,
+        } : {
           recipient: previewRecipient.email || null,
           billing_copy: previewBillingEmail && previewBillingEmail !== previewRecipientEmail ? previewBillingEmail : null,
           // Same exclusion set the send applies: recipient, primary, billing.
-          report_copies: isWdoProject
-            ? wdoReportCopyEmails(parseFindings(project), [previewRecipientEmail, customer?.email, previewBillingEmail])
-            : [],
+          report_copies: previewReportCopies,
         },
       });
     }

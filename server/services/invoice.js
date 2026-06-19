@@ -1216,8 +1216,20 @@ const InvoiceService = {
     let payerTaxExempt = false;
     try {
       const PayerService = require("./payer");
+      // Mirror create(): when linked only by serviceRecordId, derive the visit's
+      // scheduled_service_id so a per-job (tax-exempt) payer override is reflected
+      // in the dry-run total — otherwise the preview shows tax the real, exempt
+      // invoice won't actually bill.
+      let previewScheduledServiceId = scheduledServiceId;
+      if (!previewScheduledServiceId && serviceRecordId) {
+        const srLink = await database("service_records")
+          .where({ id: serviceRecordId, customer_id: customerId })
+          .first("scheduled_service_id")
+          .catch(() => null);
+        if (srLink?.scheduled_service_id) previewScheduledServiceId = srLink.scheduled_service_id;
+      }
       const resolved = await PayerService.resolveForInvoice({
-        database, customerId, customer: cust, scheduledServiceId,
+        database, customerId, customer: cust, scheduledServiceId: previewScheduledServiceId,
       });
       payerTaxExempt = !!resolved.taxExempt;
     } catch { /* preview proceeds with the normal tax calc */ }

@@ -123,6 +123,17 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // the third-party bill (PDF + pay link). Instead we fail so the operator can
   // add the payer's AP email (or set an explicit recipient) and resend.
   await PayerService.attachToInvoice(invoice);
+  // Fail-safe for the PDF Bill-To: a payer-billed invoice whose payer can't
+  // attach (legacy/no-snapshot, or the payer was deactivated) leaves
+  // invoice.payer unset, and billBlock would then render the HOMEOWNER as
+  // Bill-To. With an explicit AP-recipient override the payer guard below is
+  // skipped, so the AP would receive a payer invoice billed to the homeowner.
+  // Synthesize the same "Third-party payer" placeholder the public PDF routes
+  // use so the bill-to is never the homeowner. payerRecipient() of this
+  // placeholder is null, so the no-override branch below still fails closed.
+  if (invoice.payer_id && !invoice.payer) {
+    invoice.payer = { company_name: 'Third-party payer', ap_email: null };
+  }
   let effectiveOverride = options.recipientOverride || null;
   if (!effectiveOverride && invoice.payer_id) {
     // Keyed on payer_id (the column), NOT the attached object: a payer-billed
