@@ -1,12 +1,16 @@
 const { etDateString } = require('../utils/datetime-et');
 
 // An active recurring account is "at risk" — i.e. its next monthly charge is
-// NOT something the business can count on landing — when either of these is
+// NOT something the business can count on landing — when any of these is
 // true as of `asOf`:
 //
-//   1. Autopay is paused. `autopay_paused_until` is in the future, so the
+//   1. Service is paused (`service_paused_at` set). The monthly billing cron
+//      skips these entirely — it's the terminal end-state after the autopay
+//      retry ladder exhausts ('autopay_final_failure'), so the account will
+//      not be charged at all. (billing-cron.js: .whereNull('service_paused_at'))
+//   2. Autopay is paused. `autopay_paused_until` is in the future, so the
 //      automated charge will be skipped. (A null/past pause date = not paused.)
-//   2. The account is already overdue: it carries an OUTSTANDING invoice that
+//   3. The account is already overdue: it carries an OUTSTANDING invoice that
 //      is past due (or explicitly flagged `overdue`). "Outstanding" mirrors
 //      the dashboard AR query's own definition exactly — `paid_at IS NULL`
 //      (paid_at, not status, is the authoritative paid signal) AND
@@ -18,13 +22,17 @@ const { etDateString } = require('../utils/datetime-et');
 //
 // Autopay being *disabled* is deliberately NOT at-risk: many Waves customers
 // are invoiced after each visit and pay on receipt, so a disabled autopay
-// flag is a billing *method*, not a billing *risk*.
+// flag is a billing *method*, not a billing *risk*. Annual-prepay-covered
+// customers (also skipped by the monthly cron) are likewise NOT at-risk —
+// they have already paid for the period, so that revenue is collected, not
+// uncertain.
 //
 // `iv` is correlated to the outer `customers c`, so the predicate works both
 // inside a SUM(...) FILTER and as a standalone WHERE. Two `?` bindings, both
 // `asOf`.
 const AT_RISK_PREDICATE = `(
-  (
+  c.service_paused_at IS NOT NULL
+  OR (
     c.autopay_enabled = true
     AND c.autopay_paused_until IS NOT NULL
     AND c.autopay_paused_until >= ?::date

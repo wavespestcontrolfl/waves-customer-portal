@@ -60,6 +60,10 @@ describe('computeMrrBreakdown', () => {
 });
 
 describe('AT_RISK_PREDICATE definition', () => {
+  test('flags service-paused accounts (billing cron skips these entirely)', () => {
+    expect(AT_RISK_PREDICATE).toContain('c.service_paused_at IS NOT NULL');
+  });
+
   test('flags paused autopay (future pause date)', () => {
     expect(AT_RISK_PREDICATE).toContain('c.autopay_enabled = true');
     expect(AT_RISK_PREDICATE).toContain('c.autopay_paused_until IS NOT NULL');
