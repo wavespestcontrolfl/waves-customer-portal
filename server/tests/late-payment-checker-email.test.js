@@ -16,6 +16,7 @@ jest.mock('../services/short-url', () => ({
 }));
 jest.mock('../services/invoice-followups', () => ({
   hasActiveSequence: jest.fn(async () => false),
+  isDunningStopped: jest.fn(async () => false),
 }));
 jest.mock('../services/workflows/balance-reminder', () => ({
   sendLatePaymentEmail: jest.fn(async () => ({ ok: true })),
@@ -25,6 +26,7 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const BalanceReminder = require('../services/workflows/balance-reminder');
+const InvoiceFollowUps = require('../services/invoice-followups');
 const LatePaymentChecker = require('../services/late-payment-checker');
 
 function chain({ result = [], first } = {}) {
@@ -121,5 +123,34 @@ describe('late-payment checker email sidecar', () => {
       invoiceTitle: 'Quarterly Pest Control',
       payUrl: 'https://portal.wavespestcontrol.com/l/pay123',
     }));
+  });
+
+  test('does not send a late-payment reminder when the per-invoice follow-up sequence was stopped by an admin', async () => {
+    const invoice = {
+      id: 'inv-1',
+      customer_id: 'cust-1',
+      token: 'token-1',
+      invoice_number: 'WPC-2026-1042',
+      status: 'sent',
+      title: 'Quarterly Pest Control',
+      total: '129.00',
+      due_date: '2026-05-10',
+      service_date: '2026-05-01',
+      created_at: '2026-05-01T12:00:00.000Z',
+    };
+
+    // Admin clicked "stop" on the AUTOMATED FOLLOW-UPS card — dunning is off for this invoice.
+    InvoiceFollowUps.hasActiveSequence.mockResolvedValueOnce(false);
+    InvoiceFollowUps.isDunningStopped.mockResolvedValueOnce(true);
+
+    setDbQueues({
+      invoices: [chain({ result: [invoice] })],
+    });
+
+    await LatePaymentChecker.checkAndNotify();
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
   });
 });

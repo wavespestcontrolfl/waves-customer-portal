@@ -648,6 +648,22 @@ async function hasActiveSequence(invoiceId) {
   return !!seq;
 }
 
+/**
+ * True when an admin has explicitly STOPPED this invoice's follow-up sequence.
+ * A stop is a deliberate "stop all automated dunning for this invoice" instruction
+ * (e.g. customer is paying by mailed check). The account-level late-payment-checker
+ * must honor it too — otherwise stopping follow-ups in the invoice UI silently hands
+ * the customer off to the legacy reminder path and they keep getting "X days overdue"
+ * texts. `hasActiveSequence` deliberately excludes 'stopped' (a stopped sequence is no
+ * longer "active"/handling the invoice), so this is a separate, explicit check.
+ */
+async function isDunningStopped(invoiceId) {
+  const seq = await db('invoice_followup_sequences')
+    .where({ invoice_id: invoiceId, status: 'stopped' })
+    .first();
+  return !!seq;
+}
+
 module.exports = {
   scheduleForInvoice,
   runPending,
@@ -659,4 +675,5 @@ module.exports = {
   stopSequence,
   sendNextTouchNow,
   hasActiveSequence,
+  isDunningStopped,
 };
