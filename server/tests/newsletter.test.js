@@ -16,7 +16,7 @@
  *     silently corrupts campaign analytics or double-applies events.
  */
 
-const { buildSubscriberQuery, excludeGloballySuppressed } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, excludeGloballySuppressed, narrowServiceLineFilter, sanitizePersonalizationToken } = require('../services/newsletter-sender');
 const db = require('../models/db');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
@@ -103,6 +103,50 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(sql).toMatch(/"customer_id" is null/);
   });
 
+  // The audience-profiles module + preview script speak { audience: 'customers'
+  // | 'leads' }. The send path only runs buildSubscriberQuery (never
+  // matchesFilter), so this shape MUST narrow here too — otherwise a saved
+  // { audience: 'customers' } segment silently blasts every active subscriber.
+  test('audience:customers narrows to customer_id IS NOT NULL (canonical shape)', () => {
+    const { sql } = shapeOf({ audience: 'customers' });
+    expect(sql).toMatch(/"customer_id" is not null/);
+    expect(sql).not.toMatch(/"customer_id" is null/);
+  });
+
+  test('audience:leads narrows to customer_id IS NULL (canonical shape)', () => {
+    const { sql } = shapeOf({ audience: 'leads' });
+    expect(sql).toMatch(/"customer_id" is null/);
+  });
+
+  test('unknown audience value fails CLOSED (1 = 0), never broadens to all subscribers', () => {
+    // Admin routes persist segmentFilter verbatim, so a typo like 'customer'
+    // must match nobody (→ EMPTY_SEGMENT guard), not silently drop the filter.
+    const { sql } = shapeOf({ audience: 'customer' });
+    expect(sql).toMatch(/1 = 0/);
+    expect(sql).not.toMatch(/"customer_id" is not null/);
+  });
+
+  test('region_zone array binds via whereIn', () => {
+    const { sql, bindings } = shapeOf({ region_zone: ['manatee', 'sarasota'] });
+    expect(sql).toMatch(/"region_zone" in/);
+    expect(bindings).toEqual(expect.arrayContaining(['manatee', 'sarasota']));
+    expect(sql).not.toMatch(/1 = 0/);
+  });
+
+  test('region_zone single string is coerced to whereIn (not ignored)', () => {
+    const { sql, bindings } = shapeOf({ region_zone: 'manatee' });
+    expect(sql).toMatch(/"region_zone" in/);
+    expect(bindings).toContain('manatee');
+    expect(sql).not.toMatch(/1 = 0/);
+  });
+
+  test('malformed region_zone (non-string scalar, or array w/ bad element) fails CLOSED', () => {
+    expect(shapeOf({ region_zone: 123 }).sql).toMatch(/1 = 0/);
+    expect(shapeOf({ region_zone: ['manatee', 123] }).sql).toMatch(/1 = 0/);
+    // empty array stays a no-op (no region intent), not a fail-closed.
+    expect(shapeOf({ region_zone: [] }).sql).not.toMatch(/1 = 0/);
+  });
+
   test('sources filter binds each value via whereIn', () => {
     const { sql, bindings } = shapeOf({ sources: ['website', 'quote_wizard'] });
     expect(sql).toMatch(/"source" in \((?:\$\d+|\?), (?:\$\d+|\?)\)/);
@@ -140,6 +184,69 @@ describe('newsletter buildSubscriberQuery', () => {
     const { sql } = shapeOf({ customersOnly: true, leadsOnly: true });
     expect(sql).toMatch(/"customer_id" is not null/);
     expect(sql).toMatch(/"customer_id" is null/);
+  });
+});
+
+describe('newsletter narrowServiceLineFilter — fail-closed service-line coercion', () => {
+  test('no service-line intent → null (legacy SQL-only path preserved)', () => {
+    expect(narrowServiceLineFilter(null)).toBeNull();
+    expect(narrowServiceLineFilter({ sources: ['website'] })).toBeNull();
+    expect(narrowServiceLineFilter({ missing_service: [] })).toBeNull(); // empty array = no intent
+  });
+
+  test('well-formed keys pass through', () => {
+    expect(narrowServiceLineFilter({ has_service: ['pest'], missing_service: ['lawn'] }))
+      .toEqual({ has_service: ['pest'], missing_service: ['lawn'] });
+    expect(narrowServiceLineFilter({ min_line_count: 1, max_line_count: 1 }))
+      .toEqual({ min_line_count: 1, max_line_count: 1 });
+    expect(narrowServiceLineFilter({ max_line_count: 0 })).toEqual({ max_line_count: 0 }); // 0 is valid
+  });
+
+  test('coerces single strings / numeric strings instead of dropping them', () => {
+    expect(narrowServiceLineFilter({ missing_service: 'lawn' })).toEqual({ missing_service: ['lawn'] });
+    expect(narrowServiceLineFilter({ max_line_count: '1' })).toEqual({ max_line_count: 1 });
+  });
+
+  test('intent present but every key malformed → {} (caller must match NOBODY, never everybody)', () => {
+    // The footgun: these used to slip past hasServiceLineFilter yet resolve to
+    // an empty narrowed filter → selectAudience({}) = all customers.
+    expect(narrowServiceLineFilter({ max_line_count: {} })).toEqual({});
+    expect(narrowServiceLineFilter({ min_line_count: 'abc' })).toEqual({});
+    expect(narrowServiceLineFilter({ missing_service: 123 })).toEqual({});
+  });
+
+  test('a malformed element inside a service-line array fails the WHOLE filter closed (no narrow-to-valid-subset)', () => {
+    // ['lawn', 123] must NOT resolve to just ['lawn'] — an ambiguous segment
+    // can't quietly broaden to the valid subset.
+    expect(narrowServiceLineFilter({ missing_service: ['lawn', 123] })).toEqual({});
+    expect(narrowServiceLineFilter({ has_service: ['pest', null] })).toEqual({});
+    expect(narrowServiceLineFilter({ waveguard_tier: ['Gold', {}] })).toEqual({});
+    // ...but a clean multi-element array still passes through.
+    expect(narrowServiceLineFilter({ has_service: ['pest', 'lawn'] }))
+      .toEqual({ has_service: ['pest', 'lawn'] });
+  });
+
+  test('invalid line-counts (negative/fractional/out-of-range) fail the WHOLE filter closed', () => {
+    // { min_line_count: -1 } matches every profile (line_count >= -1) — must NOT.
+    expect(narrowServiceLineFilter({ min_line_count: -1 })).toEqual({});
+    expect(narrowServiceLineFilter({ max_line_count: 1.5 })).toEqual({});
+    expect(narrowServiceLineFilter({ max_line_count: 999 })).toEqual({}); // > sellable-line universe
+    // A malformed count nukes otherwise-valid keys too (suspect filter → nobody).
+    expect(narrowServiceLineFilter({ has_service: ['pest'], min_line_count: -1 })).toEqual({});
+  });
+});
+
+describe('newsletter sanitizePersonalizationToken — no HTML survives DB substitution', () => {
+  test('strips angle brackets / ampersands / slashes (mirrors greeting sanitizer)', () => {
+    expect(sanitizePersonalizationToken('<script>alert(1)</script>')).not.toMatch(/[<>&/]/);
+    expect(sanitizePersonalizationToken('Bradenton')).toBe('Bradenton');
+    expect(sanitizePersonalizationToken("St. Augustine")).toBe('St. Augustine');
+    expect(sanitizePersonalizationToken("Lakewood Ranch")).toBe('Lakewood Ranch');
+  });
+
+  test('empty / nullish → empty string (caller applies its default label)', () => {
+    expect(sanitizePersonalizationToken(null)).toBe('');
+    expect(sanitizePersonalizationToken('   ')).toBe('');
   });
 });
 
@@ -1301,6 +1408,7 @@ describe('newsletter greeting personalization + render polish', () => {
     greetingWithNameToken,
     greetingNameValueFor,
     stripGreetingNameToken,
+    stripPersonalizationTokens,
     plainBulletText,
     assembleBeehiivNewsletter,
   } = require('../services/newsletter-draft');
@@ -1325,6 +1433,14 @@ describe('newsletter greeting personalization + render polish', () => {
   test('stripGreetingNameToken removes every occurrence (public archive path)', () => {
     const html = `<p>Hey there${GREETING_NAME_TOKEN}!</p><p>bye${GREETING_NAME_TOKEN}</p>`;
     expect(stripGreetingNameToken(html)).toBe('<p>Hey there!</p><p>bye</p>');
+  });
+
+  test('stripPersonalizationTokens neutralizes city/grass to defaults — no literal merge tags leak to public surfaces', () => {
+    const html = `<p>Hi${GREETING_NAME_TOKEN}, your {{grass-type}} lawn in {{city}} looks great.</p>`;
+    const out = stripPersonalizationTokens(html);
+    expect(out).toBe('<p>Hi, your St. Augustine lawn in your area looks great.</p>');
+    // Every per-recipient token is gone — nothing renders literally in archive/RSS/preview.
+    expect(out).not.toMatch(/\{\{(greeting-name|city|grass-type)\}\}/);
   });
 
   test('plainBulletText strips leading emojis (incl. VS16/ZWJ sequences) and literal markers', () => {

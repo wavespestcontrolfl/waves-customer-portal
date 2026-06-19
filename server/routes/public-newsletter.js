@@ -11,7 +11,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { stripGreetingNameToken } = require('../services/newsletter-draft');
+const { stripPersonalizationTokens } = require('../services/newsletter-draft');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
@@ -376,16 +376,17 @@ router.get('/posts/by-slug/:slug', async (req, res) => {
       slug: row.slug,
       subject: row.subject,
       newsletterType: row.newsletter_type || null,
-      previewText: row.preview_text || null,
-      // Archive pages have no recipient identity — drop the greeting
-      // first-name token so readers never see a literal {{greeting-name}}.
-      htmlBody: stripGreetingNameToken(row.html_body || ''),
-      textBody: row.text_body ? stripGreetingNameToken(row.text_body) : null,
+      previewText: row.preview_text ? stripPersonalizationTokens(row.preview_text) : null,
+      // Archive pages have no recipient identity — neutralize every merge tag
+      // ({{greeting-name}}/{{city}}/{{grass-type}}) so readers never see a
+      // literal token; city/grass fall back to their neutral defaults.
+      htmlBody: stripPersonalizationTokens(row.html_body || ''),
+      textBody: row.text_body ? stripPersonalizationTokens(row.text_body) : null,
       sentAt: row.sent_at,
       indexability: row.indexability || 'index',
       seo: {
         title: row.subject,
-        description: row.preview_text || '',
+        description: stripPersonalizationTokens(row.preview_text || ''),
         canonicalUrl: `https://www.wavespestcontrol.com/newsletter/archive/${row.slug}`,
         indexability: row.indexability || 'index',
       },
@@ -409,9 +410,9 @@ router.get('/posts/:id', async (req, res) => {
       slug: row.slug || null,
       subject: row.subject,
       newsletterType: row.newsletter_type || null,
-      previewText: row.preview_text || null,
-      htmlBody: stripGreetingNameToken(row.html_body || ''),
-      textBody: row.text_body ? stripGreetingNameToken(row.text_body) : null,
+      previewText: row.preview_text ? stripPersonalizationTokens(row.preview_text) : null,
+      htmlBody: stripPersonalizationTokens(row.html_body || ''),
+      textBody: row.text_body ? stripPersonalizationTokens(row.text_body) : null,
       sentAt: row.sent_at,
       indexability: row.indexability || 'index',
     });

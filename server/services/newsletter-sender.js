@@ -4,9 +4,19 @@
  * subject assignment live here so both callers get identical behavior.
  *
  * Segment filter shape (stored in newsletter_sends.segment_filter jsonb):
- *   { sources?: string[], tags?: string[], customersOnly?: boolean,
- *     leadsOnly?: boolean }
+ *   SQL-expressible (applied directly in buildSubscriberQuery):
+ *     { sources?: string[], tags?: string[], customersOnly?: boolean,
+ *       leadsOnly?: boolean, region_zone?: string[] }
+ *   Service-line / membership (NOT a column — resolved to a customer_id set
+ *   via newsletter-audience-profiles, then injected as a whereIn):
+ *     { has_service?: string[], missing_service?: string[],
+ *       waveguard_tier?: string[], min_line_count?: number, max_line_count?: number }
  *   null/undefined = all active subscribers (legacy behavior)
+ *
+ * Callers that may carry a service-line filter must pre-resolve the customer
+ * id set and pass it as the 2nd arg:
+ *   const ids = await resolveSegmentCustomerIds(seg);
+ *   buildSubscriberQuery(seg, ids)
  */
 
 const db = require('../models/db');
@@ -15,7 +25,27 @@ const logger = require('./logger');
 const crypto = require('crypto');
 const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
-const { GREETING_NAME_TOKEN, greetingNameValueFor, stripGreetingNameToken, decodeEscapedEntities } = require('./newsletter-draft');
+const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities } = require('./newsletter-draft');
+const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
+const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
+
+// CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
+// newsletter-draft.js (imported above) so the live-send substitution and every
+// no-recipient render surface share one source of truth.
+
+// SendGrid substitutions are a literal token→value replacement applied to both
+// the HTML and text parts, so a raw DB value (e.g. customers.city) would inject
+// markup straight into the email HTML. Sanitize to a safe charset before
+// substitution — mirrors greetingNameValueFor (letters/marks/space/.,'-),
+// which strips <, >, & and slashes so no HTML can survive.
+function sanitizePersonalizationToken(value) {
+  return String(value || '')
+    .replace(/[^\p{L}\p{M}'’ .,-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60)
+    .trim();
+}
 
 function stripHtml(html) {
   if (!html) return '';
@@ -47,14 +77,168 @@ function excludeGloballySuppressed(query) {
   });
 }
 
-function buildSubscriberQuery(segmentFilter) {
+// Keys that can't be expressed in SQL against newsletter_subscribers — they
+// depend on classifying each customer's active recurring services, so they are
+// resolved to a customer_id set by resolveSegmentCustomerIds() first.
+const SERVICE_LINE_KEYS = ['has_service', 'missing_service', 'waveguard_tier', 'min_line_count', 'max_line_count'];
+
+function hasServiceLineFilter(segmentFilter) {
+  if (!segmentFilter) return false;
+  return SERVICE_LINE_KEYS.some((k) => {
+    const v = segmentFilter[k];
+    if (v == null) return false;
+    if (Array.isArray(v)) return v.length > 0;
+    return true;
+  });
+}
+
+// Coerce one service-line filter value to a clean string array:
+//   absent / empty array      → []   (no constraint)
+//   all-valid strings, or a single string → [trimmed strings]
+//   present but ANY element invalid (non-string / blank), or an uncoercible
+//   scalar (number/object)     → null (malformed → caller fails the whole
+//                                      service-line filter closed)
+// A mixed array like ['lawn', 123] returns null rather than the narrowed valid
+// subset, so an ambiguous segment can't quietly broaden to that subset.
+function toLineArray(v) {
+  if (v == null) return [];
+  if (Array.isArray(v)) {
+    if (v.length === 0) return [];
+    const cleaned = v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
+    return cleaned.length === v.length ? cleaned : null;
+  }
+  if (typeof v === 'string' && v.trim()) return [v.trim()];
+  return null;
+}
+// Coerce one filter value to a valid line-count: a non-negative INTEGER no
+// larger than the sellable-line universe ('1' → 1, 0 allowed). Anything else
+// (negative, fractional, out of range, non-numeric) → null = invalid, so a
+// constraint like { min_line_count: -1 } can't quietly match every customer.
+function toLineCount(v) {
+  const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN);
+  if (!Number.isInteger(n) || n < 0 || n > SELLABLE_LINES.length) return null;
+  return n;
+}
+
+/**
+ * Coerce the service-line / membership portion of a segment filter into a clean
+ * constraint object. Pure (no I/O) so it is unit-testable. Returns:
+ *   null  — the filter carries NO service-line intent (legacy SQL-only path).
+ *   {}    — intent was present but every key was malformed/uncoercible. Callers
+ *           MUST treat {} as "match NOBODY" (fail closed) — never let an empty
+ *           constraint fall through to selectAudience({}) = everyone.
+ *   {...} — the usable, coerced constraint.
+ */
+function narrowServiceLineFilter(segmentFilter) {
+  if (!hasServiceLineFilter(segmentFilter)) return null;
+  const f = segmentFilter;
+  const narrowed = {};
+  const hasSvc = toLineArray(f.has_service);
+  const missingSvc = toLineArray(f.missing_service);
+  const tier = toLineArray(f.waveguard_tier);
+  // null = present-but-malformed (e.g. ['lawn', 123]) → fail the WHOLE filter
+  // closed rather than narrow to the valid subset.
+  if (hasSvc === null || missingSvc === null || tier === null) return {};
+  if (hasSvc.length) narrowed.has_service = hasSvc;
+  if (missingSvc.length) narrowed.missing_service = missingSvc;
+  if (tier.length) narrowed.waveguard_tier = tier;
+  // Line-count keys: a PRESENT-but-invalid count (negative, fractional, out of
+  // range, non-numeric) fails the WHOLE filter closed — never silently drop the
+  // constraint and broaden the audience.
+  for (const key of ['min_line_count', 'max_line_count']) {
+    if (f[key] == null) continue;
+    const n = toLineCount(f[key]);
+    if (n === null) return {}; // malformed count intent → match nobody
+    narrowed[key] = n;
+  }
+  return narrowed;
+}
+
+/**
+ * Resolve the service-line / membership portion of a segment filter to the set
+ * of matching customer ids. Returns null when the filter has no service-line
+ * keys (so buildSubscriberQuery applies no whereIn and legacy behavior is
+ * preserved exactly). Returns [] (matches nobody) when the service-line keys
+ * are present but malformed — a 0-row query the empty-segment guards handle —
+ * so a typo'd/mistyped filter can never silently broaden to all customers.
+ */
+async function resolveSegmentCustomerIds(segmentFilter) {
+  const narrowed = narrowServiceLineFilter(segmentFilter);
+  if (narrowed === null) return null;              // no service-line intent
+  if (Object.keys(narrowed).length === 0) return []; // malformed intent → fail closed
+  const profiles = await selectAudience(narrowed, { recurringOnly: true });
+  return profiles.map((p) => p.customer_id).filter(Boolean);
+}
+
+/**
+ * Batch-load per-recipient personalization (city + grass-type label) for the
+ * linked customers in a send. Reuses the canonical grass source
+ * (customer_turf_profiles.grass_type, fallback normalized customers.lawn_type)
+ * and defaults grass to St. Augustine when unknown (owner directive). Returns
+ * Map<customer_id, { city, grassLabel }>. Never throws — missing data falls
+ * back to defaults at substitution time.
+ */
+async function loadPersonalizationContext(subscribers) {
+  const customerIds = Array.from(new Set((subscribers || []).map((s) => s.customer_id).filter(Boolean)));
+  const map = new Map();
+  if (!customerIds.length) return map;
+  try {
+    const [customers, turf] = await Promise.all([
+      db('customers').whereIn('id', customerIds).select('id', 'city', 'lawn_type'),
+      db('customer_turf_profiles').whereIn('customer_id', customerIds).where({ active: true }).select('customer_id', 'grass_type'),
+    ]);
+    const grassByCustomer = new Map(turf.map((t) => [t.customer_id, t.grass_type]));
+    for (const c of customers) {
+      const key = grassByCustomer.get(c.id) || normalizeGrassType(c.lawn_type) || null;
+      const grassLabel = key && key !== 'unknown' ? (grassTypeLabel(key) || DEFAULT_GRASS_LABEL) : DEFAULT_GRASS_LABEL;
+      map.set(c.id, {
+        city: sanitizePersonalizationToken(c.city) || DEFAULT_CITY_LABEL,
+        grassLabel: sanitizePersonalizationToken(grassLabel) || DEFAULT_GRASS_LABEL,
+      });
+    }
+  } catch (err) {
+    logger.warn(`[newsletter] personalization context load failed: ${err.message}`);
+  }
+  return map;
+}
+
+/**
+ * @param {object|null} segmentFilter
+ * @param {string[]|null} [customerIds] pre-resolved set from
+ *   resolveSegmentCustomerIds(); null = no service-line constraint.
+ */
+function buildSubscriberQuery(segmentFilter, customerIds = null) {
   let q = excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' }));
+
+  // Service-line / membership constraint, pre-resolved to customer ids.
+  if (Array.isArray(customerIds)) q = q.whereIn('customer_id', customerIds);
+
   if (!segmentFilter) return q;
 
   const f = segmentFilter;
   if (Array.isArray(f.sources) && f.sources.length) q = q.whereIn('source', f.sources);
-  if (f.customersOnly) q = q.whereNotNull('customer_id');
-  if (f.leadsOnly) q = q.whereNull('customer_id');
+  // `audience: 'customers'|'leads'` is the canonical shape used by
+  // newsletter-audience-profiles + the preview script; legacy customersOnly /
+  // leadsOnly stay supported. Admin routes persist req.body.segmentFilter
+  // verbatim, so an UNKNOWN audience value (typo like 'customer') must fail
+  // closed — match nobody, hit the EMPTY_SEGMENT guard — not fall through and
+  // broadcast to ALL active subscribers (the send path runs buildSubscriberQuery,
+  // not matchesFilter).
+  if (f.customersOnly || f.audience === 'customers') q = q.whereNotNull('customer_id');
+  if (f.leadsOnly || f.audience === 'leads') q = q.whereNull('customer_id');
+  if (f.audience != null && f.audience !== 'customers' && f.audience !== 'leads') {
+    q = q.whereRaw('1 = 0');
+  }
+  // region_zone: any-of array (a single string is coerced). A present-but-
+  // unusable value — a non-string scalar, or an array carrying a malformed
+  // element — fails closed instead of broadening to every region. An empty
+  // array stays a no-op (no region intent), mirroring the service-line keys.
+  if (f.region_zone != null && !(Array.isArray(f.region_zone) && f.region_zone.length === 0)) {
+    const raw = Array.isArray(f.region_zone) ? f.region_zone : [f.region_zone];
+    const zones = raw.filter((z) => typeof z === 'string' && z.trim()).map((z) => z.trim());
+    if (zones.length && zones.length === raw.length) q = q.whereIn('region_zone', zones);
+    else q = q.whereRaw('1 = 0'); // malformed region intent → match nobody
+  }
   if (Array.isArray(f.tags) && f.tags.length) {
     q = q.whereRaw('tags \\?| array[' + f.tags.map(() => '?').join(',') + ']', f.tags);
   }
@@ -158,7 +342,7 @@ async function sendCampaign(sendId, opts = {}) {
   // doesn't burn the row's status from draft/scheduled to sending only
   // to immediately land as 'sent' with recipient_count=0.
   if (!opts.force) {
-    const c = await buildSubscriberQuery(send.segment_filter).count('* as c').first();
+    const c = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
     if (Number(c?.c || 0) === 0) {
       const err = new Error('segment matches 0 active subscribers');
       err.code = 'EMPTY_SEGMENT';
@@ -199,7 +383,7 @@ async function sendCampaign(sendId, opts = {}) {
   // insert. Resume mode with existing rows skips this entirely so a changed
   // segment or new subscribers cannot expand an old campaign's audience.
   if (!opts.existingDeliveriesOnly) {
-    subscribers = await buildSubscriberQuery(send.segment_filter);
+    subscribers = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter));
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
     const deliveryRows = subscribers.map((s) => ({
       send_id: send.id,
@@ -268,10 +452,14 @@ async function sendCampaign(sendId, opts = {}) {
 
   // Body for customer touchpoints — pure function on the campaign body,
   // hoisted out of the loop. Same for every recipient.
-  // Strip the greeting-name token: substitution happens inside SendGrid's
-  // payload, so the raw body still carries {{greeting-name}} — touchpoints
-  // record the neutral form (matches what a no-name subscriber received).
-  const touchpointBody = stripGreetingNameToken(send.text_body || stripHtml(send.html_body));
+  // Neutralize every merge tag: substitution happens inside SendGrid's payload,
+  // so the raw body still carries {{greeting-name}}/{{city}}/{{grass-type}} —
+  // touchpoints record the neutral form (matches a no-name/no-data subscriber).
+  const touchpointBody = stripPersonalizationTokens(send.text_body || stripHtml(send.html_body));
+
+  // Per-recipient city + grass-type for the {{city}} / {{grass-type}} tokens.
+  // Batch-loaded once; resolved per recipient in the substitutions map below.
+  const personalizationByCustomer = await loadPersonalizationContext(subscribersToSend);
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
@@ -301,14 +489,21 @@ async function sendCampaign(sendId, opts = {}) {
 
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
+        const pctx = s.customer_id ? personalizationByCustomer.get(s.customer_id) : null;
         return {
           email: s.email,
           unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
           // Greeting personalization: the assembler put {{greeting-name}}
           // in the body; this resolves it to ", FirstName" (or "" when the
-          // subscriber row has no first name). Applies to both the HTML
-          // and plain-text parts via SendGrid substitutions.
-          substitutions: { [GREETING_NAME_TOKEN]: greetingNameValueFor(s.first_name) },
+          // subscriber row has no first name). {{city}} / {{grass-type}}
+          // resolve from the linked customer (grass defaults to St. Augustine
+          // when no lawn source). Applies to both the HTML and plain-text
+          // parts via SendGrid substitutions.
+          substitutions: {
+            [GREETING_NAME_TOKEN]: greetingNameValueFor(s.first_name),
+            [CITY_TOKEN]: pctx?.city || DEFAULT_CITY_LABEL,
+            [GRASS_TYPE_TOKEN]: pctx?.grassLabel || DEFAULT_GRASS_LABEL,
+          },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
           // even when the X-Message-Id from this batch was never observed
@@ -583,7 +778,7 @@ async function processScheduledSends() {
       // Validate AI-generated sends (flagship + Pest Insider) before dispatching
       if (requiresClaimValidation(row.newsletter_type)) {
         const recipientCount = Number(
-          (await buildSubscriberQuery(row.segment_filter).count('* as c').first())?.c || 0
+          (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
         );
         const { errors } = validateNewsletterDraft(row, { recipientCount });
         if (errors.length > 0) {
@@ -659,4 +854,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, excludeGloballySuppressed, markEventsFeatured };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, markEventsFeatured };

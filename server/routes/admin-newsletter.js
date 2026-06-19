@@ -576,20 +576,34 @@ router.post('/sends/:id/test', async (req, res) => {
       newsletterType: send.newsletter_type || undefined,
       preferredSourcesCta: true,
     });
-    // Resolve the greeting first-name token the way the broadcast does:
-    // use the test recipient's subscriber row when one exists, so the
-    // operator previews real personalization ("Hey there, Adam!"); strip
-    // the token when there's no row. sendOne has no substitutions API,
-    // so this is a manual replace.
-    const { GREETING_NAME_TOKEN, greetingNameValueFor } = require('../services/newsletter-draft');
+    // Resolve ALL merge tags the way the broadcast does so the operator's test
+    // matches production: use the test recipient's subscriber row when one
+    // exists ("Hey there, Adam!"), and resolve {{city}}/{{grass-type}} from the
+    // linked customer when present, else neutral defaults. sendOne has no
+    // substitutions API, so this is a manual replace.
+    const {
+      GREETING_NAME_TOKEN, greetingNameValueFor,
+      CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL,
+    } = require('../services/newsletter-draft');
     const testSub = await db('newsletter_subscribers')
       .whereRaw('LOWER(email) = ?', [String(testEmail).toLowerCase()])
       .first();
     const greetingValue = greetingNameValueFor(testSub?.first_name);
-    html = html.split(GREETING_NAME_TOKEN).join(greetingValue);
-    const testText = send.text_body
-      ? String(send.text_body).split(GREETING_NAME_TOKEN).join(greetingValue)
-      : undefined;
+    let cityValue = DEFAULT_CITY_LABEL;
+    let grassValue = DEFAULT_GRASS_LABEL;
+    if (testSub?.customer_id) {
+      const pctx = (await NewsletterSender.loadPersonalizationContext([testSub])).get(testSub.customer_id);
+      if (pctx) {
+        cityValue = pctx.city || DEFAULT_CITY_LABEL;
+        grassValue = pctx.grassLabel || DEFAULT_GRASS_LABEL;
+      }
+    }
+    const applyTokens = (s) => String(s)
+      .split(GREETING_NAME_TOKEN).join(greetingValue)
+      .split(CITY_TOKEN).join(cityValue)
+      .split(GRASS_TYPE_TOKEN).join(grassValue);
+    html = applyTokens(html);
+    const testText = send.text_body ? applyTokens(send.text_body) : undefined;
 
     const result = await sendgrid.sendOne({
       to: testEmail,
@@ -642,7 +656,7 @@ router.post('/sends/:id/send', async (req, res) => {
     // instead of returning 202 + later landing as 'failed'.
     const force = !!req.body?.force;
     if (!force) {
-      const segCount = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
+      const segCount = await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
       if (Number(segCount?.c || 0) === 0) {
         return res.status(400).json({
           error: 'segment matches 0 active subscribers; pass { force: true } to send anyway',
@@ -656,7 +670,7 @@ router.post('/sends/:id/send', async (req, res) => {
     // (existing contract) — not structural errors.
     if (requiresClaimValidation(send.newsletter_type)) {
       const recipientCount = force ? 1 : Number(
-        (await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first())?.c || 0
+        (await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first())?.c || 0
       );
       const { errors } = validateNewsletterDraft(send, { recipientCount });
       if (errors.length > 0) {
@@ -785,13 +799,14 @@ router.post('/preview', async (req, res) => {
   try {
     const { htmlBody, previewText, newsletterType } = req.body || {};
     const demoUrl = sendgrid.unsubscribeUrl('preview-demo-token');
-    // Previews have no recipient — drop the greeting-name token so the
-    // operator never sees a literal {{greeting-name}} in the dialog.
-    const { stripGreetingNameToken } = require('../services/newsletter-draft');
+    // Previews have no recipient — neutralize every merge tag so the operator
+    // never sees a literal {{greeting-name}}/{{city}}/{{grass-type}} in the
+    // dialog (city/grass fall back to their neutral defaults).
+    const { stripPersonalizationTokens } = require('../services/newsletter-draft');
     const html = wrapNewsletter({
-      body: stripGreetingNameToken(htmlBody || ''),
+      body: stripPersonalizationTokens(htmlBody || ''),
       unsubscribeUrl: demoUrl,
-      preheader: previewText || undefined,
+      preheader: previewText ? stripPersonalizationTokens(previewText) : undefined,
       newsletterType: newsletterType || undefined,
       preferredSourcesCta: true,
     });
@@ -822,7 +837,8 @@ router.get('/tags', async (req, res, next) => {
 // POST /api/admin/newsletter/segment-preview — count subscribers matching a segment
 router.post('/segment-preview', async (req, res, next) => {
   try {
-    const count = await NewsletterSender.buildSubscriberQuery(req.body.segmentFilter || null).count('* as c').first();
+    const seg = req.body.segmentFilter || null;
+    const count = await NewsletterSender.buildSubscriberQuery(seg, await NewsletterSender.resolveSegmentCustomerIds(seg)).count('* as c').first();
     res.json({ count: Number(count?.c || 0) });
   } catch (err) { next(err); }
 });
@@ -1619,7 +1635,7 @@ router.post('/sends/:id/validate', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     let recipientCount = null;
     try {
-      const c = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
+      const c = await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first();
       recipientCount = Number(c?.c || 0);
     } catch (queryErr) {
       logger.error(`[newsletter] validate subscriber count failed: ${queryErr.message}`);
