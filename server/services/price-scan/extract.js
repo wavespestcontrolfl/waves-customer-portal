@@ -48,6 +48,10 @@ function parsePriceText(text) {
   // package price (normalization divides by size again), so skip these.
   if (/\beach\b/i.test(s)) return null;
   if (/(?:\/|\bper\b)\s*(?:fl\.?\s*oz|ounce|oz|gallon|gal|quart|qt|pint|pt|pound|lb|liter|litre|ml|kg|gram|unit)\b/i.test(s)) return null;
+  // Reject promo / reference badges ("Save $20", "$20 off", "Free shipping over
+  // $50", "Was $99") — these carry a dollar amount that isn't the package price
+  // and can appear before it in a DOM priceTexts list.
+  if (/\b(?:save|off|discount|rebate|coupon|clearance|shipping|free|was)\b/i.test(s)) return null;
   // Numbers, allowing thousands separators: "1,234.50" is one token.
   const numbers = s.match(/\d[\d,]*(?:\.\d+)?/g);
   if (!numbers || numbers.length !== 1) return null; // 0 = no price, >1 = range/ambiguous

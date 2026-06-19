@@ -39,6 +39,13 @@ describe('price-scan extract', () => {
       expect(parsePriceText('$50 each')).toBeNull();
       expect(parsePriceText('$95.00')).toBe(95); // package price still fine
     });
+    test('rejects dollar promo / reference badges', () => {
+      expect(parsePriceText('Save $20')).toBeNull();
+      expect(parsePriceText('$20 off')).toBeNull();
+      expect(parsePriceText('Free shipping over $50')).toBeNull();
+      expect(parsePriceText('Was $99')).toBeNull();
+      expect(parsePriceText('$95.00')).toBe(95);
+    });
   });
 
   describe('mapAvailability', () => {
