@@ -165,7 +165,7 @@ function buildQuery({ status, contentType, source, liveStatus, search }) {
   return `/admin/content-registry?${params.toString()}`;
 }
 
-export default function ContentRegistryPage() {
+export default function ContentRegistryPage({ embedded = false } = {}) {
   const [data, setData] = useState(null);
   const [status, setStatus] = useState("");
   const [contentType, setContentType] = useState("");
@@ -232,15 +232,43 @@ export default function ContentRegistryPage() {
   const mismatchReasons = arrayValue(selected?.mismatch_reasons);
 
   return (
-    <div style={{ minHeight: "100%", background: D.bg, padding: 24 }}>
-      <AdminCommandHeader
-        title="Content Registry"
-        icon={Database}
-        actions={[
-          { key: "sync", label: "Sync", icon: RefreshCw, onClick: runSync, disabled: loading || syncing, variant: "primary" },
-          { key: "refresh", label: "Refresh", icon: RefreshCw, onClick: load, disabled: loading || syncing, variant: "secondary" },
-        ]}
-      />
+    <div
+      style={{
+        minHeight: "100%",
+        background: embedded ? "transparent" : D.bg,
+        padding: embedded ? 0 : 24,
+      }}
+    >
+      {!embedded && (
+        <AdminCommandHeader
+          title="Content Registry"
+          icon={Database}
+          actions={[
+            { key: "sync", label: "Sync", icon: RefreshCw, onClick: runSync, disabled: loading || syncing, variant: "primary" },
+            { key: "refresh", label: "Refresh", icon: RefreshCw, onClick: load, disabled: loading || syncing, variant: "secondary" },
+          ]}
+        />
+      )}
+      {embedded && (
+        <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+          <button
+            type="button"
+            onClick={runSync}
+            disabled={loading || syncing}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 14px", borderRadius: 6, border: `1px solid ${D.heading}`, background: D.heading, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+          >
+            <RefreshCw size={14} strokeWidth={2} /> {syncing ? "Syncing..." : "Sync"}
+          </button>
+          <button
+            type="button"
+            onClick={load}
+            disabled={loading || syncing}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 12px", borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+          >
+            <RefreshCw size={14} strokeWidth={2} /> Refresh
+          </button>
+        </div>
+      )}
 
       {error && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>

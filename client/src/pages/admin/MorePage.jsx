@@ -25,6 +25,8 @@ import {
   ChevronRight,
   Bot,
   Sprout,
+  Newspaper,
+  Send,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
 
@@ -55,6 +57,8 @@ const SECTIONS = [
       { path: "/admin/ppc", icon: Megaphone, label: "PPC" },
       { path: "/admin/seo", icon: SearchIcon, label: "SEO" },
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
+      { path: "/admin/blog", icon: Newspaper, label: "Blog" },
+      { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
     ],
   },
   {

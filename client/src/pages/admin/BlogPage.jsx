@@ -1,6 +1,9 @@
 import { useState, useEffect, lazy, Suspense } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
+  Bot,
   CalendarDays,
+  Database,
   FileCheck2,
   FileText,
   Lightbulb,
@@ -10,6 +13,16 @@ import {
   Wand2,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+
+// Content Engine + Registry are folded into this page as tabs (Autopilot /
+// Registry) rather than living as their own Marketing nav items; both are
+// rendered `embedded` so their own AdminCommandHeader is suppressed and this
+// page's header is the single header. Lazy-loaded to match the ContentCalendar
+// tab — heavy optional surfaces stay out of the base blog chunk.
+const AutonomousContentReviewPage = lazy(
+  () => import("./AutonomousContentReviewPage"),
+);
+const ContentRegistryPage = lazy(() => import("./ContentRegistryPage"));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
@@ -2852,10 +2865,26 @@ const TABS = [
   { key: "calendar", label: "Calendar", Icon: CalendarDays },
   { key: "ideas", label: "Ideas", Icon: Lightbulb },
   { key: "audit", label: "Audit", Icon: FileCheck2 },
+  { key: "autopilot", label: "Autopilot", Icon: Bot },
+  { key: "registry", label: "Registry", Icon: Database },
 ];
 
 export default function BlogPage() {
-  const [tab, setTab] = useState("generate");
+  // Tab lives in the URL (?tab=) so the retired /admin/content-engine and
+  // /admin/content-registry routes can redirect straight to the right tab
+  // and individual surfaces stay deep-linkable.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const paramTab = searchParams.get("tab");
+  const tab = TABS.some((t) => t.key === paramTab) ? paramTab : "generate";
+  const setTab = (next) =>
+    setSearchParams(
+      (current) => {
+        const params = new URLSearchParams(current);
+        params.set("tab", next);
+        return params;
+      },
+      { replace: true },
+    );
   const [selectedPost, setSelectedPost] = useState(null);
   const [counts, setCounts] = useState({});
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
@@ -2917,12 +2946,16 @@ export default function BlogPage() {
         onSectionChange={setTab}
         ariaLabel="Blog section"
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
-        action={{
-          label: generatingIdeas ? "Generating..." : "Create Blog",
-          icon: Plus,
-          onClick: handleGenerateIdeas,
-          disabled: generatingIdeas,
-        }}
+        action={
+          tab === "autopilot" || tab === "registry"
+            ? null
+            : {
+                label: generatingIdeas ? "Generating..." : "Create Blog",
+                icon: Plus,
+                onClick: handleGenerateIdeas,
+                disabled: generatingIdeas,
+              }
+        }
       />
       {tab === "generate" ? (
         <GenerateTab onGenerated={() => setTab("drafts")} />
@@ -2937,6 +2970,26 @@ export default function BlogPage() {
           }
         >
           <ContentCalendar />
+        </Suspense>
+      ) : tab === "autopilot" ? (
+        <Suspense
+          fallback={
+            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+              Loading autopilot...
+            </div>
+          }
+        >
+          <AutonomousContentReviewPage embedded />
+        </Suspense>
+      ) : tab === "registry" ? (
+        <Suspense
+          fallback={
+            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+              Loading registry...
+            </div>
+          }
+        >
+          <ContentRegistryPage embedded />
         </Suspense>
       ) : (
         <PostList status={statusMap[tab]} onSelectPost={setSelectedPost} />
