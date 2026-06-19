@@ -139,6 +139,7 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const parentId = service.recurring_parent_id || service.id;
   const siblingRows = await ctx.db('scheduled_services')
     .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+    .where('is_recurring', true) // cadence occurrences only — boosters aren't dispatchable, so don't let them block
     .whereNot('id', service.id)
     .whereNotIn('status', ['cancelled'])
     .whereBetween('scheduled_date', [dateFrom, dateTo])

@@ -24,15 +24,15 @@ const { toDateStr } = require('./dates');
 const audit = require('./audit');
 
 async function loadCapabilityMap() {
+  // Fail closed: the deactivated-tech HARD filter depends on this data. An empty
+  // map would report every tech as 'missing' (a soft penalty only), so a read
+  // failure could let apply mode move work onto a disabled tech. Throw → the run
+  // aborts rather than optimizing without the hard constraint.
   const map = new Map();
-  try {
-    const rows = await db('technician_capabilities')
-      .select('technician_id', 'service_category', 'capability_level', 'active');
-    for (const r of rows) {
-      map.set(`${r.technician_id}:${r.service_category}`, { level: r.capability_level, active: r.active !== false });
-    }
-  } catch (e) {
-    logger.warn(`[auto-dispatch] capability map load failed: ${e.message}`);
+  const rows = await db('technician_capabilities')
+    .select('technician_id', 'service_category', 'capability_level', 'active');
+  for (const r of rows) {
+    map.set(`${r.technician_id}:${r.service_category}`, { level: r.capability_level, active: r.active !== false });
   }
   return map;
 }
@@ -53,6 +53,9 @@ function loadEligibleServices(lockBoundary, lookaheadEnd) {
     // is_recurring=true only — booster-month rows carry a recurring_parent_id but
     // is_recurring=false and must not be swept (see waveguard-existing-services.js).
     .where('scheduled_services.is_recurring', true)
+    // Archiving a customer sets customers.deleted_at without clearing `active`,
+    // so filter it here like the reminder/billing crons do.
+    .whereNull('customers.deleted_at')
     .whereIn('scheduled_services.status', ['pending', 'confirmed'])
     .where('scheduled_services.scheduled_date', '>', lockBoundary)
     .where('scheduled_services.scheduled_date', '<=', lookaheadEnd)

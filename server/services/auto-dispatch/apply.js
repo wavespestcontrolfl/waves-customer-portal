@@ -77,17 +77,32 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     throw Object.assign(new Error('Placement changed since it was scored — skipping stale move'), { code: 'STALE_PLACEMENT' });
   }
 
+  // Re-assert the operator opt-out flags + original date INSIDE the rebooker's
+  // move transaction so a lock/reschedule landing between the read above and the
+  // move is caught atomically (0 rows → the rebooker throws 409). These columns
+  // are NOT NULL / always-present, so no null-predicate pitfalls.
+  options.expect = {
+    auto_dispatch_locked: false,
+    auto_dispatch_excluded: false,
+    scheduled_date: toDateStr(fresh.scheduled_date),
+  };
+
   // Canonical move — transactional, overlap-checked, silent.
   await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
 
-  // Stamp auto-dispatch bookkeeping. Atomic increment avoids a lost update if
-  // two runs (manual + cron) touch the same row before either re-reads it.
-  await db('scheduled_services').where({ id: service.id }).update({
-    last_auto_dispatch_at: db.fn.now(),
-    last_auto_dispatch_run_id: runId,
-    auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
-    updated_at: db.fn.now(),
-  });
+  // Stamp auto-dispatch bookkeeping. The move already committed; a stamp failure
+  // must NOT flip the result to "failed" (that loses the move in run totals and
+  // skips the stability stamp). Best-effort, atomic increment.
+  try {
+    await db('scheduled_services').where({ id: service.id }).update({
+      last_auto_dispatch_at: db.fn.now(),
+      last_auto_dispatch_run_id: runId,
+      auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
+      updated_at: db.fn.now(),
+    });
+  } catch (stampErr) {
+    logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
+  }
 
   let notification = null;
   try {

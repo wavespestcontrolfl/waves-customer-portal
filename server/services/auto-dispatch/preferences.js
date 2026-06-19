@@ -69,17 +69,16 @@ function normalizePreferences(prefs, serviceType) {
 }
 
 async function getCustomerSchedulingPreferences(customerId, serviceType) {
-  let prefs = null;
-  try {
-    prefs = await db('property_preferences')
-      .where('customer_id', customerId)
-      .first(
-        'preferred_day', 'preferred_time', 'contact_preference',
-        'blackout_start', 'blackout_end', 'access_notes', 'special_instructions',
-      );
-  } catch (_) {
-    prefs = null; // table/columns optional — degrade to service-type defaults
-  }
+  // No try/catch: a real read error must propagate so the orchestrator skips this
+  // service (fail closed) rather than silently dropping the customer's HARD
+  // blackout constraint. A missing ROW is not an error — .first() returns
+  // undefined and normalizePreferences applies service-type defaults.
+  const prefs = await db('property_preferences')
+    .where('customer_id', customerId)
+    .first(
+      'preferred_day', 'preferred_time', 'contact_preference',
+      'blackout_start', 'blackout_end', 'access_notes', 'special_instructions',
+    );
   return normalizePreferences(prefs, serviceType);
 }
 

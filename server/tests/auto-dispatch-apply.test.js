@@ -34,7 +34,10 @@ test('applies the move and atomically increments the change count', async () => 
 
   const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
 
-  expect(SmartRebooker.reschedule).toHaveBeenCalledWith('s1', '2026-08-11', { start: '08:00', end: '10:00' }, 'auto_dispatch', 'auto_dispatch', {});
+  const callArgs = SmartRebooker.reschedule.mock.calls[0];
+  expect(callArgs.slice(0, 5)).toEqual(['s1', '2026-08-11', { start: '08:00', end: '10:00' }, 'auto_dispatch', 'auto_dispatch']);
+  // atomic expect predicate carried into the rebooker's move transaction
+  expect(callArgs[5].expect).toMatchObject({ auto_dispatch_locked: false, auto_dispatch_excluded: false, scheduled_date: '2026-08-04' });
   expect(res).toMatchObject({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
   expect(update.mock.calls[0][0].auto_dispatch_change_count).toEqual({ raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' });
 });

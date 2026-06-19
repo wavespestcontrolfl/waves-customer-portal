@@ -111,6 +111,16 @@ test('below-threshold improvement is left unchanged', async () => {
   expect(lastDecision('no_change').reason_code).toBe('NO_SCORE_IMPROVEMENT');
 });
 
+test('fails closed (run status failed) when capability data cannot load', async () => {
+  db.mockImplementation((table) => {
+    if (table === 'technician_capabilities') return { select: () => Promise.reject(new Error('capability table read failed')) };
+    return buildChain(servicesResult);
+  });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res.status).toBe('failed');
+  expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+});
+
 test('ineligible service is skipped before candidate generation', async () => {
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'INSIDE_LOCK_WINDOW', reason_description: 'x' });
   const res = await runAutoDispatch({ mode: 'dry_run' });
