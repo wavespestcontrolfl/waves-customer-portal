@@ -7805,20 +7805,33 @@ export function CompletionPanel({
     const interactionLabel = CUSTOMER_INTERACTION_OPTIONS.find(
       (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
     )?.label || "";
-    // Reporting is ET-only: resolve the visit date in America/New_York so a
-    // non-ET device (or a completion logged just past browser-local midnight)
-    // can't draft customer-facing copy with the wrong visit date. Prefer the
-    // check-in instant; for office closeouts / backfilled visits with no
-    // check-in, fall back to the scheduled date (parsed at noon to dodge the
-    // date-only → UTC-midnight day-shift) before today.
+    // Reporting is ET-only: resolve the visit date so a non-ET device (or a
+    // completion logged just past browser-local midnight) can't draft
+    // customer-facing copy with the wrong visit date.
     const scheduledDateOnly = String(
       service.scheduledDate || service.scheduled_date || service.date || "",
     ).split("T")[0];
-    const visitDate = service.checkInTime
-      ? new Date(service.checkInTime)
-      : /^\d{4}-\d{2}-\d{2}$/.test(scheduledDateOnly)
-        ? new Date(`${scheduledDateOnly}T12:00:00`)
-        : new Date();
+    let serviceDateLabel;
+    if (service.checkInTime) {
+      // A real timestamp — format the instant in ET.
+      serviceDateLabel = new Date(service.checkInTime).toLocaleDateString(
+        "en-US",
+        { month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York" },
+      );
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(scheduledDateOnly)) {
+      // Office closeout / backfilled visit: the scheduled date is already an ET
+      // calendar date. Render the Y-M-D verbatim (UTC noon + format in UTC) so
+      // no browser-local timezone math can shift it a day in either direction.
+      const [y, mo, da] = scheduledDateOnly.split("-").map(Number);
+      serviceDateLabel = new Date(Date.UTC(y, mo - 1, da, 12)).toLocaleDateString(
+        "en-US",
+        { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" },
+      );
+    } else {
+      serviceDateLabel = new Date().toLocaleDateString("en-US", {
+        month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York",
+      });
+    }
     const payload = {
       scheduledServiceId: service.id || null,
       customerName: service.customerName,
@@ -7832,10 +7845,7 @@ export function CompletionPanel({
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",
-      serviceDate: visitDate.toLocaleDateString("en-US", {
-        month: "long", day: "numeric", year: "numeric",
-        timeZone: "America/New_York",
-      }),
+      serviceDate: serviceDateLabel,
       arrivalTime: service.checkInTime
         ? new Date(service.checkInTime).toLocaleTimeString("en-US", {
             hour: "numeric", minute: "2-digit", hour12: true,
@@ -8047,6 +8057,13 @@ export function CompletionPanel({
 
   async function handleSubmit() {
     if (submitting) return;
+    // Don't complete while an AI draft is in flight — the response is about to
+    // replace the notes, and submitting now would either lose the generated copy
+    // or rebuild the structured fields from soon-to-be-overwritten notes.
+    if (generating) {
+      alert("Hang on — finishing the AI draft. Try again in a moment.");
+      return;
+    }
     // The turf-height flag drives a server-required field on lawn visits; don't
     // submit until its state is loaded, or a pre-load submit hides the field the
     // server still enforces (422). The flag is session-cached so this rarely waits.
@@ -8617,6 +8634,11 @@ export function CompletionPanel({
   ).length;
   function handleProtocolActionSelect(value) {
     if (!value) return;
+    // No note-mutating selections while an AI draft is in flight — the chip line
+    // would be clobbered when the response replaces the notes, and handleSubmit
+    // would rebuild the structured fields from the overwritten text. (The select
+    // is value="" so it stays on the placeholder; nothing to reset.)
+    if (generating) return;
     if (!protocolActions.length) {
       appendUniqueLabel(setSelectedProtocolActionLabels, value);
       const chip = CHIP_ACTION_BY_LABEL[value];
@@ -8630,13 +8652,13 @@ export function CompletionPanel({
     if (option?.action) applyProtocolAction(option.action);
   }
   function handleObservationSelect(value) {
-    if (value) {
+    if (value && !generating) {
       appendUniqueLabel(setSelectedObservationLabels, value);
       addChipNote("Found", value);
     }
   }
   function handleRecommendationSelect(value) {
-    if (value) {
+    if (value && !generating) {
       appendUniqueLabel(setSelectedRecommendationLabels, value);
       addChipNote("Next", value);
     }
@@ -9992,6 +10014,11 @@ export function CompletionPanel({
                     alert("Add service notes, products, or visit details first.");
                     return;
                   }
+                  // Stop any in-flight dictation first: the mic is disabled while
+                  // generating, so leaving it running would keep appending
+                  // transcript chunks into notes the response is about to replace,
+                  // with no way to stop it until generation finishes.
+                  if (dictation.listening) dictation.toggle();
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
@@ -11064,6 +11091,7 @@ export function CompletionPanel({
               onClick={() => handleSubmit()}
               disabled={
                 submitting ||
+                generating ||
                 tankCleanoutCompletionBlocked ||
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||
@@ -12122,6 +12150,11 @@ export function CompletionPanel({
                   alert("Add service notes, products, or visit details first.");
                   return;
                 }
+                // Stop any in-flight dictation first: the mic is disabled while
+                // generating, so leaving it running would keep appending
+                // transcript chunks into notes the response is about to replace,
+                // with no way to stop it until generation finishes.
+                if (dictation.listening) dictation.toggle();
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
@@ -13116,6 +13149,7 @@ export function CompletionPanel({
             onClick={() => handleSubmit()}
             disabled={
               submitting ||
+              generating ||
               tankCleanoutCompletionBlocked ||
               blackoutCompletionBlocked ||
               nLimitCompletionBlocked ||
