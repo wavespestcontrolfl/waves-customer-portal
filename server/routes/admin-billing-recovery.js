@@ -1,0 +1,364 @@
+/**
+ * Billing Recovery workbench — /api/admin/billing-recovery
+ *
+ * Surfaces completed visits that were never invoiced (the silent leak: priced,
+ * non-autopay, per-visit-billed customers whose completion missed the invoice
+ * gate at admin-dispatch.js) and lets an operator either cut a draft invoice
+ * ("bill it") or record the visit as an intentionally-free no-cost type.
+ *
+ * Hard rule (autopay double-bill guard): autopay visits hold NO per-visit price
+ * and are billed separately by billing-cron off customers.monthly_rate. Putting
+ * an invoice on an autopay-covered visit double-charges the customer. "Active
+ * autopay" is the canonical customerOnAutopay() definition — a default Stripe
+ * `payment_methods` row, NOT the (often null/stale) customers.autopay_payment_method_id
+ * pointer. The leak query excludes those customers via a payment_methods EXISTS
+ * check, AND POST /bill re-verifies with customerOnAutopay() before creating any
+ * invoice. The client is never trusted.
+ *
+ * No-cost allowlist (Adam-locked 2026-06-19) — never surfaced as a leak:
+ *   autopay-active · prepaid · is_callback (warranty/re-treat) · appointment
+ *   (general_appointment "Waves Pest Control Appointment Service") · inspection
+ *   (waived) · re-service · estimate visit · rodent trapping / in-window trap
+ *   checks · follow-up re-visits.
+ *
+ * This route never auto-bills. Every invoice is an explicit operator click.
+ */
+const express = require('express');
+const router = express.Router();
+const db = require('../models/db');
+const logger = require('../services/logger');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const InvoiceService = require('../services/invoice');
+const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { publicPortalUrl } = require('../utils/portal-url');
+const { etDateString } = require('../utils/datetime-et');
+const {
+  executeDashboardTool,
+  INTERNAL_TEST_CUSTOMERS,
+} = require('../services/intelligence-bar/dashboard-tools');
+
+router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Advisory-lock namespace so two concurrent "bill" clicks on the same visit
+// serialize and can't both create a draft invoice. 0x4252 = "BR".
+const BILLING_RECOVERY_LOCK_NS = 0x4252;
+
+// Service-type patterns that are intentionally $0 and must never be flagged as a
+// leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
+const FREE_TYPE_PATTERNS = [
+  '%appointment%',  // general_appointment ("Waves Pest Control Appointment Service")
+  '%inspection%',   // inspections (often waived/credited)
+  '%re-service%', '%reservice%', '%re service%', // free re-services
+  '%estimate%',     // estimate visits
+  '%trap%', '%rodent%', // rodent trapping setup + in-window trap checks (judge manually)
+];
+
+// SQL fragment: TRUE when a non-void invoice already exists for the visit.
+// Aliases: `sr` = service_records, `ss` = scheduled_services.
+const HAS_INVOICE_SQL = `EXISTS (
+  SELECT 1 FROM invoices i
+  WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id)
+    AND COALESCE(i.status, '') <> 'void'
+)`;
+
+const INTERNAL_NAME_SQL = "LOWER(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,''))";
+
+// Active-autopay predicate mirroring customerOnAutopay(): keyed on the canonical
+// default Stripe payment_methods row (not the customers pointer), with the ET
+// pause check and ACH-not-active → card-only fallback. The single `?` binds
+// today's ET date. Returns { sql, binding } so callers can NOT() it.
+function autopayActivePredicate() {
+  const sql = `(
+    c.autopay_enabled IS NOT FALSE
+    AND NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= ?::date)
+    AND EXISTS (
+      SELECT 1 FROM payment_methods pm
+      WHERE pm.customer_id = c.id
+        AND pm.processor = 'stripe'
+        AND pm.is_default = true
+        AND pm.autopay_enabled = true
+        AND pm.stripe_payment_method_id IS NOT NULL
+        AND (
+          c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'
+          OR pm.method_type = 'card'
+        )
+    )
+  )`;
+  return { sql, binding: etDateString() };
+}
+
+function clampDays(raw) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return 90;
+  return Math.min(365, Math.max(1, n));
+}
+
+// Shared base query for uninvoiced completed visits, with the full no-cost
+// allowlist applied. Returns priced visits only (estimated_price > 0). All
+// req-derived values are bound, never interpolated.
+function uninvoicedLeakQuery(days) {
+  const autopay = autopayActivePredicate();
+  const q = db({ ss: 'scheduled_services' })
+    .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
+    .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
+    .leftJoin({ d: 'visit_billing_dispositions' }, 'd.scheduled_service_id', 'ss.id')
+    .whereRaw("ss.completed_at >= now() - (? * interval '1 day')", [days])
+    .whereRaw('COALESCE(ss.estimated_price, 0) > 0')
+    .whereNull('d.id')                                   // not already dispositioned
+    .whereRaw(`NOT ${HAS_INVOICE_SQL}`)                  // no existing invoice
+    .whereRaw('COALESCE(ss.is_callback, false) = false') // not a callback (free re-treat)
+    .whereRaw('COALESCE(sr.is_callback, false) = false')
+    .whereRaw('COALESCE(ss.prepaid_amount, 0) = 0')      // not prepaid
+    .whereRaw(`NOT ${autopay.sql}`, [autopay.binding])   // not autopay (cron-billed)
+    .whereRaw(
+      `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${FREE_TYPE_PATTERNS.map(() => '?').join(',')}]::text[])`,
+      FREE_TYPE_PATTERNS,
+    );
+  if (INTERNAL_TEST_CUSTOMERS.length) {
+    q.whereNotIn(db.raw(INTERNAL_NAME_SQL), INTERNAL_TEST_CUSTOMERS);
+  }
+  return q;
+}
+
+/**
+ * GET /api/admin/billing-recovery/leaks?days=90
+ * Completed-but-uninvoiced visits split into one-click-billable leaks
+ * (monthly_rate = 0, per-visit billed) and needs-review (monthly_rate > 0,
+ * verify they aren't billed via the monthly cadence).
+ */
+router.get('/leaks', async (req, res) => {
+  try {
+    const days = clampDays(req.query.days);
+    const rows = await uninvoicedLeakQuery(days)
+      .select(
+        'ss.id as scheduled_service_id',
+        'sr.id as service_record_id',
+        'ss.service_type',
+        'ss.estimated_price',
+        'ss.completed_at',
+        'c.id as customer_id',
+        'c.first_name',
+        'c.last_name',
+        'c.monthly_rate',
+        'c.waveguard_tier',
+      )
+      .orderBy('ss.completed_at', 'desc');
+
+    const shape = (r) => ({
+      scheduled_service_id: r.scheduled_service_id,
+      service_record_id: r.service_record_id,
+      customer_id: r.customer_id,
+      customer: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      service_type: r.service_type,
+      price: parseFloat(r.estimated_price || 0),
+      completed_at: r.completed_at,
+      monthly_rate: parseFloat(r.monthly_rate || 0),
+      waveguard_tier: r.waveguard_tier || null,
+      billable: !!r.service_record_id, // cannot invoice without a service record
+    });
+
+    const leaks = rows.filter((r) => parseFloat(r.monthly_rate || 0) === 0).map(shape);
+    const needsReview = rows.filter((r) => parseFloat(r.monthly_rate || 0) > 0).map(shape);
+    const sum = (arr) => Math.round(arr.reduce((s, r) => s + r.price, 0) * 100) / 100;
+
+    res.json({
+      window_days: days,
+      summary: {
+        leak_visits: leaks.length,
+        leak_customers: new Set(leaks.map((r) => r.customer_id)).size,
+        leak_dollars: sum(leaks),
+        review_visits: needsReview.length,
+        review_dollars: sum(needsReview),
+      },
+      leaks,
+      needs_review: needsReview,
+    });
+  } catch (err) {
+    logger.error(`[billing-recovery] leaks query failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load uninvoiced visits' });
+  }
+});
+
+/**
+ * GET /api/admin/billing-recovery/aging?min_amount=0
+ * AR aging for invoiced-but-unpaid invoices. Reuses the dashboard
+ * get_outstanding_balances tool (ET-anchored 30/60/90 buckets) — single
+ * source of truth so the numbers reconcile with the dashboard.
+ */
+router.get('/aging', async (req, res) => {
+  try {
+    const minAmount = Math.max(0, parseFloat(req.query.min_amount) || 0);
+    const aging = await executeDashboardTool('get_outstanding_balances', { min_amount: minAmount });
+    res.json(aging);
+  } catch (err) {
+    logger.error(`[billing-recovery] aging query failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load AR aging' });
+  }
+});
+
+/**
+ * POST /api/admin/billing-recovery/:scheduledServiceId/bill
+ * Cut a DRAFT invoice for an uninvoiced completed visit (does NOT send it —
+ * the operator sends from the Invoices surface). Server re-verifies the visit
+ * is genuinely billable (not autopay-covered, not already invoiced/dispositioned)
+ * before creating anything, and serializes concurrent clicks per visit.
+ */
+router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
+  const { scheduledServiceId } = req.params;
+  try {
+    const visit = await db({ ss: 'scheduled_services' })
+      .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
+      .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
+      .where('ss.id', scheduledServiceId)
+      .select(
+        'ss.id as scheduled_service_id',
+        'sr.id as service_record_id',
+        'ss.service_type',
+        'ss.estimated_price',
+        'ss.prepaid_amount',
+        db.raw('COALESCE(ss.is_callback, false) as ss_callback'),
+        db.raw('COALESCE(sr.is_callback, false) as sr_callback'),
+        'c.id as customer_id',
+        'c.monthly_rate',
+        'c.property_type',
+        'c.autopay_enabled',
+        'c.autopay_paused_until',
+        'c.ach_status',
+      )
+      .first();
+
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+    if (!visit.service_record_id) {
+      return res.status(422).json({ error: 'Visit has no completion record — cannot invoice' });
+    }
+
+    // Canonical autopay double-bill guard (keyed on the default payment_methods
+    // row, ET pause, ACH-not-active → card-only). Never trust the client.
+    const onAutopay = await customerOnAutopay({
+      id: visit.customer_id,
+      autopay_enabled: visit.autopay_enabled,
+      autopay_paused_until: visit.autopay_paused_until,
+      ach_status: visit.ach_status,
+    });
+    if (onAutopay) {
+      return res.status(409).json({ error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
+    }
+    if (visit.ss_callback || visit.sr_callback) {
+      return res.status(409).json({ error: 'Visit is flagged as a callback / re-treat (no-cost).' });
+    }
+    if (parseFloat(visit.prepaid_amount || 0) > 0) {
+      return res.status(409).json({ error: 'Visit is prepaid.' });
+    }
+    if (!(parseFloat(visit.estimated_price || 0) > 0)) {
+      return res.status(422).json({ error: 'Visit has no price to invoice.' });
+    }
+
+    // Serialize concurrent bills on the same visit, recheck inside the lock,
+    // then create the invoice + disposition. Prevents duplicate draft invoices.
+    const invoice = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [BILLING_RECOVERY_LOCK_NS, scheduledServiceId]);
+
+      const existingInvoice = await trx('invoices')
+        .where(function () {
+          this.where('service_record_id', visit.service_record_id).orWhere('scheduled_service_id', scheduledServiceId);
+        })
+        .whereNot('status', 'void')
+        .first();
+      if (existingInvoice) {
+        const e = new Error('An invoice already exists for this visit.');
+        e.status = 409;
+        throw e;
+      }
+
+      const existingDisposition = await trx('visit_billing_dispositions')
+        .where('scheduled_service_id', scheduledServiceId)
+        .first();
+      if (existingDisposition) {
+        const e = new Error('Visit has already been handled.');
+        e.status = 409;
+        throw e;
+      }
+
+      // Canonical completion path (replays scheduled-service line items + discounts).
+      const created = await InvoiceService.createFromService(visit.service_record_id, {
+        amount: parseFloat(visit.estimated_price),
+        description: visit.service_type,
+        taxRate: visit.property_type === 'commercial' ? 0.07 : 0,
+        useScheduledReplay: true,
+      });
+
+      await trx('visit_billing_dispositions').insert({
+        scheduled_service_id: scheduledServiceId,
+        service_record_id: visit.service_record_id,
+        disposition: 'billed',
+        invoice_id: created.id,
+        actor_user_id: req.technicianId,
+      });
+
+      return created;
+    });
+
+    let payUrl = null;
+    if (invoice.token) {
+      payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+        kind: 'invoice',
+        entityType: 'invoices',
+        entityId: invoice.id,
+        customerId: invoice.customer_id,
+        codePrefix: invoiceShortCodePrefix(invoice),
+      });
+    }
+
+    logger.info(`[billing-recovery] billed visit ${scheduledServiceId} -> invoice ${invoice.id} by tech ${req.technicianId}`);
+    res.json({ ok: true, invoice: { id: invoice.id, total: invoice.total, status: invoice.status }, payUrl });
+  } catch (err) {
+    if (err && err.status === 409) return res.status(409).json({ error: err.message });
+    if (err && err.code === '23505') return res.status(409).json({ error: 'Visit has already been handled.' });
+    logger.error(`[billing-recovery] bill failed for ${scheduledServiceId}: ${err.message}`);
+    res.status(500).json({ error: 'Failed to create invoice' });
+  }
+});
+
+/**
+ * POST /api/admin/billing-recovery/:scheduledServiceId/dismiss
+ * Record a visit as an intentionally-free no-cost type. Creates NO invoice —
+ * only removes the visit from the leak queue and logs the reason.
+ */
+router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
+  const { scheduledServiceId } = req.params;
+  const reason = String(req.body.reason || '').trim().slice(0, 300) || null;
+  try {
+    const visit = await db({ ss: 'scheduled_services' })
+      .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
+      .where('ss.id', scheduledServiceId)
+      .select('ss.id as scheduled_service_id', 'sr.id as service_record_id')
+      .first();
+    if (!visit) return res.status(404).json({ error: 'Visit not found' });
+
+    const existing = await db('visit_billing_dispositions')
+      .where('scheduled_service_id', scheduledServiceId)
+      .first();
+    if (existing) return res.status(409).json({ error: 'Visit has already been handled.' });
+
+    await db('visit_billing_dispositions').insert({
+      scheduled_service_id: scheduledServiceId,
+      service_record_id: visit.service_record_id || null,
+      disposition: 'intentionally_free',
+      reason, // operator note stored in the DB column (not logged)
+      actor_user_id: req.technicianId,
+    });
+
+    // Do NOT log the free-text reason — it can contain customer PII. Log IDs only.
+    logger.info(`[billing-recovery] dismissed visit ${scheduledServiceId} as intentionally_free (reason ${reason ? 'provided' : 'none'}) by tech ${req.technicianId}`);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: 'Visit has already been handled.' });
+    }
+    logger.error(`[billing-recovery] dismiss failed for ${scheduledServiceId}: ${err.message}`);
+    res.status(500).json({ error: 'Failed to record disposition' });
+  }
+});
+
+module.exports = router;

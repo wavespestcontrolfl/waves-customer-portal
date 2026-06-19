@@ -15,6 +15,7 @@ import {
   Library,
   Brain,
   Receipt,
+  Banknote,
   Landmark,
   Calculator,
   Ruler,
@@ -87,6 +88,7 @@ const SECTIONS = [
     section: "Finance",
     items: [
       { path: "/admin/invoices", icon: Receipt, label: "Invoices" },
+      { path: "/admin/billing-recovery", icon: Banknote, label: "Recovery" },
       { path: "/admin/banking", icon: Landmark, label: "Banking" },
       { path: "/admin/tax", icon: Calculator, label: "Taxes" },
       { path: "/admin/pricing-logic", icon: Ruler, label: "Pricing" },
