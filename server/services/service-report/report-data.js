@@ -2323,7 +2323,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // to suppress the per-visit "Time on site" duration for members (memberships don't
     // account for an hourly figure) while non-member reports honor the admin showDuration
     // setting. Requires the loading query to select customers.waveguard_tier.
-    waveGuardTier: service.waveguard_tier || null,
+    // Only true membership tiers count: 'One-Time' is an allowed waveguard_tier for
+    // one-off customers (migration 20260414000003) but is NOT a membership, so it must
+    // not trigger the member-only display rules.
+    waveGuardTier: ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(service.waveguard_tier)
+      ? service.waveguard_tier
+      : null,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,

@@ -10,7 +10,10 @@ const logger = require('../logger');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'public-surface-20260518';
+// Bump this whenever a global report-content rule changes so every cached PDF
+// becomes a cache miss and re-renders. 20260619: WaveGuard-member reports now
+// hide the per-visit "Time on site" duration, which changes rendered content.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'public-surface-20260619';
 
 const s3 = new S3Client({
   region: config.s3?.region,
