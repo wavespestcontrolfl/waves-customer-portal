@@ -109,7 +109,8 @@ function uninvoicedLeakQuery(days) {
     .whereRaw(`NOT ${HAS_INVOICE_SQL}`)                  // no existing invoice
     .whereRaw('COALESCE(ss.is_callback, false) = false') // not a callback (free re-treat)
     .whereRaw('COALESCE(sr.is_callback, false) = false')
-    .whereRaw('COALESCE(ss.prepaid_amount, 0) = 0')      // not prepaid
+    .whereRaw('COALESCE(ss.prepaid_amount, 0) < ss.estimated_price') // not FULLY prepaid (partial surfaces in needs-review)
+    .whereRaw('COALESCE(ss.payer_id, c.payer_id) IS NULL') // self-pay only (v1); payer-billed = payer AP flow
     .whereRaw(`NOT ${autopay.sql}`, [autopay.binding])   // not autopay (cron-billed)
     .whereRaw(
       `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${FREE_TYPE_PATTERNS.map(() => '?').join(',')}]::text[])`,
@@ -136,6 +137,7 @@ router.get('/leaks', async (req, res) => {
         'sr.id as service_record_id',
         'ss.service_type',
         'ss.estimated_price',
+        'ss.prepaid_amount',
         'ss.completed_at',
         'c.id as customer_id',
         'c.first_name',
@@ -152,14 +154,18 @@ router.get('/leaks', async (req, res) => {
       customer: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
       service_type: r.service_type,
       price: parseFloat(r.estimated_price || 0),
+      prepaid: parseFloat(r.prepaid_amount || 0),
       completed_at: r.completed_at,
       monthly_rate: parseFloat(r.monthly_rate || 0),
       waveguard_tier: r.waveguard_tier || null,
       billable: !!r.service_record_id, // cannot invoice without a service record
     });
 
-    const leaks = rows.filter((r) => parseFloat(r.monthly_rate || 0) === 0).map(shape);
-    const needsReview = rows.filter((r) => parseFloat(r.monthly_rate || 0) > 0).map(shape);
+    // Recurring (monthly_rate>0) or partially-prepaid visits need a human eye
+    // before billing — they aren't safe one-click leaks.
+    const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0 || parseFloat(r.prepaid_amount || 0) > 0;
+    const leaks = rows.filter((r) => !isReview(r)).map(shape);
+    const needsReview = rows.filter(isReview).map(shape);
     const sum = (arr) => Math.round(arr.reduce((s, r) => s + r.price, 0) * 100) / 100;
 
     res.json({
@@ -217,6 +223,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
         'ss.service_type',
         'ss.estimated_price',
         'ss.prepaid_amount',
+        db.raw('COALESCE(ss.payer_id, c.payer_id) as payer_id'),
         db.raw('COALESCE(ss.is_callback, false) as ss_callback'),
         db.raw('COALESCE(sr.is_callback, false) as sr_callback'),
         'c.id as customer_id',
@@ -244,14 +251,26 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     if (onAutopay) {
       return res.status(409).json({ error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
     }
+    // v1 is self-pay only — a payer-billed visit is owed by the payer's AP inbox,
+    // not the homeowner, and must be cut through the payer invoice path.
+    if (visit.payer_id) {
+      return res.status(409).json({ error: 'Visit is billed to a third-party payer — handle via the payer AP flow.' });
+    }
     if (visit.ss_callback || visit.sr_callback) {
       return res.status(409).json({ error: 'Visit is flagged as a callback / re-treat (no-cost).' });
     }
-    if (parseFloat(visit.prepaid_amount || 0) > 0) {
-      return res.status(409).json({ error: 'Visit is prepaid.' });
-    }
-    if (!(parseFloat(visit.estimated_price || 0) > 0)) {
+    const prepaid = parseFloat(visit.prepaid_amount || 0);
+    const price = parseFloat(visit.estimated_price || 0);
+    if (!(price > 0)) {
       return res.status(422).json({ error: 'Visit has no price to invoice.' });
+    }
+    if (prepaid >= price) {
+      return res.status(409).json({ error: 'Visit is already fully prepaid.' });
+    }
+    if (prepaid > 0) {
+      // Partial prepay needs the prepaid credit applied (completion does this via
+      // a local helper not reused here) — route to the manual invoice flow.
+      return res.status(409).json({ error: `Visit has a partial prepayment ($${prepaid.toFixed(2)}) — bill it manually so the prepaid credit is applied.` });
     }
 
     // Serialize concurrent bills on the same visit, recheck inside the lock,
@@ -336,23 +355,34 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
       .first();
     if (!visit) return res.status(404).json({ error: 'Visit not found' });
 
-    const existing = await db('visit_billing_dispositions')
-      .where('scheduled_service_id', scheduledServiceId)
-      .first();
-    if (existing) return res.status(409).json({ error: 'Visit has already been handled.' });
+    // Same per-visit advisory lock as POST /bill so a dismiss can't race a bill
+    // (no invoice can be cut for a visit being dismissed, and vice versa).
+    await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [BILLING_RECOVERY_LOCK_NS, scheduledServiceId]);
 
-    await db('visit_billing_dispositions').insert({
-      scheduled_service_id: scheduledServiceId,
-      service_record_id: visit.service_record_id || null,
-      disposition: 'intentionally_free',
-      reason, // operator note stored in the DB column (not logged)
-      actor_user_id: req.technicianId,
+      const existing = await trx('visit_billing_dispositions')
+        .where('scheduled_service_id', scheduledServiceId)
+        .first();
+      if (existing) {
+        const e = new Error('Visit has already been handled.');
+        e.status = 409;
+        throw e;
+      }
+
+      await trx('visit_billing_dispositions').insert({
+        scheduled_service_id: scheduledServiceId,
+        service_record_id: visit.service_record_id || null,
+        disposition: 'intentionally_free',
+        reason, // operator note stored in the DB column (not logged)
+        actor_user_id: req.technicianId,
+      });
     });
 
     // Do NOT log the free-text reason — it can contain customer PII. Log IDs only.
     logger.info(`[billing-recovery] dismissed visit ${scheduledServiceId} as intentionally_free (reason ${reason ? 'provided' : 'none'}) by tech ${req.technicianId}`);
     res.json({ ok: true });
   } catch (err) {
+    if (err && err.status === 409) return res.status(409).json({ error: err.message });
     if (err && err.code === '23505') {
       return res.status(409).json({ error: 'Visit has already been handled.' });
     }

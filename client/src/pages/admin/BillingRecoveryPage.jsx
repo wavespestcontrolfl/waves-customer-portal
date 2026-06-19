@@ -231,8 +231,8 @@ export default function BillingRecoveryPage() {
           {data?.needs_review?.length > 0 && (
             <Card className="mb-6">
               <CardHeader>
-                <CardTitle>Needs review — recurring customers</CardTitle>
-                <p className="text-12 text-zinc-500 mt-1">These have a monthly rate; confirm they aren't billed on a recurring cadence before invoicing.</p>
+                <CardTitle>Needs review — recurring or partially prepaid</CardTitle>
+                <p className="text-12 text-zinc-500 mt-1">These have a monthly rate or a partial prepayment — confirm they aren't billed on a cadence, and bill partial-prepay visits manually so the credit is applied.</p>
               </CardHeader>
               <CardBody>
                 <Table>

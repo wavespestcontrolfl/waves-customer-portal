@@ -77,7 +77,7 @@ async function withServer(fn) {
 const BILLABLE_VISIT = {
   scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service',
   estimated_price: '129.00', prepaid_amount: null, ss_callback: false, sr_callback: false,
-  customer_id: 'cust-1', monthly_rate: '0', property_type: 'residential',
+  customer_id: 'cust-1', monthly_rate: '0', property_type: 'residential', payer_id: null,
   autopay_enabled: true, autopay_paused_until: null, ach_status: null,
 };
 
@@ -140,6 +140,40 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  test('billing a payer-billed visit is blocked (self-pay only v1)', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, payer_id: 'payer-1' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(false);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.error).toMatch(/payer/i);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
+  test('billing a partially-prepaid visit is blocked (credit must be applied)', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: '150.00', prepaid_amount: '50.00' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(false);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.error).toMatch(/partial prepayment/i);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
   test('billing a visit that already has an invoice is blocked', async () => {
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: BILLABLE_VISIT });
@@ -163,8 +197,11 @@ describe('admin billing-recovery routes', () => {
     const dispositionQB = makeQB({ first: null });
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: { scheduled_service_id: 'ss-1', service_record_id: 'sr-1' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    installTransaction((arg) => {
       if (arg === 'visit_billing_dispositions') return dispositionQB;
-      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+      throw new Error(`unexpected trx table ${arg}`);
     });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/dismiss`, {
@@ -180,8 +217,9 @@ describe('admin billing-recovery routes', () => {
 
   test('GET /leaks splits true leaks from needs-review by monthly_rate', async () => {
     const rows = [
-      { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '129.00', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null },
-      { scheduled_service_id: 'ss-2', service_record_id: 'sr-2', service_type: 'Pest Control', estimated_price: '200.00', completed_at: '2026-06-10', customer_id: 'cust-2', first_name: 'Jane', last_name: 'Doe', monthly_rate: '49.00', waveguard_tier: 'Gold' },
+      { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '129.00', prepaid_amount: '0', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null },
+      { scheduled_service_id: 'ss-2', service_record_id: 'sr-2', service_type: 'Pest Control', estimated_price: '200.00', prepaid_amount: '0', completed_at: '2026-06-10', customer_id: 'cust-2', first_name: 'Jane', last_name: 'Doe', monthly_rate: '49.00', waveguard_tier: 'Gold' },
+      { scheduled_service_id: 'ss-3', service_record_id: 'sr-3', service_type: 'Pest Control', estimated_price: '150.00', prepaid_amount: '50.00', completed_at: '2026-06-05', customer_id: 'cust-3', first_name: 'Sam', last_name: 'Park', monthly_rate: '0', waveguard_tier: null },
     ];
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
@@ -193,9 +231,9 @@ describe('admin billing-recovery routes', () => {
       expect(res.status).toBe(200);
       expect(body.summary.leak_visits).toBe(1);
       expect(body.summary.leak_dollars).toBe(129);
-      expect(body.summary.review_visits).toBe(1);
+      expect(body.summary.review_visits).toBe(2); // monthly-rate + partial-prepay
       expect(body.leaks[0].customer).toBe('Tyler Levin');
-      expect(body.needs_review[0].customer).toBe('Jane Doe');
+      expect(body.needs_review.map((r) => r.customer)).toEqual(expect.arrayContaining(['Jane Doe', 'Sam Park']));
     });
   });
 
