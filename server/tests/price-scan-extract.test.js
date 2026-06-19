@@ -48,6 +48,12 @@ describe('price-scan extract', () => {
       expect(parsePriceText('From $48.48')).toBeNull();
       expect(parsePriceText('$95.00')).toBe(95);
     });
+    test('rejects bare pack-size labels', () => {
+      expect(parsePriceText('78 oz')).toBeNull();
+      expect(parsePriceText('2.5 gal')).toBeNull();
+      expect(parsePriceText('18 lb')).toBeNull();
+      expect(parsePriceText('$95.00')).toBe(95); // a real price has no size unit
+    });
   });
 
   describe('mapAvailability', () => {
