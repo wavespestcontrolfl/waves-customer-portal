@@ -1010,8 +1010,21 @@ async function publishOrUpdatePage(draft, brief = {}) {
   if (spokeTarget) {
     sourceFrontmatter.canonical = canonicalUrlForSlug(slug, blogOrigin);
   }
-  const canonical = assertCanonicalMatchesSlug(sourceFrontmatter, slug, blogOrigin);
+  // Validate the writer's slug↔canonical self-consistency first (a genuinely
+  // mismatched draft still throws → review). Then enforce the blog URL protocol
+  // (/{category}/{slug}/) on the PUBLIC route: realign slug + canonical onto the
+  // post's own category so a flat writer slug (e.g. /plaster-bagworms-southwest-
+  // florida/) still satisfies the astro blog-slug-protocol guardrail instead of
+  // failing every Pages build and parking the PR. The committed file/hero/branch
+  // keep using the raw `slug` (the live flat-file / prefixed-URL convention), so
+  // only the URL changes — not where bytes are committed.
+  assertCanonicalMatchesSlug(sourceFrontmatter, slug, blogOrigin);
+  const routeSlug = categoryRouteSlug(slug, normalizeAutonomousCategory(sourceFrontmatter, brief));
+  const canonical = canonicalUrlForSlug(routeSlug, blogOrigin);
   const frontmatter = normalizeAutonomousBlogFrontmatter(sourceFrontmatter, brief, body, { slug, canonical });
+  // normalizeAutonomousBlogFrontmatter derives the frontmatter slug from the raw
+  // path slug; realign it to the category route so slug + canonical agree.
+  frontmatter.slug = `/${routeSlug}/`;
   stampBlogDomains(frontmatter, spokeTarget);
   // Keep the persisted run payload consistent with what we ACTUALLY publish.
   // The runner stores this same `draft` object in autonomous_runs.draft_payload,
@@ -1966,6 +1979,37 @@ function buildSeoReviewSection({ frontmatter = {}, brief = {} } = {}) {
   ].join('\n');
 }
 
+// The topic segment of a slug/canonical/URL — the LAST non-empty path part,
+// stripped of origin, query, hash, and surrounding slashes.
+function slugLeafOf(value) {
+  return String(value || '')
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .split(/[?#]/)[0]
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+    .filter(Boolean)
+    .pop() || '';
+}
+
+// The ROUTE slug (the /{category}/{slug}/ URL path) for a blog post: the post's
+// own category, then the topic leaf of its raw slug. The astro
+// blog-slug-protocol guardrail THROWS at astro:config:setup unless a post's
+// frontmatter slug is exactly /{category}/{slug}/, and the writer agent
+// occasionally emits a FLAT top-level slug (e.g. plaster-bagworms-southwest-
+// florida) — which renders locally but fails every Pages build and parks the PR
+// after a full generation spend. Deriving the route from the post's own category
+// keeps slug + canonical + category consistent by construction, for every
+// category (pest-control / lawn-care / termite / mosquito / tree-shrub), not a
+// hardcoded one. The committed file/hero PATHS keep using the raw slug, so this
+// only governs the public URL (matching the live flat-file/prefixed-URL posts).
+// Idempotent: an already-correct {category}/{leaf} returns unchanged.
+function categoryRouteSlug(rawSlug, category) {
+  const cat = String(category || '').replace(/^\/+|\/+$/g, '');
+  const leaf = slugLeafOf(rawSlug);
+  if (!cat) return leaf || String(rawSlug || '').replace(/^\/+|\/+$/g, '');
+  return leaf ? `${cat}/${leaf}` : cat;
+}
+
 function slugPathFromFrontmatter(frontmatter) {
   const raw = String(frontmatter?.slug || '').trim();
   const pathname = raw
@@ -2257,6 +2301,8 @@ module.exports = {
     isCommittedHeroUrl,
     absoluteHeroUrl,
     slugPathFromFrontmatter,
+    categoryRouteSlug,
+    slugLeafOf,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
     buildDraftPrBody,

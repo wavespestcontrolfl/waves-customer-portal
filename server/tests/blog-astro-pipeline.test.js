@@ -255,6 +255,39 @@ describe('blog Astro frontmatter validation', () => {
       .toEqual(['Article']);
   });
 
+  describe('categoryRouteSlug (blog URL protocol /{category}/{slug}/)', () => {
+    const { categoryRouteSlug } = AstroPublisher._internals;
+
+    test('prefixes a flat writer slug with the category', () => {
+      expect(categoryRouteSlug('plaster-bagworms-southwest-florida', 'pest-control'))
+        .toBe('pest-control/plaster-bagworms-southwest-florida');
+    });
+
+    test('is idempotent on an already-correct {category}/{leaf}', () => {
+      expect(categoryRouteSlug('lawn-care/chinch-bugs-bradenton', 'lawn-care'))
+        .toBe('lawn-care/chinch-bugs-bradenton');
+    });
+
+    test('realigns a wrong-category prefix to the resolved category (keeps the leaf)', () => {
+      expect(categoryRouteSlug('lawn-care/dangerous-ants-in-florida', 'pest-control'))
+        .toBe('pest-control/dangerous-ants-in-florida');
+    });
+
+    test('uses the category for every supported vertical, not a hardcoded one', () => {
+      expect(categoryRouteSlug('dollar-spot-venice', 'lawn-care')).toBe('lawn-care/dollar-spot-venice');
+      expect(categoryRouteSlug('drywood-swarmers-venice', 'termite')).toBe('termite/drywood-swarmers-venice');
+      expect(categoryRouteSlug('summer-mosquitoes', 'mosquito')).toBe('mosquito/summer-mosquitoes');
+    });
+
+    test('collapses a deeper-than-two-segment slug to {category}/{leaf}', () => {
+      expect(categoryRouteSlug('/pest-control/sub/foo/', 'pest-control')).toBe('pest-control/foo');
+    });
+
+    test('falls back to the bare leaf when no category resolves', () => {
+      expect(categoryRouteSlug('/foo/', '')).toBe('foo');
+    });
+  });
+
   test('does not build live URLs from unsupported target_sites hosts', () => {
     expect(AstroPublisher.liveUrlForPost({
       title: 'Bad host',
@@ -391,7 +424,7 @@ describe('blog Astro frontmatter validation', () => {
     }));
     expect(gh.createIssueComment).toHaveBeenCalledWith(123, expect.stringContaining('@codex review'));
     expect(result).toMatchObject({
-      url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
+      url: 'https://www.wavespestcontrol.com/pest-control/ant-trails-bradenton/',
       status: 'pr_open',
       live: false,
       pr_number: 123,
@@ -435,7 +468,7 @@ describe('blog Astro frontmatter validation', () => {
       domains: ['wavespestcontrol.com'],
       robots: 'index, follow',
     });
-    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/ant-trails-bradenton/');
+    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/pest-control/ant-trails-bradenton/');
   });
 
   test('normalizes raw autonomous blog frontmatter before schema validation', async () => {
@@ -516,8 +549,16 @@ describe('blog Astro frontmatter validation', () => {
     const fmModule = require('../services/content-astro/frontmatter');
     const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('/banana-spiders-in-florida.mdx'));
     const parsed = fmModule.parse(markdownCall[0].content);
-    expect(result.url).toBe('https://www.wavespestcontrol.com/banana-spiders-in-florida/');
-    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/banana-spiders-in-florida/');
+    expect(result.url).toBe('https://www.wavespestcontrol.com/pest-control/banana-spiders-in-florida/');
+    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/pest-control/banana-spiders-in-florida/');
+    // Blog URL protocol: the FLAT writer slug is realigned to /{category}/{slug}/
+    // so the astro blog-slug-protocol guardrail (slug.first-segment === category)
+    // passes instead of failing every Pages build.
+    expect(parsed.data.slug).toBe('/pest-control/banana-spiders-in-florida/');
+    expect(parsed.data.category).toBe('pest-control');
+    // …while the committed markdown FILE keeps the flat path (URL ≠ file location,
+    // matching the live flat-file / prefixed-URL posts) — not a category subdir.
+    expect(markdownCall[0].path).toBe('src/content/blog/banana-spiders-in-florida.mdx');
     expect(validateBlogFrontmatter(parsed.data)).toEqual({ ok: true, errors: [] });
     expect(parsed.data).not.toHaveProperty('tags');
   });
@@ -557,7 +598,7 @@ describe('blog Astro frontmatter validation', () => {
       content: expect.stringContaining('FAQPage'),
     }));
     expect(result).toMatchObject({
-      url: 'https://www.wavespestcontrol.com/yellow-lawn-sarasota/',
+      url: 'https://www.wavespestcontrol.com/pest-control/yellow-lawn-sarasota/',
       status: 'pr_open',
     });
   });
@@ -660,7 +701,7 @@ describe('Astro publisher autonomous draft adapter', () => {
     });
 
     expect(result).toMatchObject({
-      url: 'https://www.wavespestcontrol.com/autonomous-ant-control-bradenton/',
+      url: 'https://www.wavespestcontrol.com/pest-control/autonomous-ant-control-bradenton/',
       pr_number: 42,
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
     });
