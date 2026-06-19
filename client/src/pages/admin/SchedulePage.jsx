@@ -388,9 +388,29 @@ function adminFetch(path, options = {}) {
   });
 }
 
-// generateAiReport removed (Phase 2): the manual report-rewrite button is gone.
-// The /admin/schedule/generate-report endpoint stays for now; Phase 3 moves
-// report-copy generation fully server-side at completion.
+async function generateAiReport(payload) {
+  const r = await fetch(`${API_BASE}/admin/schedule/generate-report`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  let body = null;
+  try {
+    body = await r.json();
+  } catch {
+    /* non-JSON body */
+  }
+  if (!r.ok) {
+    const detail = body?.error || `HTTP ${r.status}`;
+    const err = new Error(detail);
+    err.status = r.status;
+    throw err;
+  }
+  return body || {};
+}
 
 function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
@@ -6469,9 +6489,14 @@ export function CompletionPanel({
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
   // only free-text input — the AI report copy is generated from it + photos.)
-  const dictation = useSpeechDictation((text) =>
-    setNotes((b) => (b ? `${b} ${text}` : text)),
-  );
+  // Ignore any chunk that lands once an AI draft is in flight: SpeechRecognition
+  // .stop() can still deliver a final result asynchronously, which would mutate
+  // notes after the payload was snapshotted and then be lost when the response
+  // replaces the notes.
+  const dictation = useSpeechDictation((text) => {
+    if (generating) return;
+    setNotes((b) => (b ? `${b} ${text}` : text));
+  });
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
   const [soilTemp, setSoilTemp] = useState("");
@@ -6492,6 +6517,7 @@ export function CompletionPanel({
   const [recapLoading, setRecapLoading] = useState(false);
   const [recapError, setRecapError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [success, setSuccess] = useState(false);
   const [completionResult, setCompletionResult] = useState(null);
   const [elapsed, setElapsed] = useState("0:00");
@@ -7708,11 +7734,69 @@ export function CompletionPanel({
     );
   }
   function labelsStillInNotes(labels) {
-    const currentNotes = notes.toLowerCase();
+    // A selected label only counts as still-active if it appears inside one of
+    // the bracketed chip-marker lines ([Protocol]/[Protocol optional]/[Action]/
+    // [Found]/[Next] …) — NOT in arbitrary prose. The label arrays are only ever
+    // populated alongside a marker (the chip handlers, or a restored draft whose
+    // saved notes carry the markers), so this matches the same items as before
+    // for normal completions, but makes the deselect handle reliable after
+    // Generate: deleting the marker truly removes the item even when the AI prose
+    // happens to repeat the label text verbatim.
+    const markerLines = notes
+      .split("\n")
+      .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
+      .map((line) => line.toLowerCase());
     return (Array.isArray(labels) ? labels : []).filter((label) => {
-      const text = String(label || "").trim();
-      return text && currentNotes.includes(text.toLowerCase());
+      const text = String(label || "").trim().toLowerCase();
+      return text && markerLines.some((line) => line.includes(text));
     });
+  }
+  // Generate AI report replaces the notes wholesale with AI prose, which would
+  // strip the [Protocol]/[Found]/[Next] tagged lines that handleSubmit reads
+  // back via labelsStillInNotes to rebuild protocolActionsCompleted + their
+  // re-entry/treatment scopes, observations, and recommendations. Re-append the
+  // still-selected labels so the structured visit record (and interior-treatment
+  // safety scopes) survive drafting.
+  function stitchSelectedLabelsIntoReport(reportText) {
+    const base = String(reportText || "");
+    const lines = [];
+    // Always emit an explicit removable marker (don't skip when the prose
+    // happens to mention the label verbatim): the marker is the tech's deselect
+    // handle, so leaving a still-selected item in prose-only form would make it
+    // impossible to deselect before completing.
+    const pushLabel = (prefix, label) => {
+      const text = String(label || "").trim();
+      if (text) lines.push(`[${prefix}] ${text}`);
+    };
+    // Only re-stitch labels still present in the pre-generation notes — the tech
+    // deselects a wrongly-picked item by deleting its tagged line, and
+    // handleSubmit honors that via labelsStillInNotes. Stitching the full
+    // selected-label state would resurrect a deliberately-removed action (and its
+    // re-entry scope) on the next Generate. (notes still holds the pre-draft text
+    // here; setNotes(report) hasn't applied yet.)
+    labelsStillInNotes(selectedProtocolActionLabels).forEach((l) =>
+      pushLabel("Protocol", l),
+    );
+    labelsStillInNotes(selectedObservationLabels).forEach((l) =>
+      pushLabel("Found", l),
+    );
+    labelsStillInNotes(selectedRecommendationLabels).forEach((l) =>
+      pushLabel("Next", l),
+    );
+    if (!lines.length) return base;
+    return base.trimEnd() + "\n\n" + lines.join("\n");
+  }
+  // The [Protocol]/[Found]/[Next] chip lines are structured selections that ride
+  // along in the notes only as the tech's deselect handle — they're already sent
+  // as the typed `actionsCompleted`/`observations`/`recommendations` fields. Keep
+  // them out of `serviceNotes` so a future-step [Next] recommendation can't get
+  // drafted as completed work (the prompt files serviceNotes under COMPLETED WORK).
+  function stripChipTagLines(text) {
+    return String(text || "")
+      .split("\n")
+      .filter((line) => !/^\s*\[(?:Protocol(?: optional)?|Action|Found|Next)\]\s/.test(line))
+      .join("\n")
+      .trim();
   }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
@@ -7720,9 +7804,92 @@ export function CompletionPanel({
   // prompt won't turn a customer concern or a recommendation into a confirmed
   // finding (see the server prompt). photoCount is reported but never enough on
   // its own — the model can't see the photos.
-  // buildAiReportPayload removed (Phase 2): the manual "Generate AI report"
-  // button it fed is gone. Report copy is generated server-side from the notes,
-  // photos, products, and structured data — see Phase 3 auto-derive.
+  function buildAiReportPayload() {
+    const productsApplied = selectedProducts
+      .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
+      .join(", ");
+    const actionsCompleted = labelsStillInNotes(selectedProtocolActionLabels);
+    const observations = labelsStillInNotes(selectedObservationLabels);
+    const recommendations = labelsStillInNotes(selectedRecommendationLabels);
+    // Mirror the final-submit gate (handleSubmit only sends customerConcernText
+    // when the interaction is still "customer had a concern"): if the tech typed
+    // a concern then switched the interaction away, the concern input is hidden
+    // and must not leak into AI-drafted copy.
+    const concern = isCustomerConcernInteraction(customerInteraction)
+      ? customerConcern.trim()
+      : "";
+    const interactionLabel = CUSTOMER_INTERACTION_OPTIONS.find(
+      (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
+    )?.label || "";
+    // Reporting is ET-only: resolve the visit date so a non-ET device (or a
+    // completion logged just past browser-local midnight) can't draft
+    // customer-facing copy with the wrong visit date.
+    const scheduledDateOnly = String(
+      service.scheduledDate || service.scheduled_date || service.date || "",
+    ).split("T")[0];
+    let serviceDateLabel;
+    if (service.checkInTime) {
+      // A real timestamp — format the instant in ET.
+      serviceDateLabel = new Date(service.checkInTime).toLocaleDateString(
+        "en-US",
+        { month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York" },
+      );
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(scheduledDateOnly)) {
+      // Office closeout / backfilled visit: the scheduled date is already an ET
+      // calendar date. Render the Y-M-D verbatim (UTC noon + format in UTC) so
+      // no browser-local timezone math can shift it a day in either direction.
+      const [y, mo, da] = scheduledDateOnly.split("-").map(Number);
+      serviceDateLabel = new Date(Date.UTC(y, mo - 1, da, 12)).toLocaleDateString(
+        "en-US",
+        { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" },
+      );
+    } else {
+      serviceDateLabel = new Date().toLocaleDateString("en-US", {
+        month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York",
+      });
+    }
+    const payload = {
+      scheduledServiceId: service.id || null,
+      customerName: service.customerName,
+      serviceType: service.serviceType,
+      serviceLine: service.serviceLine || service.service_line || undefined,
+      products: selectedProducts.map((p) => ({
+        productId: p.productId || null,
+        name: p.name,
+        rate: p.rate || null,
+        rateUnit: p.rateUnit || null,
+        targets: Array.isArray(p.targets) ? p.targets : [],
+      })),
+      technicianName: service.technicianName || "Waves Tech",
+      serviceDate: serviceDateLabel,
+      arrivalTime: service.checkInTime
+        ? new Date(service.checkInTime).toLocaleTimeString("en-US", {
+            hour: "numeric", minute: "2-digit", hour12: true,
+            timeZone: "America/New_York",
+          })
+        : "",
+      serviceNotes: stripChipTagLines(notes),
+      productsApplied,
+      areasServiced,
+      actionsCompleted,
+      observations,
+      recommendations,
+      customerInteraction: interactionLabel,
+      customerConcern: concern,
+      pestActivityRating: clientPestRating ?? null,
+      photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
+    };
+    const hasReportInput =
+      Boolean(payload.serviceNotes) ||
+      productsApplied.length > 0 ||
+      areasServiced.length > 0 ||
+      actionsCompleted.length > 0 ||
+      observations.length > 0 ||
+      recommendations.length > 0 ||
+      Boolean(concern) ||
+      payload.pestActivityRating !== null;
+    return { payload, hasReportInput };
+  }
   function recordActionScope(label, scope, treatmentApplied) {
     if (!label || (scope !== "interior" && scope !== "exterior")) return;
     setActionScopeByLabel((prev) => ({
@@ -7755,6 +7922,10 @@ export function CompletionPanel({
     }
   }
   function addProduct(product) {
+    // No payload-feeding mutations while an AI draft is in flight — a product
+    // added now would land in the submitted structured data but not in the prose
+    // the response is about to write (built from the pre-draft snapshot).
+    if (generating) return;
     if (selectedProducts.find((p) => p.productId === product.id)) return;
     const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
     const areaRequirement = requiredApplicationArea(
@@ -7801,6 +7972,7 @@ export function CompletionPanel({
     });
   }
   function removeProduct(productId) {
+    if (generating) return;
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
     );
@@ -7836,6 +8008,7 @@ export function CompletionPanel({
     );
   }
   function toggleArea(area) {
+    if (generating) return;
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
@@ -7906,6 +8079,13 @@ export function CompletionPanel({
 
   async function handleSubmit() {
     if (submitting) return;
+    // Don't complete while an AI draft is in flight — the response is about to
+    // replace the notes, and submitting now would either lose the generated copy
+    // or rebuild the structured fields from soon-to-be-overwritten notes.
+    if (generating) {
+      alert("Hang on — finishing the AI draft. Try again in a moment.");
+      return;
+    }
     // The turf-height flag drives a server-required field on lawn visits; don't
     // submit until its state is loaded, or a pre-load submit hides the field the
     // server still enforces (422). The flag is session-cached so this rarely waits.
@@ -8476,6 +8656,11 @@ export function CompletionPanel({
   ).length;
   function handleProtocolActionSelect(value) {
     if (!value) return;
+    // No note-mutating selections while an AI draft is in flight — the chip line
+    // would be clobbered when the response replaces the notes, and handleSubmit
+    // would rebuild the structured fields from the overwritten text. (The select
+    // is value="" so it stays on the placeholder; nothing to reset.)
+    if (generating) return;
     if (!protocolActions.length) {
       appendUniqueLabel(setSelectedProtocolActionLabels, value);
       const chip = CHIP_ACTION_BY_LABEL[value];
@@ -8489,13 +8674,13 @@ export function CompletionPanel({
     if (option?.action) applyProtocolAction(option.action);
   }
   function handleObservationSelect(value) {
-    if (value) {
+    if (value && !generating) {
       appendUniqueLabel(setSelectedObservationLabels, value);
       addChipNote("Found", value);
     }
   }
   function handleRecommendationSelect(value) {
-    if (value) {
+    if (value && !generating) {
       appendUniqueLabel(setSelectedRecommendationLabels, value);
       addChipNote("Next", value);
     }
@@ -9670,30 +9855,64 @@ export function CompletionPanel({
             </Field>{" "}
             <Field label="Technician notes">
               {" "}
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={quickComplete ? 3 : 5}
-                placeholder={
-                  dictation.listening
-                    ? "Listening… speak your notes"
-                    : "What did you do on this visit?"
-                }
-                style={{ ...mTextarea, minHeight: quickComplete ? 90 : 140 }}
-              />{" "}
-              {dictation.supported && (
-                <button
-                  type="button"
-                  onClick={dictation.toggle}
+              <div style={{ position: "relative" }}>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  rows={quickComplete ? 3 : 5}
+                  // Lock edits while the AI draft is in flight so typing or a
+                  // dictated chunk landing mid-call isn't clobbered when the
+                  // response replaces the notes.
+                  disabled={generating}
+                  placeholder={
+                    dictation.listening
+                      ? "Listening… speak your notes"
+                      : "What did you do on this visit?"
+                  }
                   style={{
-                    ...secondaryPill,
-                    marginTop: 6,
-                    color: dictation.listening ? M.err : M.ink2,
+                    ...mTextarea,
+                    minHeight: quickComplete ? 90 : 140,
+                    // Reserve the bottom-right corner for the dictation mic so
+                    // typed text never runs under it.
+                    paddingRight: dictation.supported ? 52 : mTextarea.padding,
+                    opacity: generating ? 0.6 : 1,
                   }}
-                >
-                  {dictation.listening ? "● Stop dictation" : "🎙 Dictate notes"}
-                </button>
-              )}
+                />{" "}
+                {dictation.supported && (
+                  <button
+                    type="button"
+                    onClick={dictation.toggle}
+                    disabled={generating}
+                    aria-label={
+                      dictation.listening ? "Stop dictation" : "Dictate notes"
+                    }
+                    title={
+                      dictation.listening ? "Stop dictation" : "Dictate notes"
+                    }
+                    style={{
+                      position: "absolute",
+                      bottom: 10,
+                      right: 10,
+                      width: 38,
+                      height: 38,
+                      borderRadius: "50%",
+                      border: `1px solid ${dictation.listening ? M.err : M.hairline}`,
+                      background: dictation.listening ? M.err : M.card,
+                      color: dictation.listening ? M.card : M.ink2,
+                      fontSize: 17,
+                      lineHeight: 1,
+                      cursor: generating ? "not-allowed" : "pointer",
+                      opacity: generating ? 0.5 : 1,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
+                    }}
+                  >
+                    {dictation.listening ? "■" : "🎙"}
+                  </button>
+                )}
+              </div>
             </Field>
             {!isTypedFindings && (
               <Field label="Protocol actions">
@@ -9805,9 +10024,44 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>
-            {/* Manual "Generate AI report" button removed (Phase 2): the report
-                copy is generated server-side from the notes + photos + structured
-                data, not by rewriting the tech's notes in place. */}
+            {/* AI report — drafts customer-facing visit copy into the notes box
+                from the structured visit data (actions, observations, products,
+                concern), for the tech to review/edit before completing. */}
+            {!quickComplete && (
+              <button
+                type="button"
+                onClick={async () => {
+                  // Stop dictation BEFORE snapshotting notes for the payload, so
+                  // a final spoken chunk lands in serviceNotes rather than after
+                  // the snapshot. Once generating flips true the dictation
+                  // callback ignores any late chunk (and the mic is disabled).
+                  if (dictation.listening) dictation.toggle();
+                  const { payload, hasReportInput } = buildAiReportPayload();
+                  if (!hasReportInput) {
+                    alert("Add service notes, products, or visit details first.");
+                    return;
+                  }
+                  setGenerating(true);
+                  try {
+                    const r = await generateAiReport(payload);
+                    if (r.report)
+                      setNotes(stitchSelectedLabelsIntoReport(r.report));
+                  } catch (e) {
+                    alert("AI report failed: " + e.message);
+                  }
+                  setGenerating(false);
+                }}
+                disabled={generating}
+                style={{
+                  ...secondaryPill,
+                  marginTop: 4,
+                  marginBottom: 20,
+                  opacity: generating ? 0.5 : 1,
+                }}
+              >
+                {generating ? "Generating…" : "✨ Generate AI report"}
+              </button>
+            )}
             {/* Service photos — pure lawn visits capture turf photos in the
                 Lawn Assessment block above, which flow into the report gallery,
                 so this redundant second upload is hidden. Combined visits keep
@@ -10859,6 +11113,7 @@ export function CompletionPanel({
               onClick={() => handleSubmit()}
               disabled={
                 submitting ||
+                generating ||
                 tankCleanoutCompletionBlocked ||
                 blackoutCompletionBlocked ||
                 nLimitCompletionBlocked ||
@@ -11742,48 +11997,68 @@ export function CompletionPanel({
           </select>
           {/* Technician Notes */}
           <label style={labelStyle}>Technician Notes</label>{" "}
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            rows={quickComplete ? 3 : 5}
-            style={{
-              width: "100%",
-              background: D.input,
-              color: D.text,
-              border: `1px solid ${D.border}`,
-              borderRadius: 10,
-              padding: 12,
-              fontSize: 14,
-              resize: "vertical",
-              fontFamily: "'Nunito Sans', sans-serif",
-              boxSizing: "border-box",
-            }}
-            placeholder={
-              dictation.listening
-                ? "Listening… speak your notes"
-                : "Notes about this service..."
-            }
-          />
-          {dictation.supported && (
-            <button
-              type="button"
-              onClick={dictation.toggle}
+          <div style={{ position: "relative" }}>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={quickComplete ? 3 : 5}
+              // Lock edits while the AI draft is in flight so typing or a
+              // dictated chunk landing mid-call isn't clobbered when the
+              // response replaces the notes.
+              disabled={generating}
               style={{
-                marginTop: 8,
-                padding: "8px 14px",
-                borderRadius: 10,
-                border: `1px solid ${dictation.listening ? D.red : D.border}`,
+                width: "100%",
                 background: D.input,
-                color: dictation.listening ? D.red : D.text,
-                fontSize: 13,
-                fontWeight: 700,
-                cursor: "pointer",
+                color: D.text,
+                border: `1px solid ${D.border}`,
+                borderRadius: 10,
+                padding: 12,
+                // Reserve the bottom-right corner for the dictation mic.
+                paddingRight: dictation.supported ? 50 : 12,
+                fontSize: 14,
+                resize: "vertical",
                 fontFamily: "'Nunito Sans', sans-serif",
+                boxSizing: "border-box",
+                opacity: generating ? 0.6 : 1,
               }}
-            >
-              {dictation.listening ? "● Stop dictation" : "🎙 Dictate notes"}
-            </button>
-          )}
+              placeholder={
+                dictation.listening
+                  ? "Listening… speak your notes"
+                  : "Notes about this service..."
+              }
+            />
+            {dictation.supported && (
+              <button
+                type="button"
+                onClick={dictation.toggle}
+                disabled={generating}
+                aria-label={
+                  dictation.listening ? "Stop dictation" : "Dictate notes"
+                }
+                title={dictation.listening ? "Stop dictation" : "Dictate notes"}
+                style={{
+                  position: "absolute",
+                  bottom: 12,
+                  right: 10,
+                  width: 36,
+                  height: 36,
+                  borderRadius: "50%",
+                  border: `1px solid ${dictation.listening ? D.red : D.border}`,
+                  background: dictation.listening ? D.red : D.card,
+                  color: dictation.listening ? D.white : D.text,
+                  fontSize: 16,
+                  lineHeight: 1,
+                  cursor: generating ? "not-allowed" : "pointer",
+                  opacity: generating ? 0.5 : 1,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                {dictation.listening ? "■" : "🎙"}
+              </button>
+            )}
+          </div>
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
             {!isTypedFindings && (
@@ -11885,8 +12160,57 @@ export function CompletionPanel({
               </select>{" "}
             </div>{" "}
           </div>
-          {/* Manual "Generate AI Service Report" button removed (Phase 2): report
-              copy is generated server-side from notes + photos + structured data. */}
+          {/* AI Service Report — drafts customer-facing visit copy into the
+              notes box from the structured visit data, for the tech to
+              review/edit before completing. */}
+          {!quickComplete && (
+            <button
+              type="button"
+              onClick={async () => {
+                // Stop dictation BEFORE snapshotting notes for the payload, so
+                // a final spoken chunk lands in serviceNotes rather than after
+                // the snapshot. Once generating flips true the dictation
+                // callback ignores any late chunk (and the mic is disabled).
+                if (dictation.listening) dictation.toggle();
+                const { payload, hasReportInput } = buildAiReportPayload();
+                if (!hasReportInput) {
+                  alert("Add service notes, products, or visit details first.");
+                  return;
+                }
+                setGenerating(true);
+                try {
+                  const r = await generateAiReport(payload);
+                  if (r.report)
+                    setNotes(stitchSelectedLabelsIntoReport(r.report));
+                } catch (e) {
+                  alert("AI report failed: " + e.message);
+                }
+                setGenerating(false);
+              }}
+              disabled={generating}
+              style={{
+                width: "100%",
+                padding: "10px 16px",
+                borderRadius: 10,
+                border: "none",
+                background: generating
+                  ? D.card
+                  : "linear-gradient(135deg, #8b5cf6, #6366f1)",
+                color: D.heading,
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: generating ? "wait" : "pointer",
+                marginTop: 8,
+                marginBottom: 20,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+              }}
+            >
+              {generating ? "Generating Report..." : "✨ Generate AI Service Report"}
+            </button>
+          )}
           {/* Photo Upload — hidden in quick complete. Pure lawn visits capture
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
@@ -12847,6 +13171,7 @@ export function CompletionPanel({
             onClick={() => handleSubmit()}
             disabled={
               submitting ||
+              generating ||
               tankCleanoutCompletionBlocked ||
               blackoutCompletionBlocked ||
               nLimitCompletionBlocked ||
