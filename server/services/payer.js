@@ -263,7 +263,12 @@ async function attachToInvoice(invoice, database = db) {
     try {
       const live = await getPayer(invoice.payer_id, database);
       if (live && live.active !== false) {
-        if (live.ap_email && isEmailLike(live.ap_email)) snap.ap_email = live.ap_email;
+        // The live ACTIVE payer controls AP routing for an undelivered invoice:
+        // use its current AP email if valid, otherwise CLEAR the (possibly stale)
+        // creation-snapshot AP email so delivery FAILS CLOSED rather than sending
+        // to an old address. Identity stays for display; payerRecipient() returns
+        // null without a valid AP email, so send/preview/project paths fail closed.
+        snap.ap_email = (live.ap_email && isEmailLike(live.ap_email)) ? live.ap_email : null;
         invoice.payer = snap;
       }
       // missing/inactive live payer → leave invoice.payer unset (fail closed)

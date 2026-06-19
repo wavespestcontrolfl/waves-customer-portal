@@ -191,6 +191,19 @@ describe('PayerService.attachToInvoice', () => {
     expect(inv.payer).toBeUndefined();
   });
 
+  test('an UNFROZEN invoice clears a stale snapshot AP email when the live active payer has none (fails closed)', async () => {
+    // Live payer is active but its AP email was removed; a draft must NOT fall
+    // back to the stale creation-snapshot AP — clear it so delivery fails closed.
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: true, ap_email: null }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'draft',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'stale@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay' }));
+    expect(inv.payer.ap_email).toBeNull();
+  });
+
   test('an ISSUED invoice keeps its frozen snapshot even if the payer was later deactivated', async () => {
     // Once delivered, the bill-to is an immutable record — a later deactivation
     // must not strip it (the homeowner must never become the bill-to).
