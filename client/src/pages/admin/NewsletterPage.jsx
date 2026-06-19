@@ -18,7 +18,7 @@
 // /admin/newsletter when newsletter-v1 was rolled out). Automations
 // renders EmailAutomationsPanelV2 directly.
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Card, CardBody } from "../../components/ui";
