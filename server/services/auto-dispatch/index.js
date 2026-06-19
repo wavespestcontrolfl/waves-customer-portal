@@ -120,7 +120,8 @@ async function runAutoDispatch(opts = {}) {
 
   let runStatus = 'completed';
   let runError = null;
-  let geocodedCount = 0;
+  let geocodeAttempts = 0; // counts API attempts (success OR fail) — bounds the cap
+  let geocoded = 0;        // successes only — for the run summary
 
   try {
     const capMap = await loadCapabilityMap();
@@ -132,9 +133,10 @@ async function runAutoDispatch(opts = {}) {
         const eligCtx = { today, lockBoundary, lockWindowDays: config.lockWindowDays };
         let elig = isEligibleForAutoDispatch(service, eligCtx);
         // Self-heal a not-yet-geocoded customer once, bounded per run, then re-check.
-        if (!elig.eligible && elig.reason_code === 'MISSING_GEO' && geocodedCount < config.maxGeocodesPerRun) {
+        if (!elig.eligible && elig.reason_code === 'MISSING_GEO' && geocodeAttempts < config.maxGeocodesPerRun) {
+          geocodeAttempts++; // every attempt is a Google API call — count it whether or not it resolves
           const res = await geocodeAndRecheck(service, eligCtx);
-          if (res.geocoded) geocodedCount++;
+          if (res.geocoded) geocoded++;
           elig = res.recheck;
         }
         if (!elig.eligible) {
@@ -268,8 +270,8 @@ async function runAutoDispatch(opts = {}) {
   }
 
   await audit.completeRun(runId, { status: runStatus, totals, error: runError });
-  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${geocodedCount}`);
-  return { runId, status: runStatus, geocoded: geocodedCount, ...totals };
+  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${geocoded}/${geocodeAttempts}`);
+  return { runId, status: runStatus, geocoded, geocode_attempts: geocodeAttempts, ...totals };
 }
 
 module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn } };

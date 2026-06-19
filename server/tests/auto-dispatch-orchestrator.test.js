@@ -157,6 +157,16 @@ test('still skips MISSING_GEO when geocoding cannot resolve the address', async 
   expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
 });
 
+test('caps geocode ATTEMPTS even when they all fail (counts attempts, not successes)', async () => {
+  servicesResult = [svc({ id: 's1', customer_id: 'c1' }), svc({ id: 's2', customer_id: 'c2' })];
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null); // never resolves
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  const res = await runAutoDispatch({ mode: 'dry_run', maxGeocodesPerRun: 1 });
+  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1); // 2 missing-geo, cap=1 → only 1 API attempt
+  expect(res).toMatchObject({ skipped: 2, geocoded: 0, geocode_attempts: 1 });
+});
+
 test('ineligible service is skipped before candidate generation', async () => {
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'INSIDE_LOCK_WINDOW', reason_description: 'x' });
   const res = await runAutoDispatch({ mode: 'dry_run' });
