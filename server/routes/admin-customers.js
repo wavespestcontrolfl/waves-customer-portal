@@ -2208,8 +2208,9 @@ router.put('/:id/stage', async (req, res, next) => {
     const stageUpdates = { pipeline_stage: stage, pipeline_stage_changed_at: new Date() };
     if (stage === 'churned') {
       // Always timestamp the churn (reason optional) so retention can see it —
-      // previously churned_at was only set when a reason was typed.
-      stageUpdates.churned_at = new Date();
+      // previously churned_at was only set when a reason was typed. churned_at
+      // is a DATE column, so use the ET calendar date, not a UTC-coerced JS Date.
+      stageUpdates.churned_at = etDateString();
       if (req.body.churnReason) stageUpdates.churn_reason = req.body.churnReason;
     } else {
       // Reactivation / any non-churned target: clear the churn stamp so a

@@ -38,6 +38,7 @@ exports.up = async function up(knex) {
       AND (
         EXISTS (SELECT 1 FROM invoices i WHERE i.customer_id = customers.id AND i.paid_at IS NOT NULL)
         OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = customers.id AND s.status = 'completed')
+        OR EXISTS (SELECT 1 FROM service_records r WHERE r.customer_id = customers.id AND r.status = 'completed')
       )
   `);
 
