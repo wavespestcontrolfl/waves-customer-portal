@@ -5853,6 +5853,10 @@ router.put('/:token/accept', async (req, res, next) => {
       membership: acceptMembership,
       oneTime: treatAsOneTime,
       oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
+      // The appointment being committed carries any per-job payer override
+      // (scheduled_services.payer_id precedes the customer default), so the
+      // deposit exemption resolves the same payer the eventual invoice will.
+      scheduledServiceId: existingAppointmentId || null,
     });
     if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
       return res.status(400).json({
@@ -6693,12 +6697,35 @@ router.put('/:token/accept', async (req, res, next) => {
     // Required paths never sweep: their unapplied remainder rolls forward
     // to the next service-record invoice. Post-commit and best-effort —
     // failures alert + leave the truth on the ledger.
-    if (depositPolicy.enforced && !depositPolicy.required) {
+    //
+    // Third-party Bill-To also sweeps: a deposit-policy exemption only fires
+    // when the estimate's customer is KNOWN at policy time. An unlinked estimate
+    // can be matched to an existing payer customer during accept — the deposit
+    // was required + collected, but the customer is payer-billed and every
+    // invoice they ever get (now or at a future visit) skips homeowner deposit
+    // credit, so the money would strand. Resolve payer status from the FINAL
+    // bound customer, not just the accept-time invoice: a one-time / pay-at-visit
+    // payer accept creates no invoice now (the invoice is the completed-visit one
+    // via createFromService), so invoiceIsPayerBilled stays false. Refund here
+    // rather than roll forward. resolveForInvoice fails soft to self-pay; on a
+    // miss we skip the refund (the deposit still rolls forward as before).
+    let customerIsPayerBilled = invoiceIsPayerBilled;
+    if (!customerIsPayerBilled && customerId) {
+      try {
+        const PayerService = require('../services/payer');
+        const resolvedSweepPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: existingAppointmentId || null });
+        customerIsPayerBilled = !!resolvedSweepPayer?.payerId;
+      } catch (e) {
+        logger.warn(`[estimate-accept] payer resolve for deposit sweep failed (customer ${customerId}): ${e.message}`);
+      }
+    }
+    const payerBilledSweep = customerIsPayerBilled && depositPolicy.required;
+    if ((depositPolicy.enforced && !depositPolicy.required) || payerBilledSweep) {
       try {
         const { refundUnconsumedDeposits } = require('../services/estimate-deposits');
         await refundUnconsumedDeposits({
           estimateId: estimate.id,
-          reason: `exempt_accept:${depositPolicy.exemptReason || 'unknown'}`,
+          reason: payerBilledSweep ? 'payer_billed_accept' : `exempt_accept:${depositPolicy.exemptReason || 'unknown'}`,
         });
       } catch (e) {
         logger.error(`[estimate-accept] exempt-path deposit sweep failed for estimate ${estimate.id}: ${e.message}`);

@@ -216,3 +216,23 @@ describe('PayerService.attachToInvoice', () => {
     expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' }));
   });
 });
+
+describe('PayerService.resolveForInvoice — throwOnError (strict) mode', () => {
+  function throwingDb() {
+    return jest.fn(() => ({
+      where() { return this; },
+      first() { return Promise.reject(new Error('db down')); },
+    }));
+  }
+
+  test('default (fail-soft) swallows a lookup error and returns self-pay', async () => {
+    const out = await PayerService.resolveForInvoice({ database: throwingDb(), customerId: 'c1' });
+    expect(out).toMatchObject({ payerId: null });
+  });
+
+  test('throwOnError re-throws so fail-closed callers skip on uncertainty', async () => {
+    await expect(
+      PayerService.resolveForInvoice({ database: throwingDb(), customerId: 'c1', throwOnError: true }),
+    ).rejects.toThrow('db down');
+  });
+});

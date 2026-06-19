@@ -38,8 +38,13 @@ const mockLoadExistingRecurringQualifyingRows = jest.fn(async () => []);
 jest.mock('../services/waveguard-existing-services', () => ({
   loadExistingRecurringQualifyingRows: (...args) => mockLoadExistingRecurringQualifyingRows(...args),
 }));
+const mockResolveForInvoice = jest.fn(async () => ({ payerId: null }));
+jest.mock('../services/payer', () => ({
+  resolveForInvoice: (...args) => mockResolveForInvoice(...args),
+}));
 
 const {
+  assessDepositFollowUpEligibility,
   computeDepositAmount,
   createDepositIntentForEstimate,
   ensureDepositSatisfied,
@@ -191,6 +196,102 @@ describe('resolveDepositPolicyForEstimate — live plan-customer fallback (P2)',
       membership: { isExistingCustomer: true },
     });
     expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveDepositPolicyForEstimate — third-party payer exemption', () => {
+  const linkedEstimate = { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 };
+
+  it('exempts a would-be-required deposit when the customer resolves to a payer', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      paymentMethodPreference: 'pay_at_visit',
+      membership: { isExistingCustomer: false },
+    });
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null });
+    expect(policy.required).toBe(false);
+    expect(policy.exemptReason).toBe('payer_billed');
+    // Only the deposit gate is dropped — slotRequired stays as the base policy
+    // computed it (false here for a non-oneTimeUninvoiced accept).
+    expect(policy.slotRequired).toBe(false);
+  });
+
+  it('threads the estimate-linked scheduled service as the payer scope (per-job payer)', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 7 });
+    await resolveDepositPolicyForEstimate({
+      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280, estimate_data: JSON.stringify({ scheduled_service_id: 'ss-55' }) },
+      membership: { isExistingCustomer: false },
+    });
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: 'ss-55' });
+  });
+
+  it('an explicit committed-appointment scheduledServiceId overrides the estimate link', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 7 });
+    await resolveDepositPolicyForEstimate({
+      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280, estimate_data: JSON.stringify({ scheduled_service_id: 'ss-55' }) },
+      membership: { isExistingCustomer: false },
+      scheduledServiceId: 'ss-committed',
+    });
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: 'ss-committed' });
+  });
+
+  it('does NOT override an already-exempt existing-plan policy (keeps its slot gate)', async () => {
+    // policy.required is already false (existing plan) → payer check never runs,
+    // so the existing_plan_customer booking gate (slotRequired:true) is preserved.
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      membership: { isExistingCustomer: true },
+    });
+    expect(policy.required).toBe(false);
+    expect(policy.exemptReason).toBe('existing_plan_customer');
+    expect(policy.slotRequired).toBe(true);
+    expect(mockResolveForInvoice).not.toHaveBeenCalled();
+  });
+
+  it('a payer lookup miss/error leaves the deposit required (fail-safe direction)', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: null });
+    expect((await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate, membership: {},
+    })).required).toBe(true);
+    mockResolveForInvoice.mockRejectedValueOnce(new Error('db down'));
+    expect((await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate, membership: {},
+    })).required).toBe(true);
+  });
+
+  it('no linked customer = no payer lookup', async () => {
+    await resolveDepositPolicyForEstimate({
+      estimate: { id: 'est-1', onetime_total: 280 },
+      membership: {},
+    });
+    expect(mockResolveForInvoice).not.toHaveBeenCalled();
+  });
+});
+
+describe('assessDepositFollowUpEligibility — payer-billed skips the nudge (P1)', () => {
+  it('never sends a deposit-abandonment SMS to a payer-billed estimate', async () => {
+    const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
+    mockDbHandler = (table) => {
+      if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
+      throw new Error(`unexpected table ${table}`);
+    };
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'payer_billed' });
+    // Strict (throwOnError) so an unverifiable payer status skips the SMS.
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null, throwOnError: true });
+  });
+
+  it('fails closed — an errored payer lookup skips the nudge (no SMS)', async () => {
+    const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
+    mockDbHandler = (table) => {
+      if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
+      throw new Error(`unexpected table ${table}`);
+    };
+    mockResolveForInvoice.mockRejectedValueOnce(new Error('payer db down'));
+    const result = await assessDepositFollowUpEligibility('est-1');
+    expect(result).toEqual({ eligible: false, reason: 'eligibility_unverified' });
   });
 });
 
