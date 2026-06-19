@@ -73,6 +73,20 @@ function applyETTimestampWindow(qb, column, from, to) {
     .whereRaw(`${column} <  (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'`, [`${to}T00:00:00`]);
 }
 
+// ET-midnight bind for single-sided timestamp boundaries (column <op> ET-midnight
+// of dateStr). Postgres on Railway runs UTC, so comparing a timestamptz against a
+// bare ET date string would shift the cutoff by the ET offset (the same trap
+// applyETTimestampWindow guards for ranges).
+const ET_MIDNIGHT_TS = "?::timestamp AT TIME ZONE 'America/New_York'";
+function etDayStart(dateStr) { return `${dateStr}T00:00:00`; }
+
+// A "customer" for dashboard counts = a converted pipeline stage, NOT a lead.
+// `customers.active` defaults to true for leads too, so it can't distinguish
+// them. Matches the app's existing real-customer predicate (admin-customers.js,
+// pipeline-manager.js, document-template-bulk-send.js) — owner-confirmed.
+const CUSTOMER_STAGES = ['active_customer', 'won', 'at_risk'];
+function whereRealCustomer(qb) { return qb.whereIn('pipeline_stage', CUSTOMER_STAGES); }
+
 async function paidRevenueTotal(from, to) {
   const [ledger, paidInvoiceGaps] = await Promise.all([
     db('payments')
@@ -155,15 +169,13 @@ router.get('/', dashboardCache, async (req, res, next) => {
     ] = await Promise.all([
       paidRevenueTotal(som, today),
       paidRevenueTotal(solm, eolm),
-      db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first(),
-      // New-customer acquisition this month. Counts everyone acquired in the
-      // window — current actives AND those who already churned same-month —
-      // because filtering on active=true alone silently drops a signup that
-      // churned within the month, undercounting gross adds. churned_at is only
-      // ever set on previously-active customers, so (active OR churned) is the
-      // "is/was a real customer" set without pulling in never-activated prospects.
-      db('customers').whereNull('deleted_at').where('created_at', '>=', som)
-        .where(function newlyAcquired() { this.where('active', true).orWhereNotNull('churned_at'); })
+      // Active customers = real customers (CUSTOMER_STAGES), not the whole
+      // customers table — `active=true` defaults true for new_lead/prospect rows.
+      db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer).count('* as count').first(),
+      // New customers this month = real customers (not leads) whose row was
+      // created this month, ET-anchored so the month boundary doesn't drift.
+      db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
+        .modify((qb) => applyETTimestampWindow(qb, 'created_at', som, today))
         .count('* as count').first(),
       db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
@@ -452,31 +464,34 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
-    // Retention — of the customers active at the START of the window, how many
-    // are still here. Both the base and the churn count are scoped to the SAME
-    // start-of-window cohort so the subtraction is exact.
+    // Retention — of the real customers active at the START of the window, how
+    // many are still here. Base and churn share the SAME start-of-window cohort
+    // so the subtraction is exact. NOTE: churn is keyed on churned_at, which
+    // isn't populated yet — until it is, retention reads ~100% (no churn signal).
     let retentionPct = null, churned = 0;
     try {
-      // Start-of-window cohort: existed before the window and hadn't churned or
-      // been deleted before it began. (Current-active would fold in everyone
-      // acquired *during* the window, inflating the base and the rate.)
+      // Start-of-window cohort: a real customer (CUSTOMER_STAGES, not a lead)
+      // that existed before the window and hadn't churned/been deleted before it
+      // began. Current-active would fold in everyone acquired *during* the
+      // window, inflating the base and the rate. ET-anchored boundaries.
       const cohort = () => db('customers')
-        .where('created_at', '<', start)
+        .modify(whereRealCustomer)
+        .whereRaw(`created_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
         .where(function notDeletedBeforeStart() {
-          this.whereNull('deleted_at').orWhere('deleted_at', '>=', start);
+          this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
         });
 
       // Churned during the window, restricted to that cohort — so a same-window
       // signup→churn (never in the base) can't artificially lower retention.
       const churnedRow = await cohort()
-        .whereNotNull('churned_at').where('churned_at', '>=', start)
+        .whereNotNull('churned_at').whereRaw(`churned_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
         .count('* as c').first();
       churned = parseInt(churnedRow?.c || 0);
 
       // Base = the cohort still un-churned as of the window start.
       const activeAtStartRow = await cohort()
         .where(function notChurnedBeforeStart() {
-          this.whereNull('churned_at').orWhere('churned_at', '>=', start);
+          this.whereNull('churned_at').orWhereRaw(`churned_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
         })
         .count('* as c').first();
       const activeAtStart = parseInt(activeAtStartRow?.c || 0);
@@ -670,11 +685,10 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
         paidRevenueTotal(from, to),
         db('scheduled_services').whereBetween('scheduled_date', [from, to])
           .select(db.raw("COUNT(*) as total"), db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")).first(),
-        // Match the main KPI's new-customer definition: gross acquisitions in
-        // the window (active now OR churned), not just still-active — otherwise
-        // period-over-period new-customer deltas drop same-period churns.
-        db('customers').whereNull('deleted_at').whereBetween('created_at', [from, to + 'T23:59:59'])
-          .where(function newlyAcquired() { this.where('active', true).orWhereNotNull('churned_at'); })
+        // Match the main KPI's new-customer definition: real customers (not
+        // leads) whose row was created in the window, ET-anchored.
+        db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
+          .modify((qb) => applyETTimestampWindow(qb, 'created_at', from, to))
           .count('* as c').first(),
       ]);
       return {
