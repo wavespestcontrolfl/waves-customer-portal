@@ -7739,17 +7739,18 @@ export function CompletionPanel({
   // strip the [Protocol]/[Found]/[Next] tagged lines that handleSubmit reads
   // back via labelsStillInNotes to rebuild protocolActionsCompleted + their
   // re-entry/treatment scopes, observations, and recommendations. Re-append the
-  // selected labels the prose didn't already mention so the structured visit
-  // record (and interior-treatment safety scopes) survive drafting.
+  // still-selected labels so the structured visit record (and interior-treatment
+  // safety scopes) survive drafting.
   function stitchSelectedLabelsIntoReport(reportText) {
     const base = String(reportText || "");
-    const lower = base.toLowerCase();
     const lines = [];
-    const pushIfMissing = (prefix, label) => {
+    // Always emit an explicit removable marker (don't skip when the prose
+    // happens to mention the label verbatim): the marker is the tech's deselect
+    // handle, so leaving a still-selected item in prose-only form would make it
+    // impossible to deselect before completing.
+    const pushLabel = (prefix, label) => {
       const text = String(label || "").trim();
-      if (text && !lower.includes(text.toLowerCase())) {
-        lines.push(`[${prefix}] ${text}`);
-      }
+      if (text) lines.push(`[${prefix}] ${text}`);
     };
     // Only re-stitch labels still present in the pre-generation notes — the tech
     // deselects a wrongly-picked item by deleting its tagged line, and
@@ -7758,16 +7759,28 @@ export function CompletionPanel({
     // re-entry scope) on the next Generate. (notes still holds the pre-draft text
     // here; setNotes(report) hasn't applied yet.)
     labelsStillInNotes(selectedProtocolActionLabels).forEach((l) =>
-      pushIfMissing("Protocol", l),
+      pushLabel("Protocol", l),
     );
     labelsStillInNotes(selectedObservationLabels).forEach((l) =>
-      pushIfMissing("Found", l),
+      pushLabel("Found", l),
     );
     labelsStillInNotes(selectedRecommendationLabels).forEach((l) =>
-      pushIfMissing("Next", l),
+      pushLabel("Next", l),
     );
     if (!lines.length) return base;
     return base.trimEnd() + "\n\n" + lines.join("\n");
+  }
+  // The [Protocol]/[Found]/[Next] chip lines are structured selections that ride
+  // along in the notes only as the tech's deselect handle — they're already sent
+  // as the typed `actionsCompleted`/`observations`/`recommendations` fields. Keep
+  // them out of `serviceNotes` so a future-step [Next] recommendation can't get
+  // drafted as completed work (the prompt files serviceNotes under COMPLETED WORK).
+  function stripChipTagLines(text) {
+    return String(text || "")
+      .split("\n")
+      .filter((line) => !/^\s*\[(?:Protocol(?: optional)?|Action|Found|Next)\]\s/.test(line))
+      .join("\n")
+      .trim();
   }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
@@ -7829,7 +7842,7 @@ export function CompletionPanel({
             timeZone: "America/New_York",
           })
         : "",
-      serviceNotes: notes.trim(),
+      serviceNotes: stripChipTagLines(notes),
       productsApplied,
       areasServiced,
       actionsCompleted,
@@ -9803,6 +9816,10 @@ export function CompletionPanel({
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   rows={quickComplete ? 3 : 5}
+                  // Lock edits while the AI draft is in flight so typing or a
+                  // dictated chunk landing mid-call isn't clobbered when the
+                  // response replaces the notes.
+                  disabled={generating}
                   placeholder={
                     dictation.listening
                       ? "Listening… speak your notes"
@@ -9814,12 +9831,14 @@ export function CompletionPanel({
                     // Reserve the bottom-right corner for the dictation mic so
                     // typed text never runs under it.
                     paddingRight: dictation.supported ? 52 : mTextarea.padding,
+                    opacity: generating ? 0.6 : 1,
                   }}
                 />{" "}
                 {dictation.supported && (
                   <button
                     type="button"
                     onClick={dictation.toggle}
+                    disabled={generating}
                     aria-label={
                       dictation.listening ? "Stop dictation" : "Dictate notes"
                     }
@@ -9838,7 +9857,8 @@ export function CompletionPanel({
                       color: dictation.listening ? M.card : M.ink2,
                       fontSize: 17,
                       lineHeight: 1,
-                      cursor: "pointer",
+                      cursor: generating ? "not-allowed" : "pointer",
+                      opacity: generating ? 0.5 : 1,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
@@ -11932,6 +11952,10 @@ export function CompletionPanel({
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               rows={quickComplete ? 3 : 5}
+              // Lock edits while the AI draft is in flight so typing or a
+              // dictated chunk landing mid-call isn't clobbered when the
+              // response replaces the notes.
+              disabled={generating}
               style={{
                 width: "100%",
                 background: D.input,
@@ -11945,6 +11969,7 @@ export function CompletionPanel({
                 resize: "vertical",
                 fontFamily: "'Nunito Sans', sans-serif",
                 boxSizing: "border-box",
+                opacity: generating ? 0.6 : 1,
               }}
               placeholder={
                 dictation.listening
@@ -11956,6 +11981,7 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={dictation.toggle}
+                disabled={generating}
                 aria-label={
                   dictation.listening ? "Stop dictation" : "Dictate notes"
                 }
@@ -11972,7 +11998,8 @@ export function CompletionPanel({
                   color: dictation.listening ? D.white : D.text,
                   fontSize: 16,
                   lineHeight: 1,
-                  cursor: "pointer",
+                  cursor: generating ? "not-allowed" : "pointer",
+                  opacity: generating ? 0.5 : 1,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
