@@ -174,6 +174,10 @@ router.get('/', dashboardCache, async (req, res, next) => {
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer).count('* as count').first(),
       // New customers this month = real customers (not leads) whose row was
       // created this month, ET-anchored so the month boundary doesn't drift.
+      // NOTE: created_at is the row-creation (≈ lead-intake) time, a proxy for
+      // conversion — a lead created earlier and converted in-place this month is
+      // missed. Accurate acquisition-by-conversion-date needs a persisted
+      // customer_since (currently unpopulated); tracked as a follow-up.
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
         .modify((qb) => applyETTimestampWindow(qb, 'created_at', som, today))
         .count('* as count').first(),
@@ -465,25 +469,23 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     }
 
     // Retention — of the real customers active at the START of the window, how
-    // many are still here. Churning MOVES the row to pipeline_stage='churned'
-    // (admin-customers PUT /:id/stage), so the cohort must INCLUDE churned rows
-    // (filtering to CUSTOMER_STAGES alone would drop every churn and pin
-    // retention at 100%).
+    // many are still here. Churn is read from CURRENT state: churning moves the
+    // row to pipeline_stage='churned' (admin-customers PUT /:id/stage) and
+    // reactivation moves it back, so the LIVE stage — not the sticky churned_at,
+    // which isn't cleared on reactivation — is the source of truth. Churn time =
+    // pipeline_stage_changed_at (when the row entered its current stage), which
+    // also dates a re-churn by its most recent event.
     let retentionPct = null, churned = 0;
     try {
-      // A row is churned if it's in the churned stage OR carries a churned_at
-      // (defensive against any deactivation path that sets churned_at without
-      // moving the stage). Churn time = the LATER of churned_at / the
-      // stage-change time, so a re-churn (which bumps pipeline_stage_changed_at
-      // but may leave an older churned_at) is dated by its most recent event.
-      // GREATEST ignores NULLs.
-      const IS_CHURNED = `(pipeline_stage = 'churned' OR churned_at IS NOT NULL)`;
-      const churnTimeAfterStart = `GREATEST(churned_at, pipeline_stage_changed_at) >= ${ET_MIDNIGHT_TS}`;
+      const enteredInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
+      const enteredBeforeWindow = `(pipeline_stage_changed_at < ${ET_MIDNIGHT_TS} OR pipeline_stage_changed_at IS NULL)`;
       // Cohort = a customer (not a lead) that existed before the window, wasn't
       // deleted before it, and was a customer AT the start: either still in a
-      // retained stage, OR churned but only on/after the window start (a churn
-      // before the window means they weren't a customer at the start).
-      // ET-anchored boundaries throughout.
+      // retained stage entered before the window, OR currently churned but only
+      // on/after the window start (a churn before the window means they weren't
+      // a customer at the start). No per-stage history, so entry time is a proxy
+      // — a customer→customer move mid-window is excluded from the base;
+      // acceptable until a customer_since signal exists. ET-anchored throughout.
       const cohort = () => db('customers')
         .whereRaw(`created_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
         .where(function notDeletedBeforeStart() {
@@ -491,29 +493,18 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
         })
         .where(function wasCustomerAtStart() {
           this.where(function retainedFromBeforeStart() {
-            // Still a non-churned customer, in that stage since before the
-            // window — a proxy for "was a customer at the start", since there's
-            // no per-stage history (NULL stage-change = legacy row, assumed
-            // pre-existing). Keeps a lead that converted *during* the window out
-            // of the base. Trade-off: a customer→customer move mid-window (e.g.
-            // active_customer→at_risk) is also excluded; acceptable until a
-            // stage-history/customer_since signal exists.
             this.whereIn('pipeline_stage', CUSTOMER_STAGES)
-              .whereNull('churned_at')
-              .where(function enteredBeforeStart() {
-                this.whereRaw(`pipeline_stage_changed_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
-                  .orWhereNull('pipeline_stage_changed_at');
-              });
+              .whereRaw(enteredBeforeWindow, [etDayStart(start)]);
           })
             .orWhere(function churnedInWindow() {
-              this.whereRaw(IS_CHURNED).whereRaw(churnTimeAfterStart, [etDayStart(start)]);
+              this.where('pipeline_stage', 'churned').whereRaw(enteredInWindow, [etDayStart(start)]);
             });
         });
 
       // Churned during the window = the churned subset of that same cohort.
       const churnedRow = await cohort()
-        .whereRaw(IS_CHURNED)
-        .whereRaw(churnTimeAfterStart, [etDayStart(start)])
+        .where('pipeline_stage', 'churned')
+        .whereRaw(enteredInWindow, [etDayStart(start)])
         .count('* as c').first();
       churned = parseInt(churnedRow?.c || 0);
 
