@@ -2355,7 +2355,15 @@ export default function DispatchPageV2({
             setDetailService(null);
             setEditingService(svc);
           }}
-          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          onTreatmentPlan={(svc) => {
+            // Same trap as onReviewCheckout: TreatmentPlanPanel renders inline
+            // (fixed z-1000) and would mount behind this body-level portaled
+            // detail sheet. Close the detail sheet first. (Only this in-detail
+            // entry point needs it — the list/grid onTreatmentPlan handlers
+            // fire with no detail sheet open.)
+            setDetailService(null);
+            setTreatmentPlanService(svc);
+          }}
           onReviewCheckout={(svc) => {
             // Close the detail sheet before opening checkout. The detail sheet
             // portals to document.body (z-100), while the checkout sheet renders
