@@ -7735,6 +7735,28 @@ export function CompletionPanel({
       return text && currentNotes.includes(text.toLowerCase());
     });
   }
+  // Generate AI report replaces the notes wholesale with AI prose, which would
+  // strip the [Protocol]/[Found]/[Next] tagged lines that handleSubmit reads
+  // back via labelsStillInNotes to rebuild protocolActionsCompleted + their
+  // re-entry/treatment scopes, observations, and recommendations. Re-append the
+  // selected labels the prose didn't already mention so the structured visit
+  // record (and interior-treatment safety scopes) survive drafting.
+  function stitchSelectedLabelsIntoReport(reportText) {
+    const base = String(reportText || "");
+    const lower = base.toLowerCase();
+    const lines = [];
+    const pushIfMissing = (prefix, label) => {
+      const text = String(label || "").trim();
+      if (text && !lower.includes(text.toLowerCase())) {
+        lines.push(`[${prefix}] ${text}`);
+      }
+    };
+    selectedProtocolActionLabels.forEach((l) => pushIfMissing("Protocol", l));
+    selectedObservationLabels.forEach((l) => pushIfMissing("Found", l));
+    selectedRecommendationLabels.forEach((l) => pushIfMissing("Next", l));
+    if (!lines.length) return base;
+    return base.trimEnd() + "\n\n" + lines.join("\n");
+  }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
   // server can't drift. The payload classifies inputs by provenance so the
@@ -7748,7 +7770,13 @@ export function CompletionPanel({
     const actionsCompleted = labelsStillInNotes(selectedProtocolActionLabels);
     const observations = labelsStillInNotes(selectedObservationLabels);
     const recommendations = labelsStillInNotes(selectedRecommendationLabels);
-    const concern = customerConcern.trim();
+    // Mirror the final-submit gate (handleSubmit only sends customerConcernText
+    // when the interaction is still "customer had a concern"): if the tech typed
+    // a concern then switched the interaction away, the concern input is hidden
+    // and must not leak into AI-drafted copy.
+    const concern = isCustomerConcernInteraction(customerInteraction)
+      ? customerConcern.trim()
+      : "";
     const interactionLabel = CUSTOMER_INTERACTION_OPTIONS.find(
       (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
     )?.label || "";
@@ -7765,12 +7793,21 @@ export function CompletionPanel({
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",
-      serviceDate: new Date().toLocaleDateString("en-US", {
+      // Reporting is ET-only: format the visit date/time in America/New_York so
+      // a non-ET device (or a completion logged just past browser-local
+      // midnight) can't draft customer-facing copy with the wrong visit date.
+      // Tie the date to the check-in instant when present, else completion-now.
+      serviceDate: (service.checkInTime
+        ? new Date(service.checkInTime)
+        : new Date()
+      ).toLocaleDateString("en-US", {
         month: "long", day: "numeric", year: "numeric",
+        timeZone: "America/New_York",
       }),
       arrivalTime: service.checkInTime
         ? new Date(service.checkInTime).toLocaleTimeString("en-US", {
             hour: "numeric", minute: "2-digit", hour12: true,
+            timeZone: "America/New_York",
           })
         : "",
       serviceNotes: notes.trim(),
@@ -9919,7 +9956,8 @@ export function CompletionPanel({
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
-                    if (r.report) setNotes(r.report);
+                    if (r.report)
+                      setNotes(stitchSelectedLabelsIntoReport(r.report));
                   } catch (e) {
                     alert("AI report failed: " + e.message);
                   }
@@ -12041,7 +12079,8 @@ export function CompletionPanel({
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
-                  if (r.report) setNotes(r.report);
+                  if (r.report)
+                    setNotes(stitchSelectedLabelsIntoReport(r.report));
                 } catch (e) {
                   alert("AI report failed: " + e.message);
                 }
