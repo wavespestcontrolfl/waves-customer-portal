@@ -963,14 +963,18 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         await createDefaultCustomerRows(trx, created.id);
         customerId = created.id;
       } else if (existingCustomer && !['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage)) {
-        // Reused an existing customer that's still in a lead stage — promote it
-        // on booking (the create branch above inserts stage='won'). Without
-        // this, a booked lead whose customer row already exists stays stuck at
-        // new_lead and is under-counted in the customer KPIs.
+        // Reused an existing customer that's still in a lead (or churned) stage —
+        // promote it on booking (the create branch above inserts stage='won').
+        // Without this, a booked lead whose customer row already exists stays
+        // stuck at new_lead and is under-counted in the customer KPIs. Clear any
+        // churn stamp too, so re-booking a churned customer doesn't leave it
+        // marked both won and churned.
         await trx('customers').where({ id: customerId }).update({
           pipeline_stage: 'won',
           pipeline_stage_changed_at: new Date(),
           member_since: existingCustomer.member_since || etDateString(),
+          churned_at: null,
+          churn_reason: null,
         });
       }
 

@@ -27,8 +27,11 @@ exports.up = async function up(knex) {
   await knex.raw(`
     UPDATE customers
     SET pipeline_stage = 'active_customer',
-        member_since = COALESCE(member_since, created_at::date),
-        pipeline_stage_changed_at = COALESCE(member_since::timestamptz, pipeline_stage_changed_at, created_at)
+        member_since = COALESCE(member_since, (created_at AT TIME ZONE 'America/New_York')::date),
+        pipeline_stage_changed_at = COALESCE(
+          (member_since::timestamp AT TIME ZONE 'America/New_York'),
+          pipeline_stage_changed_at,
+          created_at)
     WHERE deleted_at IS NULL
       AND active = true
       AND pipeline_stage = 'new_lead'
@@ -41,7 +44,7 @@ exports.up = async function up(knex) {
   // 2) Fill missing member_since on existing customer-stage rows.
   await knex.raw(`
     UPDATE customers
-    SET member_since = created_at::date
+    SET member_since = (created_at AT TIME ZONE 'America/New_York')::date
     WHERE deleted_at IS NULL
       AND pipeline_stage IN ('active_customer', 'won', 'at_risk')
       AND member_since IS NULL
