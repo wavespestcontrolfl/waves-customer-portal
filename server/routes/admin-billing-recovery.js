@@ -40,9 +40,12 @@ const {
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Advisory-lock namespace so two concurrent "bill" clicks on the same visit
-// serialize and can't both create a draft invoice. 0x4252 = "BR".
-const BILLING_RECOVERY_LOCK_NS = 0x4252;
+// Reuse the SAME advisory-lock key the scheduled-service invoice-mint path uses
+// (admin-schedule.js: 'schedule.invoice.mint') so a recovery Bill serializes not
+// just against another recovery Bill/dismiss but against Charge-now / completion
+// mints too. invoices.scheduled_service_id is NOT unique, so a private namespace
+// would let a recovery Bill and a concurrent mint both create duplicate drafts.
+const SCHEDULED_SERVICE_INVOICE_MINT_LOCK = 'schedule.invoice.mint';
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
@@ -137,7 +140,12 @@ function uninvoicedLeakQuery(days) {
     .whereRaw('COALESCE(sr.is_callback, false) = false')
     .whereRaw('COALESCE(ss.prepaid_amount, 0) < ss.estimated_price') // not FULLY prepaid (partial surfaces in needs-review)
     .whereRaw('COALESCE(ss.payer_id, c.payer_id) IS NULL') // self-pay only (v1); payer-billed = payer AP flow
-    .whereRaw(`NOT ${autopay.sql}`, [autopay.binding])   // not autopay (cron-billed)
+    // Conservative v1 scope (owner priority: never risk double-billing an autopay
+    // customer). The completion predicate only treats autopay as covering NO-price
+    // visits, so an autopay customer's one-off explicitly-priced visit is
+    // technically billable — surfacing those is a deliberate follow-up, kept out of
+    // v1 to avoid any double-bill exposure.
+    .whereRaw(`NOT ${autopay.sql}`, [autopay.binding])   // exclude active-autopay customers
     .whereRaw(
       `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${ALWAYS_FREE_PATTERNS.map(() => '?').join(',')}]::text[])`,
       ALWAYS_FREE_PATTERNS,
@@ -283,8 +291,12 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       return res.status(422).json({ error: 'Visit completion record is incomplete (office-handoff) — cannot invoice.' });
     }
 
-    // Canonical autopay double-bill guard (keyed on the default payment_methods
-    // row, ET pause, ACH-not-active → card-only). Never trust the client.
+    // Conservative v1 double-bill guard (owner priority): reject active-autopay
+    // customers outright. The completion predicate only treats autopay as covering
+    // NO-price visits, so an autopay one-off priced visit is technically billable —
+    // recovering those is a deliberate follow-up; v1 stays conservative. Keyed on
+    // the canonical customerOnAutopay() (default payment_methods row, ET pause,
+    // ACH-not-active → card-only). Never trust the client.
     const onAutopay = await customerOnAutopay({
       id: visit.customer_id,
       autopay_enabled: visit.autopay_enabled,
@@ -322,7 +334,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     // Serialize concurrent bills on the same visit, recheck inside the lock,
     // then create the invoice + disposition. Prevents duplicate draft invoices.
     const invoice = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [BILLING_RECOVERY_LOCK_NS, scheduledServiceId]);
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, scheduledServiceId]);
 
       const existingInvoice = await trx('invoices')
         .where(function () {
@@ -410,7 +422,7 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
     // eligibility is re-validated INSIDE the lock so a stale UI / direct request
     // can't permanently exclude a future, uncompleted, or already-invoiced visit.
     await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [BILLING_RECOVERY_LOCK_NS, scheduledServiceId]);
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, scheduledServiceId]);
 
       const visit = await trx({ ss: 'scheduled_services' })
         .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
