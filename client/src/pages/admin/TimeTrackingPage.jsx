@@ -148,8 +148,34 @@ const STAFF_SECTIONS = [
   { key: "documents", label: "Documents", Icon: FileText },
 ];
 
+// The 7-tab bar is grouped into parent sections, each revealing its leaf
+// tabs in a sub-row. `tab` still holds the LEAF key, so every
+// {tab === "..."} render block below is unchanged.
+const TIMETRACKING_TAB_GROUPS = [
+  { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard, tabs: ["dashboard"] },
+  {
+    key: "time",
+    label: "Time",
+    Icon: Clock,
+    tabs: ["timesheet", "entries", "approvals"],
+  },
+  {
+    key: "team",
+    label: "Team",
+    Icon: Users,
+    tabs: ["team", "documents"],
+  },
+  { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
+];
+const STAFF_LEAF_BY_KEY = Object.fromEntries(
+  STAFF_SECTIONS.map((s) => [s.key, s]),
+);
+
 export default function TimeTrackingPage() {
   const [tab, setTab] = useState("dashboard");
+  const activeGroup =
+    TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    TIMETRACKING_TAB_GROUPS[0];
   const [toast, setToast] = useState("");
   const showToast = (m) => {
     setToast(m);
@@ -162,12 +188,61 @@ export default function TimeTrackingPage() {
       <AdminCommandHeader
         title="Staff"
         icon={Users}
-        sections={STAFF_SECTIONS}
-        activeKey={tab}
-        onSectionChange={setTab}
+        sections={TIMETRACKING_TAB_GROUPS.map((g) => ({
+          key: g.key,
+          label: g.label,
+          Icon: g.Icon,
+        }))}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = TIMETRACKING_TAB_GROUPS.find((x) => x.key === key);
+          if (g) setTab(g.tabs[0]);
+        }}
         ariaLabel="Staff section"
-        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((key) => {
+            const leaf = STAFF_LEAF_BY_KEY[key];
+            const active = tab === key;
+            const LeafIcon = leaf.Icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                <LeafIcon size={14} strokeWidth={1.9} />
+                {leaf.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {tab === "dashboard" && <DashboardTab showToast={showToast} />}
       {tab === "timesheet" && <TimesheetTab showToast={showToast} />}
       {tab === "approvals" && <ApprovalsTab showToast={showToast} />}
