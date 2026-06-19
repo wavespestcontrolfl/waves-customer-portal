@@ -28,6 +28,7 @@ const { isActivePlanCustomer } = require('../services/waveguard-existing-service
 const {
   ensureDepositSatisfied,
   resolveDepositPolicyForEstimate,
+  linkedScheduledServiceId,
   computeDepositAmount,
 } = require('../services/estimate-deposits');
 const {
@@ -5842,6 +5843,13 @@ router.put('/:token/accept', async (req, res, next) => {
     // estimate.
     // ─────────────────────────────────────────────
     const acceptMembership = await buildEstimateMembershipContext(estimate);
+    // The scheduled_service whose per-job payer the eventual invoice will resolve
+    // (committed appointment > estimate's persisted link > source_estimate_id).
+    // Resolve ONCE and thread the same scope into the deposit exemption, the
+    // bill-by-invoice create, and the post-accept refund sweep so all three agree
+    // on the payer — otherwise a per-job payer with no customer default could
+    // exempt the deposit while the invoice still resolves self-pay (or vice versa).
+    const acceptLinkedSsId = await linkedScheduledServiceId(estimate, existingAppointmentId || null);
     // resolveDepositPolicyForEstimate adds the LIVE plan-customer fallback
     // (legacy customer-linked estimates have no membershipSnapshot) and
     // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
@@ -5853,10 +5861,7 @@ router.put('/:token/accept', async (req, res, next) => {
       membership: acceptMembership,
       oneTime: treatAsOneTime,
       oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
-      // The appointment being committed carries any per-job payer override
-      // (scheduled_services.payer_id precedes the customer default), so the
-      // deposit exemption resolves the same payer the eventual invoice will.
-      scheduledServiceId: existingAppointmentId || null,
+      scheduledServiceId: acceptLinkedSsId,
     });
     if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
       return res.status(400).json({
@@ -6310,6 +6315,10 @@ router.put('/:token/accept', async (req, res, next) => {
         const inv = await InvoiceService.create({
           database: trx,
           customerId,
+          // Same appointment scope the deposit exemption used, so the invoice
+          // resolves the same per-job payer (scheduled_services.payer_id) instead
+          // of falling back to self-pay when the customer has no default payer.
+          ...(acceptLinkedSsId ? { scheduledServiceId: acceptLinkedSsId } : {}),
           title: invoiceDraft.title,
           lineItems: invoiceDraft.lineItems,
           notes: invoiceDraft.notes,
@@ -6713,7 +6722,7 @@ router.put('/:token/accept', async (req, res, next) => {
     if (!customerIsPayerBilled && customerId) {
       try {
         const PayerService = require('../services/payer');
-        const resolvedSweepPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: existingAppointmentId || null });
+        const resolvedSweepPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: acceptLinkedSsId });
         customerIsPayerBilled = !!resolvedSweepPayer?.payerId;
       } catch (e) {
         logger.warn(`[estimate-accept] payer resolve for deposit sweep failed (customer ${customerId}): ${e.message}`);

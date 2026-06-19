@@ -274,6 +274,7 @@ describe('assessDepositFollowUpEligibility — payer-billed skips the nudge (P1)
     const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
     mockDbHandler = (table) => {
       if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
+      if (table === 'scheduled_services') { const ss = {}; ['where', 'whereIn', 'whereNotNull', 'orderBy', 'select'].forEach((m) => { ss[m] = () => ss; }); ss.first = async () => null; return ss; }
       throw new Error(`unexpected table ${table}`);
     };
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
@@ -287,6 +288,7 @@ describe('assessDepositFollowUpEligibility — payer-billed skips the nudge (P1)
     const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
     mockDbHandler = (table) => {
       if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
+      if (table === 'scheduled_services') { const ss = {}; ['where', 'whereIn', 'whereNotNull', 'orderBy', 'select'].forEach((m) => { ss[m] = () => ss; }); ss.first = async () => null; return ss; }
       throw new Error(`unexpected table ${table}`);
     };
     mockResolveForInvoice.mockRejectedValueOnce(new Error('payer db down'));
@@ -1279,12 +1281,16 @@ describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
   function followUpDb({ estimate, receivedRows = [], pendingRow = undefined }) {
     return (table) => {
       const b = {};
-      for (const m of ['where', 'whereIn', 'orderBy', 'select']) {
+      for (const m of ['where', 'whereIn', 'whereNotNull', 'orderBy', 'select']) {
         b[m] = jest.fn(() => b);
       }
-      b.first = jest.fn(async () =>
-        table === 'estimates' ? estimate : pendingRow,
-      );
+      b.first = jest.fn(async () => {
+        if (table === 'estimates') return estimate;
+        // No source_estimate_id-linked per-job payer in these fixtures, so the
+        // payer exemption check falls through to the customer-default resolver.
+        if (table === 'scheduled_services') return null;
+        return pendingRow;
+      });
       b.then = (resolve, reject) =>
         Promise.resolve(table === 'estimate_deposits' ? receivedRows : [])
           .then(resolve, reject);
