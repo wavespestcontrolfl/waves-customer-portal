@@ -12,7 +12,10 @@ const AVAILABILITY = ['in_stock', 'limited', 'out_of_stock', 'backorder', 'unkno
 function mapAvailability(value) {
   const s = String(value || '').toLowerCase();
   if (!s) return 'unknown';
-  if (/out[\s_-]?of[\s_-]?stock|outofstock|sold[\s_-]?out|unavailable|discontinued/.test(s)) return 'out_of_stock';
+  // Out-of-stock first — including negated "in stock"/"available" phrasing
+  // ("not in stock", "not currently available") that would otherwise fall
+  // through to the positive in-stock match below and be read as available.
+  if (/out[\s_-]?of[\s_-]?stock|outofstock|sold[\s_-]?out|unavailable|discontinued|not[\s_-]+(currently[\s_-]+)?(in[\s_-]?stock|available)|no[\s_-]+longer[\s_-]+available|temporarily[\s_-]+out/.test(s)) return 'out_of_stock';
   if (/back[\s_-]?order|backorder|pre[\s_-]?order|preorder/.test(s)) return 'backorder';
   if (/limited[\s_-]?availability|limitedavailability|low[\s_-]?stock|only\s+\d+\s+left/.test(s)) return 'limited';
   if (/in[\s_-]?stock|instock/.test(s)) return 'in_stock';

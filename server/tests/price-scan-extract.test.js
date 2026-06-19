@@ -41,6 +41,14 @@ describe('price-scan extract', () => {
       expect(mapAvailability('whatever')).toBe('unknown');
       expect(mapAvailability('')).toBe('unknown');
     });
+    test('negated in-stock / availability phrases are out of stock', () => {
+      // The positive "in stock" regex would otherwise match inside these.
+      expect(mapAvailability('Not in stock')).toBe('out_of_stock');
+      expect(mapAvailability('Not currently in stock')).toBe('out_of_stock');
+      expect(mapAvailability('Not available')).toBe('out_of_stock');
+      expect(mapAvailability('No longer available')).toBe('out_of_stock');
+      expect(mapAvailability('Temporarily out of stock')).toBe('out_of_stock');
+    });
   });
 
   describe('offerPrice', () => {
