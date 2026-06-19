@@ -51,6 +51,11 @@ describe('stageLifecycleStamps', () => {
     const s = stageLifecycleStamps('new_lead', 'contacted', { member_since: null }, { today: TODAY });
     expect(Object.keys(s)).toEqual(['pipeline_stage_changed_at']);
   });
+
+  test('a no-op same-stage save returns no stamps (preserves churned_at)', () => {
+    expect(stageLifecycleStamps('churned', 'churned', { member_since: '2025-01-01' }, { today: TODAY })).toEqual({});
+    expect(stageLifecycleStamps('active_customer', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY })).toEqual({});
+  });
 });
 
 describe('admin customers route helpers', () => {

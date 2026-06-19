@@ -412,8 +412,10 @@ const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // member_since / churned_at consistent (otherwise editing the stage from
 // Customers 360 would skip them). `today` is the ET calendar date — member_since
 // and churned_at are DATE columns, so a JS Date would land on the wrong day
-// after ET midnight. Call only when the stage actually changed.
+// after ET midnight. Returns {} for a no-op (same-stage) save so it never resets
+// pipeline_stage_changed_at or restamps churned_at on a churned→churned re-save.
 function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason } = {}) {
+  if (newStage === oldStage) return {};
   const stamps = { pipeline_stage_changed_at: new Date() };
   if (newStage === 'churned') {
     // Always timestamp the churn so retention can see it; reason optional.
