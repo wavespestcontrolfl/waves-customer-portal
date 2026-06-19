@@ -86,7 +86,16 @@ exports.up = async function up(knex) {
     if (!hasPayer || !hasPo || !hasSnap) {
       await knex.schema.alterTable('invoices', (t) => {
         if (!hasPayer) {
-          t.integer('payer_id').references('id').inTable('payers').onDelete('SET NULL');
+          // RESTRICT (not SET NULL): invoices.payer_id is the flag EVERY
+          // fail-closed guard keys off (SMS/receipt suppression, pay-token
+          // suppression, billing/balance filters, dispatch collection gate).
+          // SET NULL on a payer delete would strand payer_snapshot while making
+          // the invoice look self-pay — re-exposing the payer's invoice/pay/
+          // receipt surfaces to the homeowner. An issued invoice's bill-to is
+          // immutable; payers are deactivated (active=false), never hard-deleted
+          // (no DELETE route exists), so this only blocks a raw delete of a
+          // payer that still has billing history.
+          t.integer('payer_id').references('id').inTable('payers').onDelete('RESTRICT');
           t.index(['payer_id'], 'invoices_payer_id_idx');
         }
         if (!hasPo) t.string('po_number', 64);

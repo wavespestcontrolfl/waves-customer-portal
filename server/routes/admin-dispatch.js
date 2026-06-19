@@ -4645,7 +4645,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
-      invoiceToken: invoice?.token || null,
+      // Third-party Bill-To: never hand back the payer invoice's pay token — it
+      // is the AP's bearer pay link (/api/pay/:token); a cached/mobile client or
+      // the tech holding this response could open it and collect the AP's bill
+      // from the service recipient. Keep id/status/total for display only.
+      // (mirrors the track-public.js token suppression)
+      invoiceToken: invoice && !invoice.payer_id ? (invoice.token || null) : null,
       invoiceStatus: invoice?.status || null,
       reportUrl,
       invoicePaymentActionRequired,

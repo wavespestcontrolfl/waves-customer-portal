@@ -227,7 +227,15 @@ async function attachToInvoice(invoice, database = db) {
     // correction takes effect on a resend; for an issued invoice the snapshot AP
     // is authoritative. We also recover a live AP whenever the snapshot never had
     // a usable one (minted before the AP email was set), issued or not.
-    const apIsFrozen = AP_FROZEN_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase());
+    // "Issued/delivered" is determined by the persistent sent_at timestamp, not
+    // the live status: sendViaSMSAndEmail claims a sendable invoice by flipping
+    // its status to 'sending' BEFORE this attach runs (claimInvoiceForSend), so a
+    // resend of an already-sent/viewed payer invoice would otherwise look
+    // undelivered and overwrite the frozen snapshot AP email with the live one.
+    // sent_at survives the claim (it's COALESCE-set on first delivery, never
+    // cleared), so it correctly keeps an issued invoice's delivered AP frozen.
+    const apIsFrozen = !!invoice.sent_at
+      || AP_FROZEN_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase());
     if ((!apIsFrozen || !isEmailLike(snap.ap_email)) && invoice.payer_id) {
       try {
         const live = await getPayer(invoice.payer_id, database);

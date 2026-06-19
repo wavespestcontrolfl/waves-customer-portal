@@ -130,6 +130,20 @@ describe('PayerService.attachToInvoice', () => {
     expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' }));
   });
 
+  test('a RESEND caught mid-claim (status "sending") keeps the frozen AP email when already delivered (sent_at set)', async () => {
+    // sendViaSMSAndEmail claims a sendable invoice by flipping status -> "sending"
+    // BEFORE attach runs; "sending" is not a frozen status, so without the
+    // sent_at check a resend of an already-delivered payer invoice would look
+    // undelivered and overwrite the frozen snapshot AP with the live payer email.
+    const database = jest.fn(() => { throw new Error('should not query the live payer for an already-delivered invoice'); });
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'sending', sent_at: '2026-06-18T12:00:00Z',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ ap_email: 'frozen@westbay.com' }));
+  });
+
   test('an UNDELIVERED invoice prefers the live active payer AP email over a stale snapshot', async () => {
     // Snapshot froze a (now-corrected) AP email at creation; ops fixed the live
     // payer. A draft/undelivered invoice should resend to the corrected inbox.
