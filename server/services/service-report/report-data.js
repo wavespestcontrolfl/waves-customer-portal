@@ -1227,8 +1227,20 @@ function findingSeverityForObservation(text) {
 }
 
 function lawnScoreValue(value) {
+  // A not-scored category arrives from the DB as NULL (JS null) or '' — guard
+  // before Number(), because Number(null) and Number('') are both 0, which would
+  // make a missing category masquerade as a real score of 0 (dragging the
+  // overall down and fabricating before/after deltas).
+  if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+}
+
+// A category delta is meaningful only when BOTH visits scored that category.
+// A missing value means "not assessed", not 0 — returning null keeps the report
+// from fabricating a full-magnitude improvement/regression against a blank.
+function lawnScoreDelta(afterValue, beforeValue) {
+  return afterValue == null || beforeValue == null ? null : afterValue - beforeValue;
 }
 
 // Legacy lawn assessments (pre single-voice fix) joined each photo's/model's
@@ -1260,11 +1272,20 @@ function calculateLawnOverallScore(row = {}) {
   // old five-signal weighting, so recompute them to match the four displayed
   // bars (Density/Weed/Color/Stress) instead of hidden fungus/thatch weights.
   if (explicit != null && row.stress_damage != null) return explicit;
-  const turf = Number(row.turf_density) || 0;
-  const weeds = Number(row.weed_suppression) || 0;
-  const color = Number(row.color_health) || 0;
-  const stress = resolveStressDamage(row) ?? 0;
-  return Math.round((turf * 0.30) + (weeds * 0.25) + (color * 0.25) + (stress * 0.20));
+  // Weighted average of the four displayed categories, null-aware: a category
+  // that wasn't scored is excluded and the weights are renormalized over the
+  // ones present, so a missing category doesn't count as 0 and drag the overall
+  // down. When all four are present this is the plain 30/25/25/20 average.
+  const components = [
+    [lawnScoreValue(row.turf_density), 0.30],
+    [lawnScoreValue(row.weed_suppression), 0.25],
+    [lawnScoreValue(row.color_health), 0.25],
+    [resolveStressDamage(row), 0.20],
+  ].filter(([value]) => value != null);
+  if (!components.length) return null;
+  const totalWeight = components.reduce((sum, [, weight]) => sum + weight, 0);
+  const weighted = components.reduce((sum, [value, weight]) => sum + (value * weight), 0);
+  return Math.round(weighted / totalWeight);
 }
 
 function formatLawnAssessmentScore(row) {
@@ -1295,7 +1316,9 @@ function lawnAssessmentSummary(current, initial, count) {
   if (!initial || count < 2) {
     return 'This is your first lawn health assessment. Future reports will show the trend.';
   }
-  const delta = Number(current.overallScore || 0) - Number(initial.overallScore || 0);
+  const delta = lawnScoreDelta(current.overallScore, initial.overallScore);
+  // One of the two assessments has no overall score yet — don't claim a trend.
+  if (delta == null) return 'Lawn health is being tracked across your assessments.';
   if (delta > 0) return `Lawn health is up ${delta} point${delta === 1 ? '' : 's'} since your first assessment.`;
   if (delta < 0) return `Lawn health is down ${Math.abs(delta)} point${Math.abs(delta) === 1 ? '' : 's'} since your first assessment.`;
   return 'Lawn health is holding steady since your first assessment.';
@@ -1700,13 +1723,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
         notes: assessment.observations || '',
       },
       improvement: {
-        turfDensity: (Number(assessment.turf_density) || 0) - (Number(initialRow.turf_density) || 0),
-        weedSuppression: (Number(assessment.weed_suppression) || 0) - (Number(initialRow.weed_suppression) || 0),
-        colorHealth: (Number(assessment.color_health) || 0) - (Number(initialRow.color_health) || 0),
-        stressDamage: (resolveStressDamage(assessment) ?? 0) - (resolveStressDamage(initialRow) ?? 0),
-        fungusControl: (Number(assessment.fungus_control) || 0) - (Number(initialRow.fungus_control) || 0),
-        thatchLevel: (Number(assessment.thatch_level) || 0) - (Number(initialRow.thatch_level) || 0),
-        overall: calculateLawnOverallScore(assessment) - calculateLawnOverallScore(initialRow),
+        turfDensity: lawnScoreDelta(lawnScoreValue(assessment.turf_density), lawnScoreValue(initialRow.turf_density)),
+        weedSuppression: lawnScoreDelta(lawnScoreValue(assessment.weed_suppression), lawnScoreValue(initialRow.weed_suppression)),
+        colorHealth: lawnScoreDelta(lawnScoreValue(assessment.color_health), lawnScoreValue(initialRow.color_health)),
+        stressDamage: lawnScoreDelta(resolveStressDamage(assessment), resolveStressDamage(initialRow)),
+        fungusControl: lawnScoreDelta(lawnScoreValue(assessment.fungus_control), lawnScoreValue(initialRow.fungus_control)),
+        thatchLevel: lawnScoreDelta(lawnScoreValue(assessment.thatch_level), lawnScoreValue(initialRow.thatch_level)),
+        overall: lawnScoreDelta(calculateLawnOverallScore(assessment), calculateLawnOverallScore(initialRow)),
       },
     };
   }
@@ -2391,6 +2414,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  calculateLawnOverallScore,
+  lawnScoreDelta,
+  lawnScoreValue,
   singleVoiceObservation,
   parseJsonObject,
   parseJsonArray,
