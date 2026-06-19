@@ -465,35 +465,40 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     }
 
     // Retention — of the real customers active at the START of the window, how
-    // many are still here. Base and churn share the SAME start-of-window cohort
-    // so the subtraction is exact. NOTE: churn is keyed on churned_at, which
-    // isn't populated yet — until it is, retention reads ~100% (no churn signal).
+    // many are still here. Churning MOVES the row to pipeline_stage='churned'
+    // (admin-customers PUT /:id/stage), so the cohort must INCLUDE churned rows
+    // (filtering to CUSTOMER_STAGES alone would drop every churn and pin
+    // retention at 100%). Churn time = churned_at when set, else the
+    // stage-change timestamp (churned_at is only written when a reason is given).
     let retentionPct = null, churned = 0;
     try {
-      // Start-of-window cohort: a real customer (CUSTOMER_STAGES, not a lead)
-      // that existed before the window and hadn't churned/been deleted before it
-      // began. Current-active would fold in everyone acquired *during* the
-      // window, inflating the base and the rate. ET-anchored boundaries.
+      const churnTimeAfterStart = `COALESCE(churned_at, pipeline_stage_changed_at) >= ${ET_MIDNIGHT_TS}`;
+      // Cohort = a customer (not a lead) that existed before the window, wasn't
+      // deleted before it, and was a customer AT the start: either still in a
+      // retained stage, OR churned but only on/after the window start (a churn
+      // before the window means they weren't a customer at the start).
+      // ET-anchored boundaries throughout.
       const cohort = () => db('customers')
-        .modify(whereRealCustomer)
         .whereRaw(`created_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
         .where(function notDeletedBeforeStart() {
           this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
+        })
+        .where(function wasCustomerAtStart() {
+          this.whereIn('pipeline_stage', CUSTOMER_STAGES)
+            .orWhere(function churnedInOrAfterWindow() {
+              this.where('pipeline_stage', 'churned').whereRaw(churnTimeAfterStart, [etDayStart(start)]);
+            });
         });
 
-      // Churned during the window, restricted to that cohort — so a same-window
-      // signup→churn (never in the base) can't artificially lower retention.
+      // Churned during the window = the churned subset of that same cohort.
       const churnedRow = await cohort()
-        .whereNotNull('churned_at').whereRaw(`churned_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
+        .where('pipeline_stage', 'churned')
+        .whereRaw(churnTimeAfterStart, [etDayStart(start)])
         .count('* as c').first();
       churned = parseInt(churnedRow?.c || 0);
 
-      // Base = the cohort still un-churned as of the window start.
-      const activeAtStartRow = await cohort()
-        .where(function notChurnedBeforeStart() {
-          this.whereNull('churned_at').orWhereRaw(`churned_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
-        })
-        .count('* as c').first();
+      // Base = everyone who was a customer at the window start (retained + churned-in-window).
+      const activeAtStartRow = await cohort().count('* as c').first();
       const activeAtStart = parseInt(activeAtStartRow?.c || 0);
 
       // churned ⊆ base, so the clamp is just belt-and-suspenders.
