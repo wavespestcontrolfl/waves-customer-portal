@@ -67,7 +67,6 @@ import {
   Headphones,
   Inbox,
   Loader2,
-  Mail,
   MessageSquare,
   Mic,
   MicOff,
@@ -205,14 +204,8 @@ const TABS = [
   { key: "triage", label: "Triage", Icon: Inbox },
   {
     key: "templates",
-    label: "SMS Templates",
+    label: "Message Templates",
     Icon: FileText,
-    className: "hidden md:inline-flex",
-  },
-  {
-    key: "email_templates",
-    label: "Email Templates",
-    Icon: Mail,
     className: "hidden md:inline-flex",
   },
   {
@@ -2249,6 +2242,8 @@ function SmsTab() {
 
 export default function CommunicationsPageV2() {
   const [tab, setTab] = useState("sms");
+  // SMS / Email are sub-views of the single Message Templates tab.
+  const [templateKind, setTemplateKind] = useState("sms");
   const tabs = TABS;
 
   useEffect(() => {
@@ -2257,7 +2252,16 @@ export default function CommunicationsPageV2() {
       if (!raw) return;
       const params = new URLSearchParams(raw);
       const nextTab = params.get("tab");
-      if (nextTab && tabs.some((item) => item.key === nextTab)) setTab(nextTab);
+      if (!nextTab) return;
+      // Back-compat: the standalone Email Templates tab is now a sub-view of
+      // Message Templates, so #tab=email_templates still lands on it.
+      if (nextTab === "email_templates") {
+        setTemplateKind("email");
+        setTab("templates");
+        return;
+      }
+      if (nextTab === "templates") setTemplateKind("sms");
+      if (tabs.some((item) => item.key === nextTab)) setTab(nextTab);
     };
     applyHashTab();
     window.addEventListener("hashchange", applyHashTab);
@@ -2274,14 +2278,45 @@ export default function CommunicationsPageV2() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Communications section"
-        navGridClassName="grid-cols-2 md:grid-cols-8"
+        navGridClassName="grid-cols-2 md:grid-cols-7"
       />
       {tab === "events" && <NotificationEventsTabV2 />}
       {tab === "sms" && <SmsTab />}
       {tab === "calls" && <CallLogTabV2 />}
       {tab === "triage" && <TriageInboxTabV2 />}
-      {tab === "templates" && <SmsTemplatesTabV2 />}
-      {tab === "email_templates" && <EmailTemplatesPanelV2 />}
+      {tab === "templates" && (
+        <>
+          <div className="flex gap-2 mb-4">
+            {[
+              { key: "sms", label: "SMS Templates" },
+              { key: "email", label: "Email Templates" },
+            ].map((k) => {
+              const active = templateKind === k.key;
+              return (
+                <button
+                  key={k.key}
+                  type="button"
+                  onClick={() => setTemplateKind(k.key)}
+                  aria-current={active ? "page" : undefined}
+                  className={
+                    "h-9 px-4 rounded-sm border-hairline text-12 font-medium uppercase tracking-label inline-flex items-center justify-center gap-2 u-focus-ring transition-colors " +
+                    (active
+                      ? "bg-zinc-900 text-white border-zinc-900"
+                      : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900")
+                  }
+                >
+                  {k.label}
+                </button>
+              );
+            })}
+          </div>
+          {templateKind === "sms" ? (
+            <SmsTemplatesTabV2 />
+          ) : (
+            <EmailTemplatesPanelV2 />
+          )}
+        </>
+      )}
       {tab === "csr" && <CSRCoachTabV2 />}
       {tab === "notifications" && <PushSettingsV2 />}
     </div>
