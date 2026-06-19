@@ -2170,8 +2170,14 @@ describe('service report v1', () => {
     }, 'token-lawn', knex);
 
     expect(data.serviceLine).toBe('lawn');
-    expect(data.lawnAssessment.scores.overallScore).toBe(83);
-    expect(data.lawnAssessment.initialScores.overallScore).toBe(66);
+    // These are legacy rows (fungus_control/thatch_level, no stress_damage), so
+    // calculateLawnOverallScore recomputes them under the 4-category model
+    // (Density·.30 + Weed·.25 + Color·.25 + Stress·.20, Stress = min(fungus, thatch))
+    // rather than trusting the stored overall_score — the overall then matches the
+    // four bars the customer sees. round(80·.30+90·.25+82·.25+70·.20) = 81;
+    // round(60·.30+70·.25+65·.25+60·.20) = 64. (Trend delta is still 17.)
+    expect(data.lawnAssessment.scores.overallScore).toBe(81);
+    expect(data.lawnAssessment.initialScores.overallScore).toBe(64);
     expect(data.lawnAssessment.customerSummary).toBe('Approved snapshot: moderate weed pressure is being monitored.');
     expect(data.lawnAssessment.trendSummary).toBe('Lawn health is up 17 points since your first assessment.');
     expect(data.lawnAssessment.snapshot).toMatchObject({
@@ -2193,12 +2199,12 @@ describe('service report v1', () => {
     expect(data.lawnAssessment.recommendationCards[0]).not.toHaveProperty('internal_reason');
     expect(data.lawnAssessment.recommendationCards[0]).not.toHaveProperty('trigger_signals');
     expect(data.lawnAssessment.recommendationCards[0]).not.toHaveProperty('confidence');
-    expect(data.lawnAssessment.trend.map((point) => point.overallScore)).toEqual([66, 83]);
+    expect(data.lawnAssessment.trend.map((point) => point.overallScore)).toEqual([64, 81]);
     expect(data.lawnAssessment.turfProfile).toMatchObject({ grassType: 'st_augustine', lawnSqft: 6200 });
     expect(data.findings).toEqual([]);
     expect(data.metrics.find((metric) => metric.key === 'lawn_health')).toMatchObject({
       label: 'Lawn health',
-      value: 83,
+      value: 81,
       unit: '%',
     });
     expect(data.metrics.some((metric) => metric.label === 'Pressure index')).toBe(false);
@@ -2266,7 +2272,9 @@ describe('service report v1', () => {
       service_data: '{}',
     }, 'token-lawn-low', knex);
 
-    expect(data.lawnAssessment.scores.overallScore).toBe(35);
+    // Legacy row recomputed under the 4-category model (Stress = min(fungus 30,
+    // thatch 50) = 30): round(35·.30 + 20·.25 + 40·.25 + 30·.20) = 32.
+    expect(data.lawnAssessment.scores.overallScore).toBe(32);
     expect(data.findings).toEqual([]);
   });
 
