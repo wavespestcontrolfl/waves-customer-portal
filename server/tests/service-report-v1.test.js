@@ -38,7 +38,7 @@ const {
 } = require('../services/service-report/delivery');
 const { buildServiceReportV1Email } = require('../services/service-report/email-delivery');
 const { buildPressureTrendContextFromRows } = require('../services/service-report/pressure-trend');
-const { buildSinceLastVisitContext } = require('../services/service-report/since-last-visit');
+const { buildSinceLastVisitContext, readableActivityLine } = require('../services/service-report/since-last-visit');
 const {
   buildPremiumExperienceContextFromRows,
   buildWeatherCallContext,
@@ -134,6 +134,170 @@ describe('service report v1', () => {
     });
 
     expect(context.pressureLine).toBe('Pressure: 0.3 -> 0.3');
+  });
+
+  test('since-last-visit activity line reports the real finding, never a fabricated ant-trail claim', () => {
+    const line = readableActivityLine([
+      { title: 'Ant activity along the east foundation' },
+    ]);
+    expect(line).toBe('Ant activity along the east foundation');
+    expect(line).not.toMatch(/front entry/i);
+    expect(line).not.toMatch(/reduced to a small trail/i);
+    // Empty findings yield no line at all.
+    expect(readableActivityLine([])).toBeUndefined();
+  });
+
+  // Minimal knex stand-in that understands the operators and grouped
+  // where(fn)/orWhere(fn) the prior-visit boundary relies on, so these tests
+  // exercise the real SQL shape rather than ignoring the date/started_at bound.
+  const makeSinceLastVisitKnex = (fixtures) => (table) => {
+    let rows = [...(fixtures[table] || [])];
+    const compare = (a, op, b) => {
+      if (op === '<') return a < b;
+      if (op === '<=') return a <= b;
+      if (op === '>') return a > b;
+      if (op === '>=') return a >= b;
+      return a === b;
+    };
+    const predicateFromFn = (fn) => {
+      const branches = [[]];
+      const add = (pred) => branches[branches.length - 1].push(pred);
+      const sub = {
+        where(criteria, op, value) {
+          if (typeof criteria === 'function') add(predicateFromFn(criteria));
+          else if (typeof criteria === 'string') {
+            if (value === undefined) { value = op; op = '='; }
+            add((row) => compare(row[criteria], op, value));
+          } else if (criteria && typeof criteria === 'object') {
+            add((row) => Object.entries(criteria).every(([k, v]) => row[k] === v));
+          }
+          return sub;
+        },
+        orWhere(criteria, op, value) { branches.push([]); return sub.where(criteria, op, value); },
+        whereNull(column) { add((row) => row[column] == null); return sub; },
+      };
+      fn.call(sub);
+      return (row) => branches.some((branch) => branch.every((pred) => pred(row)));
+    };
+    const query = {
+      where(criteria, op, value) {
+        if (typeof criteria === 'function') rows = rows.filter(predicateFromFn(criteria));
+        else if (typeof criteria === 'string') {
+          if (value === undefined) { value = op; op = '='; }
+          rows = rows.filter((row) => compare(row[criteria], op, value));
+        } else if (criteria && typeof criteria === 'object') {
+          rows = rows.filter((row) => Object.entries(criteria).every(([k, v]) => row[k] === v));
+        }
+        return query;
+      },
+      whereNot(criteria) {
+        rows = rows.filter((row) => Object.entries(criteria).every(([k, v]) => row[k] !== v));
+        return query;
+      },
+      whereNull(column) { rows = rows.filter((row) => row[column] == null); return query; },
+      whereIn(column, values) { rows = rows.filter((row) => values.includes(row[column])); return query; },
+      orderBy(column, direction = 'asc') {
+        rows = [...rows].sort((a, b) => {
+          if (a[column] < b[column]) return direction === 'desc' ? 1 : -1;
+          if (a[column] > b[column]) return direction === 'desc' ? -1 : 1;
+          return 0;
+        });
+        return query;
+      },
+      select: () => query,
+      first: () => Promise.resolve(rows[0] || null),
+      catch: () => Promise.resolve(rows),
+    };
+    return query;
+  };
+
+  test('since-last-visit ignores visits dated after the report when choosing the prior visit', async () => {
+    const knex = makeSinceLastVisitKnex({
+      service_records: [
+        {
+          id: 'prior-real',
+          customer_id: 'customer-1',
+          status: 'completed',
+          service_line: 'pest',
+          service_type: 'Quarterly Pest Control Service',
+          service_date: '2026-02-10',
+          pressure_index: 2.0,
+        },
+        {
+          // A newer visit completed AFTER the report being rendered. It must
+          // not be selected as the "prior" baseline for the older report.
+          id: 'future-visit',
+          customer_id: 'customer-1',
+          status: 'completed',
+          service_line: 'pest',
+          service_type: 'Quarterly Pest Control Service',
+          service_date: '2026-06-01',
+          pressure_index: 4.0,
+        },
+      ],
+      service_findings: [],
+    });
+
+    const context = await buildSinceLastVisitContext({
+      record: {
+        id: 'service-current',
+        customer_id: 'customer-1',
+        service_line: 'pest',
+        service_type: 'Quarterly Pest Control Service',
+        service_date: '2026-03-15',
+        pressure_index: 1.0,
+      },
+      knex,
+    });
+
+    expect(context.priorServiceRecordId).toBe('prior-real');
+    expect(context.pressureLine).toBe('Pressure: 2.0 -> 1.0');
+  });
+
+  test('since-last-visit breaks same-day ties on started_at so a later same-day visit is not the baseline', async () => {
+    const knex = makeSinceLastVisitKnex({
+      service_records: [
+        {
+          id: 'prior-earlier-day',
+          customer_id: 'customer-1',
+          status: 'completed',
+          service_line: 'pest',
+          service_type: 'Quarterly Pest Control Service',
+          service_date: '2026-02-10',
+          started_at: '2026-02-10T14:00:00Z',
+          pressure_index: 2.0,
+        },
+        {
+          // Same calendar day as the report, but started LATER. It must not be
+          // selected as the prior baseline (that would reverse the delta).
+          id: 'same-day-later',
+          customer_id: 'customer-1',
+          status: 'completed',
+          service_line: 'pest',
+          service_type: 'Quarterly Pest Control Service',
+          service_date: '2026-03-15',
+          started_at: '2026-03-15T16:00:00Z',
+          pressure_index: 4.0,
+        },
+      ],
+      service_findings: [],
+    });
+
+    const context = await buildSinceLastVisitContext({
+      record: {
+        id: 'service-current',
+        customer_id: 'customer-1',
+        service_line: 'pest',
+        service_type: 'Quarterly Pest Control Service',
+        service_date: '2026-03-15',
+        started_at: '2026-03-15T09:00:00Z',
+        pressure_index: 1.0,
+      },
+      knex,
+    });
+
+    expect(context.priorServiceRecordId).toBe('prior-earlier-day');
+    expect(context.pressureLine).toBe('Pressure: 2.0 -> 1.0');
   });
 
   test('dynamic pressure trend includes current override and customer ROI copy', () => {
