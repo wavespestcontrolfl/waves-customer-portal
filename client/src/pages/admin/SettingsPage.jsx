@@ -130,6 +130,26 @@ const VALID_TABS = [
   "system",
 ];
 
+// Nav-only consolidation: the six leaf tabs collapse into four parent groups.
+// Tab state still holds the LEAF key (one of VALID_TABS); these groups only drive
+// which parent button is active and which leaf the parent jumps to.
+const SETTINGS_TAB_GROUPS = [
+  { key: "general", label: "General", Icon: Building2, tabs: ["general", "team"] },
+  { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
+  { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
+  { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system"] },
+];
+
+// Per-leaf nav metadata for the sub-tab pill row.
+const SETTINGS_LEAF_META = {
+  general: { label: "General", Icon: Building2 },
+  team: { label: "Team", Icon: Users },
+  integrations: { label: "Integrations", Icon: Plug },
+  "service-reports": { label: "Service Reports", Icon: MapPinned },
+  gates: { label: "Feature Gates", Icon: ToggleLeft },
+  system: { label: "System", Icon: Server },
+};
+
 export default function SettingsPage() {
   const isMobile = useIsMobile();
   const [searchParams] = useSearchParams();
@@ -168,14 +188,8 @@ export default function SettingsPage() {
 
   const gates = health?.gates || {};
 
-  const TABS = [
-    { key: "general", label: "General", Icon: Building2 },
-    { key: "integrations", label: "Integrations", Icon: Plug },
-    { key: "gates", label: "Feature Gates", Icon: ToggleLeft },
-    { key: "team", label: "Team", Icon: Users },
-    { key: "service-reports", label: "Service Reports", Icon: MapPinned },
-    { key: "system", label: "System", Icon: Server },
-  ];
+  const activeGroup =
+    SETTINGS_TAB_GROUPS.find((g) => g.tabs.includes(tab)) || SETTINGS_TAB_GROUPS[0];
 
   return (
     <div>
@@ -183,11 +197,56 @@ export default function SettingsPage() {
       <AdminCommandHeader
         title="Settings"
         icon={SettingsIcon}
-        sections={TABS}
-        activeKey={tab}
-        onSectionChange={setTab}
-        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
+        sections={SETTINGS_TAB_GROUPS}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = SETTINGS_TAB_GROUPS.find((x) => x.key === key);
+          if (g) setTab(g.tabs[0]);
+        }}
+        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((leafKey) => {
+            const meta = SETTINGS_LEAF_META[leafKey];
+            const LeafIcon = meta?.Icon;
+            const active = tab === leafKey;
+            return (
+              <button
+                key={leafKey}
+                type="button"
+                onClick={() => setTab(leafKey)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: active ? "1px solid #18181B" : "1px solid #E4E4E7",
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                {LeafIcon && <LeafIcon size={14} strokeWidth={1.9} aria-hidden />}
+                {meta?.label || leafKey}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {/* ── GENERAL ── */}
       {tab === "general" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
