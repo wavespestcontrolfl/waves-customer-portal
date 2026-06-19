@@ -19,6 +19,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { runAutoDispatch } = require('../services/auto-dispatch');
 const { VALID_MODES, isApplyAllowed } = require('../services/auto-dispatch/config');
+const { runExclusive } = require('../utils/cron-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -79,7 +80,12 @@ router.post('/run', async (req, res) => {
   }
   try {
     logger.info(`[auto-dispatch] manual run requested by tech ${req.technicianId} mode=${mode}`);
-    const result = await runAutoDispatch({ mode, triggeredBy: 'manual' });
+    // Share the cron's advisory lock so a manual run can't overlap the 4:10 cron
+    // (or another manual run) and double-apply past the per-run cap / stale guard.
+    const result = await runExclusive('auto-dispatch-recurring', () => runAutoDispatch({ mode, triggeredBy: 'manual' }));
+    if (result && result.skipped) {
+      return res.status(409).json({ error: 'Another auto-dispatch run is already in progress', reason: result.reason });
+    }
     res.json({ ok: true, ...result });
   } catch (err) {
     logger.error(`[auto-dispatch] manual run failed: ${err.message}`);

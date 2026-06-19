@@ -59,6 +59,11 @@ function getAutoDispatchConfig(overrides = {}) {
       ?? intEnv('AUTO_DISPATCH_LOCK_WINDOW_DAYS', 14, { min: 0, max: 365 }),
     lookaheadDays: overrides.lookaheadDays
       ?? intEnv('AUTO_DISPATCH_LOOKAHEAD_DAYS', 90, { min: 1, max: 365 }),
+    // Candidate slots are searched within ± this many days of the visit's
+    // existing scheduled_date, so route optimization can't collapse the
+    // recurring cadence by pulling the visit far from its intended date.
+    dateToleranceDays: overrides.dateToleranceDays
+      ?? intEnv('AUTO_DISPATCH_DATE_TOLERANCE_DAYS', 7, { min: 1, max: 60 }),
     minScoreImprovement: overrides.minScoreImprovement
       ?? intEnv('AUTO_DISPATCH_MIN_SCORE_IMPROVEMENT', 15, { min: 0, max: 100 }),
     maxChangesPerRun: overrides.maxChangesPerRun

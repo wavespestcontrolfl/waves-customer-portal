@@ -13,6 +13,7 @@
 const db = require('../../models/db');
 const { recordAuditEvent } = require('../audit-log');
 const logger = require('./../logger');
+const { toDateStr } = require('./dates');
 
 function jsonb(value) {
   try { return JSON.stringify(value == null ? {} : value); } catch (_) { return '{}'; }
@@ -50,7 +51,7 @@ async function logDecision(runId, opts = {}) {
     error = null,
   } = opts;
 
-  const svcDate = service && service.scheduled_date ? String(service.scheduled_date).split('T')[0] : null;
+  const svcDate = service ? toDateStr(service.scheduled_date) : null;
   const row = {
     auto_dispatch_run_id: runId,
     scheduled_service_id: (service && service.id) || null,

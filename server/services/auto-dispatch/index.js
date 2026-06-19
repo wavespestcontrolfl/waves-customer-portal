@@ -20,6 +20,7 @@ const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove } = require('./apply');
+const { toDateStr } = require('./dates');
 const audit = require('./audit');
 
 async function loadCapabilityMap() {
@@ -53,7 +54,7 @@ function loadEligibleServices(lockBoundary, lookaheadEnd) {
       this.where('scheduled_services.is_recurring', true)
         .orWhereNotNull('scheduled_services.recurring_parent_id');
     })
-    .whereIn('scheduled_services.status', ['pending', 'confirmed', 'rescheduled'])
+    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
     .where('scheduled_services.scheduled_date', '>', lockBoundary)
     .where('scheduled_services.scheduled_date', '<=', lookaheadEnd)
     .where(function () {
@@ -125,6 +126,7 @@ async function runAutoDispatch(opts = {}) {
           nowDate,
           lockWindowDays: config.lockWindowDays,
           lookaheadDays: config.lookaheadDays,
+          dateToleranceDays: config.dateToleranceDays,
           capabilityFor,
           topN: 60,
         };
@@ -196,7 +198,7 @@ async function runAutoDispatch(opts = {}) {
             service,
             reason_code: 'CHANGE_APPLIED',
             reason_description: `Moved (+${improvement})`,
-            oldPlacement: { date: String(service.scheduled_date).split('T')[0], window_start: service.window_start, window_end: service.window_end, technician_id: service.technician_id, status: result.pre_status },
+            oldPlacement: { date: toDateStr(service.scheduled_date), window_start: service.window_start, window_end: service.window_end, technician_id: service.technician_id, status: result.pre_status },
             newPlacement: { ...newPlacement, status: result.post_status },
             scores,
             prefsSnapshot,

@@ -47,8 +47,17 @@ describe('isEligibleForAutoDispatch', () => {
     expect(isEligibleForAutoDispatch(svc({ scheduled_date: '2026-07-03' }), CTX).eligible).toBe(true);
   });
 
-  test.each(['completed', 'cancelled', 'skipped', 'en_route', 'on_site'])('status %s is not auto-dispatchable', (status) => {
+  test.each(['completed', 'cancelled', 'skipped', 'en_route', 'on_site', 'rescheduled'])('status %s is not auto-dispatchable', (status) => {
     expect(isEligibleForAutoDispatch(svc({ status }), CTX).eligible).toBe(false);
+  });
+
+  test("'rescheduled' (an un-actioned customer request) is skipped with a clear reason", () => {
+    expect(isEligibleForAutoDispatch(svc({ status: 'rescheduled' }), CTX))
+      .toMatchObject({ reason_code: 'RESCHEDULE_REQUEST_PENDING' });
+  });
+
+  test('accepts a pg Date object for scheduled_date (not INVALID_DATE)', () => {
+    expect(isEligibleForAutoDispatch(svc({ scheduled_date: new Date('2026-07-20T00:00:00Z') }), CTX).eligible).toBe(true);
   });
 
   test('manually locked is MANUALLY_LOCKED', () => {

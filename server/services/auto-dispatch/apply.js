@@ -14,6 +14,7 @@
 const db = require('../../models/db');
 const SmartRebooker = require('../rebooker');
 const logger = require('../logger');
+const { toDateStr } = require('./dates');
 
 /**
  * Deferred customer-notification hook. Builds the event payload; only attempts a
@@ -25,7 +26,7 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
     event: 'AppointmentAutoDispatchChanged',
     appointment_id: service.id,
     customer_id: service.customer_id,
-    old_date: String(service.scheduled_date).split('T')[0],
+    old_date: toDateStr(service.scheduled_date),
     old_time_window: service.window_start ? `${service.window_start}-${service.window_end || ''}` : null,
     new_date: best.date,
     new_time_window: `${best.start_time}-${best.end_time}`,
@@ -49,17 +50,22 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   if (techChanged) options.technicianId = best.technician_id;
 
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
-  // reschedule() reloads it but only guards status — if staff or another run
-  // moved its date/window/tech since, do NOT overwrite that newer placement.
+  // reschedule() reloads it but only guards status — if staff locked/excluded it
+  // or moved its date/window/tech since, do NOT overwrite that newer state.
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
-    .first('scheduled_date', 'window_start', 'technician_id');
+    .first('scheduled_date', 'window_start', 'window_end', 'technician_id',
+      'auto_dispatch_locked', 'auto_dispatch_excluded');
   if (!fresh) {
     throw Object.assign(new Error('Service no longer exists'), { code: 'STALE_PLACEMENT' });
   }
+  if (fresh.auto_dispatch_locked === true || fresh.auto_dispatch_excluded === true) {
+    throw Object.assign(new Error('Visit was locked/excluded from auto-dispatch after scoring'), { code: 'STALE_PLACEMENT' });
+  }
   const norm = (t) => (t ? String(t).slice(0, 5) : null);
-  const changed = String(fresh.scheduled_date).split('T')[0] !== String(service.scheduled_date).split('T')[0]
+  const changed = toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
     || norm(fresh.window_start) !== norm(service.window_start)
+    || norm(fresh.window_end) !== norm(service.window_end)
     || String(fresh.technician_id || '') !== String(service.technician_id || '');
   if (changed) {
     throw Object.assign(new Error('Placement changed since it was scored — skipping stale move'), { code: 'STALE_PLACEMENT' });

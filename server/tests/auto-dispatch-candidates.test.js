@@ -67,9 +67,13 @@ describe('findValidCandidateSlots', () => {
 
     // own row excluded from find-time occupancy
     expect(findAvailableSlots).toHaveBeenCalledTimes(1);
-    expect(findAvailableSlots.mock.calls[0][0].excludeServiceIds).toEqual(['s1']);
-    // window passed is lock+1 .. lookahead
-    expect(findAvailableSlots.mock.calls[0][0].dateFrom > '2026-06-19').toBe(true);
+    const args = findAvailableSlots.mock.calls[0][0];
+    expect(args.excludeServiceIds).toEqual(['s1']);
+    expect(args.slotStepMinutes).toBe(60); // on-the-hour starts
+    // search window is bounded to ±7 days of the visit's date (2026-08-04),
+    // not the whole horizon — so cadence isn't collapsed.
+    expect(args.dateFrom).toBe('2026-07-28');
+    expect(args.dateTo).toBe('2026-08-11');
   });
 
   test('returns no candidates (and no_geo note) when the service has no usable coordinates', async () => {

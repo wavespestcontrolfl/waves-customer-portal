@@ -13,15 +13,21 @@
  *   customer    = customers.active
  */
 const { resolveGeo } = require('./geo');
+const { toDateStr } = require('./dates');
 
-const VALID_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
-// Terminal/live statuses → a specific skip reason for the audit trail.
+// Only live, staff-owned visits. 'rescheduled' is deliberately excluded: the
+// customer route sets that status as a pending reschedule REQUEST with a stale
+// date/window that staff must action through SmartRebooker — auto-moving it
+// would silently confirm the stale slot and override the request.
+const VALID_STATUSES = new Set(['pending', 'confirmed']);
+// Terminal/live/request statuses → a specific skip reason for the audit trail.
 const STATUS_REASON = {
   completed: 'COMPLETED',
   cancelled: 'CANCELLED',
   skipped: 'SKIPPED',
   en_route: 'INVALID_STATUS',
   on_site: 'INVALID_STATUS',
+  rescheduled: 'RESCHEDULE_REQUEST_PENDING',
 };
 
 function deny(reason_code, reason_description) {
@@ -42,7 +48,7 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
   if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
   if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
 
-  const dateStr = String(service.scheduled_date || '').split('T')[0];
+  const dateStr = toDateStr(service.scheduled_date) || '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return deny('INVALID_DATE', 'Missing/invalid scheduled_date');
   // Lock window is inclusive: anything on or before today+N days is locked.
   if (ctx.lockBoundary && dateStr <= ctx.lockBoundary) {

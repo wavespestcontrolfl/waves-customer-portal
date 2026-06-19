@@ -14,6 +14,7 @@
 const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
+const { toDateStr, shiftDateStr } = require('./dates');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -42,7 +43,7 @@ function inBlackout(dateStr, blackout) {
  */
 async function computeCurrentPlacement(service, prefs, ctx) {
   const geo = resolveGeo(service);
-  const dateStr = String(service.scheduled_date).split('T')[0];
+  const dateStr = toDateStr(service.scheduled_date);
   const techId = service.technician_id || null;
   const category = prefs.service_category;
 
@@ -113,8 +114,22 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
 
-  const dateFrom = etDateString(addETDays(ctx.nowDate, ctx.lockWindowDays + 1));
-  const dateTo = etDateString(addETDays(ctx.nowDate, ctx.lookaheadDays));
+  // Search within ± tolerance days of the visit's CURRENT date (clamped to the
+  // lock floor and lookahead horizon) so optimization tightens the route without
+  // collapsing the recurring cadence by pulling the visit far from its date.
+  const lockFloor = etDateString(addETDays(ctx.nowDate, ctx.lockWindowDays + 1));
+  const horizonCap = etDateString(addETDays(ctx.nowDate, ctx.lookaheadDays));
+  const origDate = toDateStr(service.scheduled_date);
+  const tol = ctx.dateToleranceDays || 7;
+  let dateFrom = shiftDateStr(origDate, -tol);
+  if (!dateFrom || dateFrom < lockFloor) dateFrom = lockFloor;
+  let dateTo = shiftDateStr(origDate, tol);
+  if (!dateTo || dateTo > horizonCap) dateTo = horizonCap;
+  if (dateFrom > dateTo) {
+    // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
+    const current = await computeCurrentPlacement(service, prefs, ctx);
+    return { current, candidates: [] };
+  }
   const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
   const category = prefs.service_category;
 
