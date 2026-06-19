@@ -571,7 +571,9 @@ function buildPressureReceiptContext({ pressureTrend, visitRows = [], findings =
     stats.push({
       label: 'Pressure down',
       value: `${pressureTrend.percentChange}%`,
-      detail: 'Since your first WaveGuard pressure reading',
+      // Same recent-window baseline as pressure-trend.js — it's the oldest of
+      // the last few visits, not the customer's first-ever reading.
+      detail: 'Over your recent visits',
       sourceKeys: ['pressure_trend'],
     });
   }

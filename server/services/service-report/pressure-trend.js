@@ -77,9 +77,12 @@ function buildCustomerSummary({ direction, percentChange, baseline, current }) {
     return `Pest pressure remains low at ${current.pressureIndex.toFixed(1)}.`;
   }
   if (direction === 'down') {
+    // baseline is the oldest of the last `limit` visits (the series is
+    // sliced to a recent window and we only fetch limit-1 priors), so it is
+    // NOT necessarily the customer's first-ever service — word it honestly.
     return percentChange != null
-      ? `Pest pressure is down ${percentChange}% since your first WaveGuard service.`
-      : 'Pest pressure is down since your first WaveGuard service.';
+      ? `Pest pressure is down ${percentChange}% over your recent visits.`
+      : 'Pest pressure is down over your recent visits.';
   }
   if (direction === 'flat') return 'Pest pressure remains steady and low.';
   if (direction === 'up') {
