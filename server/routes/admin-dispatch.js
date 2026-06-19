@@ -3659,6 +3659,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const invoiceAmount = hasVisitPrice
       ? Number(svc.estimated_price)
       : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    // Third-party Bill-To: a payer-billed visit is owed by the payer's AP inbox,
+    // so the service customer's autopay/prepay must neither suppress the AP
+    // invoice (autopayCoversVisit / prepaidCovered) nor be credited against it
+    // (applyPrepaidCreditToInvoice). Resolve the effective payer up front —
+    // BEFORE autopay coverage is computed — so every coverage gate can exclude
+    // payer visits. resolveForInvoice never throws (it falls back to self-pay),
+    // and we keep the existing self-pay flow on any lookup error.
+    let visitIsPayerBilled = false;
+    try {
+      const PayerService = require('../services/payer');
+      const resolvedPayer = await PayerService.resolveForInvoice({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+      });
+      visitIsPayerBilled = !!resolvedPayer?.payerId;
+    } catch (e) {
+      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id}: ${e.message}`);
+    }
     const customerAutopayActive = await customerOnAutopay({
       id: svc.customer_id,
       autopay_enabled: svc.cust_autopay_enabled,
@@ -3666,7 +3684,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autopay_payment_method_id: svc.cust_autopay_payment_method_id,
       ach_status: svc.cust_ach_status,
     });
-    const autopayCoversVisit = customerAutopayActive
+    // Never let the homeowner's autopay cover a payer-billed WaveGuard visit —
+    // the AP invoice must still be cut and sent to the payer.
+    const autopayCoversVisit = !visitIsPayerBilled
+      && customerAutopayActive
       && !hasVisitPrice
       && !!svc.cust_waveguard_tier
       && Number(svc.cust_monthly_rate || 0) > 0;
@@ -3731,7 +3752,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } catch (e) { /* non-blocking */ }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
-    const prepaidCovered = svc.prepaid_amount != null
+    // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
+    // homeowner's prepay can't cover the payer's bill, so the AP invoice must
+    // still be cut.
+    const prepaidCovered = !visitIsPayerBilled
+      && svc.prepaid_amount != null
       && Number(svc.prepaid_amount) > 0
       && Number(svc.prepaid_amount) >= invoiceAmount;
     // If the tech already minted an invoice for this visit pre-completion
@@ -3841,6 +3866,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const applyPrepaidCreditToInvoice = async (invoiceRow) => {
       const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
       if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
+      // Third-party Bill-To: never credit the homeowner's prepaid amount against
+      // a payer-billed invoice — that money isn't owed by the payer. The invoice
+      // row is the source of truth (createFromService auto-resolves a default
+      // payer, and any pre-minted invoice carries its own payer_id), so guard on
+      // it directly.
+      if (invoiceRow.payer_id) return invoiceRow;
 
       return db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')

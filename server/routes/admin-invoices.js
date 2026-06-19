@@ -1608,6 +1608,14 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     // ── Pre-checks (no lock): status, amount due, sufficient balance ──
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Third-party Bill-To: account credit belongs to the homeowner. A
+    // payer-billed invoice is owed by the payer, not the homeowner — drawing
+    // down the service customer's credit to mark the AP invoice prepaid would
+    // consume the wrong party's money. Reject it before any state change (a
+    // payer-facing credit flow is Phase 2).
+    if (invoice.payer_id) {
+      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {

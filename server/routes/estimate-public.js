@@ -8173,20 +8173,40 @@ function buildAcceptNotificationPayload({
   billingTerm = 'standard',
   annualPrepayAmount = null,
 } = {}) {
-  if (billByInvoice) {
-    // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
-    // the homeowner gets the report and owes nothing, so never advertise a
-    // customer pay link. Admin copy still reflects that the invoice was sent.
-    if (payerBilled) {
-      const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+  // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
+  // the homeowner gets the report and owes nothing, so never advertise a
+  // customer pay link. This must precede every billing-term branch below — the
+  // converter auto-resolves a default payer even when billByInvoice is false
+  // (standard / annual recurring accepts), so a payer-billed invoice can reach
+  // here with billByInvoice unset; its invoicePayUrl is already nulled, but the
+  // term branches below would still tell the homeowner to use the pay link.
+  // Admin copy still reflects that the invoice was sent.
+  if (payerBilled) {
+    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
+    // Mirror the non-payer invoice-mode paths: only claim the invoice reached the
+    // billing contact when delivery actually succeeded. A payer with no usable AP
+    // email fails sendViaSMSAndEmail (invoiceLinkDelivered=false) — surface that
+    // as office follow-up rather than a false "sent" state. The homeowner owes
+    // nothing either way.
+    if (!invoiceLinkDelivered) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
-        adminBody: `${planLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
+        adminBody: `${planLabel} approved. Invoice billed to a third-party payer, but automatic delivery to their AP inbox failed — office follow-up needed.`,
         customerTitle: 'Estimate accepted',
-        customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
+        customerBody: `Your ${planLabel} is approved. We'll coordinate billing with your billing contact — nothing is due from you.`,
         customerLink: '/?tab=billing',
       };
     }
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${planLabel} approved. Invoice billed to a third-party payer — sent to their AP inbox.`,
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${planLabel} is approved. The invoice was sent to your billing contact — nothing is due from you.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  if (billByInvoice) {
     if (treatAsOneTime) {
       if (!invoiceMode || !invoiceLinkDelivered) {
         return {

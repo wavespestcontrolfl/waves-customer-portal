@@ -3593,6 +3593,19 @@ router.post('/:id/invoice', async (req, res, next) => {
     });
 
     let invoice = minted.invoice;
+    // Third-party Bill-To (post-lock recheck): the pre-lock guard above rejects
+    // payer-resolved visits, but the minted/replayed invoice can still be
+    // payer-billed inside the lock window — InvoiceService.create() auto-resolves
+    // a default payer (so a payer set between the pre-lock check and this mint
+    // lands payer_id on the new row), and the replay branch can surface a
+    // pre-existing payer invoice from another path. Either way we must not apply
+    // the homeowner's prepaid credit to it or hand the AP's bearer /pay/:token to
+    // tech checkout — re-check before both, returning the same 400.
+    if (invoice.payer_id) {
+      return res.status(400).json({
+        error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
+      });
+    }
     const applied = await applyPrepaidCredit(invoice);
     invoice = applied.invoice;
 
