@@ -208,8 +208,10 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
     cost-of-acceptance lane, `CONFIGURED_COST_BPS` = 290 = 2.9%). The statement
     pay MUST run the same quote → finalize → update flow as invoice card pay:
     derive the displayed total, the PaymentIntent amount, AND the recorded
-    surcharge from `computeChargeAmount(base, { funding })` for the selected
-    funding source, and verify the webhook amount against it. A flat
+    surcharge from `computeChargeAmount(statement.total, methodType, { funding })`
+    (method type is the 2nd arg, options 3rd — per `server/services/stripe-pricing.js`)
+    and take the cents fields from that result; verify the webhook amount against
+    it. A flat
     "PaymentIntent = statement total" would undercharge card payments and drift
     the payment row from the webhook. ACH / offline (check/wire) carry **no**
     surcharge (debit/ACH are zero-cost, FL gating already handled by the shared
