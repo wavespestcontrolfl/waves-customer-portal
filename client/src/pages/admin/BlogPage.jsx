@@ -6,10 +6,8 @@ import {
   Database,
   FileCheck2,
   FileText,
-  Lightbulb,
   Newspaper,
   Plus,
-  Send,
   Wand2,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -2858,16 +2856,33 @@ function GenerateTab({ onGenerated }) {
 // =========================================================================
 const ContentCalendar = lazy(() => import("./ContentCalendar"));
 const TABS = [
+  { key: "posts", label: "Posts", Icon: FileText },
   { key: "generate", label: "Generate", Icon: Wand2 },
-  { key: "published", label: "Published", Icon: Send },
-  { key: "drafts", label: "Drafts", Icon: FileText },
-  { key: "queued", label: "Queued", Icon: FileCheck2 },
   { key: "calendar", label: "Calendar", Icon: CalendarDays },
-  { key: "ideas", label: "Ideas", Icon: Lightbulb },
   { key: "audit", label: "Audit", Icon: FileCheck2 },
   { key: "autopilot", label: "Autopilot", Icon: Bot },
   { key: "registry", label: "Registry", Icon: Database },
 ];
+
+// Post lifecycle statuses are a sub-filter inside the Posts tab (was four
+// separate top-level tabs: Published/Drafts/Queued/Ideas). Keys are the
+// actual blog_posts.status values; counts come from
+// /admin/content/blog/analytics (byStatus).
+const POST_STATUSES = [
+  { key: "published", label: "Published" },
+  { key: "draft", label: "Drafts" },
+  { key: "queued", label: "Queued" },
+  { key: "idea", label: "Ideas" },
+];
+
+// Legacy ?tab= keys (the pre-collapse top-level status tabs) → Posts sub-filter
+// status. Lets old deep links / history entries resolve to the right list.
+const LEGACY_POST_TAB = {
+  published: "published",
+  drafts: "draft",
+  queued: "queued",
+  ideas: "idea",
+};
 
 export default function BlogPage() {
   // Tab lives in the URL (?tab=) so the retired /admin/content-engine and
@@ -2875,7 +2890,15 @@ export default function BlogPage() {
   // and individual surfaces stay deep-linkable.
   const [searchParams, setSearchParams] = useSearchParams();
   const paramTab = searchParams.get("tab");
-  const tab = TABS.some((t) => t.key === paramTab) ? paramTab : "generate";
+  // Back-compat: the old per-status top-level tabs are now sub-filters inside
+  // Posts, so legacy deep links (?tab=drafts|queued|ideas|published) resolve to
+  // the Posts tab with the matching status instead of silently opening Published.
+  const legacyPostStatus = LEGACY_POST_TAB[paramTab];
+  const tab = legacyPostStatus
+    ? "posts"
+    : TABS.some((t) => t.key === paramTab)
+      ? paramTab
+      : "posts";
   const setTab = (next) =>
     setSearchParams(
       (current) => {
@@ -2888,6 +2911,26 @@ export default function BlogPage() {
   const [selectedPost, setSelectedPost] = useState(null);
   const [counts, setCounts] = useState({});
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
+  // Posts sub-filter (Published/Drafts/Queued/Ideas) is URL-backed via ?status=
+  // so it survives refresh / bookmark / share. Legacy ?tab=drafts|queued|ideas|
+  // published links still resolve (via legacyPostStatus) and stay stable on
+  // reload — no normalization needed, since postStatus is derived, not stored.
+  const VALID_POST_STATUSES = POST_STATUSES.map((s) => s.key);
+  const paramStatus = searchParams.get("status");
+  const postStatus = VALID_POST_STATUSES.includes(paramStatus)
+    ? paramStatus
+    : legacyPostStatus || "published";
+  const setPostStatus = (status) =>
+    setSearchParams(
+      (current) => {
+        const params = new URLSearchParams(current);
+        params.set("tab", "posts");
+        params.set("status", status);
+        return params;
+      },
+      { replace: true },
+    );
+  const goToPosts = (status) => setPostStatus(status);
 
   useEffect(() => {
     adminFetch("/admin/content/blog/analytics")
@@ -2899,7 +2942,7 @@ export default function BlogPage() {
     setGeneratingIdeas(true);
     try {
       await adminPost("/admin/content/blog/ideas", { count: 20 });
-      setTab("ideas");
+      goToPosts("idea");
     } catch (err) {
       alert(`Idea generation failed: ${err.message}`);
     }
@@ -2922,30 +2965,17 @@ export default function BlogPage() {
     );
   }
 
-  const statusMap = {
-    published: "published",
-    drafts: "draft",
-    queued: "queued",
-    ideas: "idea",
-  };
-
   return (
     <div>
       {" "}
       <AdminCommandHeader
         title="Blog"
         icon={Newspaper}
-        sections={TABS.map((t) => ({
-          ...t,
-          label:
-            counts[statusMap[t.key]] != null
-              ? `${t.label} (${counts[statusMap[t.key]] || 0})`
-              : t.label,
-        }))}
+        sections={TABS}
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Blog section"
-        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
         action={
           tab === "autopilot" || tab === "registry"
             ? null
@@ -2958,7 +2988,7 @@ export default function BlogPage() {
         }
       />
       {tab === "generate" ? (
-        <GenerateTab onGenerated={() => setTab("drafts")} />
+        <GenerateTab onGenerated={() => goToPosts("draft")} />
       ) : tab === "audit" ? (
         <AuditTab />
       ) : tab === "calendar" ? (
@@ -2992,7 +3022,48 @@ export default function BlogPage() {
           <ContentRegistryPage embedded />
         </Suspense>
       ) : (
-        <PostList status={statusMap[tab]} onSelectPost={setSelectedPost} />
+        <>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              marginBottom: 16,
+            }}
+          >
+            {POST_STATUSES.map((s) => {
+              const active = postStatus === s.key;
+              return (
+                <button
+                  key={s.key}
+                  type="button"
+                  onClick={() => setPostStatus(s.key)}
+                  style={{
+                    height: 36,
+                    padding: "0 14px",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.04em",
+                    cursor: "pointer",
+                    border: `1px solid ${active ? D.heading : D.border}`,
+                    background: active ? D.heading : D.card,
+                    color: active ? "#fff" : D.text,
+                  }}
+                >
+                  {s.label}
+                  {counts[s.key] != null ? ` (${counts[s.key]})` : ""}
+                </button>
+              );
+            })}
+          </div>
+          <PostList
+            key={postStatus}
+            status={postStatus}
+            onSelectPost={setSelectedPost}
+          />
+        </>
       )}
     </div>
   );
