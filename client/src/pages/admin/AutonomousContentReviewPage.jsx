@@ -116,7 +116,7 @@ function gateTone(summary) {
   return "green";
 }
 
-export default function AutonomousContentReviewPage() {
+export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [view, setView] = useState("content");
   const [data, setData] = useState(null);
   const [linkData, setLinkData] = useState(null);
@@ -302,12 +302,20 @@ export default function AutonomousContentReviewPage() {
   const ideaCounts = ideaData?.counts || {};
 
   return (
-    <div style={{ minHeight: "100%", background: D.bg, padding: 24 }}>
-      <AdminCommandHeader
-        title="Autonomous Content Review"
-        icon={Bot}
-        actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: () => { load(); loadLinks(); loadIdeas(); }, disabled: loading || linkLoading || ideaLoading, variant: "secondary" }]}
-      />
+    <div
+      style={{
+        minHeight: "100%",
+        background: embedded ? "transparent" : D.bg,
+        padding: embedded ? 0 : 24,
+      }}
+    >
+      {!embedded && (
+        <AdminCommandHeader
+          title="Autonomous Content Review"
+          icon={Bot}
+          actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: () => { load(); loadLinks(); loadIdeas(); }, disabled: loading || linkLoading || ideaLoading, variant: "secondary" }]}
+        />
+      )}
 
       {error && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
@@ -320,6 +328,16 @@ export default function AutonomousContentReviewPage() {
         <TabButton active={view === "content"} icon={Bot} label="Content Queue" onClick={() => setView("content")} />
         <TabButton active={view === "links"} icon={Link2} label="Internal Links" onClick={() => setView("links")} />
         <TabButton active={view === "ideas"} icon={Lightbulb} label="Blog Ideas" onClick={() => setView("ideas")} />
+        {embedded && (
+          <button
+            type="button"
+            onClick={() => { load(); loadLinks(); loadIdeas(); }}
+            disabled={loading || linkLoading || ideaLoading}
+            style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 12px", borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+          >
+            <RefreshCw size={14} strokeWidth={2} /> Refresh
+          </button>
+        )}
       </div>
 
       {view === "content" && (
