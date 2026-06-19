@@ -34,7 +34,11 @@
  * newer Service Library UI edits, and the typed lawn-findings cutover this
  * replaces was itself a forward-only migration.
  */
-const OLD_ASSESSMENT_LABELS = ['Lawn Assessment', 'Lawn Assessment Service'];
+// Old denormalized labels this service has carried across renames, newest
+// first: the post-#1912 name, the 20260507 normalization, and the original
+// seeded 20260401000105 label. Open scheduled rows may still hold any of
+// them, and the completion resolver matches by name, so all must be relabeled.
+const OLD_ASSESSMENT_LABELS = ['Lawn Assessment', 'Lawn Assessment Service', 'Lawn Health Inspection'];
 // Open (still-to-be-completed) visit statuses — the only rows whose
 // denormalized label we relabel. An explicit allowlist (rather than a
 // terminal denylist) guarantees we never rewrite a closed visit's history
@@ -89,6 +93,10 @@ exports.up = async function (knex) {
       creates_service_record: true,
       portal_visibility: 'internal_only',
       portal_attach_policy: 'never',
+      // Re-activate: profileByServiceKey only resolves active rows, so an env
+      // where this profile was inactive would otherwise ignore the flip and
+      // fall back to the customer-facing default report flow.
+      active: true,
       updated_at: knex.fn.now(),
     };
     const existing = await knex('service_completion_profiles')

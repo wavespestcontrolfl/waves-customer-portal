@@ -3065,7 +3065,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .ignore();
         }
 
-        if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length) {
+        // Internal-only consultations skip service_findings entirely: the
+        // observations are still retained in structured_notes, but a findings
+        // row would make the consult readable as prior pest history (Pest
+        // Pressure recurring-issue component matches completed records'
+        // service_findings by service_line) and surface on customer-facing
+        // findings reads — neither is wanted for an advisory walkthrough.
+        if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length && !isInternalOnlyCompletion) {
           const findingRows = reportObservations.map((title) => ({
             service_record_id: record.id,
             category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
