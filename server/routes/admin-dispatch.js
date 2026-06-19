@@ -4599,6 +4599,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && !alreadyPaid
       && !autopayCoversVisit
       && !suppressCompletionInvoiceLink;
+    // Referral reward: if this customer was referred and just completed their
+    // FIRST recurring service, credit both the referrer and the referee $25 to
+    // their account. Self-contained + idempotent; never blocks completion.
+    try {
+      const referralEngine = require('../services/referral-engine');
+      await referralEngine.creditReferralOnFirstService({
+        customerId: svc.customer_id,
+        // Canonical recurring signal in this codebase (matches the parent-job check).
+        isRecurring: !!(svc.is_recurring || svc.recurring_pattern),
+      });
+    } catch (referralErr) {
+      logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
+    }
+
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,

@@ -7,6 +7,7 @@ const logger = require('./logger');
 const crypto = require('crypto');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
+const { postCreditMovement, round2 } = require('./customer-credit');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -440,34 +441,17 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
 
   const referral = outcome.referral;
 
-  // Post-commit side effects — NON money-critical (the reward credit and the
-  // milestone award already committed in the transaction above). Wrapped so a
-  // transient failure here can't bubble a 500: on retry the admin would hit the
-  // alreadyConverted no-op and these would be skipped for good.
-  if (referral.promoter_id) {
+  // Post-commit side effects — NON money-critical (the milestone award already
+  // committed in the transaction above). Wrapped so a transient failure here can't
+  // bubble a 500: on retry the admin would hit the alreadyConverted no-op and these
+  // would be skipped for good. The referrer's reward SMS + the real money are issued
+  // later, when the referee completes their first recurring service — see
+  // creditReferralOnFirstService.
+  if (referral.promoter_id && outcome.milestoneAward) {
     try {
       const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
       if (promoter) {
-        const rewardSms = await renderReferralSms('referral_reward', {
-          referrer_name: promoter.first_name,
-          referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-          reward_amount: 'a referral reward',
-        }, settings.reward_sms_template, {
-          workflow: 'referral_reward',
-          entity_type: 'referral',
-          entity_id: referral.id,
-        });
-        await sendSMS(promoter.customer_phone, rewardSms, {
-          customerId: promoter.customer_id,
-          messageType: 'referral_reward',
-          referralId: referral.id,
-          promoterId: promoter.id,
-          entryPoint: 'referral_engine_reward',
-        });
-
-        if (outcome.milestoneAward) {
-          await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
-        }
+        await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
       }
     } catch (sideErr) {
       logger.warn(`[ReferralEngine] convert post-commit notify failed for referral ${referral.id}: ${sideErr.message}`);
@@ -548,6 +532,127 @@ async function confirmFirstService(customerId) {
 
   logger.info(`[ReferralEngine] First service confirmed for referral ${matchedReferral.id}`);
   return { referralId: matchedReferral.id, promoterId: matchedReferral.promoter_id, rewardCents };
+}
+
+// ---------------------------------------------------------------------------
+// 4b. creditReferralOnFirstService — issue the real $25-each account credits
+// ---------------------------------------------------------------------------
+// Called from the service-completion flow. When a referred customer who signed
+// up for a RECURRING plan completes their first service, BOTH the referrer and
+// the referee get a $25 account credit via the customer-credit ledger (the real
+// reward — the promoter balance / payout columns are tracking only). A one-time
+// service never qualifies. Idempotent: the referral's first_service_completed
+// flag is the single-use guard, re-checked under a row lock.
+async function creditReferralOnFirstService({ customerId, isRecurring }) {
+  if (!isRecurring) return null;            // one-time service never qualifies
+  if (!customerId) return null;
+
+  const customer = await db('customers').where({ id: customerId }).first('id', 'phone', 'first_name');
+  if (!customer || !customer.phone) return null;
+
+  const normalizedPhone = normalizePhone(customer.phone);
+
+  // Map the completing customer back to the referral that brought them in (by
+  // phone — the referee's customer_id is not persisted on the referral row).
+  const candidate = await db('referrals')
+    .where('status', 'signed_up')
+    .where('first_service_completed', false)
+    .where(function () {
+      this.where('referee_phone', customer.phone).orWhere('referee_phone', normalizedPhone);
+    })
+    .orderBy('created_at', 'asc')
+    .first('id');
+  if (!candidate) return null;
+
+  const settings = await getSettings();
+  const referrerCents = Number(settings.referrer_reward_cents) || 0;
+  const refereeCents = Number(settings.referee_discount_cents) || 0;
+  const referrerDollars = round2(referrerCents / 100);
+  const refereeDollars = round2(refereeCents / 100);
+
+  const outcome = await db.transaction(async (trx) => {
+    // Re-read under lock; first_service_completed is the single-use guard.
+    const referral = await trx('referrals').where({ id: candidate.id }).forUpdate().first();
+    if (!referral || referral.first_service_completed || referral.status !== 'signed_up') {
+      return { skipped: true };
+    }
+
+    // Referee — the customer who just completed their first recurring service.
+    if (refereeDollars > 0) {
+      await postCreditMovement({
+        customerId,
+        delta: refereeDollars,
+        source: 'referral',
+        referralId: referral.id,
+        note: 'Referral welcome credit — first recurring service completed',
+        createdBy: 'referral_engine',
+      }, trx);
+    }
+
+    // Referrer — the customer whose share link brought them in.
+    if (referrerDollars > 0 && referral.referrer_customer_id) {
+      await postCreditMovement({
+        customerId: referral.referrer_customer_id,
+        delta: referrerDollars,
+        source: 'referral',
+        referralId: referral.id,
+        note: `Referral reward — ${customer.first_name || 'your referral'} completed their first service`,
+        createdBy: 'referral_engine',
+      }, trx);
+    }
+
+    // Mark the referral rewarded (single-use) + keep the legacy credited flags truthful.
+    await trx('referrals').where({ id: referral.id }).update({
+      first_service_completed: true,
+      referrer_reward_status: 'earned',
+      referee_credited: true,
+      referrer_credited: true,
+      status: 'credited',
+      updated_at: new Date(),
+    });
+
+    // Promoter bookkeeping: drain the pending tracker so the Refer tab stays honest.
+    if (referral.promoter_id) {
+      await trx('referral_promoters').where({ id: referral.promoter_id }).update({
+        pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [referrerCents]),
+        updated_at: new Date(),
+      });
+    }
+
+    return { skipped: false, referral };
+  });
+
+  if (outcome.skipped) return null;
+
+  // Post-commit: notify the referrer their reward landed (non-critical).
+  if (outcome.referral.promoter_id) {
+    try {
+      const promoter = await db('referral_promoters').where({ id: outcome.referral.promoter_id }).first();
+      if (promoter && promoter.customer_phone) {
+        const rewardSms = await renderReferralSms('referral_reward', {
+          referrer_name: promoter.first_name,
+          referee_name: outcome.referral.referee_name || outcome.referral.referral_first_name || 'your friend',
+          reward_amount: `$${referrerDollars.toFixed(0)}`,
+        }, settings.reward_sms_template, {
+          workflow: 'referral_reward',
+          entity_type: 'referral',
+          entity_id: outcome.referral.id,
+        });
+        await sendSMS(promoter.customer_phone, rewardSms, {
+          customerId: promoter.customer_id,
+          messageType: 'referral_reward',
+          referralId: outcome.referral.id,
+          promoterId: promoter.id,
+          entryPoint: 'referral_engine_first_service',
+        });
+      }
+    } catch (smsErr) {
+      logger.warn(`[ReferralEngine] reward SMS failed for referral ${outcome.referral.id}: ${smsErr.message}`);
+    }
+  }
+
+  logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${referrerDollars}, referee $${refereeDollars}`);
+  return { referralId: outcome.referral.id, referrerCents, refereeCents };
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +938,7 @@ module.exports = {
   submitReferral,
   convertReferral,
   confirmFirstService,
+  creditReferralOnFirstService,
   checkMilestones,
   getSettings,
   updateSettings,
