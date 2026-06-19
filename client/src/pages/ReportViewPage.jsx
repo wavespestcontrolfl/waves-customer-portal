@@ -4092,8 +4092,16 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
   });
   const events = timeline.events;
   // WaveGuard memberships don't account for an hourly/per-visit time figure on customer-facing
-  // service reports — the "Time on site" duration is intentionally suppressed (reads as zero).
-  const timeOnSiteDisplay = '';
+  // service reports — the "Time on site" duration is suppressed (reads as zero) for members.
+  // Non-member reports keep honoring the admin "Show duration when reliable" setting, which
+  // governs whether timeline.durationMinutes is populated upstream. timingSource is the full
+  // report payload (passed as timingSource={data}), so the membership flag is read from it.
+  const isWaveGuardMember = Boolean(
+    timingSource?.waveGuardTier || timingSource?.waveguardTier || timingSource?.plan?.isWaveGuard,
+  );
+  const timeOnSiteDisplay = isWaveGuardMember
+    ? ''
+    : (timeline.durationMinutes ? formatCompactDurationMinutes(timeline.durationMinutes) : '');
 
   if (loading) {
     return (
