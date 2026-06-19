@@ -21,7 +21,30 @@ const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove } = require('./apply');
 const { toDateStr } = require('./dates');
+const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
+
+// Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
+// from their address) and re-check eligibility, so a not-yet-geocoded recurring
+// customer is optimized the first time the optimizer sees them rather than being
+// silently skipped. Safe in both modes — it writes only customer coordinates,
+// never scheduled_services. Returns { recheck, geocoded }.
+async function geocodeAndRecheck(service, eligCtx) {
+  try {
+    const geo = await ensureCustomerGeocoded(service.customer_id);
+    if (geo && geo.lat != null && geo.lng != null) {
+      service.customer_latitude = geo.lat;
+      service.customer_longitude = geo.lng;
+      return { recheck: isEligibleForAutoDispatch(service, eligCtx), geocoded: true };
+    }
+  } catch (e) {
+    logger.warn(`[auto-dispatch] geocode retry failed for customer ${service.customer_id}: ${e.message}`);
+  }
+  return {
+    recheck: { eligible: false, reason_code: 'MISSING_GEO', reason_description: 'No usable geo (geocode attempt did not resolve the address)' },
+    geocoded: false,
+  };
+}
 
 async function loadCapabilityMap() {
   // Fail closed: the deactivated-tech HARD filter depends on this data. An empty
@@ -97,6 +120,7 @@ async function runAutoDispatch(opts = {}) {
 
   let runStatus = 'completed';
   let runError = null;
+  let geocodedCount = 0;
 
   try {
     const capMap = await loadCapabilityMap();
@@ -105,7 +129,14 @@ async function runAutoDispatch(opts = {}) {
 
     for (const service of services) {
       try {
-        const elig = isEligibleForAutoDispatch(service, { today, lockBoundary, lockWindowDays: config.lockWindowDays });
+        const eligCtx = { today, lockBoundary, lockWindowDays: config.lockWindowDays };
+        let elig = isEligibleForAutoDispatch(service, eligCtx);
+        // Self-heal a not-yet-geocoded customer once, bounded per run, then re-check.
+        if (!elig.eligible && elig.reason_code === 'MISSING_GEO' && geocodedCount < config.maxGeocodesPerRun) {
+          const res = await geocodeAndRecheck(service, eligCtx);
+          if (res.geocoded) geocodedCount++;
+          elig = res.recheck;
+        }
         if (!elig.eligible) {
           totals.skipped++;
           await audit.logDecision(runId, { action: 'skipped', service, reason_code: elig.reason_code, reason_description: elig.reason_description });
@@ -237,8 +268,8 @@ async function runAutoDispatch(opts = {}) {
   }
 
   await audit.completeRun(runId, { status: runStatus, totals, error: runError });
-  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed}`);
-  return { runId, status: runStatus, ...totals };
+  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${geocodedCount}`);
+  return { runId, status: runStatus, geocoded: geocodedCount, ...totals };
 }
 
 module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn } };

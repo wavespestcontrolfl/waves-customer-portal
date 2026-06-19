@@ -15,6 +15,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
 }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn() }));
+jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
@@ -25,6 +26,7 @@ const db = require('../models/db');
 const eligibility = require('../services/auto-dispatch/eligibility');
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 const apply = require('../services/auto-dispatch/apply');
+const geocoder = require('../services/geocoder');
 const audit = require('../services/auto-dispatch/audit');
 const { runAutoDispatch } = require('../services/auto-dispatch');
 
@@ -133,6 +135,26 @@ test('fails closed (run status failed) when capability data cannot load', async 
   const res = await runAutoDispatch({ mode: 'dry_run' });
   expect(res.status).toBe('failed');
   expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+});
+
+test('self-heals a MISSING_GEO customer by geocoding, then re-checks (not skipped)', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4, lng: -82.5 });
+  eligibility.isEligibleForAutoDispatch
+    .mockReturnValueOnce({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' })
+    .mockReturnValueOnce({ eligible: true });
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
+  expect(res).toMatchObject({ skipped: 0, evaluated: 1, geocoded: 1, recommended: 1 });
+});
+
+test('still skips MISSING_GEO when geocoding cannot resolve the address', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1);
+  expect(res).toMatchObject({ skipped: 1, evaluated: 0, geocoded: 0 });
+  expect(lastDecision('skipped').reason_code).toBe('MISSING_GEO');
 });
 
 test('ineligible service is skipped before candidate generation', async () => {

@@ -68,6 +68,11 @@ function getAutoDispatchConfig(overrides = {}) {
       ?? intEnv('AUTO_DISPATCH_MIN_SCORE_IMPROVEMENT', 15, { min: 0, max: 100 }),
     maxChangesPerRun: overrides.maxChangesPerRun
       ?? intEnv('AUTO_DISPATCH_MAX_CHANGES_PER_RUN', 100, { min: 0, max: 100000 }),
+    // Self-heal: per-run cap on geocoding MISSING_GEO customers (each is a Google
+    // Geocoding API call). The set shrinks as customers get geocoded, so this
+    // mainly bounds the first run / a surge of new customers.
+    maxGeocodesPerRun: overrides.maxGeocodesPerRun
+      ?? intEnv('AUTO_DISPATCH_MAX_GEOCODES_PER_RUN', 50, { min: 0, max: 5000 }),
     requirePortalPreferences: overrides.requirePortalPreferences
       ?? boolEnv('AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES', false),
     notifyCustomers: overrides.notifyCustomers
