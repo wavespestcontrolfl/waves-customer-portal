@@ -122,6 +122,41 @@ const SOCIAL_TABS = [
   { key: "history", label: "Post History", Icon: History },
 ];
 
+// The 10-tab bar is grouped into parent sections, each revealing its leaf tabs
+// in a sub-row. `tab` state still holds the LEAF key, so every
+// {tab === "..."} render block below is unchanged.
+const SOCIAL_TAB_GROUPS = [
+  {
+    key: "studio",
+    label: "Studio",
+    Icon: PenSquare,
+    tabs: ["campaigns", "compose", "templates"],
+  },
+  {
+    key: "posts",
+    label: "Posts",
+    Icon: CalendarDays,
+    tabs: ["calendar", "history"],
+  },
+  {
+    key: "automation",
+    label: "Automation",
+    Icon: Activity,
+    tabs: ["rss", "audit"],
+  },
+  { key: "reviews", label: "Review Graphics", Icon: Star, tabs: ["reviews"] },
+  {
+    key: "competitors",
+    label: "Competitors",
+    Icon: TrendingUp,
+    tabs: ["competitors"],
+  },
+  { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
+];
+const SOCIAL_LEAF_BY_KEY = Object.fromEntries(
+  SOCIAL_TABS.map((s) => [s.key, s]),
+);
+
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(
     typeof window !== "undefined" && window.innerWidth < 640,
@@ -186,6 +221,8 @@ function MetaHealthStrip({ health, onRefresh }) {
 
 export default function SocialMediaPage() {
   const [tab, setTab] = useState("campaigns");
+  const activeGroup =
+    SOCIAL_TAB_GROUPS.find((g) => g.tabs.includes(tab)) || SOCIAL_TAB_GROUPS[0];
   const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
   const [rssItems, setRssItems] = useState([]);
@@ -228,12 +265,61 @@ export default function SocialMediaPage() {
       <AdminCommandHeader
         title="Social Media"
         icon={Share2}
-        sections={SOCIAL_TABS}
-        activeKey={tab}
-        onSectionChange={setTab}
+        sections={SOCIAL_TAB_GROUPS.map((g) => ({
+          key: g.key,
+          label: g.label,
+          Icon: g.Icon,
+        }))}
+        activeKey={activeGroup.key}
+        onSectionChange={(key) => {
+          const g = SOCIAL_TAB_GROUPS.find((x) => x.key === key);
+          if (g) setTab(g.tabs[0]);
+        }}
         ariaLabel="Social Media section"
-        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-10"
+        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
       />
+      {activeGroup.tabs.length > 1 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {activeGroup.tabs.map((key) => {
+            const leaf = SOCIAL_LEAF_BY_KEY[key];
+            const active = tab === key;
+            const LeafIcon = leaf.Icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 36,
+                  padding: "0 14px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
+                  background: active ? "#18181B" : "#FFFFFF",
+                  color: active ? "#fff" : "#27272A",
+                }}
+              >
+                <LeafIcon size={14} strokeWidth={1.9} />
+                {leaf.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {/* Failure alert banner */}
       {alert && (
         <div
