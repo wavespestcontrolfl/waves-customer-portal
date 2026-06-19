@@ -973,6 +973,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           pipeline_stage: 'won',
           pipeline_stage_changed_at: new Date(),
           member_since: existingCustomer.member_since || etDateString(),
+          active: true,
           churned_at: null,
           churn_reason: null,
         });
