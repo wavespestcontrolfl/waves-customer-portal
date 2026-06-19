@@ -3,6 +3,7 @@ const router = express.Router();
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
+const CustomerCredit = require('../services/customer-credit');
 const TwilioService = require('../services/twilio');
 const { generateToken, generateRefreshToken, authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
@@ -307,10 +308,17 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
 router.get('/me', authenticate, async (req, res, next) => {
   try {
   const customer = req.customer;
-  const [prefs, annualPrepay] = await Promise.all([
+  const [prefs, annualPrepay, creditLedger] = await Promise.all([
     db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null),
     annualPrepayForCustomer(customer.id),
+    CustomerCredit.getLedger(customer.id, { limit: 100 }).catch(() => []),
   ]);
+  // Portal billing "Credits" card: itemized credit issuances (referral / manual)
+  // plus the real net account-credit balance, so the reward — which posts to
+  // customer_credit_ledger + customers.account_credits — actually surfaces to
+  // the customer instead of only being visible in admin Customer 360.
+  const credits = CustomerCredit.portalCreditsFromLedger(creditLedger);
+  const accountCredit = CustomerCredit.round2(customer.account_credits || 0);
 
   res.json({
     id: customer.id,
@@ -340,6 +348,8 @@ router.get('/me', authenticate, async (req, res, next) => {
     monthlyRate: parseFloat(customer.monthly_rate),
     memberSince: customer.member_since,
     referralCode: customer.referral_code,
+    accountCredit,
+    credits,
     annualPrepay,
     notificationPrefs: prefs ? {
       serviceReminder24h: prefs.service_reminder_24h,

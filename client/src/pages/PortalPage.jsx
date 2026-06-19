@@ -3457,7 +3457,11 @@ function BillingTab({ customer }) {
   const referralCredits = credits.filter(c => c.type === 'referral');
   const serviceCredits = credits.filter(c => c.type === 'service');
   const promoCredits = credits.filter(c => c.type === 'promo');
-  const totalCredits = credits.reduce((sum, c) => sum + (c.amount || 0), 0);
+  // "Total Account Credit" = the real net balance (server-authoritative), not the
+  // sum of issuances — so it stays correct after a credit is applied to an invoice.
+  const totalCredits = customer?.accountCredit != null
+    ? Number(customer.accountCredit)
+    : credits.reduce((sum, c) => sum + (c.amount || 0), 0);
 
   // WaveGuard membership — services & upsell
   const includedServices = SERVICE_CATALOG.slice(0, numServices);

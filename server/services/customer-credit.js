@@ -109,10 +109,54 @@ async function postCreditMovement({
   return result;
 }
 
+// Ledger `source` → the credit-group `type` the customer portal billing card
+// renders (referral / service / promo). Manual issuances + adjustments read as
+// "promo"; consumption sources (invoice_application / invoice_prepaid) never
+// appear because portalCreditsFromLedger only maps positive issuances.
+const CREDIT_DISPLAY_TYPE_BY_SOURCE = Object.freeze({
+  referral: 'referral',
+  manual: 'promo',
+  adjustment: 'promo',
+});
+
+// Controlled, customer-safe label per display type. We deliberately do NOT
+// surface the raw ledger `note`: manual/adjustment notes are free-form operator
+// input (internal comments / PII), and even the system referral note embeds the
+// referee's name. The customer only ever sees one of these fixed labels.
+const PUBLIC_CREDIT_LABEL_BY_TYPE = Object.freeze({
+  referral: 'Referral reward',
+  service: 'Service credit',
+  promo: 'Account credit',
+});
+
+/**
+ * Map raw customer_credit_ledger rows into the shape the portal billing
+ * "Credits" card expects ({ type, description, amount, date }). Only issuances
+ * (delta > 0) are shown as available credit — consumption rows (delta < 0, the
+ * credit being applied to an invoice) are spend, not an available balance.
+ * `description` is a controlled public label (never the raw operator note).
+ */
+function portalCreditsFromLedger(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((e) => Number(e.delta) > 0)
+    .map((e) => {
+      const type = CREDIT_DISPLAY_TYPE_BY_SOURCE[e.source] || 'promo';
+      return {
+        id: e.id,
+        type,
+        description: PUBLIC_CREDIT_LABEL_BY_TYPE[type] || PUBLIC_CREDIT_LABEL_BY_TYPE.promo,
+        amount: round2(e.delta),
+        date: e.created_at,
+      };
+    });
+}
+
 module.exports = {
   VALID_SOURCES,
+  CREDIT_DISPLAY_TYPE_BY_SOURCE,
   round2,
   getBalance,
   getLedger,
   postCreditMovement,
+  portalCreditsFromLedger,
 };
