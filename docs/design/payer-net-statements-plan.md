@@ -205,7 +205,9 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
   and explicitly rejects `invoice.payer_id`. We add a payer-scoped charge that is
   only ever reachable via a statement token, never a homeowner surface.
   - **Surcharge is mandatory for card-family pay** (AGENTS.md / the
-    cost-of-acceptance lane, `CONFIGURED_COST_BPS` = 290 = 2.9%). The statement
+    cost-of-acceptance lane). Do NOT restate the rate here — it is configured
+    (`CONFIGURED_COST_BPS`) and the lane's rule is *derive the displayed %, never
+    hardcode it*. The statement
     pay MUST run the same quote → finalize → update flow as invoice card pay:
     derive the displayed total, the PaymentIntent amount, AND the recorded
     surcharge from `computeChargeAmount(statement.total, methodType, { funding })`
