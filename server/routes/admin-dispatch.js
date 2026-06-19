@@ -2182,6 +2182,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
     let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
     let effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+    // Internal-only consultation (e.g. Waves Assessment): advisory walkthrough,
+    // not a treatment. Beyond suppressing delivery, it must NOT feed the
+    // customer-report findings / Pest Pressure pipeline, and its suppression
+    // posture is frozen on the record so resumed side effects and downstream
+    // customer-facing gates (documents, paid-invoice review) honor it.
+    const isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
@@ -2703,7 +2709,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
           const structuredNotes = {
             visitOutcome,
-            requestReview: isIncompleteVisit ? false : requestReview !== false,
+            // Internal-only consultations never request a customer review —
+            // freeze the opt-out so the Stripe paid-invoice webhook
+            // (stripe-webhook.js) also suppresses it for a billed assessment.
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion) ? false : requestReview !== false,
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             reviewTiming: reviewTiming || null,
@@ -2738,10 +2747,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               ? { completionTelemetry }
               : {}),
             // Delivery posture at completion time, frozen on the record:
-            // /api/services suppresses report links for internal_only rows
-            // (Phase-1b shadow) — a later graduation to auto_send must not
-            // retroactively expose reports that were never sent.
-            ...(typedFindingsType ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // /api/services + documents.js suppress report links/downloads for
+            // non-auto_send rows — a later graduation to auto_send must not
+            // retroactively expose reports that were never sent. Frozen for
+            // typed completions AND internal-only consultations (typedDeliveryMode
+            // 'disabled') so the no-customer-artifact posture survives resume.
+            ...((typedFindingsType || isInternalOnlyCompletion) ? { typedReportDelivery: typedDeliveryMode } : {}),
             // Companion delivery postures frozen alongside (same rule):
             // graduation flips on the profile never retro-publish stored
             // companion sections.
@@ -3067,6 +3078,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           useServiceReportV1
           && serviceFindingsAvailable
           && !typedFindingsType
+          && !isInternalOnlyCompletion
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
@@ -3083,7 +3095,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // service_type can detect to the 'pest' line and slip past the
         // one-time-label gate, which would pollute recurring pressure
         // history. The activity score above is their indicator instead.
-        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType) {
+        // Internal-only consultations are excluded for the same reason: an
+        // advisory walkthrough must not write Pest Pressure history.
+        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion) {
           const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
           if (pestPressure && pestPressure.result.displayedScore != null) {
             record.pressure_index = pestPressure.result.displayedScore;
@@ -3796,11 +3810,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // PUBLIC_PORTAL_URL first which is the canonical public origin.
     // Resume safety: a crash-resumed completion re-enters here with the
     // record already committed — and the profile may have graduated since
-    // (e.g. Phase-1b internal_only → auto_send). The record's FROZEN
-    // typedReportDelivery is the truth for this completion's delivery
-    // gates; the live profile only decides for brand-new records (the
-    // freeze itself is written from the profile at insert time).
-    if (typedFindingsType && record?.structured_notes) {
+    // (e.g. Phase-1b internal_only → auto_send, or a Waves Assessment flipped
+    // off internal-only). The record's FROZEN typedReportDelivery is the truth
+    // for this completion's delivery gates; the live profile only decides for
+    // brand-new records (the freeze itself is written from the profile at
+    // insert time). Applies to typed completions AND internal-only
+    // consultations — both freeze typedReportDelivery; routine completions
+    // never persist it, so frozenDelivery is undefined and nothing changes.
+    if (record?.structured_notes) {
       const frozenDelivery = parseJsonObject(record.structured_notes)?.typedReportDelivery;
       if (frozenDelivery && frozenDelivery !== typedDeliveryMode) {
         typedDeliveryMode = frozenDelivery;
