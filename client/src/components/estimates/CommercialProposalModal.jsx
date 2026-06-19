@@ -71,8 +71,10 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    // adminFetch resolves successful responses to parsed JSON (and throws on
+    // non-2xx), so consume the object directly — calling .json() again would
+    // throw "r.json is not a function" and wedge the modal in its error state.
     adminFetch(`/admin/estimates/${estimate.id}/proposal`)
-      .then((r) => r.json())
       .then((data) => {
         if (!alive) return;
         const p = data.proposal || {};
@@ -155,14 +157,13 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
     setSaving(true);
     setError(null);
     try {
-      const r = await adminFetch(`/admin/estimates/${estimate.id}/proposal`, {
+      // adminFetch sets the JSON Content-Type but does not serialize the body,
+      // and throws on a non-2xx (surfacing the server's error message), so
+      // stringify here and let a rejection fall through to the catch.
+      await adminFetch(`/admin/estimates/${estimate.id}/proposal`, {
         method: 'PUT',
-        body: payload,
+        body: JSON.stringify(payload),
       });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        throw new Error(d.error || `Save failed (${r.status})`);
-      }
       setSavedOnce(true);
       onSaved?.();
     } catch (e) {
@@ -176,7 +177,13 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
     setDownloading(true);
     setError(null);
     try {
-      const r = await adminFetch(`/admin/estimates/${estimate.id}/proposal.pdf`);
+      // The shared adminFetch always parses the body as JSON, which corrupts
+      // PDF bytes — so hit the endpoint with a raw fetch (same auth header)
+      // and read the response as a blob.
+      const r = await fetch(
+        `${import.meta.env.VITE_API_URL || '/api'}/admin/estimates/${estimate.id}/proposal.pdf`,
+        { headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` } },
+      );
       if (!r.ok) throw new Error(`Could not generate PDF (${r.status})`);
       const blob = await r.blob();
       const url = URL.createObjectURL(blob);

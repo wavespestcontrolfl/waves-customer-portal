@@ -5803,9 +5803,12 @@ router.put('/:token/accept', async (req, res, next) => {
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
+      const commercialProposal = quoteRequirement.reason === 'commercial_proposal';
       return res.status(409).json({
         error: needsManagerApproval
           ? 'Manager approval is required before this estimate can be accepted online'
+          : commercialProposal
+          ? 'This is a custom commercial proposal — your Waves account manager will finalize acceptance with you directly.'
           : 'This estimate requires an inspection before it can be accepted online',
         quoteRequired: true,
         managerApprovalRequired: needsManagerApproval,
@@ -7800,16 +7803,25 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const quoteRequiredItems = Array.isArray(breakdown?.quoteRequiredItems)
     ? breakdown.quoteRequiredItems
     : (Array.isArray(breakdown?.items) ? breakdown.items.filter((item) => item.quoteRequired === true) : []);
+  // An authored commercial proposal (the multi-building PDF) is accepted
+  // manually after a board review — never through the residential self-serve
+  // accept-and-charge flow, whose single-cadence, pre-tax stored totals would
+  // disagree with the emailed proposal PDF. Surface it as a custom quote so
+  // the public view shows the formal-proposal state and the accept endpoint
+  // refuses online acceptance.
+  const commercialProposal = estData?.proposal?.enabled === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
-    || managerApprovalRequired;
+    || managerApprovalRequired
+    || commercialProposal;
 
   return {
     quoteRequired,
     reason: managerApprovalRequired
       ? 'st_augustine_dethatching'
-      : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason || null),
+      : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason
+        || (commercialProposal ? 'commercial_proposal' : null)),
     items: quoteRequiredItems,
   };
 }

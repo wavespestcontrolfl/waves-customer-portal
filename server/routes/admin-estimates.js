@@ -97,6 +97,25 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
+// When an operator authors a commercial proposal, their line items ARE the
+// quote — so the auto-quote-required state a commercial estimate is created
+// with must be cleared, or the recursive estimateDataHasQuoteRequirement send
+// gate keeps blocking delivery with the manual-review error. Clearing these
+// raw booleans does NOT re-open the self-serve accept path: the public view
+// derives its manual-acceptance state from estimate_data.proposal.enabled
+// (see estimate-public resolveEstimateQuoteRequirement), not these flags.
+function clearQuoteRequirementFlags(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 12) return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => clearQuoteRequirementFlags(item, depth + 1));
+    return;
+  }
+  if (value.quoteRequired === true) value.quoteRequired = false;
+  if (value.requiresCustomQuote === true) value.requiresCustomQuote = false;
+  if (value.autoQuoteRequiresAdminApproval === true) value.autoQuoteRequiresAdminApproval = false;
+  for (const v of Object.values(value)) clearQuoteRequirementFlags(v, depth + 1);
+}
+
 function leadEstimateAutomationSummary(estimateData) {
   const data = parseEstimateData(estimateData) || {};
   const automation = data.automation || {};
@@ -473,7 +492,14 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   let proposalAttachments = [];
   try {
     if (normalizeProposal(estimate).enabled) {
-      proposalAttachments = [await buildEstimateProposalEmailAttachment(estimate)];
+      // Build the PDF from the row as it will be persisted by this send —
+      // nextExpiresAt is the validity window the customer's link gets, so the
+      // attached proposal must advertise the same "valid through" date rather
+      // than the pre-update row's (usually empty) expires_at.
+      proposalAttachments = [await buildEstimateProposalEmailAttachment({
+        ...estimate,
+        expires_at: nextExpiresAt,
+      })];
     }
   } catch (e) {
     logger.warn(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
@@ -1031,6 +1057,20 @@ router.put('/:id/proposal', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (estimate.archived_at) return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
 
+    // Re-pricing guard. Acceptance locks the price (price_locked_at) and spins
+    // up downstream records (onboarding / invoice / booking); declined and
+    // expired are closed. Saving a proposal rewrites the authoritative
+    // monthly/annual/one-time totals, so block it once the estimate has left
+    // the editable window — otherwise a late edit silently corrupts a locked,
+    // already-accepted price.
+    if (estimate.price_locked_at || ['accepted', 'declined', 'expired'].includes(estimate.status)) {
+      return res.status(409).json({
+        error: estimate.price_locked_at
+          ? 'This estimate is price-locked (accepted) and can no longer be re-priced.'
+          : `A ${estimate.status} estimate can no longer be re-priced.`,
+      });
+    }
+
     const incoming = req.body?.proposal || req.body || {};
     if (!Array.isArray(incoming.buildings) || incoming.buildings.length === 0) {
       return res.status(400).json({ error: 'proposal.buildings must be a non-empty array.' });
@@ -1052,6 +1092,11 @@ router.put('/:id/proposal', async (req, res, next) => {
       ...existingData,
       proposal: { ...normalized, updatedAt: new Date().toISOString() },
     };
+    // Make the authored proposal sendable: clear the auto-quote-required
+    // booleans the commercial estimate was created with. proposal.enabled (set
+    // above) is what keeps acceptance manual in the public view, so this only
+    // unblocks the admin send gate — it does not re-enable self-serve accept.
+    clearQuoteRequirementFlags(nextData);
 
     await db('estimates').where({ id: estimate.id }).update({
       estimate_data: JSON.stringify(nextData),
@@ -1566,6 +1611,7 @@ router.post('/cleanup-demo', async (req, res, next) => {
 });
 
 router._internals = {
+  clearQuoteRequirementFlags,
   assertEstimateSendable,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
