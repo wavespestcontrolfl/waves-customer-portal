@@ -41,7 +41,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const StripeService = require('./stripe');
 const { DEPOSIT } = require('./pricing-engine/constants');
-const { etDateString } = require('../utils/datetime-et');
 
 function isDepositEnforced() {
   const flag = process.env.ESTIMATE_DEPOSIT_REQUIRED;
@@ -91,40 +90,34 @@ function resolveDepositPolicy({ estimate, paymentMethodPreference, membership, o
 
 // Resolve the scheduled_service whose payer the eventual invoice will use, so a
 // per-job payer (scheduled_services.payer_id) exempts the deposit even when the
-// customer has no default payer. Precedence: an explicit/committed appointment,
-// else the estimate's persisted estimate_data.scheduled_service_id, else an
-// appointment linked only by source_estimate_id (the converter's reservation
-// linkage — what findLinkedUpcomingAppointment also matches on). Scoped to the
-// customer. `strict` re-throws DB errors for fail-closed callers (the nudge);
-// default fail-soft to null = "no per-job payer found" for collection paths.
-async function linkedScheduledServiceId(estimate, explicitId = null, { strict = false } = {}) {
+// customer has no default payer. Precedence: an explicit/committed appointment
+// (already validated live by the accept flow), else the estimate's live linked
+// appointment. The linked lookup REUSES findLinkedUpcomingAppointment — which
+// matches BOTH estimate_data.scheduled_service_id and source_estimate_id under
+// the same live constraints (pending|confirmed, future-dated, non-expired
+// reservation, customer-scoped, earliest first) — so a stale/cancelled/past
+// appointment can never set a payer scope the accept flow wouldn't treat as
+// active. resolveForInvoice then derives the actual payer from the returned id.
+// `strict` re-throws lookup errors for fail-closed callers (the nudge); default
+// fail-soft to null for collection paths.
+async function linkedScheduledServiceId(estimate, explicitId = null, { strict = false, fallback = true } = {}) {
   if (explicitId) return String(explicitId);
-  const estData = parseEstimateDataBlob(estimate);
-  if (estData?.scheduled_service_id) return String(estData.scheduled_service_id);
-  if (estimate?.id && estimate?.customer_id) {
-    try {
-      // Mirror findLinkedUpcomingAppointment's live-appointment constraints so a
-      // past / cancelled / expired-reservation row can never waive the deposit or
-      // set a stale payer scope: pending|confirmed, future-dated (ET), non-expired
-      // reservation, earliest first.
-      const row = await db('scheduled_services')
-        .where({ source_estimate_id: estimate.id, customer_id: estimate.customer_id })
-        .whereNotNull('payer_id')
-        .whereIn('status', ['pending', 'confirmed'])
-        .where('scheduled_date', '>=', etDateString())
-        .where((qb) => {
-          qb.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
-        })
-        .orderBy('scheduled_date', 'asc')
-        .orderBy('window_start', 'asc')
-        .first('id');
-      if (row?.id) return String(row.id);
-    } catch (err) {
-      if (strict) throw err;
-      // non-strict: a failed lookup just means "no source-linked per-job payer".
-    }
+  // fallback=false: the caller knows the exact appointment being accepted (or that
+  // none applies — e.g. a fresh-slot accept) and must NOT resolve an unrelated
+  // linked/source appointment.
+  if (!fallback || !estimate?.id) return null;
+  try {
+    // Lazy require to avoid a service→route load cycle (same pattern as the
+    // eligibility gates below).
+    const gates = require('../routes/estimate-public');
+    const appt = typeof gates.findLinkedUpcomingAppointment === 'function'
+      ? await gates.findLinkedUpcomingAppointment(estimate)
+      : null;
+    return appt?.id ? String(appt.id) : null;
+  } catch (err) {
+    if (strict) throw err;
+    return null;
   }
-  return null;
 }
 
 // Policy resolution with the LIVE existing-plan-customer fallback. The
@@ -136,7 +129,7 @@ async function linkedScheduledServiceId(estimate, explicitId = null, { strict = 
 // CURRENT qualifying recurring services. A failed live check falls back to
 // requiring the deposit — wrongly charged money still credits forward,
 // while a wrongly granted exemption silently loses the commitment gate.
-async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false, scheduledServiceId = null }) {
+async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreference = null, membership = null, oneTime = false, oneTimeUninvoiced = false, scheduledServiceId = null, useLinkedFallback = true }) {
   let member = membership;
   if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
     try {
@@ -168,7 +161,7 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
       // ?? customers.payer_id): scope by the appointment the estimate is tied to
       // (committed > persisted link > source_estimate_id) so a per-job payer with
       // no customer default is still caught.
-      const linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId);
+      const linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
       const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId });
       if (resolved?.payerId) {
         return { enforced: policy.enforced, required: false, slotRequired: policy.slotRequired, exemptReason: 'payer_billed' };

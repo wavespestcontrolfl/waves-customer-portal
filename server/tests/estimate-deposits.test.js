@@ -15,6 +15,7 @@ jest.mock('../services/logger', () => ({
 }));
 const mockRefundPaymentIntent = jest.fn();
 const mockIsEstimateAcceptActive = jest.fn(() => true);
+const mockFindLinkedAppt = jest.fn(async () => null);
 
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: (...args) => mockRetrievePaymentIntent(...args),
@@ -26,6 +27,7 @@ jest.mock('../routes/estimate-public', () => ({
   buildPricingBundle: jest.fn(async () => ({})),
   resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
+  findLinkedUpcomingAppointment: (...args) => mockFindLinkedAppt(...args),
 }));
 jest.mock('../services/estimate-membership-context', () => ({
   buildEstimateMembershipContext: jest.fn(async () => ({ isExistingCustomer: false })),
@@ -217,23 +219,38 @@ describe('resolveDepositPolicyForEstimate — third-party payer exemption', () =
     expect(policy.slotRequired).toBe(false);
   });
 
-  it('threads the estimate-linked scheduled service as the payer scope (per-job payer)', async () => {
+  it('threads the live linked appointment as the payer scope (per-job payer)', async () => {
+    // The helper delegates to findLinkedUpcomingAppointment (live constraints);
+    // its returned id becomes the resolveForInvoice scope.
+    mockFindLinkedAppt.mockResolvedValueOnce({ id: 'ss-55', payer_id: 7 });
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 7 });
     await resolveDepositPolicyForEstimate({
-      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280, estimate_data: JSON.stringify({ scheduled_service_id: 'ss-55' }) },
+      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 },
       membership: { isExistingCustomer: false },
     });
     expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: 'ss-55' });
   });
 
-  it('an explicit committed-appointment scheduledServiceId overrides the estimate link', async () => {
+  it('an explicit committed-appointment scheduledServiceId short-circuits the linked lookup', async () => {
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 7 });
     await resolveDepositPolicyForEstimate({
-      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280, estimate_data: JSON.stringify({ scheduled_service_id: 'ss-55' }) },
+      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 },
       membership: { isExistingCustomer: false },
       scheduledServiceId: 'ss-committed',
     });
+    expect(mockFindLinkedAppt).not.toHaveBeenCalled();
     expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: 'ss-committed' });
+  });
+
+  it('useLinkedFallback:false suppresses the linked lookup (slot accept → customer default only)', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 9 });
+    await resolveDepositPolicyForEstimate({
+      estimate: { id: 'est-1', customer_id: 'cust-9', onetime_total: 280 },
+      membership: { isExistingCustomer: false },
+      useLinkedFallback: false,
+    });
+    expect(mockFindLinkedAppt).not.toHaveBeenCalled();
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-9', scheduledServiceId: null });
   });
 
   it('does NOT override an already-exempt existing-plan policy (keeps its slot gate)', async () => {
@@ -274,7 +291,6 @@ describe('assessDepositFollowUpEligibility — payer-billed skips the nudge (P1)
     const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
     mockDbHandler = (table) => {
       if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
-      if (table === 'scheduled_services') { const ss = {}; ['where', 'whereIn', 'whereNotNull', 'orderBy', 'select'].forEach((m) => { ss[m] = () => ss; }); ss.first = async () => null; return ss; }
       throw new Error(`unexpected table ${table}`);
     };
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
@@ -288,7 +304,6 @@ describe('assessDepositFollowUpEligibility — payer-billed skips the nudge (P1)
     const estimate = { id: 'est-1', status: 'sent', customer_id: 'cust-9', estimate_data: '{}', bill_by_invoice: false };
     mockDbHandler = (table) => {
       if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
-      if (table === 'scheduled_services') { const ss = {}; ['where', 'whereIn', 'whereNotNull', 'orderBy', 'select'].forEach((m) => { ss[m] = () => ss; }); ss.first = async () => null; return ss; }
       throw new Error(`unexpected table ${table}`);
     };
     mockResolveForInvoice.mockRejectedValueOnce(new Error('payer db down'));
@@ -1281,16 +1296,12 @@ describe('assessDepositFollowUpEligibility (deposit-abandonment nudge)', () => {
   function followUpDb({ estimate, receivedRows = [], pendingRow = undefined }) {
     return (table) => {
       const b = {};
-      for (const m of ['where', 'whereIn', 'whereNotNull', 'orderBy', 'select']) {
+      for (const m of ['where', 'whereIn', 'orderBy', 'select']) {
         b[m] = jest.fn(() => b);
       }
-      b.first = jest.fn(async () => {
-        if (table === 'estimates') return estimate;
-        // No source_estimate_id-linked per-job payer in these fixtures, so the
-        // payer exemption check falls through to the customer-default resolver.
-        if (table === 'scheduled_services') return null;
-        return pendingRow;
-      });
+      b.first = jest.fn(async () =>
+        table === 'estimates' ? estimate : pendingRow,
+      );
       b.then = (resolve, reject) =>
         Promise.resolve(table === 'estimate_deposits' ? receivedRows : [])
           .then(resolve, reject);

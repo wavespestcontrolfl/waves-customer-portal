@@ -5843,13 +5843,17 @@ router.put('/:token/accept', async (req, res, next) => {
     // estimate.
     // ─────────────────────────────────────────────
     const acceptMembership = await buildEstimateMembershipContext(estimate);
-    // The scheduled_service whose per-job payer the eventual invoice will resolve
-    // (committed appointment > estimate's persisted link > source_estimate_id).
-    // Resolve ONCE and thread the same scope into the deposit exemption, the
-    // bill-by-invoice create, and the post-accept refund sweep so all three agree
-    // on the payer — otherwise a per-job payer with no customer default could
-    // exempt the deposit while the invoice still resolves self-pay (or vice versa).
-    const acceptLinkedSsId = await linkedScheduledServiceId(estimate, existingAppointmentId || null);
+    // The scheduled_service whose per-job payer the eventual invoice will resolve.
+    // It MUST be the appointment actually being accepted — never an unrelated
+    // linked/source appointment: an existing-appointment accept uses its validated
+    // row; a new-slot accept books a fresh reservation that carries no per-job
+    // payer, so it stays customer-default (null); only when neither is supplied do
+    // we fall back to the estimate's own live linked appointment (source_estimate_id
+    // / persisted link). Resolved ONCE and threaded into the deposit exemption, the
+    // bill-by-invoice create, and the post-accept refund sweep so all three agree.
+    const acceptLinkedSsId = (existingAppointmentId && existingAppointmentRow?.id)
+      ? String(existingAppointmentRow.id)
+      : (slotId ? null : await linkedScheduledServiceId(estimate));
     // resolveDepositPolicyForEstimate adds the LIVE plan-customer fallback
     // (legacy customer-linked estimates have no membershipSnapshot) and
     // oneTimeUninvoiced forces a booking on one-time pay-at-visit accepts —
@@ -5862,6 +5866,9 @@ router.put('/:token/accept', async (req, res, next) => {
       oneTime: treatAsOneTime,
       oneTimeUninvoiced: treatAsOneTime && estimate.bill_by_invoice !== true,
       scheduledServiceId: acceptLinkedSsId,
+      // Scope already resolved above to the accepted appointment — don't let the
+      // resolver re-derive an unrelated linked appointment when this is null.
+      useLinkedFallback: false,
     });
     if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
       return res.status(400).json({
@@ -6722,10 +6729,16 @@ router.put('/:token/accept', async (req, res, next) => {
     if (!customerIsPayerBilled && customerId) {
       try {
         const PayerService = require('../services/payer');
-        const resolvedSweepPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: acceptLinkedSsId });
+        // throwOnError: this is the only post-accept path that refunds a deposit
+        // collected before the customer was known. A fail-soft lookup error would
+        // collapse to self-pay, skip the refund, and strand a payer-billed deposit
+        // indefinitely (accepted estimates are never terminal-swept). Re-throw and
+        // log at ERROR so the unresolved deposit surfaces for reconciliation
+        // rather than vanishing silently.
+        const resolvedSweepPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: acceptLinkedSsId, throwOnError: true });
         customerIsPayerBilled = !!resolvedSweepPayer?.payerId;
       } catch (e) {
-        logger.warn(`[estimate-accept] payer resolve for deposit sweep failed (customer ${customerId}): ${e.message}`);
+        logger.error(`[estimate-accept] payer resolve for deposit sweep failed (customer ${customerId}, estimate ${estimate.id}) — deposit left on ledger for reconciliation: ${e.message}`);
       }
     }
     const payerBilledSweep = customerIsPayerBilled && depositPolicy.required;
