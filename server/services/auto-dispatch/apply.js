@@ -130,11 +130,21 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // (same as the dispatch reschedule path); best-effort.
   try {
     const AppointmentReminders = require('../appointment-reminders');
-    await AppointmentReminders.handleReschedule(
+    const reminderRecord = await AppointmentReminders.handleReschedule(
       service.id,
       `${best.date}T${best.start_time || '08:00'}`,
       { sendNotification: false },
     );
+    // handleReschedule flips confirmation_sent→true assuming a reschedule notice
+    // will follow; auto-dispatch sends none. If a creation confirmation was still
+    // pending, re-arm it (mirrors the admin silent-reschedule path) so the
+    // deferred sendConfirmation isn't suppressed — otherwise the customer gets
+    // neither the confirmation nor a reschedule notice.
+    if (reminderRecord && reminderRecord.confirmation_sent === false) {
+      await db('appointment_reminders')
+        .where({ id: reminderRecord.id })
+        .update({ confirmation_sent: false, confirmation_sent_at: null });
+    }
   } catch (remErr) {
     logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
   }

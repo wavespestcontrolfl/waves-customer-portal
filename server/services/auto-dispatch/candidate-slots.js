@@ -168,7 +168,9 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     topN: ctx.fetchCap || FETCH_CAP, // full feasible set; HARD filters run before trim
     excludeServiceIds: [service.id],
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
-    excludeStatuses: ['cancelled', 'rescheduled'], // phantom reschedule rows aren't real stops
+    // NOTE: occupancy keeps find-time's default ['cancelled'] so it stays
+    // consistent with SmartRebooker's overlap check (which treats 'rescheduled'
+    // as a conflict). Excluding it here would propose slots apply then rejects.
   });
 
   const slots = (res && res.slots) || [];

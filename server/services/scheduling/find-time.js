@@ -100,11 +100,6 @@ async function findAvailableSlots(opts) {
     // Snap proposed start times up to this minute granularity (e.g. 60 = on the
     // hour). Default 1 = exact earliest-feasible minute (identical legacy behavior).
     slotStepMinutes = 1,
-    // Statuses to drop from the occupied-route set. Default ['cancelled'] =
-    // identical legacy behavior; auto-dispatch also passes 'rescheduled' so a
-    // phantom reschedule-request row (stale date kept until staff actions it)
-    // isn't counted as a real stop.
-    excludeStatuses = ['cancelled'],
   } = opts;
   const excludeSet = new Set((excludeServiceIds || []).map(String));
 
@@ -128,7 +123,7 @@ async function findAvailableSlots(opts) {
   // Load all scheduled services in date range, per tech, with coords
   const services = await db('scheduled_services')
     .whereBetween('scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('scheduled_services.status', excludeStatuses)
+    .whereNotIn('scheduled_services.status', ['cancelled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id',

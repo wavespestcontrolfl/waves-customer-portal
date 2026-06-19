@@ -78,6 +78,21 @@ test('does not undo a concurrent confirm: scored pending but fresh confirmed sta
   expect(update.mock.calls[0][0].status).toBeUndefined(); // no pending restore
 });
 
+test('re-arms a still-pending creation confirmation after the silent reminder sync', async () => {
+  AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'r1', confirmation_sent: false });
+  const stamp = jest.fn().mockResolvedValue(1);
+  const rearm = jest.fn().mockResolvedValue(1);
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: stamp },     // bookkeeping stamp
+    { where() { return this; }, update: rearm },     // appointment_reminders re-arm
+  ];
+  db.mockImplementation(() => queue.shift());
+
+  await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+  expect(rearm).toHaveBeenCalledWith({ confirmation_sent: false, confirmation_sent_at: null });
+});
+
 test('aborts (STALE_PLACEMENT) when the visit was locked after scoring', async () => {
   db.mockImplementation(() => readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: true, auto_dispatch_excluded: false }));
   await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
