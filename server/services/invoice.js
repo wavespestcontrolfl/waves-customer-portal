@@ -1046,8 +1046,17 @@ const InvoiceService = {
     // The `depositCredit` param is capped HERE against the actual after-tax
     // value so no requested dollar is consumed without appearing in the
     // total. The floor guards rounding edges.
+    // Third-party Bill-To: a homeowner's estimate deposit must never be credited
+    // against a payer-billed invoice — that applies the service recipient's money
+    // to the third-party AP's bill (wrong-party credit) and would consume the
+    // homeowner's deposit ledger against an invoice they don't owe, leaving the
+    // payer invoice/ledger unreconcilable. Skip the credit entirely when this
+    // invoice resolved to a payer; the deposit stays received on the homeowner's
+    // ledger (callers gate their consume on the returned applied_deposit_credit,
+    // so 0 here leaves the ledger untouched). Payer-billed deposit handling
+    // (roll-forward / refund) is Phase 2.
     let appliedDepositCredit = 0;
-    if (depositCredit && Number(depositCredit.amount) > 0) {
+    if (!resolvedPayerId && depositCredit && Number(depositCredit.amount) > 0) {
       const ceilingCents = Math.max(
         0,
         Math.round((afterDiscount + taxAmount) * 100),

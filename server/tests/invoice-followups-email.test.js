@@ -79,6 +79,9 @@ function followupRow(overrides = {}) {
     due_date: '2026-05-19',
     invoice_number: 'WPC-2026-1042',
     invoice_created_at: '2026-05-20T12:00:00.000Z',
+    // runPending() selects `i.payer_id as invoice_payer_id`; mirror it so
+    // fireStep's payer guard reads the row instead of an extra lookup.
+    invoice_payer_id: null,
     ...overrides,
   };
 }
@@ -179,12 +182,15 @@ describe('invoice follow-up email sidecar', () => {
 
     expect(pendingQuery.whereNotIn).toHaveBeenCalledWith('i.status', [
       'paid',
+      'prepaid',
       'void',
       'processing',
       'refunded',
       'canceled',
       'cancelled',
     ]);
+    // Payer-billed invoices are excluded from the homeowner dunning queue.
+    expect(pendingQuery.whereNull).toHaveBeenCalledWith('i.payer_id');
   });
 
   test('does not schedule a sequence for terminal or draft invoices', async () => {

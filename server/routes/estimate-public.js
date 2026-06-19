@@ -8052,7 +8052,9 @@ function buildAcceptSuccessPayload({
   // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
   if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
-  else if (!treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
+  // A payer-billed annual-prepay accept also has no homeowner step — the prepay
+  // invoice went to the payer AP inbox, so don't surface prepay follow-up copy.
+  else if (!payerBilled && !treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
 
   const decoratedInvoicePayUrl = decorateEstimateInvoicePayUrl(invoicePayUrl, {
     billingTerm,
