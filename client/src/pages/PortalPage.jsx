@@ -1127,7 +1127,12 @@ function DashboardTab({ customer, onSwitchTab }) {
       if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
     }).catch(console.error);
     api.getReferrals().then(d => {
-      if (d?.stats) setReferralStats(d.stats);
+      if (d?.stats) setReferralStats({
+        ...d.stats,
+        // Server-authoritative figures so the dashboard never disagrees with the Refer tab.
+        totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0, // dollars
+        rewardPerReferral: Number(d.rewardPerReferral) || 25,
+      });
     }).catch(console.error);
   }, []);
 
@@ -1249,13 +1254,15 @@ function DashboardTab({ customer, onSwitchTab }) {
   const renewalCredit = customer.memberSince
     ? Math.min(75, Math.round(((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)) * 6.25))
     : 0;
-  const referralCredits = (referralStats?.totalReferrals || 0) * 25;
-  const referralTotal = Number(referralStats?.totalEarned ?? referralCredits);
+  const referralReward = Number(referralStats?.rewardPerReferral) || 25;
+  // Server-authoritative earned dollars — not an estimate off referrals *sent*.
+  const referralCredits = Math.round(Number(referralStats?.totalEarned || 0));
+  const referralTotal = referralCredits;
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
-    { icon: 'gift', label: 'Refer', sub: '$25 credit', action: () => onSwitchTab?.('refer') },
+    { icon: 'gift', label: 'Refer', sub: `$${referralReward} credit`, action: () => onSwitchTab?.('refer') },
   ];
   const rewardCards = [
     {
@@ -1267,8 +1274,8 @@ function DashboardTab({ customer, onSwitchTab }) {
     },
     {
       icon: 'gift',
-      label: referralStats?.totalReferrals ? `${referralStats.totalReferrals} referrals sent` : 'Give $25, get $25',
-      value: referralStats?.totalReferrals ? `$${referralTotal}` : '$25',
+      label: referralStats?.totalReferrals ? `${referralStats.totalReferrals} referrals sent` : `Give $${referralReward}, get $${referralReward}`,
+      value: referralStats?.totalReferrals ? `$${referralTotal}` : `$${referralReward}`,
       sub: referralStats?.totalReferrals
         ? 'earned so far'
         : 'Share Waves with a neighbor and you both get credit.',
@@ -8261,7 +8268,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const converted = Number(stats.converted ?? stats.totalConverted ?? 0);
   const pending = Number(stats.pending ?? referrals.filter(r => PENDING_REFERRAL_STATUSES.includes(r.status)).length);
   const clicks = Number(stats.totalClicks || 0);
-  const rewardPerReferral = Number(data?.rewardPerReferral || 50);
+  const rewardPerReferral = Number(data?.rewardPerReferral || 25);
   const lifetimeEarned = data?.totalEarned != null
     ? Number(data.totalEarned || 0) / 100
     : Number(stats.totalEarned || 0);

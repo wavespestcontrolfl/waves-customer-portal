@@ -370,9 +370,6 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 // 3. convertReferral
 // ---------------------------------------------------------------------------
 async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
-  const referral = await db('referrals').where({ id: referralId }).first();
-  if (!referral) throw new Error('Referral not found');
-
   const settings = await getSettings();
 
   // Calculate reward (base + tier bonus)
@@ -383,38 +380,63 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   }
   const rewardDollars = rewardCents / 100;
 
-  const updates = {
-    status: 'signed_up',
-    converted_at: new Date(),
-    referrer_reward_amount: rewardDollars,
-    converted_tier: tier || null,
-    converted_monthly_value: monthlyValue || null,
-    updated_at: new Date(),
-  };
+  // Money-critical section. Lock the referral row and only credit when it is still in a
+  // pre-conversion state, so a double-click / retry that hits convert twice can no longer
+  // credit the promoter balance twice. The referral flip + balance increment commit together.
+  const CONVERTIBLE_STATUSES = ['pending', 'contacted', 'sms_failed', 'estimated'];
+  const outcome = await db.transaction(async (trx) => {
+    const referral = await trx('referrals').where({ id: referralId }).forUpdate().first();
+    if (!referral) throw new Error('Referral not found');
 
-  if (settings.require_service_completion) {
-    updates.referrer_reward_status = 'pending_service';
-  } else {
-    updates.referrer_reward_status = 'earned';
-  }
-
-  await db('referrals').where({ id: referralId }).update(updates);
-
-  // Update promoter
-  if (referral.promoter_id) {
-    const promoterUpdates = { total_referrals_converted: 1 };
-
-    if (settings.require_service_completion) {
-      // Goes to pending earnings until first service
-      await db('referral_promoters').where({ id: referral.promoter_id })
-        .increment({ ...promoterUpdates, pending_earnings_cents: rewardCents, total_earned_cents: rewardCents });
-    } else {
-      // Credit immediately
-      await db('referral_promoters').where({ id: referral.promoter_id })
-        .increment({ ...promoterUpdates, available_balance_cents: rewardCents, total_earned_cents: rewardCents, referral_balance_cents: rewardCents });
+    // Idempotency guard: anything already converted/rejected/lost is a no-op (no re-credit).
+    if (!CONVERTIBLE_STATUSES.includes(referral.status)) {
+      return { referral, alreadyConverted: true };
     }
 
-    // Send reward SMS
+    const updates = {
+      status: 'signed_up',
+      converted_at: new Date(),
+      referrer_reward_amount: rewardDollars,
+      converted_tier: tier || null,
+      converted_monthly_value: monthlyValue || null,
+      referrer_reward_status: settings.require_service_completion ? 'pending_service' : 'earned',
+      updated_at: new Date(),
+    };
+    await trx('referrals').where({ id: referralId }).update(updates);
+
+    if (referral.promoter_id) {
+      const promoterUpdates = { total_referrals_converted: 1 };
+      if (settings.require_service_completion) {
+        // Goes to pending earnings until first service
+        await trx('referral_promoters').where({ id: referral.promoter_id })
+          .increment({ ...promoterUpdates, pending_earnings_cents: rewardCents, total_earned_cents: rewardCents });
+      } else {
+        // Credit immediately
+        await trx('referral_promoters').where({ id: referral.promoter_id })
+          .increment({ ...promoterUpdates, available_balance_cents: rewardCents, total_earned_cents: rewardCents, referral_balance_cents: rewardCents });
+      }
+    }
+
+    return { referral, alreadyConverted: false };
+  });
+
+  if (outcome.alreadyConverted) {
+    logger.info(`[ReferralEngine] Referral ${referralId} already converted (status=${outcome.referral.status}); skipping re-credit.`);
+    return {
+      referralId,
+      alreadyConverted: true,
+      status: outcome.referral.status,
+      rewardCents: 0,
+      rewardDollars: 0,
+      tier,
+      requiresServiceCompletion: settings.require_service_completion,
+    };
+  }
+
+  const referral = outcome.referral;
+
+  // Post-commit side effects (not money-critical): reward SMS, milestone check, lead attribution.
+  if (referral.promoter_id) {
     const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
     if (promoter) {
       const rewardSms = await renderReferralSms('referral_reward', {
