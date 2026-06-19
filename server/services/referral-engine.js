@@ -587,10 +587,23 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   if (!visit || !(visit.is_recurring || visit.recurring_pattern)) return null;
 
   const normalizedPhone = normalizePhone(customer.phone);
-  // Phone predicate reused for the match and the sibling-dedupe sweep.
+  // Phone predicate reused for the guard, the match, and the dedupe sweep.
   const matchesPhone = function () {
     this.where('referee_phone', customer.phone).orWhere('referee_phone', normalizedPhone);
   };
+
+  // Reward at most once per referee phone, EVER. submitReferral dedupes only per
+  // promoter, so one referee can carry several referrals. The sibling sweep below
+  // only retires duplicates that are already 'signed_up'/'pending_service' at the
+  // moment of the first credit — a duplicate still in an earlier state (pending/
+  // contacted) survives, can convert later, and would otherwise match + pay a
+  // second referee/referrer credit on a subsequent recurring visit. Once ANY
+  // referral for this phone has earned its first-service reward, refuse.
+  const alreadyRewarded = await db('referrals')
+    .where('first_service_completed', true)
+    .where(matchesPhone)
+    .first('id');
+  if (alreadyRewarded) return null;
 
   // Map the completing customer back to the referral that brought them in (by
   // phone — the referee's customer_id is not persisted on the referral row).
