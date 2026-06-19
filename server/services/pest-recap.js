@@ -43,6 +43,12 @@ const COMPLETED_STATUS = 'completed';
 // customer for a visit the status machine says never happened (Codex P1).
 const NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
 
+// A visit already closed as NOT performed — status 'incomplete', or an
+// inspection-only / customer-declined visitOutcome recorded by the heavy
+// /complete path — must NOT earn a referral credit if it's later recapped: the
+// recap re-completes the record, but the service was never actually delivered.
+const NON_PERFORMED_VISIT_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
+
 // service_records.structured_notes is jsonb in prod but may surface as a
 // string depending on driver config — mirror admin-dispatch's tolerant parse.
 function parseStructuredNotes(value) {
@@ -219,6 +225,9 @@ async function submitRecap({
   // Set under the lock if the visit can't be recapped (cancelled/skipped);
   // the transaction aborts having written nothing and we return ok:false.
   let rejectReason = null;
+  // Set under the lock if the existing record shows the visit was NOT performed
+  // (incomplete / inspection-only / customer-declined) — gates the referral credit.
+  let recapPriorNonPerformed = false;
   // Concurrency idempotency (Codex P1): scheduled_service_id has only a
   // non-unique index, so two simultaneous submits (double-tap, browser
   // retry, admin+tech race) could each pass the existing-record lookup
@@ -277,7 +286,7 @@ async function submitRecap({
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
-      .first('id', 'recap_sms_sent_at', 'structured_notes');
+      .first('id', 'status', 'recap_sms_sent_at', 'structured_notes');
 
     // At-most-once recap text: claim recap_sms_sent_at here, inside the
     // lock. If a prior submit already sent (column set), this one skips —
@@ -296,6 +305,13 @@ async function submitRecap({
     // overwrites the status with 'failed'/'blocked' and a recap re-submit
     // is then allowed to text.
     const existingNotes = parseStructuredNotes(existing?.structured_notes);
+    // The recap is about to overwrite this record to 'completed' below. If it
+    // currently reflects a NOT-performed visit (incomplete status, or a non-
+    // performed visitOutcome recorded by /complete — preserved here because the
+    // recap update never rewrites structured_notes), block the referral credit so
+    // a recap resubmit can't reward a service that was never delivered.
+    recapPriorNonPerformed = existing?.status === 'incomplete'
+      || NON_PERFORMED_VISIT_OUTCOMES.has(String(existingNotes.visitOutcome || ''));
     const completionSmsAttemptedAtMs = existingNotes.completionSmsAttemptedAt
       ? new Date(existingNotes.completionSmsAttemptedAt).getTime()
       : 0;
@@ -370,6 +386,22 @@ async function submitRecap({
   if (rejectReason) {
     logger.info(`[pest-recap] recap rejected service=${serviceId} reason=${rejectReason}`);
     return { ok: false, reason: rejectReason };
+  }
+
+  // Referral reward: a recap completes a PERFORMED visit (we're past the
+  // cancelled/skipped reject guard above), so a referred customer's first
+  // *recurring* service can land here. The helper re-confirms THIS visit is
+  // recurring — a one-time pest visit never qualifies — and handles idempotency
+  // itself. Best-effort; never blocks. Skip when the recap is re-completing a
+  // visit that was previously recorded as NOT performed (incomplete / inspection /
+  // declined) — re-completing it must not mint a reward for a service never done.
+  if (!recapPriorNonPerformed) {
+    try {
+      const referralEngine = require('./referral-engine');
+      await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId });
+    } catch (referralErr) {
+      logger.warn(`[pest-recap] referral first-service credit failed for customer=${svc.customer_id}: ${referralErr.message}`);
+    }
   }
 
   // 4. Customer-facing track_state -> complete (best-effort, post-trx).

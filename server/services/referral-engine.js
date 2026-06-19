@@ -7,6 +7,7 @@ const logger = require('./logger');
 const crypto = require('crypto');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
+const { postCreditMovement, round2 } = require('./customer-credit');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -440,31 +441,40 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
 
   const referral = outcome.referral;
 
-  // Post-commit side effects — NON money-critical (the reward credit and the
-  // milestone award already committed in the transaction above). Wrapped so a
-  // transient failure here can't bubble a 500: on retry the admin would hit the
-  // alreadyConverted no-op and these would be skipped for good.
-  if (referral.promoter_id) {
+  // Post-commit side effects — NON money-critical (the milestone award already
+  // committed in the transaction above). Wrapped so a transient failure here can't
+  // bubble a 500: on retry the admin would hit the alreadyConverted no-op and these
+  // would be skipped for good.
+  //
+  // Reward SMS routing depends on WHEN the reward is earned:
+  //  - require_service_completion ON  → deferred: the referrer's reward SMS + the
+  //    real money are issued when the referee completes their first recurring
+  //    service (see creditReferralOnFirstService).
+  //  - require_service_completion OFF → immediate: the promoter was already
+  //    credited in the transaction above and never reaches that helper, so the
+  //    reward SMS must be sent here or the immediate-earned referrer is paid silently.
+  if (referral.promoter_id && (outcome.milestoneAward || !settings.require_service_completion)) {
     try {
       const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
       if (promoter) {
-        const rewardSms = await renderReferralSms('referral_reward', {
-          referrer_name: promoter.first_name,
-          referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-          reward_amount: 'a referral reward',
-        }, settings.reward_sms_template, {
-          workflow: 'referral_reward',
-          entity_type: 'referral',
-          entity_id: referral.id,
-        });
-        await sendSMS(promoter.customer_phone, rewardSms, {
-          customerId: promoter.customer_id,
-          messageType: 'referral_reward',
-          referralId: referral.id,
-          promoterId: promoter.id,
-          entryPoint: 'referral_engine_reward',
-        });
-
+        if (!settings.require_service_completion && promoter.customer_phone) {
+          const rewardSms = await renderReferralSms('referral_reward', {
+            referrer_name: promoter.first_name,
+            referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
+            reward_amount: `$${Math.round(rewardDollars)}`,
+          }, settings.reward_sms_template, {
+            workflow: 'referral_reward',
+            entity_type: 'referral',
+            entity_id: referral.id,
+          });
+          await sendSMS(promoter.customer_phone, rewardSms, {
+            customerId: promoter.customer_id,
+            messageType: 'referral_reward',
+            referralId: referral.id,
+            promoterId: promoter.id,
+            entryPoint: 'referral_engine_convert',
+          });
+        }
         if (outcome.milestoneAward) {
           await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
         }
@@ -548,6 +558,231 @@ async function confirmFirstService(customerId) {
 
   logger.info(`[ReferralEngine] First service confirmed for referral ${matchedReferral.id}`);
   return { referralId: matchedReferral.id, promoterId: matchedReferral.promoter_id, rewardCents };
+}
+
+// Retire (mark 'superseded') every still-uncredited pending_service referral for
+// a referee phone and unwind the promoter pending+earned cents staged at
+// conversion — so a same-phone duplicate (referred by another promoter) can never
+// pay a second time and never leaves stale pending/earned on its promoter. Used
+// both when a referral earns (excludeId = the winner) and when the referee
+// already earned earlier and a duplicate converted late (no excludeId). Idempotent.
+async function supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId = null }) {
+  let q = trx('referrals')
+    .where('status', 'signed_up')
+    .where('first_service_completed', false)
+    .where('referrer_reward_status', 'pending_service')
+    .where(matchesPhone);
+  if (excludeId) q = q.whereNot('id', excludeId);
+  // forUpdate: serialize concurrent cleanup runs for the same phone so a second
+  // run blocks, then re-evaluates the pending_service predicate (now false for
+  // rows this run superseded) and can't drain the same promoter cents twice.
+  const siblings = await q.forUpdate().select('id', 'promoter_id', 'referrer_reward_amount');
+  if (!siblings.length) return;
+
+  await trx('referrals')
+    .whereIn('id', siblings.map((s) => s.id))
+    .update({
+      first_service_completed: true,
+      referrer_reward_status: 'superseded',
+      updated_at: new Date(),
+    });
+
+  // Each sibling's promoter had pending_earnings_cents AND total_earned_cents
+  // staged at conversion (convertReferral, require_service_completion path). A
+  // superseded reward can never pay, so unwind BOTH. submitReferral dedupes per
+  // promoter, so siblings have distinct promoters; group defensively anyway.
+  const drainByPromoter = new Map();
+  for (const s of siblings) {
+    if (!s.promoter_id) continue;
+    const cents = Math.round((Number(s.referrer_reward_amount) || 0) * 100);
+    if (cents <= 0) continue;
+    drainByPromoter.set(s.promoter_id, (drainByPromoter.get(s.promoter_id) || 0) + cents);
+  }
+  for (const [promoterId, cents] of drainByPromoter) {
+    await trx('referral_promoters').where({ id: promoterId }).update({
+      pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [cents]),
+      total_earned_cents: db.raw('GREATEST(total_earned_cents - ?, 0)', [cents]),
+      updated_at: new Date(),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 4b. creditReferralOnFirstService — issue the real $25-each account credits
+// ---------------------------------------------------------------------------
+// Called from the service-completion flow. When a referred customer who signed
+// up for a RECURRING plan completes their first service, BOTH the referrer and
+// the referee get a $25 account credit via the customer-credit ledger (the real
+// reward — the promoter balance / payout columns are tracking only). A one-time
+// service never qualifies. Idempotent: the referral's first_service_completed
+// flag is the single-use guard, re-checked under a row lock.
+async function creditReferralOnFirstService({ customerId, serviceId }) {
+  if (!customerId || !serviceId) return null;
+
+  const customer = await db('customers').where({ id: customerId }).first('id', 'phone', 'first_name');
+  if (!customer || !customer.phone) return null;
+
+  // Qualify on the EXACT visit that just completed — not customer-level
+  // membership. The reward is for completing a *recurring* service, so a
+  // one-time visit (or a customer who merely also holds a recurring plan) must
+  // never earn it or burn the single-use guard. Callers only invoke this for a
+  // genuinely performed completion (not an inspection/decline/incomplete), so
+  // here we only need to confirm THIS visit belongs to the customer + recurs.
+  const visit = await db('scheduled_services')
+    .where({ id: serviceId, customer_id: customerId })
+    .first('id', 'is_recurring', 'recurring_pattern');
+  if (!visit || !(visit.is_recurring || visit.recurring_pattern)) return null;
+
+  const normalizedPhone = normalizePhone(customer.phone);
+  // Phone predicate reused for the guard, the match, and the dedupe sweep.
+  const matchesPhone = function () {
+    this.where('referee_phone', customer.phone).orWhere('referee_phone', normalizedPhone);
+  };
+
+  // Reward at most once per referee phone, EVER. submitReferral dedupes only per
+  // promoter, so one referee can carry several referrals. The sibling sweep below
+  // only retires duplicates that are already 'signed_up'/'pending_service' at the
+  // moment of the first credit — a duplicate still in an earlier state (pending/
+  // contacted) survives, can convert later, and would otherwise match + pay a
+  // second referee/referrer credit on a subsequent recurring visit. Once ANY
+  // referral for this phone has earned its first-service reward, refuse.
+  const alreadyRewarded = await db('referrals')
+    .where('first_service_completed', true)
+    .where(matchesPhone)
+    .first('id');
+  if (alreadyRewarded) {
+    // A duplicate for this phone may have converted AFTER the first credit (so the
+    // sibling sweep below didn't catch it). Retire + unwind it now instead of
+    // leaving it stuck as pending_service with stale promoter pending/earned.
+    await db.transaction((trx) => supersedeAndUnwindSiblings(trx, { matchesPhone }));
+    return null;
+  }
+
+  // Map the completing customer back to the referral that brought them in (by
+  // phone — the referee's customer_id is not persisted on the referral row).
+  // Only referrals still awaiting service completion ('pending_service') qualify:
+  // immediately-earned referrals (require_service_completion=off) were already
+  // paid to the promoter balance at conversion and must not double-pay here.
+  const candidate = await db('referrals')
+    .where('status', 'signed_up')
+    .where('first_service_completed', false)
+    .where('referrer_reward_status', 'pending_service')
+    .where(matchesPhone)
+    .orderBy('created_at', 'asc')
+    .first('id');
+  if (!candidate) return null;
+
+  const settings = await getSettings();
+  const refereeCents = Number(settings.referee_discount_cents) || 0;
+  const refereeDollars = round2(refereeCents / 100);
+
+  const outcome = await db.transaction(async (trx) => {
+    // Re-read under lock; these guards are the single-use protection.
+    const referral = await trx('referrals').where({ id: candidate.id }).forUpdate().first();
+    if (!referral
+      || referral.first_service_completed
+      || referral.status !== 'signed_up'
+      || referral.referrer_reward_status !== 'pending_service') {
+      return { skipped: true };
+    }
+
+    // Real account credit = the FLAT referrer reward, symmetric with the referee
+    // credit below (which uses the current referee_discount setting). WaveGuard
+    // tier bonuses (bonus_<tier>_cents) live ONLY in the bypassed promoter-balance
+    // ledger and must never inflate the real account credit — the agreed reward is
+    // a flat $25, so a Silver/Gold/Platinum signup still credits a flat $25.
+    const referrerDollars = round2((Number(settings.referrer_reward_cents) / 100) || 0);
+    // The pending DRAIN, by contrast, uses the exact amount staged into the
+    // promoter's pending at conversion (base + any tier bonus, FROZEN on the
+    // referral) so the non-cashable tracker zeroes out. Finite-check so a frozen
+    // $0 doesn't fall back to the current setting.
+    const frozenStaked = Number(referral.referrer_reward_amount);
+    const referrerCents = Math.round((Number.isFinite(frozenStaked) ? frozenStaked : referrerDollars) * 100);
+
+    // Referee — the customer who just completed their first recurring service.
+    if (refereeDollars > 0) {
+      await postCreditMovement({
+        customerId,
+        delta: refereeDollars,
+        source: 'referral',
+        referralId: referral.id,
+        note: 'Referral welcome credit — first recurring service completed',
+        createdBy: 'referral_engine',
+      }, trx);
+    }
+
+    // Referrer — the customer whose share link brought them in.
+    if (referrerDollars > 0 && referral.referrer_customer_id) {
+      await postCreditMovement({
+        customerId: referral.referrer_customer_id,
+        delta: referrerDollars,
+        source: 'referral',
+        referralId: referral.id,
+        note: `Referral reward — ${customer.first_name || 'your referral'} completed their first service`,
+        createdBy: 'referral_engine',
+      }, trx);
+    }
+
+    // Mark the matched referral rewarded (single-use) + legacy credited flags.
+    await trx('referrals').where({ id: referral.id }).update({
+      first_service_completed: true,
+      referrer_reward_status: 'earned',
+      referee_credited: true,
+      referrer_credited: true,
+      status: 'credited',
+      updated_at: new Date(),
+    });
+
+    // De-dupe: a referee phone can carry multiple signed_up/pending_service
+    // referrals (submitReferral only dedupes per promoter). Reward exactly once —
+    // retire the other uncredited pending_service referrals for this phone (and
+    // unwind their promoters' staged pending/earned) so a later completion can't
+    // pay the referee or a second referrer again. Scoped to pending_service so an
+    // immediately-earned referral (already paid at conversion) is never clobbered.
+    await supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId: referral.id });
+
+    // Promoter bookkeeping: drain the exact pending amount staged at conversion.
+    if (referral.promoter_id) {
+      await trx('referral_promoters').where({ id: referral.promoter_id }).update({
+        pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [referrerCents]),
+        updated_at: new Date(),
+      });
+    }
+
+    return { skipped: false, referral, referrerDollars };
+  });
+
+  if (outcome.skipped) return null;
+
+  // Post-commit: notify the referrer their reward landed (non-critical).
+  if (outcome.referral.promoter_id) {
+    try {
+      const promoter = await db('referral_promoters').where({ id: outcome.referral.promoter_id }).first();
+      if (promoter && promoter.customer_phone) {
+        const rewardSms = await renderReferralSms('referral_reward', {
+          referrer_name: promoter.first_name,
+          referee_name: outcome.referral.referee_name || outcome.referral.referral_first_name || 'your friend',
+          reward_amount: `$${Math.round(outcome.referrerDollars)}`,
+        }, settings.reward_sms_template, {
+          workflow: 'referral_reward',
+          entity_type: 'referral',
+          entity_id: outcome.referral.id,
+        });
+        await sendSMS(promoter.customer_phone, rewardSms, {
+          customerId: promoter.customer_id,
+          messageType: 'referral_reward',
+          referralId: outcome.referral.id,
+          promoterId: promoter.id,
+          entryPoint: 'referral_engine_first_service',
+        });
+      }
+    } catch (smsErr) {
+      logger.warn(`[ReferralEngine] reward SMS failed for referral ${outcome.referral.id}: ${smsErr.message}`);
+    }
+  }
+
+  logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${outcome.referrerDollars}, referee $${refereeDollars}`);
+  return { referralId: outcome.referral.id, referrerDollars: outcome.referrerDollars, refereeDollars };
 }
 
 // ---------------------------------------------------------------------------
@@ -637,11 +872,13 @@ async function getSettings() {
     if (row) return { ...row, base_url: normalizeReferralBaseUrl(row.base_url) };
   } catch { /* table may not exist yet */ }
 
-  // Defaults
+  // Defaults. referrer_reward_cents matches the agreed flat $25 (the prod row +
+  // migration 20260529000006 are 2500); the historical 5000 seed would credit a
+  // referrer $50 if this fallback were ever hit, so keep it symmetric at 2500.
   return {
     program_active: true,
     base_url: normalizeReferralBaseUrl(DEFAULT_REFERRAL_BASE_URL),
-    referrer_reward_cents: 5000,
+    referrer_reward_cents: 2500,
     referee_discount_cents: 2500,
     bonus_silver_cents: 5000,
     bonus_gold_cents: 7500,
@@ -754,10 +991,10 @@ async function getProgramAnalytics(startDate, endDate) {
       .select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'signed_up' OR status = 'credited') as converted"),
+        db.raw("COUNT(*) FILTER (WHERE (status = 'signed_up' OR status = 'credited') AND referrer_reward_status IS DISTINCT FROM 'superseded') as converted"),
         db.raw("COUNT(*) FILTER (WHERE status = 'rejected' OR lost_reason IS NOT NULL) as lost"),
-        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards_dollars"),
-        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
+        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards_dollars"),
+        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
       ).first(),
     db('referral_clicks')
       .where('created_at', '>=', start)
@@ -833,6 +1070,7 @@ module.exports = {
   submitReferral,
   convertReferral,
   confirmFirstService,
+  creditReferralOnFirstService,
   checkMilestones,
   getSettings,
   updateSettings,

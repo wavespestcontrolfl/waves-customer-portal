@@ -1519,6 +1519,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
           error: e,
         });
       }
+      // Referral reward: marking a recurring first visit completed via this status
+      // action completes the service too, so it must credit like /complete + the
+      // recap path. The helper self-gates (recurring + first-time + once-per-
+      // referee + idempotent); best-effort, never blocks the status change.
+      try {
+        const referralEngine = require('../services/referral-engine');
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
+      } catch (referralErr) {
+        logger.warn(`[referral] status-complete credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
+      }
     } else if (toStatus === 'cancelled') {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
@@ -4671,6 +4681,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // payer-billed invoice — the tech must not collect the AP's invoice from
       // the service recipient. AR routes to the payer AP inbox.
       && !invoice.payer_id;
+    // Referral reward: if this customer was referred and just completed their
+    // FIRST recurring service, credit both the referrer and the referee $25 to
+    // their account. Only a genuinely PERFORMED visit qualifies — an
+    // inspection-only, customer-declined, or incomplete outcome must not earn
+    // the reward or burn the single-use guard. The helper re-confirms THIS
+    // visit is recurring + handles idempotency itself; never blocks completion.
+    const referralVisitPerformed = visitOutcome !== 'inspection_only'
+      && visitOutcome !== 'customer_declined'
+      && !isIncompleteVisit;
+    if (referralVisitPerformed) {
+      try {
+        const referralEngine = require('../services/referral-engine');
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
+      } catch (referralErr) {
+        logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
+      }
+    }
+
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,

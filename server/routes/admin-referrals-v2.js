@@ -23,9 +23,9 @@ router.get('/stats', async (req, res, next) => {
       db('referrals').select(
         db.raw("COUNT(*) as total"),
         db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
-        db.raw("COUNT(*) FILTER (WHERE status = 'signed_up' OR status = 'credited') as converted"),
+        db.raw("COUNT(*) FILTER (WHERE (status = 'signed_up' OR status = 'credited') AND referrer_reward_status IS DISTINCT FROM 'superseded') as converted"),
         db.raw("COALESCE(SUM(CASE WHEN referrer_reward_status IN ('earned','paid') THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards"),
-        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
+        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
       ).first(),
       db('referral_payouts').select(
         db.raw("COUNT(*) FILTER (WHERE status = 'pending') as pending"),
