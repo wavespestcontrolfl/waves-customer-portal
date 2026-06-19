@@ -10,6 +10,7 @@ const {
   reportPdfStorageKey,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
+const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
   emitPdfRenderTerminalFailure,
   safePdfRenderError,
@@ -304,6 +305,8 @@ async function markPdfRenderJobFailed(job, err, knex = db) {
       err: errorMessage.slice(0, 500),
     });
     logger.error(`[service-report-pdf-queue] PDF render failed permanently for ${job.service_record_id} after ${attempts} attempts: ${errorMessage}`);
+    // Surface it on the admin bell (best-effort; never breaks the queue).
+    await alertServiceReportPdfFailed({ job, error: errorMessage }, { knex });
   } else if (attempts === 1) {
     logger.warn(`[service-report-pdf-queue] PDF render failed for ${job.service_record_id}; retry queued for ${nextAttemptAt.toISOString()}: ${errorMessage}`);
   }
