@@ -43,8 +43,13 @@ function offerPrice(offer) {
     ?? offer.lowPrice
     ?? (offer.priceSpecification && offer.priceSpecification.price);
   if (raw == null) return null;
-  const n = typeof raw === 'number' ? raw : Number(String(raw).replace(/[^0-9.]/g, ''));
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw > 0 ? Math.round(raw * 100) / 100 : null;
+  }
+  // String prices go through the strict single-token parser, so an ambiguous
+  // range like "$95.00-99" or "89-95" is rejected instead of being mashed into
+  // a bogus number by stripping the separators.
+  return parsePriceText(raw);
 }
 
 function readOffer(node) {

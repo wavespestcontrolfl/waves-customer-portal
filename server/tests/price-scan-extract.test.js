@@ -59,6 +59,11 @@ describe('price-scan extract', () => {
       expect(offerPrice({})).toBeNull();
       expect(offerPrice({ price: 0 })).toBeNull();
     });
+    test('ambiguous string ranges are rejected, not mashed', () => {
+      expect(offerPrice({ price: '$95.00-99' })).toBeNull();
+      expect(offerPrice({ price: '89-95' })).toBeNull();
+      expect(offerPrice({ lowPrice: '1,099.99' })).toBe(1099.99);
+    });
   });
 
   describe('extractJsonLdOffer', () => {
