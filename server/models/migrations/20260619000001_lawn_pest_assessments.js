@@ -38,6 +38,17 @@ exports.up = async function (knex) {
       .update({ name: 'Lawn Assessment', short_name: 'Lawn Assess' });
   }
 
+  // Keep the completion-profile snapshot in step with the rename. The
+  // profile row's `service_name_snapshot` is what `serializeProfile` returns
+  // as `serviceName`, which the typed-report builder uses as the
+  // customer-facing service label — leave it stale and new lawn assessment
+  // reports keep rendering the old "Lawn Assessment Service" heading.
+  if (await knex.schema.hasTable('service_completion_profiles')) {
+    await knex('service_completion_profiles')
+      .where({ service_key: 'lawn_inspection', service_name_snapshot: 'Lawn Assessment Service' })
+      .update({ service_name_snapshot: 'Lawn Assessment', updated_at: knex.fn.now() });
+  }
+
   // ── 2) New assessment rows — no catalog price (variable, base_price NULL) ──
   const newRows = [
     {
