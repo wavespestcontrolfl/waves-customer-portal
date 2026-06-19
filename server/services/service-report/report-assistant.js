@@ -359,11 +359,19 @@ function answerTrend({ data = {} } = {}) {
   const lawnAssessment = data.lawnAssessment || null;
   if (lawnAssessment?.scores) {
     const scores = lawnAssessment.scores;
+    // Scores can be null for categories that weren't assessed — only mention the
+    // ones we actually have, so the assistant never says "null% overall".
+    const breakdown = [
+      scores.turfDensity != null ? `density/coverage ${scores.turfDensity}%` : null,
+      scores.weedSuppression != null ? `weed cleanliness ${scores.weedSuppression}%` : null,
+      scores.colorHealth != null ? `color/nutrients ${scores.colorHealth}%` : null,
+      scores.stressDamage != null ? `stress/damage ${scores.stressDamage}%` : null,
+    ].filter(Boolean);
     return [
       lawnAssessment.snapshot?.summary,
       lawnAssessment.customerSummary,
-      `Current lawn health is ${scores.overallScore}% overall.`,
-      `Breakdown: density/coverage ${scores.turfDensity}%, weed cleanliness ${scores.weedSuppression}%, color/nutrients ${scores.colorHealth}%, stress/damage ${scores.stressDamage}%.`,
+      scores.overallScore != null ? `Current lawn health is ${scores.overallScore}% overall.` : null,
+      breakdown.length ? `Breakdown: ${breakdown.join(', ')}.` : null,
     ].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join(' ');
   }
   return dynamic.pressureTrend?.customerSummary
