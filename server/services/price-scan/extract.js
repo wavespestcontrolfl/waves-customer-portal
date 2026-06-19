@@ -279,7 +279,18 @@ function extractDomPrice(snapshot = {}) {
 function offerFromSnapshot(snapshot = {}, opts = {}) {
   const jsonLd = snapshot.jsonLd || [];
   const ldOffer = extractJsonLdOffer(jsonLd, opts);
-  if (ldOffer) return ldOffer;
+  if (ldOffer) {
+    // When structured data priced the offer but omitted availability, fall back
+    // to the DOM availability text — otherwise a page whose DOM says out of
+    // stock / backorder stays 'unknown', which compare keeps eligible and could
+    // crown as the winning savings opportunity. Explicit JSON-LD availability
+    // is left as-is.
+    if (ldOffer.availability === 'unknown' && snapshot.availabilityText) {
+      const domAvail = mapAvailability(snapshot.availabilityText);
+      if (domAvail !== 'unknown') ldOffer.availability = domAvail;
+    }
+    return ldOffer;
+  }
   if (collectJsonLdOffers(jsonLd).length > 0) return null;
   const dom = extractDomPrice(snapshot);
   if (!dom) return null;

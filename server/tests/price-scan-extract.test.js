@@ -294,6 +294,15 @@ describe('price-scan extract', () => {
     test('no JSON-LD and no DOM price -> null', () => {
       expect(offerFromSnapshot({ jsonLd: [], priceTexts: ['Call for price'] }, { targetOz: 78 })).toBeNull();
     });
+    test('DOM out-of-stock overrides a JSON-LD offer with unknown availability', () => {
+      const ld = JSON.stringify({ '@type': 'Product', name: 'Taurus SC 78 oz', offers: { price: 95, priceCurrency: 'USD' } });
+      const got = offerFromSnapshot({ jsonLd: [ld], title: 'Taurus SC 78 oz', availabilityText: 'Out of stock' }, { targetOz: 78 });
+      expect(got.availability).toBe('out_of_stock');
+    });
+    test('explicit JSON-LD availability is not overridden by the DOM', () => {
+      const ld = JSON.stringify({ '@type': 'Product', name: 'X', offers: { price: 95, availability: 'InStock' } });
+      expect(offerFromSnapshot({ jsonLd: [ld], availabilityText: 'Out of stock' }, {}).availability).toBe('in_stock');
+    });
   });
 
   describe('extractDomPrice', () => {
