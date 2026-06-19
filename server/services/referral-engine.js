@@ -647,17 +647,44 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // (require_service_completion off) is also status='signed_up' +
     // first_service_completed=false but was already paid at conversion — it must
     // not be clobbered to 'superseded', which would corrupt reward history.
-    await trx('referrals')
+    const supersededSiblings = await trx('referrals')
       .whereNot('id', referral.id)
       .where('status', 'signed_up')
       .where('first_service_completed', false)
       .where('referrer_reward_status', 'pending_service')
       .where(matchesPhone)
-      .update({
-        first_service_completed: true,
-        referrer_reward_status: 'superseded',
-        updated_at: new Date(),
-      });
+      .select('id', 'promoter_id', 'referrer_reward_amount');
+
+    if (supersededSiblings.length) {
+      await trx('referrals')
+        .whereIn('id', supersededSiblings.map((s) => s.id))
+        .update({
+          first_service_completed: true,
+          referrer_reward_status: 'superseded',
+          updated_at: new Date(),
+        });
+
+      // Each sibling's promoter had pending_earnings_cents AND total_earned_cents
+      // staged at conversion (convertReferral, require_service_completion path).
+      // A superseded reward can never pay, so unwind BOTH staked counters or the
+      // promoter keeps stale pending/earned for money they'll never receive.
+      // (submitReferral dedupes per promoter, so siblings have distinct promoters
+      // and never collide with the winning referral's promoter; group defensively.)
+      const drainByPromoter = new Map();
+      for (const s of supersededSiblings) {
+        if (!s.promoter_id) continue;
+        const cents = Math.round((Number(s.referrer_reward_amount) || 0) * 100);
+        if (cents <= 0) continue;
+        drainByPromoter.set(s.promoter_id, (drainByPromoter.get(s.promoter_id) || 0) + cents);
+      }
+      for (const [promoterId, cents] of drainByPromoter) {
+        await trx('referral_promoters').where({ id: promoterId }).update({
+          pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [cents]),
+          total_earned_cents: db.raw('GREATEST(total_earned_cents - ?, 0)', [cents]),
+          updated_at: new Date(),
+        });
+      }
+    }
 
     // Promoter bookkeeping: drain the exact pending amount staged at conversion.
     if (referral.promoter_id) {
