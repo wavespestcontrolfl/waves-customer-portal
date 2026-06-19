@@ -4,6 +4,7 @@ const {
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,
+  quantityToOz,
   deriveNormalizedUnitPrice,
   tokenOverlap,
   verifyMatch,
@@ -89,6 +90,18 @@ describe('price-scan extract', () => {
       expect(got.price).toBe(90);
       expect(got.availability).toBe('in_stock');
     });
+    test('within one offers array, prefers in-stock over an earlier sold-out offer', () => {
+      const ld = JSON.stringify({
+        '@type': 'Product', name: 'A',
+        offers: [
+          { '@type': 'Offer', price: 80, availability: 'OutOfStock' },
+          { '@type': 'Offer', price: 90, availability: 'InStock' },
+        ],
+      });
+      const got = extractJsonLdOffer([ld]);
+      expect(got.price).toBe(90);
+      expect(got.availability).toBe('in_stock');
+    });
     test('non-USD currency is surfaced (caller rejects)', () => {
       const ld = JSON.stringify({ '@type': 'Product', name: 'Z', offers: { price: 10, priceCurrency: 'CAD' } });
       expect(extractJsonLdOffer([ld]).currency).toBe('CAD');
@@ -110,9 +123,27 @@ describe('price-scan extract', () => {
     });
   });
 
+  describe('quantityToOz', () => {
+    test('bare + descriptor-laden + fractional pack sizes', () => {
+      expect(quantityToOz('78 oz')).toBe(78);
+      expect(quantityToOz('21 oz can')).toBe(21);
+      expect(quantityToOz('18 lb pail')).toBe(288); // 18 * 16
+      expect(quantityToOz('1/2 gal')).toBe(64); // 0.5 * 128
+    });
+    test('count-based / unparseable -> null', () => {
+      expect(quantityToOz('each')).toBeNull();
+      expect(quantityToOz('6 bait stations')).toBeNull();
+      expect(quantityToOz('')).toBeNull();
+    });
+  });
+
   describe('deriveNormalizedUnitPrice', () => {
     test('78 oz jug', () => expect(deriveNormalizedUnitPrice(95, '78 oz')).toBeCloseTo(1.217949, 5));
     test('2.5 gal drum is cheaper per oz', () => expect(deriveNormalizedUnitPrice(300, '2.5 gal')).toBeCloseTo(0.9375, 4));
+    test('tolerates packaging descriptors / fractions', () => {
+      expect(deriveNormalizedUnitPrice(40, '18 lb pail')).toBeCloseTo(40 / 288, 6);
+      expect(deriveNormalizedUnitPrice(120, '1/2 gal')).toBeCloseTo(120 / 64, 6);
+    });
     test('null on bad price or size', () => {
       expect(deriveNormalizedUnitPrice(0, '78 oz')).toBeNull();
       expect(deriveNormalizedUnitPrice(95, '')).toBeNull();
@@ -148,6 +179,11 @@ describe('price-scan extract', () => {
       const r = verifyMatch({ name: 'Termiticide 78 oz', quantity: '78 oz' }, expected);
       expect(r.signals.name).toBe(false);
       expect(r.matched).toBe(false);
+    });
+    test('matches across a packaging descriptor in the scraped size', () => {
+      const r = verifyMatch({ name: 'Taurus SC Termiticide 78 oz jug', quantity: '78 oz jug' }, expected);
+      expect(r.signals.packSize).toBe(true);
+      expect(r.matched).toBe(true);
     });
     test('epa reg in text rescues a weak name', () => {
       const r = verifyMatch({ name: 'Generic Fipronil 78oz', text: 'EPA Reg No 53883-279', quantity: '78 oz' }, expected);

@@ -257,6 +257,7 @@ module.exports = {
   costLineFromUsage,
   normalizeQuantityToOz,
   normalizeUnit,
+  parsePackSize,
   unitPriceBreakdown,
   usageAmountForArea,
 };

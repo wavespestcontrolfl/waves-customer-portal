@@ -1,8 +1,7 @@
 // Pure opportunity computation: is any scanned vendor price cheaper than the
 // SiteOne baseline, on a normalized $/oz basis? No I/O — unit-tested.
 
-const { normalizeQuantityToOz } = require('../product-costing');
-const { deriveNormalizedUnitPrice } = require('./extract');
+const { deriveNormalizedUnitPrice, quantityToOz } = require('./extract');
 
 const DEFAULTS = {
   minSavingsPct: 0.02, // 2%
@@ -32,7 +31,7 @@ function isOutOfStock(c) {
 function findOpportunity(baseline, candidates, opts = {}) {
   const cfg = { ...DEFAULTS, ...opts };
   const basePerOz = deriveNormalizedUnitPrice(baseline && baseline.price, baseline && baseline.quantity);
-  const baseSizeOz = baseline ? normalizeQuantityToOz(baseline.quantity) : null;
+  const baseSizeOz = baseline ? quantityToOz(baseline.quantity) : null;
   const ranked = rankCandidates(candidates, cfg);
 
   const result = {

@@ -3,7 +3,19 @@
 // browser. The adapters (PR2) pull raw strings off the page with Playwright and
 // hand them to these functions, so the messy parsing logic stays testable.
 
-const { normalizeQuantityToOz, convertToOz } = require('../product-costing');
+const { convertToOz, parsePackSize } = require('../product-costing');
+
+// Scraped pack sizes are messy ("78 oz jug", "18 lb pail", "1/2 gal",
+// "4 x 30 g"), so normalize through product-costing's robust parsePackSize
+// rather than the bare-number normalizeQuantityToOz. Shares the exact
+// oz-equivalent basis as the inventory pipeline. Returns null for count-based /
+// unparseable packs (bait stations, traps) — never 0.
+function quantityToOz(quantity) {
+  const pack = parsePackSize(quantity);
+  if (!pack) return null;
+  const oz = convertToOz(pack.amount, pack.unit);
+  return oz == null ? null : Math.round(oz * 100) / 100;
+}
 
 // Matches the /report contract enum (integrations-vendor-price-worker.js).
 const AVAILABILITY = ['in_stock', 'limited', 'out_of_stock', 'backorder', 'unknown'];
@@ -56,19 +68,24 @@ function readOffer(node) {
   const offers = node && node.offers;
   if (!offers) return null;
   const list = Array.isArray(offers) ? offers : [offers];
+  let best = null;
   for (const o of list) {
     const price = offerPrice(o);
-    if (price != null) {
-      return {
-        price,
-        currency: o.priceCurrency
-          || (o.priceSpecification && o.priceSpecification.priceCurrency)
-          || null,
-        availability: o.availability || o.availabilityStatus || null,
-      };
-    }
+    if (price == null) continue;
+    const cand = {
+      price,
+      currency: o.priceCurrency
+        || (o.priceSpecification && o.priceSpecification.priceCurrency)
+        || null,
+      availability: o.availability || o.availabilityStatus || null,
+    };
+    // Prefer an in-stock offer over an earlier sold-out one in the same array,
+    // so a leading out-of-stock offer can't shadow a valid in-stock price.
+    if (!best) best = cand;
+    else if (mapAvailability(best.availability) !== 'in_stock'
+      && mapAvailability(cand.availability) === 'in_stock') best = cand;
   }
-  return null;
+  return best;
 }
 
 // Given an array of raw JSON-LD <script> string contents, find the best
@@ -127,7 +144,7 @@ function extractDomPrice(snapshot = {}) {
 function deriveNormalizedUnitPrice(price, quantity) {
   const p = Number(price);
   if (!Number.isFinite(p) || p <= 0) return null;
-  const oz = normalizeQuantityToOz(quantity);
+  const oz = quantityToOz(quantity);
   if (!oz || oz <= 0) return null;
   return Math.round((p / oz) * 1e6) / 1e6;
 }
@@ -168,10 +185,10 @@ function verifyMatch(scraped = {}, expected = {}, opts = {}) {
   const nameThreshold = opts.nameThreshold ?? 0.5;
   const signals = { name: false, epa: false, packSize: false };
 
-  const scrapedOz = normalizeQuantityToOz(scraped.quantity);
+  const scrapedOz = quantityToOz(scraped.quantity);
   const expectedOz = (expected.packSizeValue != null && expected.packSizeUnit)
     ? convertToOz(expected.packSizeValue, expected.packSizeUnit)
-    : normalizeQuantityToOz(expected.quantity);
+    : quantityToOz(expected.quantity);
   const sizeKnown = !!(scrapedOz && expectedOz);
   if (sizeKnown) {
     signals.packSize = Math.abs(scrapedOz - expectedOz) / expectedOz <= sizeTolerance;
@@ -212,6 +229,7 @@ module.exports = {
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,
+  quantityToOz,
   deriveNormalizedUnitPrice,
   tokenOverlap,
   verifyMatch,
