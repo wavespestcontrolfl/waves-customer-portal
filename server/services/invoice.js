@@ -667,6 +667,21 @@ const InvoiceService = {
     // a payer lookup can never block invoicing — and the inserted row is
     // unchanged for the (overwhelmingly common) self-pay case.
     const PayerService = require("./payer");
+    // When the caller passes only a serviceRecordId (e.g. completion-time
+    // invoicing), derive that visit's scheduled_service_id so a per-job payer
+    // override on the appointment is honored — resolveForInvoice keys per-job
+    // Bill-To routing off the scheduled service, and without this the invoice
+    // would fall back to the customer default (or self-pay) and bill the wrong
+    // party. Only the payer lookup uses the derived id; the row's own
+    // scheduled_service_id linkage below is unchanged.
+    let payerScheduledServiceId = scheduledServiceId;
+    if (!payerScheduledServiceId && serviceRecordId) {
+      const srLink = await database("service_records")
+        .where({ id: serviceRecordId, customer_id: customerId })
+        .first("scheduled_service_id")
+        .catch(() => null);
+      if (srLink?.scheduled_service_id) payerScheduledServiceId = srLink.scheduled_service_id;
+    }
     const {
       payerId: resolvedPayerId,
       poNumber: resolvedPoNumber,
@@ -676,7 +691,7 @@ const InvoiceService = {
       database,
       customerId,
       customer,
-      scheduledServiceId,
+      scheduledServiceId: payerScheduledServiceId,
     });
     // A tax-exempt payer (builder/HOA with a resale/exemption cert on file)
     // zeroes tax on its invoices — even commercial jobs that would otherwise

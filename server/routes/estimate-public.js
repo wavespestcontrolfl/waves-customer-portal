@@ -6655,6 +6655,18 @@ router.put('/:token/accept', async (req, res, next) => {
       logger.info(`[estimate-accept] Skipped EstimateConverter for estimate ${estimate.id} (one-time booking)`);
     }
 
+    // Third-party Bill-To: never return the payer's bearer /pay/:token link (or
+    // a pay_invoice next-step) to the homeowner from the public accept response.
+    // InvoiceService.create() and the EstimateConverter auto-resolve a default
+    // payer, so the FINAL invoice from any path above may be payer-billed — it
+    // was emailed to the payer AP and sendViaSMSAndEmail already suppressed the
+    // homeowner SMS. Resolve the final invoice once and suppress the customer pay
+    // URL when it's payer-billed (the client gates the pay-link next-step on it).
+    if (invoiceId && invoicePayUrl) {
+      const payerCheck = await db('invoices').where({ id: invoiceId }).first('payer_id').catch(() => null);
+      if (payerCheck?.payer_id) invoicePayUrl = null;
+    }
+
     // Exempt-path deposit sweep: the customer paid a deposit and then
     // accepted through a path that owes none (switched to prepay-annual, or
     // membership made them exempt). The webhook's staleness gate only

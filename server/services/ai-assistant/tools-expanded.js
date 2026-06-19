@@ -207,7 +207,16 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
         if (unpaid) {
           invoiceId = unpaid.id;
         } else if (input.amount && input.description) {
-          // Create a new invoice
+          // Third-party Bill-To: don't mint from a customer-facing tool for a
+          // customer with a default payer — InvoiceService.create() auto-resolves
+          // the payer, so this would create a draft AP bill just to redact it
+          // below. Check the effective payer FIRST and redact without minting.
+          const PayerService = require('../../services/payer');
+          const resolvedPayer = await PayerService.resolveForInvoice({ customerId });
+          if (resolvedPayer?.payerId) {
+            return { sent: false, payer_billed: true, message: 'This invoice is billed to a third-party payer and is not payable by the customer.' };
+          }
+          // Create a new self-pay invoice
           const customer = await db('customers').where('id', customerId).first();
           const newInvoice = await InvoiceService.create({
             customerId,
