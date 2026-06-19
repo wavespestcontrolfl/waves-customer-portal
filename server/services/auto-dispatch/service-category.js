@@ -6,7 +6,7 @@
  *   - a default time-of-day window, per the owner's routing rule:
  *       pest-family (general / rodent / termite / mosquito) → EARLY morning
  *       lawn-family  (lawn / tree & shrub)                   → MID/LATE morning
- *     (the day runs 08:00–17:00 with a 12:00–13:00 lunch).
+ *     (the day runs 08:00–17:00).
  *
  * Pure module — no DB, no I/O — so it unit-tests in isolation.
  */

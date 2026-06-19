@@ -72,18 +72,6 @@ describe('findValidCandidateSlots', () => {
     expect(findAvailableSlots.mock.calls[0][0].dateFrom > '2026-06-19').toBe(true);
   });
 
-  test('drops slots overlapping the 12–1 lunch hour', async () => {
-    findAvailableSlots.mockResolvedValue({
-      slots: [
-        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '11:30', end_time: '12:30', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 }, // overlaps lunch
-        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '12:30', end_time: '13:30', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 }, // overlaps lunch
-        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 3, total_drive_minutes: 14, stops_that_day: 3, score: 3 }, // clear of lunch
-      ],
-    });
-    const { candidates } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
-    expect(candidates.map((c) => c.start_time)).toEqual(['13:00']);
-  });
-
   test('returns no candidates (and no_geo note) when the service has no usable coordinates', async () => {
     const r = await findValidCandidateSlots({ ...SERVICE, lat: null, lng: null }, prefs, ctx());
     expect(r.candidates).toEqual([]);

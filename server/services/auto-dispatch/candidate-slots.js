@@ -17,13 +17,11 @@ const { resolveGeo, driveMin, HQ } = require('./geo');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
-const LUNCH_START = 12 * 60; // 12:00 — find-time does NOT reserve lunch; we do.
-const LUNCH_END = 13 * 60;   // 13:00
 const DEFAULT_DURATION = 60;
-// Pull the full feasible set so the HARD filters (blackout / capability / lunch)
-// run BEFORE any top-N trim — otherwise a long early blackout could fill the
-// first N find-time results and wrongly yield NO_VALID_SLOT. Then cap how many
-// survivors we actually score to bound cost.
+// Pull the full feasible set so the HARD filters (blackout / capability) run
+// BEFORE any top-N trim — otherwise a long early blackout could fill the first N
+// find-time results and wrongly yield NO_VALID_SLOT. Then cap how many survivors
+// we actually score to bound cost.
 const FETCH_CAP = 1000;
 const SCORE_CAP = 80;
 
@@ -36,14 +34,6 @@ function hhmmToMin(t) {
 
 function inBlackout(dateStr, blackout) {
   return !!(blackout && dateStr >= blackout.start && dateStr <= blackout.end);
-}
-
-// A slot overlaps the 12:00–13:00 lunch if it starts before 13:00 AND ends after 12:00.
-function overlapsLunch(startTime, endTime) {
-  const s = hhmmToMin(startTime);
-  const e = hhmmToMin(endTime);
-  if (s == null || e == null) return false;
-  return s < LUNCH_END && e > LUNCH_START;
 }
 
 /**
@@ -143,7 +133,6 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const candidates = [];
   for (const slot of slots) {
     if (inBlackout(slot.date, prefs.blackout)) continue;                // HARD: blackout
-    if (overlapsLunch(slot.start_time, slot.end_time)) continue;        // HARD: keep 12–1 lunch clear
     const techId = slot.technician && slot.technician.id;
     const cap = ctx.capabilityFor(techId, category);
     if (cap === 'deactivated') continue;                                // HARD: tech turned off for this category
