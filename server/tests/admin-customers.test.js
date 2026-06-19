@@ -12,12 +12,46 @@ const {
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
 } = adminCustomersRoute._private;
+
+describe('stageLifecycleStamps', () => {
+  const TODAY = '2026-06-19';
+
+  test('stamps member_since when first entering a customer stage', () => {
+    const s = stageLifecycleStamps('new_lead', 'won', { member_since: null }, { today: TODAY });
+    expect(s.member_since).toBe(TODAY);
+    expect(s.churned_at).toBeUndefined();
+    expect(s.pipeline_stage_changed_at).toBeInstanceOf(Date);
+  });
+
+  test('does not overwrite an existing member_since', () => {
+    const s = stageLifecycleStamps('won', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.member_since).toBeUndefined();
+  });
+
+  test('always stamps churned_at (ET date) on churn, reason optional', () => {
+    const s = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'moved' });
+    expect(s.churned_at).toBe(TODAY);
+    expect(s.churn_reason).toBe('moved');
+  });
+
+  test('clears the churn stamp on reactivation out of churned', () => {
+    const s = stageLifecycleStamps('churned', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.churned_at).toBeNull();
+    expect(s.churn_reason).toBeNull();
+  });
+
+  test('a lead→lead move only touches pipeline_stage_changed_at', () => {
+    const s = stageLifecycleStamps('new_lead', 'contacted', { member_since: null }, { today: TODAY });
+    expect(Object.keys(s)).toEqual(['pipeline_stage_changed_at']);
+  });
+});
 
 describe('admin customers route helpers', () => {
   test('validates known customer pipeline stages', () => {

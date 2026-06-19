@@ -403,6 +403,37 @@ function isValidStage(stage) {
   return !stage || CUSTOMER_STAGE_SET.has(stage);
 }
 
+// Post-conversion ("real customer") stages — entering one stamps member_since.
+// Mirrors the dashboard's whereRealCustomer definition.
+const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+
+// Lifecycle field stamps to apply when a customer's pipeline_stage CHANGES,
+// shared by PUT /:id/stage and the general PUT /:id edit so both keep
+// member_since / churned_at consistent (otherwise editing the stage from
+// Customers 360 would skip them). `today` is the ET calendar date — member_since
+// and churned_at are DATE columns, so a JS Date would land on the wrong day
+// after ET midnight. Call only when the stage actually changed.
+function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason } = {}) {
+  const stamps = { pipeline_stage_changed_at: new Date() };
+  if (newStage === 'churned') {
+    // Always timestamp the churn so retention can see it; reason optional.
+    stamps.churned_at = today;
+    if (churnReason) stamps.churn_reason = churnReason;
+  } else {
+    // Reactivation / any non-churned target: clear a stale churn stamp so a
+    // reactivated customer never carries a leftover churned_at.
+    if (oldStage === 'churned') {
+      stamps.churned_at = null;
+      stamps.churn_reason = null;
+    }
+    // First entry into a customer stage — stamp the "became a customer" date.
+    if (REAL_CUSTOMER_STAGES.has(newStage) && !customer.member_since) {
+      stamps.member_since = today;
+    }
+  }
+  return stamps;
+}
+
 function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   return {
     id: c.id,
@@ -2048,7 +2079,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
     }
     if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
-      updates.pipeline_stage_changed_at = new Date();
+      // Same lifecycle stamps as PUT /:id/stage — Customers 360 saves stage
+      // edits through this endpoint, so member_since/churned_at must be kept here
+      // too. (member_since/churned_at aren't editable fields, so no clobber.)
+      Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
     compactServiceContactSlots(updates, before);
     if (Object.keys(updates).length) {
@@ -2205,26 +2239,10 @@ router.put('/:id/stage', async (req, res, next) => {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const oldStage = customer.pipeline_stage;
-    const stageUpdates = { pipeline_stage: stage, pipeline_stage_changed_at: new Date() };
-    if (stage === 'churned') {
-      // Always timestamp the churn (reason optional) so retention can see it —
-      // previously churned_at was only set when a reason was typed. churned_at
-      // is a DATE column, so use the ET calendar date, not a UTC-coerced JS Date.
-      stageUpdates.churned_at = etDateString();
-      if (req.body.churnReason) stageUpdates.churn_reason = req.body.churnReason;
-    } else {
-      // Reactivation / any non-churned target: clear the churn stamp so a
-      // reactivated customer never carries a stale churned_at.
-      if (oldStage === 'churned') {
-        stageUpdates.churned_at = null;
-        stageUpdates.churn_reason = null;
-      }
-      // First time entering a customer stage — stamp member_since (the
-      // app-wide "became a customer" date) if it isn't set yet.
-      if (['active_customer', 'won', 'at_risk'].includes(stage) && !customer.member_since) {
-        stageUpdates.member_since = etDateString();
-      }
-    }
+    const stageUpdates = {
+      pipeline_stage: stage,
+      ...stageLifecycleStamps(oldStage, stage, customer, { today: etDateString(), churnReason: req.body.churnReason }),
+    };
     await db('customers').where({ id: req.params.id }).update(stageUpdates);
     await db('customer_interactions').insert({
       customer_id: req.params.id, interaction_type: 'note',
@@ -2862,6 +2880,7 @@ router._private = {
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
