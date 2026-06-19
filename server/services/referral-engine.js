@@ -404,6 +404,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     };
     await trx('referrals').where({ id: referralId }).update(updates);
 
+    let milestoneAward = null;
     if (referral.promoter_id) {
       const promoterUpdates = { total_referrals_converted: 1 };
       if (settings.require_service_completion) {
@@ -415,9 +416,13 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
         await trx('referral_promoters').where({ id: referral.promoter_id })
           .increment({ ...promoterUpdates, available_balance_cents: rewardCents, total_earned_cents: rewardCents, referral_balance_cents: rewardCents });
       }
+      // Award any milestone bonus inside the SAME transaction, serialized by the
+      // promoter row lock — atomic with the conversion, so it can't be double-paid
+      // by a concurrent conversion and can't be skipped by a post-commit retry.
+      milestoneAward = await applyMilestone(trx, referral.promoter_id, settings);
     }
 
-    return { referral, alreadyConverted: false };
+    return { referral, alreadyConverted: false, milestoneAward };
   });
 
   if (outcome.alreadyConverted) {
@@ -435,33 +440,41 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
 
   const referral = outcome.referral;
 
-  // Post-commit side effects (not money-critical): reward SMS, milestone check, lead attribution.
+  // Post-commit side effects — NON money-critical (the reward credit and the
+  // milestone award already committed in the transaction above). Wrapped so a
+  // transient failure here can't bubble a 500: on retry the admin would hit the
+  // alreadyConverted no-op and these would be skipped for good.
   if (referral.promoter_id) {
-    const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
-    if (promoter) {
-      const rewardSms = await renderReferralSms('referral_reward', {
-        referrer_name: promoter.first_name,
-        referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-        reward_amount: 'a referral reward',
-      }, settings.reward_sms_template, {
-        workflow: 'referral_reward',
-        entity_type: 'referral',
-        entity_id: referral.id,
-      });
-      await sendSMS(promoter.customer_phone, rewardSms, {
-        customerId: promoter.customer_id,
-        messageType: 'referral_reward',
-        referralId: referral.id,
-        promoterId: promoter.id,
-        entryPoint: 'referral_engine_reward',
-      });
+    try {
+      const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
+      if (promoter) {
+        const rewardSms = await renderReferralSms('referral_reward', {
+          referrer_name: promoter.first_name,
+          referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
+          reward_amount: 'a referral reward',
+        }, settings.reward_sms_template, {
+          workflow: 'referral_reward',
+          entity_type: 'referral',
+          entity_id: referral.id,
+        });
+        await sendSMS(promoter.customer_phone, rewardSms, {
+          customerId: promoter.customer_id,
+          messageType: 'referral_reward',
+          referralId: referral.id,
+          promoterId: promoter.id,
+          entryPoint: 'referral_engine_reward',
+        });
 
-      // Check milestones
-      await checkMilestones(referral.promoter_id);
+        if (outcome.milestoneAward) {
+          await sendMilestoneSms(promoter, outcome.milestoneAward, settings);
+        }
+      }
+    } catch (sideErr) {
+      logger.warn(`[ReferralEngine] convert post-commit notify failed for referral ${referral.id}: ${sideErr.message}`);
     }
   }
 
-  // Mark lead as converted if lead_id exists
+  // Mark lead as converted if lead_id exists (best-effort; idempotent).
   if (referral.lead_id) {
     try {
       const leadAttribution = require('./lead-attribution');
@@ -540,11 +553,15 @@ async function confirmFirstService(customerId) {
 // ---------------------------------------------------------------------------
 // 5. checkMilestones
 // ---------------------------------------------------------------------------
-async function checkMilestones(promoterId) {
-  const promoter = await db('referral_promoters').where({ id: promoterId }).first();
+// Award a milestone bonus inside an EXISTING transaction. Locks the promoter
+// row with forUpdate() and re-reads the level under the lock, so concurrent
+// conversions for the same promoter serialize and a threshold can't be crossed
+// (and paid) twice. Money-critical — never run this outside a transaction.
+// Returns the award { promoter, newLevel, bonusCents, converted } or null. No SMS.
+async function applyMilestone(trx, promoterId, settings) {
+  const promoter = await trx('referral_promoters').where({ id: promoterId }).forUpdate().first();
   if (!promoter) return null;
 
-  const settings = await getSettings();
   const converted = promoter.total_referrals_converted;
   const currentLevel = promoter.milestone_level || 'none';
 
@@ -564,21 +581,24 @@ async function checkMilestones(promoterId) {
 
   if (newLevel === currentLevel) return null;
 
-  // Award milestone
-  await db('referral_promoters').where({ id: promoterId }).update({
+  await trx('referral_promoters').where({ id: promoterId }).update({
     milestone_level: newLevel,
     milestone_earned_at: new Date(),
-    available_balance_cents: db.raw('available_balance_cents + ?', [bonusCents]),
-    total_earned_cents: db.raw('total_earned_cents + ?', [bonusCents]),
-    referral_balance_cents: db.raw('referral_balance_cents + ?', [bonusCents]),
+    available_balance_cents: trx.raw('available_balance_cents + ?', [bonusCents]),
+    total_earned_cents: trx.raw('total_earned_cents + ?', [bonusCents]),
+    referral_balance_cents: trx.raw('referral_balance_cents + ?', [bonusCents]),
     updated_at: new Date(),
   });
 
-  // Send milestone SMS
+  return { promoter, newLevel, bonusCents, converted };
+}
+
+// Best-effort milestone SMS (post-commit; never throws into a caller).
+async function sendMilestoneSms(promoter, award, settings) {
   const milestoneSms = await renderReferralSms('referral_milestone', {
     referrer_name: promoter.first_name,
-    milestone_level: newLevel,
-    count: String(converted),
+    milestone_level: award.newLevel,
+    count: String(award.converted),
     bonus_amount: 'a bonus reward',
   }, settings.milestone_sms_template, {
     workflow: 'referral_milestone',
@@ -591,9 +611,21 @@ async function checkMilestones(promoterId) {
     promoterId: promoter.id,
     entryPoint: 'referral_engine_milestone',
   });
+}
 
-  logger.info(`[ReferralEngine] Promoter ${promoterId} reached ${newLevel} milestone. Bonus: $${(bonusCents / 100).toFixed(2)}`);
-  return { promoterId, newLevel, bonusCents };
+async function checkMilestones(promoterId) {
+  const settings = await getSettings();
+  const award = await db.transaction((trx) => applyMilestone(trx, promoterId, settings));
+  if (!award) return null;
+
+  try {
+    await sendMilestoneSms(award.promoter, award, settings);
+  } catch (smsErr) {
+    logger.warn(`[ReferralEngine] milestone SMS failed for promoter ${promoterId}: ${smsErr.message}`);
+  }
+
+  logger.info(`[ReferralEngine] Promoter ${promoterId} reached ${award.newLevel} milestone. Bonus: $${(award.bonusCents / 100).toFixed(2)}`);
+  return { promoterId, newLevel: award.newLevel, bonusCents: award.bonusCents };
 }
 
 // ---------------------------------------------------------------------------
