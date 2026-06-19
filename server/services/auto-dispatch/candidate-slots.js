@@ -59,7 +59,9 @@ async function computeCurrentPlacement(service, prefs, ctx) {
       .where('scheduled_services.scheduled_date', dateStr)
       .where('scheduled_services.technician_id', techId)
       .whereNot('scheduled_services.id', service.id)
-      .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped'])
+      // 'rescheduled' phantom rows keep a stale date until staff action them —
+      // not a real stop the tech will work, so exclude from detour/density too.
+      .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select(
         'scheduled_services.id',
@@ -166,6 +168,7 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     topN: ctx.fetchCap || FETCH_CAP, // full feasible set; HARD filters run before trim
     excludeServiceIds: [service.id],
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
+    excludeStatuses: ['cancelled', 'rescheduled'], // phantom reschedule rows aren't real stops
   });
 
   const slots = (res && res.slots) || [];
@@ -184,7 +187,9 @@ async function findValidCandidateSlots(service, prefs, ctx) {
       end_time: slot.end_time,
       detour_minutes: slot.detour_minutes,
       total_drive_minutes: slot.total_drive_minutes,
-      stops_that_day: slot.stops_that_day,
+      // find-time reports stops BEFORE insertion; +1 for the moved visit so it
+      // matches the current placement's count (which includes the visit itself).
+      stops_that_day: (slot.stops_that_day || 0) + 1,
       technician_id: techId || null,
       technician_name: (slot.technician && slot.technician.name) || null,
       capability_level: cap,

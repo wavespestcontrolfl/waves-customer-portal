@@ -169,7 +169,11 @@ async function runAutoDispatch(opts = {}) {
           current_score_breakdown: currentScore,
           candidate_score_breakdown: bestScore,
         };
-        const newPlacement = { date: best.date, window_start: best.start_time, window_end: best.end_time, technician_id: best.technician_id, status: 'confirmed' };
+        // apply preserves pending (restores it after the rebooker), so the
+        // projected status must reflect that — don't claim a pending visit
+        // would be confirmed in the dry-run/cap-held audit.
+        const projectedStatus = service.status === 'pending' ? 'pending' : 'confirmed';
+        const newPlacement = { date: best.date, window_start: best.start_time, window_end: best.end_time, technician_id: best.technician_id, status: projectedStatus };
         const constraints = {
           lock_boundary: lockBoundary,
           blackout: prefs.blackout,

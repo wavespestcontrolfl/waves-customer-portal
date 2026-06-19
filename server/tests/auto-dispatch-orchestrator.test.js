@@ -143,6 +143,14 @@ test('ineligible service is skipped before candidate generation', async () => {
   expect(lastDecision('skipped').reason_code).toBe('INSIDE_LOCK_WINDOW');
 });
 
+test('dry-run recommendation for a pending visit projects pending (not confirmed)', async () => {
+  servicesResult = [svc({ status: 'pending' })];
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(lastDecision('recommended').newPlacement.status).toBe('pending');
+});
+
 test('no candidate slots → no_change NO_VALID_SLOT', async () => {
   candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [] });
   const res = await runAutoDispatch({ mode: 'dry_run' });
