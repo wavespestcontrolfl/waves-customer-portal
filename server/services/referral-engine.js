@@ -597,7 +597,12 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // Use the reward amount FROZEN on the referral at conversion (base + any tier
     // bonus) — not the current setting — so a settings change between signup and
     // first service can't over/under-credit, and the pending drain matches exactly.
-    const referrerDollars = round2(Number(referral.referrer_reward_amount) || (Number(settings.referrer_reward_cents) / 100) || 0);
+    // Finite-check (not `||`) so an intentional $0.00 frozen reward stays $0,
+    // rather than falling through to the current setting.
+    const frozenReward = Number(referral.referrer_reward_amount);
+    const referrerDollars = round2(Number.isFinite(frozenReward)
+      ? frozenReward
+      : ((Number(settings.referrer_reward_cents) / 100) || 0));
     const referrerCents = Math.round(referrerDollars * 100);
 
     // Referee — the customer who just completed their first recurring service.
@@ -638,10 +643,15 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // (submitReferral only dedupes per promoter). Reward exactly once per
     // referee — retire the other uncredited signed_up referrals for this phone
     // so a later completion can't pay the referee (or a second referrer) again.
+    // Scope to 'pending_service' ONLY: an immediately-earned referral
+    // (require_service_completion off) is also status='signed_up' +
+    // first_service_completed=false but was already paid at conversion — it must
+    // not be clobbered to 'superseded', which would corrupt reward history.
     await trx('referrals')
       .whereNot('id', referral.id)
       .where('status', 'signed_up')
       .where('first_service_completed', false)
+      .where('referrer_reward_status', 'pending_service')
       .where(matchesPhone)
       .update({
         first_service_completed: true,
