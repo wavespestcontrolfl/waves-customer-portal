@@ -908,9 +908,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // Resolve the customer: reuse the lead's linked customer if it still exists,
     // otherwise provision one from the lead's contact fields.
     let customerId = lead.customer_id || null;
+    let existingCustomer = null;
     if (customerId) {
-      const existing = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
-      if (!existing) customerId = null;
+      existingCustomer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+      if (!existingCustomer) customerId = null;
     }
 
     const needsCustomer = !customerId;
@@ -961,6 +962,16 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         }).returning('*');
         await createDefaultCustomerRows(trx, created.id);
         customerId = created.id;
+      } else if (existingCustomer && !['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage)) {
+        // Reused an existing customer that's still in a lead stage — promote it
+        // on booking (the create branch above inserts stage='won'). Without
+        // this, a booked lead whose customer row already exists stays stuck at
+        // new_lead and is under-counted in the customer KPIs.
+        await trx('customers').where({ id: customerId }).update({
+          pipeline_stage: 'won',
+          pipeline_stage_changed_at: new Date(),
+          member_since: existingCustomer.member_since || etDateString(),
+        });
       }
 
       // Create the scheduled service. Only set workflow columns the schema has.

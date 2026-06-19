@@ -2205,10 +2205,26 @@ router.put('/:id/stage', async (req, res, next) => {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const oldStage = customer.pipeline_stage;
-    await db('customers').where({ id: req.params.id }).update({ pipeline_stage: stage, pipeline_stage_changed_at: new Date() });
-    if (stage === 'churned' && req.body.churnReason) {
-      await db('customers').where({ id: req.params.id }).update({ churned_at: new Date(), churn_reason: req.body.churnReason });
+    const stageUpdates = { pipeline_stage: stage, pipeline_stage_changed_at: new Date() };
+    if (stage === 'churned') {
+      // Always timestamp the churn (reason optional) so retention can see it —
+      // previously churned_at was only set when a reason was typed.
+      stageUpdates.churned_at = new Date();
+      if (req.body.churnReason) stageUpdates.churn_reason = req.body.churnReason;
+    } else {
+      // Reactivation / any non-churned target: clear the churn stamp so a
+      // reactivated customer never carries a stale churned_at.
+      if (oldStage === 'churned') {
+        stageUpdates.churned_at = null;
+        stageUpdates.churn_reason = null;
+      }
+      // First time entering a customer stage — stamp member_since (the
+      // app-wide "became a customer" date) if it isn't set yet.
+      if (['active_customer', 'won', 'at_risk'].includes(stage) && !customer.member_since) {
+        stageUpdates.member_since = etDateString();
+      }
     }
+    await db('customers').where({ id: req.params.id }).update(stageUpdates);
     await db('customer_interactions').insert({
       customer_id: req.params.id, interaction_type: 'note',
       subject: `Stage changed: ${oldStage} → ${stage}`,

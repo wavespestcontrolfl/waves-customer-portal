@@ -898,6 +898,9 @@ const EstimateConverter = {
       : {
           pipeline_stage: 'active_customer',
           pipeline_stage_changed_at: new Date(),
+          // Persist the "became a customer" date if not already set (the lead
+          // may have carried a member_since from intake — keep the earlier one).
+          member_since: database.raw('COALESCE(member_since, ?)', [etDateString()]),
           waveguard_tier: tier,
           monthly_rate: monthlyRate,
           active: true,
