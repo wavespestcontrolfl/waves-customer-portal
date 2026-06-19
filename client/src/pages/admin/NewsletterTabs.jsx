@@ -46,11 +46,76 @@ const SOURCE_SEGMENTS = [
   { value: "website", label: "Website Legacy" },
 ];
 
+// Cross-sell service lines — must mirror SELLABLE_LINES in
+// server/services/newsletter-audience-profiles.js (the server classifies each
+// customer's active recurring lines from scheduled_services and resolves these
+// to a customer-id set). Labels are client-only display copy.
+const SERVICE_LINES = [
+  { value: "pest", label: "Pest" },
+  { value: "lawn", label: "Lawn" },
+  { value: "mosquito", label: "Mosquito" },
+  { value: "tree_shrub", label: "Tree & Shrub" },
+  { value: "termite", label: "Termite" },
+  { value: "rodent", label: "Rodent" },
+];
+
+// region_zone values stored on newsletter_subscribers (see segment preview).
+const REGION_ZONES = [
+  { value: "manatee", label: "Manatee" },
+  { value: "sarasota", label: "Sarasota" },
+  { value: "south_sarasota", label: "S. Sarasota" },
+  { value: "pinellas", label: "Pinellas" },
+  { value: "tampa", label: "Tampa" },
+];
+
+// Membership / line-count buckets → min/max_line_count on the server.
+const LINE_COUNT_OPTIONS = [
+  { key: "any", label: "Any" },
+  { key: "members", label: "Members (1+)" },
+  { key: "single", label: "Single-line" },
+  { key: "multi", label: "Multi-line (2+)" },
+];
+
+// One-click cross-sell segments (the "Agora play" campaigns). Each sets the
+// service-line controls below; all imply customers-only.
+const CAMPAIGN_PRESETS = [
+  { label: "Pest → Lawn", has: ["pest"], missing: ["lawn"] },
+  { label: "Pest+Lawn → Mosquito", has: ["pest", "lawn"], missing: ["mosquito"] },
+  { label: "Single-line members", lineCount: "single" },
+  { label: "Members w/o mosquito", missing: ["mosquito"], lineCount: "members" },
+];
+
 function FieldLabel({ children }) {
   return (
     <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
       {children}
     </label>
+  );
+}
+
+// Pill-style multi-select chip row (matches the source/tag chip styling).
+function ChipRow({ options, selected, onToggle }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((o) => {
+        const on = selected.includes(o.value);
+        return (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => onToggle(o.value)}
+            className={cn(
+              "h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring",
+              on
+                ? "bg-zinc-900 text-white border-zinc-900"
+                : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
+            )}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -243,6 +308,13 @@ export function ComposeView({
   // <datalist>so the operator picks an existing tag instead of typing
   // a near-miss that matches zero subscribers.
   const [tagSuggestions, setTagSuggestions] = useState([]);
+  // Service-line cross-sell constraints (resolved server-side to a customer-id
+  // set via newsletter-audience-profiles). has = holds ALL listed lines,
+  // missing = holds NONE of the listed lines; both AND together.
+  const [segmentHasLines, setSegmentHasLines] = useState([]);
+  const [segmentMissingLines, setSegmentMissingLines] = useState([]);
+  const [segmentRegions, setSegmentRegions] = useState([]);
+  const [segmentLineCount, setSegmentLineCount] = useState("any"); // any | members | single | multi
 
   // Schedule
   const [scheduleAt, setScheduleAt] = useState("");
@@ -310,8 +382,50 @@ export function ComposeView({
     if (segmentMode === "custom" && segmentSources.length)
       f.sources = segmentSources;
     if (segmentTags.length) f.tags = segmentTags;
+    // Service-line cross-sell constraints. The server resolves these to a
+    // customer-id set (inherently customer-only) and ANDs them with the
+    // audience mode above.
+    if (segmentHasLines.length) f.has_service = segmentHasLines;
+    if (segmentMissingLines.length) f.missing_service = segmentMissingLines;
+    if (segmentRegions.length) f.region_zone = segmentRegions;
+    if (segmentLineCount === "members") f.min_line_count = 1;
+    else if (segmentLineCount === "single") {
+      f.min_line_count = 1;
+      f.max_line_count = 1;
+    } else if (segmentLineCount === "multi") f.min_line_count = 2;
     return Object.keys(f).length ? f : null;
-  }, [segmentMode, segmentSources, segmentTags]);
+  }, [
+    segmentMode,
+    segmentSources,
+    segmentTags,
+    segmentHasLines,
+    segmentMissingLines,
+    segmentRegions,
+    segmentLineCount,
+  ]);
+
+  // Apply a one-click cross-sell preset (sets the service-line controls and
+  // forces customers-only, since service-line membership implies a customer).
+  const applyCampaignPreset = (p) => {
+    setSegmentMode("customers");
+    setSegmentHasLines(p.has || []);
+    setSegmentMissingLines(p.missing || []);
+    setSegmentLineCount(p.lineCount || "any");
+    setSegmentRegions([]);
+  };
+
+  const clearServiceLineSegment = () => {
+    setSegmentHasLines([]);
+    setSegmentMissingLines([]);
+    setSegmentRegions([]);
+    setSegmentLineCount("any");
+  };
+
+  const serviceLineActive =
+    segmentHasLines.length > 0 ||
+    segmentMissingLines.length > 0 ||
+    segmentRegions.length > 0 ||
+    segmentLineCount !== "any";
 
   useEffect(() => {
     adminFetch("/admin/newsletter/subscribers?status=active&limit=1")
@@ -919,6 +1033,97 @@ export function ComposeView({
                 Press Enter or comma to add. Matches subscribers tagged with ANY
                 of the listed tags.
               </div>{" "}
+            </div>{" "}
+            {/* Service-line cross-sell — the "Agora play". Resolves server-side
+                to the customers who hold / lack the selected recurring lines. */}
+            <div className="mt-3 pt-3 border-t border-hairline border-zinc-200">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <FieldLabel>
+                  Service line{" "}
+                  <span className="normal-case tracking-normal text-ink-tertiary">
+                    (cross-sell, customers)
+                  </span>
+                </FieldLabel>
+                {serviceLineActive && (
+                  <button
+                    type="button"
+                    onClick={clearServiceLineSegment}
+                    className="text-11 text-ink-tertiary hover:text-zinc-900 u-focus-ring"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {CAMPAIGN_PRESETS.map((p) => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => applyCampaignPreset(p)}
+                    className="h-7 px-2.5 text-11 rounded-full border-hairline border-dashed border-zinc-300 text-ink-secondary hover:border-zinc-900 hover:text-zinc-900 u-focus-ring"
+                    title="One-click cross-sell segment"
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <div className="text-11 text-ink-secondary mb-1">Has all of</div>
+              <ChipRow
+                options={SERVICE_LINES}
+                selected={segmentHasLines}
+                onToggle={(v) =>
+                  setSegmentHasLines((cur) =>
+                    cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
+                  )
+                }
+              />
+              <div className="text-11 text-ink-secondary mt-2 mb-1">
+                Missing all of
+              </div>
+              <ChipRow
+                options={SERVICE_LINES}
+                selected={segmentMissingLines}
+                onToggle={(v) =>
+                  setSegmentMissingLines((cur) =>
+                    cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
+                  )
+                }
+              />
+              <div className="text-11 text-ink-secondary mt-3 mb-1">
+                Membership
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {LINE_COUNT_OPTIONS.map((o) => (
+                  <button
+                    key={o.key}
+                    type="button"
+                    onClick={() => setSegmentLineCount(o.key)}
+                    className={cn(
+                      "h-7 px-2.5 text-11 rounded-sm border-hairline u-focus-ring",
+                      segmentLineCount === o.key
+                        ? "bg-zinc-900 text-white border-zinc-900"
+                        : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
+                    )}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              <div className="text-11 text-ink-secondary mt-3 mb-1">Region</div>
+              <ChipRow
+                options={REGION_ZONES}
+                selected={segmentRegions}
+                onToggle={(v) =>
+                  setSegmentRegions((cur) =>
+                    cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
+                  )
+                }
+              />
+              <div className="text-11 text-ink-tertiary mt-2">
+                Lines come from each customer&rsquo;s active recurring services.
+                A customer must hold ALL of &ldquo;Has&rdquo;, none of
+                &ldquo;Missing&rdquo;.
+              </div>
             </div>{" "}
           </div>{" "}
         </div>{" "}
