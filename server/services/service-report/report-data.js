@@ -2319,6 +2319,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
+    // WaveGuard membership tier (null for non-members). Consumed by the report viewer
+    // to suppress the per-visit "Time on site" duration for members (memberships don't
+    // account for an hourly figure) while non-member reports honor the admin showDuration
+    // setting. Requires the loading query to select customers.waveguard_tier.
+    waveGuardTier: service.waveguard_tier || null,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,

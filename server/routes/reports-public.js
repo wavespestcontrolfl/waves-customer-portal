@@ -899,6 +899,7 @@ router.get('/:token/data', async (req, res, next) => {
         'customers.address_line1', 'customers.address_line2',
         'customers.city', 'customers.state', 'customers.zip',
         'customers.has_left_google_review',
+        'customers.waveguard_tier',
         'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
