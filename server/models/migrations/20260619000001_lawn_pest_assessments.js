@@ -50,6 +50,14 @@ exports.up = async function (knex) {
   }
 
   // ── 2) New assessment rows — no catalog price (variable, base_price NULL) ──
+  // Seeded INACTIVE (is_active=false). These are meant to complete as
+  // internal-only consultations (no customer-facing report), but that
+  // completion path is a coupled change landing in a dedicated follow-up PR.
+  // Until then they must not be schedulable/completable — a completion now
+  // would fall back to DEFAULT_SERVICE_REPORT_PROFILE and send a customer
+  // Service Report (the resolver/pickers filter on is_active, so inactive
+  // rows are invisible to both booking and the admin appointment picker).
+  // The follow-up flips is_active=true alongside the consultation profiles.
   const newRows = [
     {
       service_key: 'pest_assessment', name: 'Pest Control Assessment', short_name: 'Pest Assess',
@@ -61,7 +69,7 @@ exports.up = async function (knex) {
       requires_license: true, license_category: 'GHP',
       min_tech_skill_level: 1,
       icon: '🐛', color: '#18181B', sort_order: 66,
-      customer_visible: true, booking_enabled: true,
+      customer_visible: true, booking_enabled: true, is_active: false,
     },
     {
       service_key: 'lawn_pest_assessment', name: 'Lawn and Pest Control Assessment', short_name: 'Lawn+Pest Assess',
@@ -73,7 +81,7 @@ exports.up = async function (knex) {
       requires_license: true, license_category: 'GHP',
       min_tech_skill_level: 1,
       icon: '📋', color: '#18181B', sort_order: 67,
-      customer_visible: true, booking_enabled: true,
+      customer_visible: true, booking_enabled: true, is_active: false,
     },
   ];
 
