@@ -167,6 +167,31 @@ test('caps geocode ATTEMPTS even when they all fail (counts attempts, not succes
   expect(res).toMatchObject({ skipped: 2, geocoded: 0, geocode_attempts: 1 });
 });
 
+test('dedupes geocode per customer — one API call for multiple visits of the same customer', async () => {
+  servicesResult = [svc({ id: 's1', customer_id: 'cX' }), svc({ id: 's2', customer_id: 'cX' })];
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+  geocoder.ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4, lng: -82.5 });
+  eligibility.isEligibleForAutoDispatch
+    .mockReturnValueOnce({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'x' }) // s1 initial
+    .mockReturnValueOnce({ eligible: true })                                                       // s1 recheck (post-geocode)
+    .mockReturnValueOnce({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'x' }) // s2 initial
+    .mockReturnValueOnce({ eligible: true });                                                      // s2 recheck (from cache)
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledTimes(1); // one call for both visits of cX
+  expect(res).toMatchObject({ evaluated: 2, geocoded: 1, geocode_attempts: 1, skipped: 0 });
+});
+
+test('does not spend geocode budget on an inactive recurring plan', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4, lng: -82.5 });
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'x' });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled(); // plan checked first → no geocode
+  expect(res).toMatchObject({ skipped: 1, geocode_attempts: 0 });
+  expect(lastDecision('skipped').reason_code).toBe('RECURRING_PLAN_INACTIVE');
+});
+
 test('ineligible service is skipped before candidate generation', async () => {
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'INSIDE_LOCK_WINDOW', reason_description: 'x' });
   const res = await runAutoDispatch({ mode: 'dry_run' });

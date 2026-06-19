@@ -122,6 +122,7 @@ async function runAutoDispatch(opts = {}) {
   let runError = null;
   let geocodeAttempts = 0; // counts API attempts (success OR fail) — bounds the cap
   let geocoded = 0;        // successes only — for the run summary
+  const geoCache = new Map(); // customer_id -> {lat,lng}|null, so repeat visits of one customer don't re-attempt
 
   try {
     const capMap = await loadCapabilityMap();
@@ -132,20 +133,44 @@ async function runAutoDispatch(opts = {}) {
       try {
         const eligCtx = { today, lockBoundary, lockWindowDays: config.lockWindowDays };
         let elig = isEligibleForAutoDispatch(service, eligCtx);
-        // Self-heal a not-yet-geocoded customer once, bounded per run, then re-check.
-        if (!elig.eligible && elig.reason_code === 'MISSING_GEO' && geocodeAttempts < config.maxGeocodesPerRun) {
-          geocodeAttempts++; // every attempt is a Google API call — count it whether or not it resolves
-          const res = await geocodeAndRecheck(service, eligCtx);
-          if (res.geocoded) geocoded++;
-          elig = res.recheck;
+        let planCheck = null;
+
+        // Self-heal a not-yet-geocoded customer, then re-check — but BEFORE the
+        // plan-active gate (don't spend the geocode budget on a lapsed plan we'd
+        // skip anyway) and deduped per customer (a customer's later visits would
+        // just read the coords the first row saved, so they must not re-attempt).
+        if (!elig.eligible && elig.reason_code === 'MISSING_GEO') {
+          planCheck = await isRecurringPlanActive(service, db);
+          if (!planCheck.active) {
+            totals.skipped++;
+            await audit.logDecision(runId, { action: 'skipped', service, reason_code: planCheck.reason_code, reason_description: planCheck.reason_description });
+            continue;
+          }
+          const cust = service.customer_id;
+          if (geoCache.has(cust)) {
+            const cached = geoCache.get(cust);
+            if (cached) {
+              service.customer_latitude = cached.lat;
+              service.customer_longitude = cached.lng;
+              elig = isEligibleForAutoDispatch(service, eligCtx);
+            }
+          } else if (geocodeAttempts < config.maxGeocodesPerRun) {
+            geocodeAttempts++; // one Google API call per NEW customer, success or not
+            const res = await geocodeAndRecheck(service, eligCtx);
+            geoCache.set(cust, res.geocoded ? { lat: service.customer_latitude, lng: service.customer_longitude } : null);
+            if (res.geocoded) geocoded++;
+            elig = res.recheck;
+          }
         }
+
         if (!elig.eligible) {
           totals.skipped++;
           await audit.logDecision(runId, { action: 'skipped', service, reason_code: elig.reason_code, reason_description: elig.reason_description });
           continue;
         }
 
-        const planCheck = await isRecurringPlanActive(service, db);
+        // Plan-active gate (reuse the result if the geo self-heal already computed it).
+        if (!planCheck) planCheck = await isRecurringPlanActive(service, db);
         if (!planCheck.active) {
           totals.skipped++;
           await audit.logDecision(runId, { action: 'skipped', service, reason_code: planCheck.reason_code, reason_description: planCheck.reason_description });
