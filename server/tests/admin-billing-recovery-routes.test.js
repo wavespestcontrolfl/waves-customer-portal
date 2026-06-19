@@ -212,13 +212,11 @@ describe('admin billing-recovery routes', () => {
 
   test('dismiss records an intentionally-free disposition with reason and actor', async () => {
     const dispositionQB = makeQB({ first: null });
-    db.mockImplementation((arg) => {
-      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { scheduled_service_id: 'ss-1', service_record_id: 'sr-1' } });
-      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
-    });
     installTransaction((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { scheduled_service_id: 'ss-1', completed_at: '2026-06-18', service_record_id: 'sr-1' } });
+      if (arg === 'invoices') return makeQB({ first: null });
       if (arg === 'visit_billing_dispositions') return dispositionQB;
-      throw new Error(`unexpected trx table ${arg}`);
+      throw new Error(`unexpected trx table ${JSON.stringify(arg)}`);
     });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/dismiss`, {
@@ -229,6 +227,21 @@ describe('admin billing-recovery routes', () => {
       expect(dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({
         scheduled_service_id: 'ss-1', disposition: 'intentionally_free', reason: 'in-window rodent trap check', actor_user_id: 'admin-1',
       }));
+    });
+  });
+
+  test('dismiss is blocked when the visit is already invoiced (eligibility rechecked in-lock)', async () => {
+    installTransaction((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { scheduled_service_id: 'ss-1', completed_at: '2026-06-18', service_record_id: 'sr-1' } });
+      if (arg === 'invoices') return makeQB({ first: { id: 'inv-x' } });
+      throw new Error(`unexpected trx table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/dismiss`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'x' }),
+      });
+      expect(res.status).toBe(409);
     });
   });
 

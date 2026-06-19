@@ -317,6 +317,16 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       }
 
       // Canonical completion path (replays scheduled-service line items + discounts).
+      // NOTE: createFromService writes via the global db connection and takes no
+      // trx, so the draft invoice commits independently of this transaction —
+      // true invoice⇄disposition atomicity would require threading a trx through
+      // the shared InvoiceService (used by the completion path), which is out of
+      // scope here. The advisory lock + the existing-invoice/disposition rechecks
+      // above prevent the dangerous outcomes (double invoice, double disposition).
+      // Residual failure mode is benign: if the disposition insert below throws,
+      // the draft invoice is orphaned (recoverable/voidable) and the existing-
+      // invoice recheck excludes the visit from future leaks on retry — never a
+      // double-charge.
       const created = await InvoiceService.createFromService(visit.service_record_id, {
         amount: parseFloat(visit.estimated_price),
         description: visit.service_type,
@@ -365,26 +375,33 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
   const { scheduledServiceId } = req.params;
   const reason = String(req.body.reason || '').trim().slice(0, 300) || null;
   try {
-    const visit = await db({ ss: 'scheduled_services' })
-      .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
-      .where('ss.id', scheduledServiceId)
-      .select('ss.id as scheduled_service_id', 'sr.id as service_record_id')
-      .first();
-    if (!visit) return res.status(404).json({ error: 'Visit not found' });
-
     // Same per-visit advisory lock as POST /bill so a dismiss can't race a bill
-    // (no invoice can be cut for a visit being dismissed, and vice versa).
+    // (no invoice can be cut for a visit being dismissed, and vice versa). All
+    // eligibility is re-validated INSIDE the lock so a stale UI / direct request
+    // can't permanently exclude a future, uncompleted, or already-invoiced visit.
     await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [BILLING_RECOVERY_LOCK_NS, scheduledServiceId]);
+
+      const visit = await trx({ ss: 'scheduled_services' })
+        .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
+        .where('ss.id', scheduledServiceId)
+        .select('ss.id as scheduled_service_id', 'ss.completed_at', 'sr.id as service_record_id')
+        .first();
+      if (!visit) { const e = new Error('Visit not found'); e.status = 404; throw e; }
+      if (!visit.completed_at) { const e = new Error('Visit is not completed — nothing to dismiss.'); e.status = 422; throw e; }
+
+      const invoiced = await trx('invoices')
+        .where(function () {
+          this.where('service_record_id', visit.service_record_id).orWhere('scheduled_service_id', scheduledServiceId);
+        })
+        .whereNot('status', 'void')
+        .first();
+      if (invoiced) { const e = new Error('Visit is already invoiced — cannot mark it free.'); e.status = 409; throw e; }
 
       const existing = await trx('visit_billing_dispositions')
         .where('scheduled_service_id', scheduledServiceId)
         .first();
-      if (existing) {
-        const e = new Error('Visit has already been handled.');
-        e.status = 409;
-        throw e;
-      }
+      if (existing) { const e = new Error('Visit has already been handled.'); e.status = 409; throw e; }
 
       await trx('visit_billing_dispositions').insert({
         scheduled_service_id: scheduledServiceId,
@@ -399,7 +416,7 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
     logger.info(`[billing-recovery] dismissed visit ${scheduledServiceId} as intentionally_free (reason ${reason ? 'provided' : 'none'}) by tech ${req.technicianId}`);
     res.json({ ok: true });
   } catch (err) {
-    if (err && err.status === 409) return res.status(409).json({ error: err.message });
+    if (err && err.status) return res.status(err.status).json({ error: err.message });
     if (err && err.code === '23505') {
       return res.status(409).json({ error: 'Visit has already been handled.' });
     }
