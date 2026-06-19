@@ -46,21 +46,28 @@ const BILLING_RECOVERY_LOCK_NS = 0x4252;
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
-const FREE_TYPE_PATTERNS = [
+// Always-free service types — excluded from the leak queue entirely and rejected
+// on the write path. These are never billable.
+const ALWAYS_FREE_PATTERNS = [
   '%appointment%',  // general_appointment ("Waves Pest Control Appointment Service")
-  '%inspection%',   // inspections (often waived/credited)
-  '%re-service%', '%reservice%', '%re service%', // free re-services
   '%estimate%',     // estimate visits
+  '%re-service%', '%reservice%', '%re service%', // free re-services
   '%follow-up%', '%followup%', '%follow up%', '%re-visit%', '%revisit%', // follow-up re-visits
-  '%trap%', '%rodent%', // rodent trapping setup + in-window trap checks (judge manually)
 ];
 
-// JS mirror of the FREE_TYPE_PATTERNS ILIKE check, for the write path (POST /bill)
-// so a stale or direct request can't bill a visit type the leak query excludes.
-function isNoCostServiceType(serviceType) {
+// Ambiguous types that CAN be paid (paid WDO/inspection, rodent trapping setup)
+// OR free (waived inspection, in-window trap check). Surface these in needs-review
+// for a human call rather than suppressing real paid-visit leaks.
+const REVIEW_PATTERNS = ['%inspection%', '%trap%', '%rodent%'];
+
+const matchesPatterns = (serviceType, patterns) => {
   const s = String(serviceType || '').toLowerCase();
-  return FREE_TYPE_PATTERNS.some((p) => s.includes(p.replace(/%/g, '')));
-}
+  return patterns.some((p) => s.includes(p.replace(/%/g, '')));
+};
+// Always-free check for the write path (POST /bill) — a stale/direct request
+// must not bill an always-free type.
+const isNoCostServiceType = (serviceType) => matchesPatterns(serviceType, ALWAYS_FREE_PATTERNS);
+const isReviewServiceType = (serviceType) => matchesPatterns(serviceType, REVIEW_PATTERNS);
 
 // SQL fragment: TRUE when a non-void invoice already exists for the visit.
 // Aliases: `sr` = service_records, `ss` = scheduled_services.
@@ -121,8 +128,8 @@ function uninvoicedLeakQuery(days) {
     .whereRaw('COALESCE(ss.payer_id, c.payer_id) IS NULL') // self-pay only (v1); payer-billed = payer AP flow
     .whereRaw(`NOT ${autopay.sql}`, [autopay.binding])   // not autopay (cron-billed)
     .whereRaw(
-      `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${FREE_TYPE_PATTERNS.map(() => '?').join(',')}]::text[])`,
-      FREE_TYPE_PATTERNS,
+      `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${ALWAYS_FREE_PATTERNS.map(() => '?').join(',')}]::text[])`,
+      ALWAYS_FREE_PATTERNS,
     );
   if (INTERNAL_TEST_CUSTOMERS.length) {
     q.whereNotIn(db.raw(INTERNAL_NAME_SQL), INTERNAL_TEST_CUSTOMERS);
@@ -169,9 +176,12 @@ router.get('/leaks', async (req, res) => {
       billable: !!r.service_record_id, // cannot invoice without a service record
     });
 
-    // Recurring (monthly_rate>0) or partially-prepaid visits need a human eye
-    // before billing — they aren't safe one-click leaks.
-    const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0 || parseFloat(r.prepaid_amount || 0) > 0;
+    // Recurring (monthly_rate>0), partially-prepaid, or ambiguous-type
+    // (inspection/rodent — could be paid or free) visits need a human eye before
+    // billing — they aren't safe one-click leaks.
+    const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0
+      || parseFloat(r.prepaid_amount || 0) > 0
+      || isReviewServiceType(r.service_type);
     const leaks = rows.filter((r) => !isReview(r)).map(shape);
     const needsReview = rows.filter(isReview).map(shape);
     const sum = (arr) => Math.round(arr.reduce((s, r) => s + r.price, 0) * 100) / 100;
@@ -274,7 +284,7 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       return res.status(409).json({ error: 'Visit is flagged as a callback / re-treat (no-cost).' });
     }
     if (isNoCostServiceType(visit.service_type)) {
-      return res.status(409).json({ error: 'Visit type is in the no-cost allowlist (appointment / inspection / re-service / estimate / rodent trap / follow-up) — not billable here.' });
+      return res.status(409).json({ error: 'Visit type is always no-cost (appointment / estimate / re-service / follow-up) — not billable here.' });
     }
     const prepaid = parseFloat(visit.prepaid_amount || 0);
     const price = parseFloat(visit.estimated_price || 0);

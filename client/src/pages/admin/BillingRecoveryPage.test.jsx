@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMoney, daysSince, formatDateOnly, FREE_REASONS } from "./BillingRecoveryPage";
+import { formatMoney, daysSince, formatDateOnly, formatETDate, FREE_REASONS } from "./BillingRecoveryPage";
 
 describe("BillingRecoveryPage helpers", () => {
   it("formats money with USD + thousands separators", () => {
@@ -23,6 +23,12 @@ describe("BillingRecoveryPage helpers", () => {
     expect(formatDateOnly("2026-06-19T00:00:00Z")).toBe("6/19/2026");
     expect(formatDateOnly(null)).toBe("—");
     expect(formatDateOnly("garbage")).toBe("garbage");
+  });
+
+  it("formatETDate renders timestamps in ET and handles bad input", () => {
+    expect(formatETDate(null)).toBe("—");
+    expect(formatETDate("garbage")).toBe("—");
+    expect(formatETDate("2026-06-18T12:00:00Z")).toMatch(/^\d{1,2}\/\d{1,2}\/\d{4}$/);
   });
 
   it("free reasons cover the Adam-locked no-cost taxonomy", () => {

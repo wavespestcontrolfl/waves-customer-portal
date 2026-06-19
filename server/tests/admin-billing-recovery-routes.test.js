@@ -174,9 +174,9 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
-  test('billing a no-cost-type visit is blocked (write path enforces the allowlist)', async () => {
+  test('billing an always-free-type visit is blocked (write path enforces the allowlist)', async () => {
     db.mockImplementation((arg) => {
-      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, service_type: 'WDO Inspection Service' } });
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, service_type: 'Estimate service' } });
       throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
     });
     customerOnAutopay.mockResolvedValue(false);
@@ -250,6 +250,7 @@ describe('admin billing-recovery routes', () => {
       { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '129.00', prepaid_amount: '0', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null },
       { scheduled_service_id: 'ss-2', service_record_id: 'sr-2', service_type: 'Pest Control', estimated_price: '200.00', prepaid_amount: '0', completed_at: '2026-06-10', customer_id: 'cust-2', first_name: 'Jane', last_name: 'Doe', monthly_rate: '49.00', waveguard_tier: 'Gold' },
       { scheduled_service_id: 'ss-3', service_record_id: 'sr-3', service_type: 'Pest Control', estimated_price: '150.00', prepaid_amount: '50.00', completed_at: '2026-06-05', customer_id: 'cust-3', first_name: 'Sam', last_name: 'Park', monthly_rate: '0', waveguard_tier: null },
+      { scheduled_service_id: 'ss-4', service_record_id: 'sr-4', service_type: 'WDO Inspection Service', estimated_price: '125.00', prepaid_amount: '0', completed_at: '2026-06-04', customer_id: 'cust-4', first_name: 'Wendy', last_name: 'Ono', monthly_rate: '0', waveguard_tier: null },
     ];
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
@@ -261,9 +262,9 @@ describe('admin billing-recovery routes', () => {
       expect(res.status).toBe(200);
       expect(body.summary.leak_visits).toBe(1);
       expect(body.summary.leak_dollars).toBe(129);
-      expect(body.summary.review_visits).toBe(2); // monthly-rate + partial-prepay
+      expect(body.summary.review_visits).toBe(3); // monthly-rate + partial-prepay + inspection(ambiguous)
       expect(body.leaks[0].customer).toBe('Tyler Levin');
-      expect(body.needs_review.map((r) => r.customer)).toEqual(expect.arrayContaining(['Jane Doe', 'Sam Park']));
+      expect(body.needs_review.map((r) => r.customer)).toEqual(expect.arrayContaining(['Jane Doe', 'Sam Park', 'Wendy Ono']));
     });
   });
 

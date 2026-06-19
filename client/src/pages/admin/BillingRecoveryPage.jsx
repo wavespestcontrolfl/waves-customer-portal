@@ -57,6 +57,15 @@ export function formatDateOnly(d) {
   return `${Number(m[2])}/${Number(m[3])}/${m[1]}`; // M/D/YYYY
 }
 
+// Timestamptz fields (e.g. completed_at) — the portal is Eastern Time, so render
+// the ET calendar date rather than the operator's browser timezone.
+export function formatETDate(dateStr) {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", { timeZone: "America/New_York" });
+}
+
 async function adminFetch(path, options = {}) {
   const r = await fetch(`${API_BASE}${path}`, {
     headers: {
@@ -93,7 +102,7 @@ function VisitRow({ visit, busy, onBill, onFree, confirmBill }) {
     <TR>
       <TD>{visit.customer || "—"}</TD>
       <TD className="text-zinc-500">
-        {visit.completed_at ? new Date(visit.completed_at).toLocaleDateString("en-US") : "—"}
+        {formatETDate(visit.completed_at)}
         {ago != null && <span className="text-zinc-400"> · {ago}d ago</span>}
       </TD>
       <TD>{visit.service_type || "—"}</TD>
