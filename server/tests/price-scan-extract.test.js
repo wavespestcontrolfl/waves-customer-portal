@@ -39,11 +39,13 @@ describe('price-scan extract', () => {
       expect(parsePriceText('$50 each')).toBeNull();
       expect(parsePriceText('$95.00')).toBe(95); // package price still fine
     });
-    test('rejects dollar promo / reference badges', () => {
+    test('rejects dollar promo / reference / starting-at badges', () => {
       expect(parsePriceText('Save $20')).toBeNull();
       expect(parsePriceText('$20 off')).toBeNull();
       expect(parsePriceText('Free shipping over $50')).toBeNull();
       expect(parsePriceText('Was $99')).toBeNull();
+      expect(parsePriceText('Starting at $48.48')).toBeNull();
+      expect(parsePriceText('From $48.48')).toBeNull();
       expect(parsePriceText('$95.00')).toBe(95);
     });
   });
@@ -250,11 +252,16 @@ describe('price-scan extract', () => {
       const snap = { jsonLd: [variantLd], priceTexts: ['$48.48'], title: 'Taurus SC Termiticide' };
       expect(offerFromSnapshot(snap, { targetOz: 12 })).toBeNull();
     });
-    test('no JSON-LD offers -> DOM fallback is used', () => {
-      const snap = { jsonLd: [], priceTexts: ['$89.00'], title: 'Taurus SC 78 oz', availabilityText: 'In Stock' };
-      const got = offerFromSnapshot(snap, { targetOz: 78 });
-      expect(got.price).toBe(89);
-      expect(got.availability).toBe('in_stock');
+    test('DOM fallback used only when the title substantiates the target size', () => {
+      // title carries the matching size -> trust the DOM price
+      const ok = { jsonLd: [], priceTexts: ['$89.00'], title: 'Taurus SC 78 oz', availabilityText: 'In Stock' };
+      expect(offerFromSnapshot(ok, { targetOz: 78 }).price).toBe(89);
+      // title has NO size -> can't tie the DOM price to 78 oz -> null
+      expect(offerFromSnapshot({ jsonLd: [], priceTexts: ['$48.48'], title: 'Taurus SC Termiticide' }, { targetOz: 78 })).toBeNull();
+      // title is a DIFFERENT size -> null (don't report a 20 oz price as 78 oz)
+      expect(offerFromSnapshot({ jsonLd: [], priceTexts: ['$48.48'], title: 'Taurus SC 20 oz' }, { targetOz: 78 })).toBeNull();
+      // no targetOz -> size gate doesn't apply
+      expect(offerFromSnapshot({ jsonLd: [], priceTexts: ['$48.48'], title: 'Taurus SC' }).price).toBe(48.48);
     });
     test('no JSON-LD and no DOM price -> null', () => {
       expect(offerFromSnapshot({ jsonLd: [], priceTexts: ['Call for price'] }, { targetOz: 78 })).toBeNull();

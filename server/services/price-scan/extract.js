@@ -51,7 +51,7 @@ function parsePriceText(text) {
   // Reject promo / reference badges ("Save $20", "$20 off", "Free shipping over
   // $50", "Was $99") — these carry a dollar amount that isn't the package price
   // and can appear before it in a DOM priceTexts list.
-  if (/\b(?:save|off|discount|rebate|coupon|clearance|shipping|free|was)\b/i.test(s)) return null;
+  if (/\b(?:save|off|discount|rebate|coupon|clearance|shipping|free|was|starting|from)\b/i.test(s)) return null;
   // Numbers, allowing thousands separators: "1,234.50" is one token.
   const numbers = s.match(/\d[\d,]*(?:\.\d+)?/g);
   if (!numbers || numbers.length !== 1) return null; // 0 = no price, >1 = range/ambiguous
@@ -261,7 +261,18 @@ function offerFromSnapshot(snapshot = {}, opts = {}) {
   const ldOffer = extractJsonLdOffer(jsonLd, opts);
   if (ldOffer) return ldOffer;
   if (collectJsonLdOffers(jsonLd).length > 0) return null;
-  return extractDomPrice(snapshot);
+  const dom = extractDomPrice(snapshot);
+  if (!dom) return null;
+  // A DOM price can't be tied to a specific variant. On a size-specific scan,
+  // only trust it when the page TITLE substantiates the target size — otherwise
+  // a default / "starting at" price for another variant could be reported as the
+  // requested pack. (The same size gate the JSON-LD path applies.)
+  if (opts.targetOz && opts.targetOz > 0) {
+    const tol = opts.sizeTolerance ?? 0.05;
+    const titleOz = quantityToOz(extractSizeToken(dom.name));
+    if (!titleOz || Math.abs(titleOz - opts.targetOz) / opts.targetOz > tol) return null;
+  }
+  return dom;
 }
 
 // $ per oz-equivalent, matching the inventory pipeline's basis
