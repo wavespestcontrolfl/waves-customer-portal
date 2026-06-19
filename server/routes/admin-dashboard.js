@@ -452,29 +452,36 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
-    // Retention — customers who churned in window vs active at the START.
+    // Retention — of the customers active at the START of the window, how many
+    // are still here. Both the base and the churn count are scoped to the SAME
+    // start-of-window cohort so the subtraction is exact.
     let retentionPct = null, churned = 0;
     try {
-      const churnedRow = await db('customers')
-        .whereNotNull('churned_at').where('churned_at', '>=', start).count('* as c').first();
-      churned = parseInt(churnedRow?.c || 0);
-      // Base = customers active AT THE START of the window, NOT the current
-      // active count. Current-active folds in everyone acquired *during* the
-      // window, inflating the base and the retention rate. A start-of-window
-      // customer existed before the window and hadn't churned/been deleted
-      // before it began.
-      const activeAtStartRow = await db('customers')
+      // Start-of-window cohort: existed before the window and hadn't churned or
+      // been deleted before it began. (Current-active would fold in everyone
+      // acquired *during* the window, inflating the base and the rate.)
+      const cohort = () => db('customers')
         .where('created_at', '<', start)
+        .where(function notDeletedBeforeStart() {
+          this.whereNull('deleted_at').orWhere('deleted_at', '>=', start);
+        });
+
+      // Churned during the window, restricted to that cohort — so a same-window
+      // signup→churn (never in the base) can't artificially lower retention.
+      const churnedRow = await cohort()
+        .whereNotNull('churned_at').where('churned_at', '>=', start)
+        .count('* as c').first();
+      churned = parseInt(churnedRow?.c || 0);
+
+      // Base = the cohort still un-churned as of the window start.
+      const activeAtStartRow = await cohort()
         .where(function notChurnedBeforeStart() {
           this.whereNull('churned_at').orWhere('churned_at', '>=', start);
         })
-        .where(function notDeletedBeforeStart() {
-          this.whereNull('deleted_at').orWhere('deleted_at', '>=', start);
-        })
         .count('* as c').first();
       const activeAtStart = parseInt(activeAtStartRow?.c || 0);
-      // Clamp so a rare same-window signup→churn (counted in `churned` but not
-      // in the start-of-window base) can't push retention below 0.
+
+      // churned ⊆ base, so the clamp is just belt-and-suspenders.
       retentionPct = activeAtStart > 0
         ? Math.max(0, Math.round(((activeAtStart - churned) / activeAtStart) * 1000) / 10)
         : null;
