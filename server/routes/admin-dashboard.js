@@ -484,7 +484,20 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
           this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
         })
         .where(function wasCustomerAtStart() {
-          this.whereIn('pipeline_stage', CUSTOMER_STAGES)
+          this.where(function retainedFromBeforeStart() {
+            // Still a customer AND already in that stage before the window — a
+            // proxy for "was a customer at the start", since there's no
+            // per-stage history (NULL stage-change = legacy row, assumed
+            // pre-existing). This keeps a lead that converted *during* the
+            // window out of the base. Trade-off: a customer→customer move
+            // mid-window (e.g. active_customer→at_risk) is also excluded;
+            // acceptable until a stage-history/customer_since signal exists.
+            this.whereIn('pipeline_stage', CUSTOMER_STAGES)
+              .where(function enteredBeforeStart() {
+                this.whereRaw(`pipeline_stage_changed_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
+                  .orWhereNull('pipeline_stage_changed_at');
+              });
+          })
             .orWhere(function churnedInOrAfterWindow() {
               this.where('pipeline_stage', 'churned').whereRaw(churnTimeAfterStart, [etDayStart(start)]);
             });
