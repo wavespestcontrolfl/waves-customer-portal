@@ -156,7 +156,15 @@ router.get('/', dashboardCache, async (req, res, next) => {
       paidRevenueTotal(som, today),
       paidRevenueTotal(solm, eolm),
       db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first(),
-      db('customers').where({ active: true }).whereNull('deleted_at').where('created_at', '>=', som).count('* as count').first(),
+      // New-customer acquisition this month. Counts everyone acquired in the
+      // window — current actives AND those who already churned same-month —
+      // because filtering on active=true alone silently drops a signup that
+      // churned within the month, undercounting gross adds. churned_at is only
+      // ever set on previously-active customers, so (active OR churned) is the
+      // "is/was a real customer" set without pulling in never-activated prospects.
+      db('customers').whereNull('deleted_at').where('created_at', '>=', som)
+        .where(function newlyAcquired() { this.where('active', true).orWhereNotNull('churned_at'); })
+        .count('* as count').first(),
       db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
         db.raw("COUNT(*) as total"),
@@ -444,15 +452,32 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
-    // Retention — customers who churned in window vs active at start
+    // Retention — customers who churned in window vs active at the START.
     let retentionPct = null, churned = 0;
     try {
       const churnedRow = await db('customers')
         .whereNotNull('churned_at').where('churned_at', '>=', start).count('* as c').first();
       churned = parseInt(churnedRow?.c || 0);
-      const activeStart = await db('customers').where({ active: true }).whereNull('deleted_at').count('* as c').first();
-      const base = parseInt(activeStart?.c || 0) + churned;
-      retentionPct = base > 0 ? Math.round(((base - churned) / base) * 1000) / 10 : null;
+      // Base = customers active AT THE START of the window, NOT the current
+      // active count. Current-active folds in everyone acquired *during* the
+      // window, inflating the base and the retention rate. A start-of-window
+      // customer existed before the window and hadn't churned/been deleted
+      // before it began.
+      const activeAtStartRow = await db('customers')
+        .where('created_at', '<', start)
+        .where(function notChurnedBeforeStart() {
+          this.whereNull('churned_at').orWhere('churned_at', '>=', start);
+        })
+        .where(function notDeletedBeforeStart() {
+          this.whereNull('deleted_at').orWhere('deleted_at', '>=', start);
+        })
+        .count('* as c').first();
+      const activeAtStart = parseInt(activeAtStartRow?.c || 0);
+      // Clamp so a rare same-window signup→churn (counted in `churned` but not
+      // in the start-of-window base) can't push retention below 0.
+      retentionPct = activeAtStart > 0
+        ? Math.max(0, Math.round(((activeAtStart - churned) / activeAtStart) * 1000) / 10)
+        : null;
     } catch (err) {
       logger.error(`[admin-dashboard] retention failed: ${err.message}`);
     }
@@ -638,7 +663,12 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
         paidRevenueTotal(from, to),
         db('scheduled_services').whereBetween('scheduled_date', [from, to])
           .select(db.raw("COUNT(*) as total"), db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")).first(),
-        db('customers').where({ active: true }).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
+        // Match the main KPI's new-customer definition: gross acquisitions in
+        // the window (active now OR churned), not just still-active — otherwise
+        // period-over-period new-customer deltas drop same-period churns.
+        db('customers').whereNull('deleted_at').whereBetween('created_at', [from, to + 'T23:59:59'])
+          .where(function newlyAcquired() { this.where('active', true).orWhereNotNull('churned_at'); })
+          .count('* as c').first(),
       ]);
       return {
         revenue: parseFloat(rev || 0),
