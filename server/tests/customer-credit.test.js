@@ -43,3 +43,35 @@ describe('customer-credit postCreditMovement validation', () => {
     ]);
   });
 });
+
+describe('customer-credit portalCreditsFromLedger', () => {
+  test('maps issuances to the portal credit shape with source→type', () => {
+    const rows = [
+      { id: 'a', delta: 25, source: 'referral', note: 'Referral reward', created_at: '2026-06-19' },
+      { id: 'b', delta: 10, source: 'manual', note: null, created_at: '2026-06-18' },
+      { id: 'c', delta: 5, source: 'adjustment', note: 'Goodwill', created_at: '2026-06-17' },
+    ];
+    expect(CustomerCredit.portalCreditsFromLedger(rows)).toEqual([
+      { id: 'a', type: 'referral', description: 'Referral reward', amount: 25, date: '2026-06-19' },
+      { id: 'b', type: 'promo', description: null, amount: 10, date: '2026-06-18' },
+      { id: 'c', type: 'promo', description: 'Goodwill', amount: 5, date: '2026-06-17' },
+    ]);
+  });
+
+  test('excludes consumption (delta <= 0) and rounds amounts', () => {
+    const rows = [
+      { id: 'a', delta: 25.005, source: 'referral', created_at: 't1' },
+      { id: 'b', delta: -25, source: 'invoice_application', created_at: 't2' },
+      { id: 'c', delta: 0, source: 'manual', created_at: 't3' },
+    ];
+    const out = CustomerCredit.portalCreditsFromLedger(rows);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: 'a', type: 'referral', amount: 25.01 });
+  });
+
+  test('returns [] for empty or non-array input', () => {
+    expect(CustomerCredit.portalCreditsFromLedger()).toEqual([]);
+    expect(CustomerCredit.portalCreditsFromLedger(null)).toEqual([]);
+    expect(CustomerCredit.portalCreditsFromLedger('nope')).toEqual([]);
+  });
+});

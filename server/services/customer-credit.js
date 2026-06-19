@@ -109,10 +109,40 @@ async function postCreditMovement({
   return result;
 }
 
+// Ledger `source` → the credit-group `type` the customer portal billing card
+// renders (referral / service / promo). Manual issuances + adjustments read as
+// "promo"; consumption sources (invoice_application / invoice_prepaid) never
+// appear because portalCreditsFromLedger only maps positive issuances.
+const CREDIT_DISPLAY_TYPE_BY_SOURCE = Object.freeze({
+  referral: 'referral',
+  manual: 'promo',
+  adjustment: 'promo',
+});
+
+/**
+ * Map raw customer_credit_ledger rows into the shape the portal billing
+ * "Credits" card expects ({ type, description, amount, date }). Only issuances
+ * (delta > 0) are shown as available credit — consumption rows (delta < 0, the
+ * credit being applied to an invoice) are spend, not an available balance.
+ */
+function portalCreditsFromLedger(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((e) => Number(e.delta) > 0)
+    .map((e) => ({
+      id: e.id,
+      type: CREDIT_DISPLAY_TYPE_BY_SOURCE[e.source] || 'promo',
+      description: e.note || null,
+      amount: round2(e.delta),
+      date: e.created_at,
+    }));
+}
+
 module.exports = {
   VALID_SOURCES,
+  CREDIT_DISPLAY_TYPE_BY_SOURCE,
   round2,
   getBalance,
   getLedger,
   postCreditMovement,
+  portalCreditsFromLedger,
 };
