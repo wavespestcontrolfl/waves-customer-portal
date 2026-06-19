@@ -7751,9 +7751,21 @@ export function CompletionPanel({
         lines.push(`[${prefix}] ${text}`);
       }
     };
-    selectedProtocolActionLabels.forEach((l) => pushIfMissing("Protocol", l));
-    selectedObservationLabels.forEach((l) => pushIfMissing("Found", l));
-    selectedRecommendationLabels.forEach((l) => pushIfMissing("Next", l));
+    // Only re-stitch labels still present in the pre-generation notes — the tech
+    // deselects a wrongly-picked item by deleting its tagged line, and
+    // handleSubmit honors that via labelsStillInNotes. Stitching the full
+    // selected-label state would resurrect a deliberately-removed action (and its
+    // re-entry scope) on the next Generate. (notes still holds the pre-draft text
+    // here; setNotes(report) hasn't applied yet.)
+    labelsStillInNotes(selectedProtocolActionLabels).forEach((l) =>
+      pushIfMissing("Protocol", l),
+    );
+    labelsStillInNotes(selectedObservationLabels).forEach((l) =>
+      pushIfMissing("Found", l),
+    );
+    labelsStillInNotes(selectedRecommendationLabels).forEach((l) =>
+      pushIfMissing("Next", l),
+    );
     if (!lines.length) return base;
     return base.trimEnd() + "\n\n" + lines.join("\n");
   }
@@ -7780,6 +7792,20 @@ export function CompletionPanel({
     const interactionLabel = CUSTOMER_INTERACTION_OPTIONS.find(
       (o) => o.value === normalizeCustomerInteractionValue(customerInteraction),
     )?.label || "";
+    // Reporting is ET-only: resolve the visit date in America/New_York so a
+    // non-ET device (or a completion logged just past browser-local midnight)
+    // can't draft customer-facing copy with the wrong visit date. Prefer the
+    // check-in instant; for office closeouts / backfilled visits with no
+    // check-in, fall back to the scheduled date (parsed at noon to dodge the
+    // date-only → UTC-midnight day-shift) before today.
+    const scheduledDateOnly = String(
+      service.scheduledDate || service.scheduled_date || service.date || "",
+    ).split("T")[0];
+    const visitDate = service.checkInTime
+      ? new Date(service.checkInTime)
+      : /^\d{4}-\d{2}-\d{2}$/.test(scheduledDateOnly)
+        ? new Date(`${scheduledDateOnly}T12:00:00`)
+        : new Date();
     const payload = {
       scheduledServiceId: service.id || null,
       customerName: service.customerName,
@@ -7793,14 +7819,7 @@ export function CompletionPanel({
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",
-      // Reporting is ET-only: format the visit date/time in America/New_York so
-      // a non-ET device (or a completion logged just past browser-local
-      // midnight) can't draft customer-facing copy with the wrong visit date.
-      // Tie the date to the check-in instant when present, else completion-now.
-      serviceDate: (service.checkInTime
-        ? new Date(service.checkInTime)
-        : new Date()
-      ).toLocaleDateString("en-US", {
+      serviceDate: visitDate.toLocaleDateString("en-US", {
         month: "long", day: "numeric", year: "numeric",
         timeZone: "America/New_York",
       }),
