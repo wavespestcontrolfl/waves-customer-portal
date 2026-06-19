@@ -159,7 +159,9 @@ describe('PayerService.attachToInvoice', () => {
 
   test('parses a JSON-string snapshot', async () => {
     const database = jest.fn(() => { throw new Error('should not query'); });
-    const inv = { id: 'i1', payer_id: 7, payer_snapshot: JSON.stringify({ company_name: 'West Bay' }) };
+    // Issued (sent_at) + a frozen AP email → no live lookup needed, so the
+    // "should not query" mock holds while we exercise JSON-string parsing.
+    const inv = { id: 'i1', payer_id: 7, status: 'sent', sent_at: '2026-06-18T12:00:00Z', payer_snapshot: JSON.stringify({ company_name: 'West Bay', ap_email: 'ap@westbay.com' }) };
     await PayerService.attachToInvoice(inv, database);
     expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'West Bay' }));
   });
@@ -176,13 +178,28 @@ describe('PayerService.attachToInvoice', () => {
     expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com' }));
   });
 
-  test('does NOT recover an AP email from a payer deactivated after the invoice was minted', async () => {
+  test('an UNFROZEN invoice whose payer was deactivated after minting is UNATTACHABLE (fails closed)', async () => {
+    // Never-delivered invoice + payer turned off after minting: must NOT attach
+    // and silently deliver to the stale snapshot AP inbox — leave invoice.payer
+    // unset so the send paths fail closed for operator correction.
     const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: false, ap_email: 'ap@westbay.com' }) }) }));
     const inv = {
-      id: 'i1', payer_id: 7,
-      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: null },
+      id: 'i1', payer_id: 7, status: 'draft',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
     };
     await PayerService.attachToInvoice(inv, database);
-    expect(inv.payer.ap_email).toBeNull();
+    expect(inv.payer).toBeUndefined();
+  });
+
+  test('an ISSUED invoice keeps its frozen snapshot even if the payer was later deactivated', async () => {
+    // Once delivered, the bill-to is an immutable record — a later deactivation
+    // must not strip it (the homeowner must never become the bill-to).
+    const database = jest.fn(() => { throw new Error('should not query the live payer for an issued invoice with a frozen AP email'); });
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'sent', sent_at: '2026-06-18T12:00:00Z',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' }));
   });
 });

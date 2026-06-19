@@ -219,34 +219,58 @@ async function attachToInvoice(invoice, database = db) {
     // (persistPayerApIfNeeded) must still see that the stored snapshot lacked an
     // AP email to know it needs to freeze the recovered one.
     const snap = { ...parsed };
-    // The snapshot freezes the bill-to IDENTITY (name/address) at creation, but
-    // the AP *email* is the delivery address and is only frozen once the invoice
-    // has actually been ISSUED/delivered (the round-3 intent: "an issued invoice
-    // keeps its Bill-To"). For an undelivered invoice (draft/scheduled/sending)
-    // prefer the live ACTIVE payer's current AP email, so an operator's
-    // correction takes effect on a resend; for an issued invoice the snapshot AP
-    // is authoritative. We also recover a live AP whenever the snapshot never had
-    // a usable one (minted before the AP email was set), issued or not.
     // "Issued/delivered" is determined by the persistent sent_at timestamp, not
     // the live status: sendViaSMSAndEmail claims a sendable invoice by flipping
     // its status to 'sending' BEFORE this attach runs (claimInvoiceForSend), so a
     // resend of an already-sent/viewed payer invoice would otherwise look
-    // undelivered and overwrite the frozen snapshot AP email with the live one.
-    // sent_at survives the claim (it's COALESCE-set on first delivery, never
-    // cleared), so it correctly keeps an issued invoice's delivered AP frozen.
+    // undelivered. sent_at survives the claim (COALESCE-set on first delivery,
+    // never cleared), so it correctly classifies an issued invoice as frozen.
     const apIsFrozen = !!invoice.sent_at
       || AP_FROZEN_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase());
-    if ((!apIsFrozen || !isEmailLike(snap.ap_email)) && invoice.payer_id) {
-      try {
-        const live = await getPayer(invoice.payer_id, database);
-        if (live && live.active !== false && live.ap_email && isEmailLike(live.ap_email)) {
-          snap.ap_email = live.ap_email;
+
+    // ISSUED invoice: the frozen bill-to is an immutable record of who it was
+    // billed to — keep the snapshot even if the payer was later edited or
+    // deactivated (round-3 intent: "an issued invoice keeps its Bill-To"). Only
+    // recover a live AP email if the snapshot never captured one (minted before
+    // ops filled it in).
+    if (apIsFrozen) {
+      if (!isEmailLike(snap.ap_email) && invoice.payer_id) {
+        try {
+          const live = await getPayer(invoice.payer_id, database);
+          if (live && live.active !== false && live.ap_email && isEmailLike(live.ap_email)) {
+            snap.ap_email = live.ap_email;
+          }
+        } catch (err) {
+          logger.warn(`[payer] attachToInvoice live AP-email recovery failed for invoice ${invoice.id}: ${err.message}`);
         }
-      } catch (err) {
-        logger.warn(`[payer] attachToInvoice live AP-email recovery failed for invoice ${invoice.id}: ${err.message}`);
       }
+      invoice.payer = snap;
+      return invoice;
     }
-    invoice.payer = snap;
+
+    // UNFROZEN invoice (draft/scheduled/sending, never delivered): not yet a
+    // record of issue, so it requires a live ACTIVE payer. A payer cleared or
+    // deactivated after minting makes the invoice UNATTACHABLE (invoice.payer is
+    // left unset) so the delivery paths FAIL CLOSED — the operator reactivates or
+    // corrects the bill-to instead of silently sending to the stale snapshot AP
+    // inbox. The live ACTIVE payer's AP email is preferred so a correction takes
+    // effect on a resend. (A snapshot with no payer_id link can't be re-verified;
+    // routing keys off payer_id so it stays self-pay — keep it for display.)
+    if (!invoice.payer_id) {
+      invoice.payer = snap;
+      return invoice;
+    }
+    try {
+      const live = await getPayer(invoice.payer_id, database);
+      if (live && live.active !== false) {
+        if (live.ap_email && isEmailLike(live.ap_email)) snap.ap_email = live.ap_email;
+        invoice.payer = snap;
+      }
+      // missing/inactive live payer → leave invoice.payer unset (fail closed)
+    } catch (err) {
+      logger.warn(`[payer] attachToInvoice live lookup failed for invoice ${invoice.id}: ${err.message}`);
+      // fail closed for unfrozen invoices on lookup error
+    }
     return invoice;
   }
   // Legacy invoices created before payer_snapshot existed fall back to the live

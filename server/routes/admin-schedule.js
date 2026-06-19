@@ -3448,6 +3448,17 @@ router.post('/:id/invoice', async (req, res, next) => {
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
+      // Third-party Bill-To: the current-resolution guard above can read self-pay
+      // if the live payer link was cleared/deactivated AFTER this invoice was
+      // minted — but the existing invoice still carries payer_id and its token is
+      // the AP's bearer pay link. Refuse reuse for in-person collection before
+      // applying any credit or returning the token; AR routes to the payer AP
+      // inbox (same rule as the fresh-mint guard).
+      if (existing.payer_id) {
+        return res.status(400).json({
+          error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
+        });
+      }
       const applied = await applyPrepaidCredit(existing);
       existing = applied.invoice;
       const alreadyPaid = ['paid', 'prepaid'].includes(existing.status);
