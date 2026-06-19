@@ -51,6 +51,7 @@ const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance } = require(
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
+  resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const CompanionCompletions = require('../services/service-report/companion-completions');
@@ -2160,20 +2161,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true' ? 'internal_only' : c.delivery,
       ]),
     );
-    // Delivery control for typed completions: profile delivery_mode
-    // (auto_send | internal_only | disabled) + a global kill env.
+    // Delivery control. For typed completions: profile delivery_mode
+    // (auto_send | internal_only | disabled) + a global kill env;
     // internal_only renders + stores the report (token/PDF) without customer
-    // SMS/email — the Phase-1b shadow mode. Recurring completions
-    // (findingsType null) are never affected.
+    // SMS/email — the Phase-1b shadow mode. For non-typed completions the
+    // routine Service Report auto-sends, EXCEPT internal-only consultations
+    // (completion_mode 'internal_only', e.g. Waves Assessment): an advisory
+    // walkthrough with no customer-facing report — delivery is forced
+    // 'disabled' (no public token minted) and customer comms are suppressed,
+    // while the service_records audit row is still written.
     // let, not const: re-derived from the record's FROZEN delivery posture
     // once the record is final, so a crash-resumed completion can't pick up
     // a later profile graduation (see the re-derivation before token mint).
-    let typedDeliveryMode = typedFindingsType
-      ? (process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true'
-        ? 'disabled'
-        : (completionProfile?.deliveryMode || 'auto_send'))
-      : 'auto_send';
-    let suppressTypedCustomerComms = !!typedFindingsType && typedDeliveryMode !== 'auto_send';
+    const deliveryPosture = resolveCompletionDeliveryPosture({
+      typedFindingsType,
+      completionMode: completionProfile?.completionMode,
+      profileDeliveryMode: completionProfile?.deliveryMode,
+      specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+    });
+    let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
+    let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
     let effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
 
     const reportServiceLine = detectServiceLine(svc.service_type);

@@ -1,6 +1,7 @@
 const {
   resolveCompletionProfileForScheduledService,
   serializeProfile,
+  resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 
 function makeKnex({ service = null, serviceResults = null, profile = null, hasTable = true } = {}) {
@@ -60,6 +61,106 @@ describe('service completion profiles', () => {
       defaultFollowupDays: 3,
       projectBacked: true,
       requiresProject: true,
+    });
+  });
+
+  test('serializes an internal-only consultation profile with no typed findings', () => {
+    const profile = serializeProfile({
+      service_key: 'lawn_inspection',
+      service_name_snapshot: 'Waves Assessment',
+      category: 'inspection',
+      billing_type: 'one_time',
+      completion_mode: 'internal_only',
+      project_type: null,
+      creates_service_record: true,
+      portal_visibility: 'internal_only',
+      portal_attach_policy: 'never',
+      followup_policy: 'none',
+      active: true,
+    });
+
+    expect(profile).toMatchObject({
+      serviceKey: 'lawn_inspection',
+      serviceName: 'Waves Assessment',
+      completionMode: 'internal_only',
+      findingsType: null,
+      projectType: null,
+      projectBacked: false,
+      requiresProject: false,
+      createsServiceRecord: true,
+      portalVisibility: 'internal_only',
+      portalAttachPolicy: 'never',
+    });
+  });
+
+  describe('resolveCompletionDeliveryPosture', () => {
+    test('internal-only consultation forces disabled delivery and suppresses comms', () => {
+      const posture = resolveCompletionDeliveryPosture({
+        typedFindingsType: null,
+        completionMode: 'internal_only',
+      });
+      expect(posture).toEqual({
+        typedDeliveryMode: 'disabled',
+        suppressCustomerComms: true,
+        isInternalOnly: true,
+      });
+    });
+
+    test('routine non-typed completion auto-sends', () => {
+      const posture = resolveCompletionDeliveryPosture({
+        typedFindingsType: null,
+        completionMode: 'service_report',
+      });
+      expect(posture).toEqual({
+        typedDeliveryMode: 'auto_send',
+        suppressCustomerComms: false,
+        isInternalOnly: false,
+      });
+    });
+
+    test('typed completion is unaffected by internal-only branch and honors profile delivery_mode', () => {
+      expect(resolveCompletionDeliveryPosture({
+        typedFindingsType: 'one_time_lawn_treatment',
+        completionMode: 'service_report',
+        profileDeliveryMode: 'auto_send',
+      })).toEqual({
+        typedDeliveryMode: 'auto_send',
+        suppressCustomerComms: false,
+        isInternalOnly: false,
+      });
+
+      expect(resolveCompletionDeliveryPosture({
+        typedFindingsType: 'one_time_lawn_treatment',
+        completionMode: 'service_report',
+        profileDeliveryMode: 'internal_only',
+      })).toEqual({
+        typedDeliveryMode: 'internal_only',
+        suppressCustomerComms: true,
+        isInternalOnly: false,
+      });
+    });
+
+    test('global specialty kill env disables typed delivery', () => {
+      const posture = resolveCompletionDeliveryPosture({
+        typedFindingsType: 'pest_inspection',
+        completionMode: 'service_report',
+        profileDeliveryMode: 'auto_send',
+        specialtyDeliveryDisabled: true,
+      });
+      expect(posture).toMatchObject({ typedDeliveryMode: 'disabled', suppressCustomerComms: true });
+    });
+
+    test('completion_mode internal_only is ignored when a typed findings type is present', () => {
+      // A typed findings type always wins — internal_only only applies to the
+      // non-typed routine path, so a (hypothetical) typed + internal_only row
+      // must not be treated as a consultation.
+      const posture = resolveCompletionDeliveryPosture({
+        typedFindingsType: 'pest_inspection',
+        completionMode: 'internal_only',
+        profileDeliveryMode: 'auto_send',
+      });
+      expect(posture.isInternalOnly).toBe(false);
+      expect(posture.typedDeliveryMode).toBe('auto_send');
     });
   });
 
