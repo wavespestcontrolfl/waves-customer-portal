@@ -1178,6 +1178,8 @@ router.get('/', async (req, res, next) => {
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        payerId: s.payer_id || null,
+        poNumber: s.po_number || null,
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
@@ -1321,6 +1323,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
+          'scheduled_services.payer_id', 'scheduled_services.po_number',
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -1391,6 +1394,8 @@ router.get('/week', async (req, res, next) => {
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
           createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        payerId: s.payer_id || null,
+        poNumber: s.po_number || null,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
@@ -2128,6 +2133,11 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
         'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
         'scheduled_services.source_estimate_id',
+        // Per-job Bill-To: the Edit-appointment modal opened from the list echoes
+        // these on save, so they must come back here — otherwise a save posts
+        // blank payerId/poNumber and silently clears an existing per-job payer/PO
+        // (and trips the admin-only actual-change 403 for techs).
+        'scheduled_services.payer_id', 'scheduled_services.po_number',
         'customers.first_name', 'customers.last_name', 'customers.address_line1 as address', 'customers.city', 'customers.zip',
         'technicians.name as tech_name'
       )
@@ -2165,6 +2175,8 @@ router.get('/list', async (req, res, next) => {
       isRecurring: s.is_recurring,
       recurringPattern: s.recurring_pattern || null,
       sourceEstimateId: s.source_estimate_id || null,
+      payerId: s.payer_id || null,
+      poNumber: s.po_number || null,
     }));
 
     res.json({
@@ -2324,6 +2336,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       addons,
       serviceId,
       createInvoice,
+      payerId, poNumber,
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
@@ -2470,6 +2483,37 @@ router.put('/:id/update-details', async (req, res, next) => {
       try {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.create_invoice_on_complete) updates.create_invoice_on_complete = !!createInvoice;
+      } catch {}
+    }
+    // Per-job third-party Bill-To override + PO. Null clears the override so
+    // the job falls back to the customer's default payer (or self-pay).
+    // CHANGING the payer/PO is admin-only (it controls where the invoice is
+    // routed and who pays). The edit modal always echoes these fields on every
+    // save, so a tech editing something unrelated must NOT be rejected — only
+    // an actual change vs the stored values is admin-gated.
+    if (payerId !== undefined || poNumber !== undefined) {
+      try {
+        const cols = await db('scheduled_services').columnInfo();
+        const hasPayerCol = !!cols.payer_id;
+        const hasPoCol = !!cols.po_number;
+        if (hasPayerCol || hasPoCol) {
+          const existing = await db('scheduled_services')
+            .where({ id: req.params.id })
+            .first('payer_id', 'po_number');
+          const nextPayerId = payerId === undefined
+            ? (existing?.payer_id ?? null)
+            : ((payerId === '' || payerId == null) ? null : (parseInt(payerId, 10) || null));
+          const nextPo = poNumber === undefined
+            ? (existing?.po_number ?? null)
+            : (poNumber ? String(poNumber).trim().slice(0, 64) : null);
+          const payerChanged = hasPayerCol && (existing?.payer_id ?? null) !== nextPayerId;
+          const poChanged = hasPoCol && (existing?.po_number ?? null) !== nextPo;
+          if ((payerChanged || poChanged) && req.techRole !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
+          }
+          if (payerChanged) updates.payer_id = nextPayerId;
+          if (poChanged) updates.po_number = nextPo;
+        }
       } catch {}
     }
     // Multi-line edit: an explicit `addons` array describes the full set of
@@ -2704,6 +2748,35 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // Third-party Bill-To: a payer/PO change on a recurring PARENT must reach
+        // the already-spawned pending child visits, INDEPENDENT of any date/
+        // cadence rewrite (that path is separately gated by
+        // shouldRewritePendingRecurringRows and propagates payer/PO too, but it
+        // doesn't run when only the Bill-To changed). Without this, editing just
+        // the payer/PO on a series leaves future visits routed to the old payer.
+        const payerOrPoChanged = Object.prototype.hasOwnProperty.call(updates, 'payer_id')
+          || Object.prototype.hasOwnProperty.call(updates, 'po_number');
+        if (payerOrPoChanged) {
+          const parentRow = await trx('scheduled_services')
+            .where({ id: req.params.id })
+            .first('payer_id', 'po_number', 'is_recurring', 'recurring_parent_id');
+          if (parentRow?.is_recurring && !parentRow.recurring_parent_id) {
+            const seriesCols = await trx('scheduled_services').columnInfo();
+            const childPayerUpdates = {};
+            if (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && seriesCols.payer_id) {
+              childPayerUpdates.payer_id = parentRow.payer_id ?? null;
+            }
+            if (Object.prototype.hasOwnProperty.call(updates, 'po_number') && seriesCols.po_number) {
+              childPayerUpdates.po_number = parentRow.po_number ?? null;
+            }
+            if (Object.keys(childPayerUpdates).length > 0) {
+              await trx('scheduled_services')
+                .where({ recurring_parent_id: req.params.id })
+                .whereIn('status', ['pending', 'confirmed'])
+                .update(childPayerUpdates);
+            }
+          }
+        }
         if (reminderBefore) {
           const prevDate = reminderBefore.scheduled_date instanceof Date
             ? reminderBefore.scheduled_date.toISOString().split('T')[0]
@@ -2902,6 +2975,10 @@ router.put('/:id/update-details', async (req, res, next) => {
               if (seriesCols.recurring_interval_days) childUpdates.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
               if (seriesCols.skip_weekends) childUpdates.skip_weekends = skipChild;
               if (seriesCols.weekend_shift && skipChild) childUpdates.weekend_shift = dirChild;
+              // Keep existing future visits' Bill-To in lockstep with the
+              // (freshly-updated) series parent so a payer change propagates.
+              if (seriesCols.payer_id) childUpdates.payer_id = parent.payer_id ?? null;
+              if (seriesCols.po_number) childUpdates.po_number = parent.po_number ?? null;
               await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
@@ -3037,6 +3114,11 @@ router.put('/:id/update-details', async (req, res, next) => {
               applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons);
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
               if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
+              // Inherit the (freshly-updated) parent's third-party Bill-To so
+              // future visits in the series route to the same payer/PO instead
+              // of silently falling back to the customer default / self-pay.
+              if (cols.payer_id) childData.payer_id = parent.payer_id ?? null;
+              if (cols.po_number) childData.po_number = parent.po_number ?? null;
             } catch { /* non-blocking */ }
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {
@@ -3261,6 +3343,28 @@ router.post('/:id/invoice', async (req, res, next) => {
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
+    // Third-party Bill-To: this endpoint mints a collectible invoice and returns
+    // its token to the tech checkout sheet for in-person card/ACH collection. A
+    // payer-billed visit must never be collected from the homeowner in person —
+    // AR routes to the payer AP inbox, and the invoice is sent there on
+    // completion. Refuse the in-person mint for payer-resolved visits.
+    try {
+      const PayerService = require('../services/payer');
+      const resolved = await PayerService.resolveForInvoice({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+      });
+      if (resolved?.payerId) {
+        return res.status(400).json({
+          error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
+        });
+      }
+    } catch (e) {
+      // resolveForInvoice never throws, but never let a payer lookup break the
+      // existing self-pay charge-now flow.
+      logger.warn(`[admin-schedule] payer resolve failed on charge-now for service ${svc.id}: ${e.message}`);
+    }
+
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
     const applyPrepaidCredit = async (invoice) => {
@@ -3344,6 +3448,17 @@ router.post('/:id/invoice', async (req, res, next) => {
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
+      // Third-party Bill-To: the current-resolution guard above can read self-pay
+      // if the live payer link was cleared/deactivated AFTER this invoice was
+      // minted — but the existing invoice still carries payer_id and its token is
+      // the AP's bearer pay link. Refuse reuse for in-person collection before
+      // applying any credit or returning the token; AR routes to the payer AP
+      // inbox (same rule as the fresh-mint guard).
+      if (existing.payer_id) {
+        return res.status(400).json({
+          error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
+        });
+      }
       const applied = await applyPrepaidCredit(existing);
       existing = applied.invoice;
       const alreadyPaid = ['paid', 'prepaid'].includes(existing.status);
@@ -3478,6 +3593,19 @@ router.post('/:id/invoice', async (req, res, next) => {
     });
 
     let invoice = minted.invoice;
+    // Third-party Bill-To (post-lock recheck): the pre-lock guard above rejects
+    // payer-resolved visits, but the minted/replayed invoice can still be
+    // payer-billed inside the lock window — InvoiceService.create() auto-resolves
+    // a default payer (so a payer set between the pre-lock check and this mint
+    // lands payer_id on the new row), and the replay branch can surface a
+    // pre-existing payer invoice from another path. Either way we must not apply
+    // the homeowner's prepaid credit to it or hand the AP's bearer /pay/:token to
+    // tech checkout — re-check before both, returning the same 400.
+    if (invoice.payer_id) {
+      return res.status(400).json({
+        error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
+      });
+    }
     const applied = await applyPrepaidCredit(invoice);
     invoice = applied.invoice;
 

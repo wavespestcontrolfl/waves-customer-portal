@@ -28,6 +28,7 @@ const trackTransitions = require('./track-transitions');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { generateRecap, smsRecap } = require('./completion-recap');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storage');
 const { etDateString } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
@@ -369,6 +370,14 @@ async function submitRecap({
     if (productRows.length) {
       await trx('service_products').where({ service_record_id: recordId }).del();
       await trx('service_products').insert(productRows);
+    }
+
+    // Re-completing an EXISTING record rewrites its notes / rating / products —
+    // all of which the service report renders — so drop any cached PDF for it.
+    // The report cache key is content-insensitive, so without this the next
+    // view/email would serve the pre-edit PDF. New records have no cached PDF.
+    if (existing) {
+      await invalidateServiceReportPdfCache(recordId, trx);
     }
   });
 

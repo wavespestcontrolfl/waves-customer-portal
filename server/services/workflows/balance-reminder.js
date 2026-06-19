@@ -169,12 +169,35 @@ class BalanceReminder {
   }
 
   async getCustomerBalance(customerId) {
-    const outstanding = await db("payments")
+    const allOutstanding = await db("payments")
       .where({ "payments.customer_id": customerId })
       .whereIn("status", ["failed", "upcoming"])
       .whereNull("superseded_by_payment_id")
       .where("payment_date", "<", etDateString())
       .orderBy("payment_date", "asc");
+
+    // Third-party Bill-To: a payer-billed invoice's payment rows sit under the
+    // homeowner's customer_id but are the payer's debt — drop them so an AP
+    // ACH/card failure doesn't inflate the homeowner's balance / overdue age and
+    // trigger an early or incorrect balance reminder.
+    const payerInvRows = await db("invoices")
+      .where({ customer_id: customerId })
+      .whereNotNull("payer_id")
+      .select("id")
+      .catch(() => []);
+    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+    const isPayerPayment = (p) => {
+      try {
+        const m = typeof p.metadata === "string" ? JSON.parse(p.metadata) : p.metadata;
+        const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
+        return !!(invId && payerInvoiceIds.has(invId));
+      } catch {
+        return false;
+      }
+    };
+    const outstanding = payerInvoiceIds.size === 0
+      ? allOutstanding
+      : allOutstanding.filter((p) => !isPayerPayment(p));
 
     if (!outstanding.length) return null;
 
@@ -190,6 +213,9 @@ class BalanceReminder {
     const oldestInvoice = await db("invoices")
       .where({ customer_id: customerId })
       .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
+      // Third-party Bill-To: never surface a payer-billed invoice as the
+      // homeowner's oldest unpaid invoice / pay link — AR routes to the payer.
+      .whereNull("payer_id")
       .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
       .first();
 
@@ -424,10 +450,13 @@ class BalanceReminder {
         .first();
       if (sentRecently) continue;
 
-      // Get oldest unpaid invoice for title and service date
+      // Get oldest unpaid invoice for title and service date. Third-party
+      // Bill-To: exclude payer-billed invoices — the homeowner is never the
+      // bill-to and must not be texted/emailed a payer invoice's pay link.
       const oldestInvoice = await db("invoices")
         .where({ customer_id: customer.id })
         .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
+        .whereNull("payer_id")
         .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
         .first();
       if (!oldestInvoice?.id || !oldestInvoice?.token) {

@@ -1,0 +1,218 @@
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const PayerService = require('../services/payer');
+
+// Minimal knex-ish chain: where(...).first(...) resolves to the table's result.
+function makeDb(tables) {
+  return jest.fn((table) => {
+    const result = Object.prototype.hasOwnProperty.call(tables, table) ? tables[table] : null;
+    const chain = {
+      where: () => chain,
+      first: () => Promise.resolve(result),
+    };
+    return chain;
+  });
+}
+
+describe('PayerService.resolveForInvoice precedence', () => {
+  test('per-job payer on the scheduled service wins over the customer default', async () => {
+    const database = makeDb({
+      scheduled_services: { payer_id: 10, po_number: 'PO-1' },
+      customers: { payer_id: 20 },
+      payers: { id: 10, active: true },
+    });
+    const out = await PayerService.resolveForInvoice({
+      database, customerId: 'c1', scheduledServiceId: 's1',
+    });
+    expect(out).toMatchObject({ payerId: 10, poNumber: 'PO-1', taxExempt: false });
+  });
+
+  test('falls back to the customer default payer when the job has none', async () => {
+    const database = makeDb({
+      scheduled_services: { payer_id: null, po_number: null },
+      customers: { payer_id: 20 },
+      payers: { id: 20, active: true },
+    });
+    const out = await PayerService.resolveForInvoice({
+      database, customerId: 'c1', scheduledServiceId: 's1',
+    });
+    expect(out).toMatchObject({ payerId: 20, poNumber: null, taxExempt: false });
+  });
+
+  test('surfaces taxExempt from the resolved active payer', async () => {
+    const database = makeDb({
+      customers: { payer_id: 20 },
+      payers: { id: 20, active: true, tax_exempt: true },
+    });
+    const out = await PayerService.resolveForInvoice({ database, customer: { id: 'c1', payer_id: 20 } });
+    expect(out).toMatchObject({ payerId: 20, poNumber: null, taxExempt: true });
+  });
+
+  test('scopes the per-job lookup by customer — a mismatched job is ignored, falls back to default', async () => {
+    // scheduled_services lookup is constrained by customer_id; a stale/other-
+    // customer scheduledServiceId returns no row, so the customer default wins.
+    const database = jest.fn((table) => {
+      const chain = {
+        _table: table,
+        where(clause) { this._clause = clause; return this; },
+        first() {
+          if (this._table === 'scheduled_services') {
+            // simulate the customer_id constraint filtering the row out
+            return Promise.resolve(this._clause && this._clause.customer_id === 'c1' ? null : null);
+          }
+          if (this._table === 'customers') return Promise.resolve({ payer_id: 20 });
+          if (this._table === 'payers') return Promise.resolve({ id: 20, active: true });
+          return Promise.resolve(null);
+        },
+      };
+      return chain;
+    });
+    const out = await PayerService.resolveForInvoice({
+      database, customerId: 'c1', scheduledServiceId: 's-other',
+    });
+    expect(out).toMatchObject({ payerId: 20, poNumber: null, taxExempt: false });
+  });
+
+  test('an inactive payer link resolves to self-pay (null), not a dead AP inbox', async () => {
+    const database = makeDb({
+      customers: { payer_id: 20 },
+      payers: { id: 20, active: false },
+    });
+    const out = await PayerService.resolveForInvoice({ database, customer: { payer_id: 20 } });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
+  });
+
+  test('no payer anywhere → self-pay', async () => {
+    const database = makeDb({ customers: { payer_id: null }, payers: null });
+    const out = await PayerService.resolveForInvoice({ database, customer: { payer_id: null } });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
+  });
+
+  test('never throws — a DB failure fails soft to self-pay', async () => {
+    const database = jest.fn(() => { throw new Error('boom'); });
+    const out = await PayerService.resolveForInvoice({
+      database, customerId: 'c1', scheduledServiceId: 's1',
+    });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
+  });
+});
+
+describe('PayerService.attachToInvoice', () => {
+  test('attaches an active payer', async () => {
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: true, ap_email: 'ap@x.com' }) }) }));
+    const inv = { id: 'i1', payer_id: 7 };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ id: 7 }));
+  });
+
+  test('does NOT attach a payer deactivated after the invoice was minted', async () => {
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: false }) }) }));
+    const inv = { id: 'i1', payer_id: 7 };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toBeUndefined();
+  });
+
+  test('no-op when the invoice has no payer_id', async () => {
+    const database = jest.fn(() => { throw new Error('should not query'); });
+    const inv = { id: 'i1' };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toBeUndefined();
+  });
+
+  test('an ISSUED invoice uses the frozen snapshot AP email (does not query the live payer)', async () => {
+    const database = jest.fn(() => { throw new Error('should not query the live payer for an issued invoice'); });
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'paid',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' }));
+  });
+
+  test('a RESEND caught mid-claim (status "sending") keeps the frozen AP email when already delivered (sent_at set)', async () => {
+    // sendViaSMSAndEmail claims a sendable invoice by flipping status -> "sending"
+    // BEFORE attach runs; "sending" is not a frozen status, so without the
+    // sent_at check a resend of an already-delivered payer invoice would look
+    // undelivered and overwrite the frozen snapshot AP with the live payer email.
+    const database = jest.fn(() => { throw new Error('should not query the live payer for an already-delivered invoice'); });
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'sending', sent_at: '2026-06-18T12:00:00Z',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ ap_email: 'frozen@westbay.com' }));
+  });
+
+  test('an UNDELIVERED invoice prefers the live active payer AP email over a stale snapshot', async () => {
+    // Snapshot froze a (now-corrected) AP email at creation; ops fixed the live
+    // payer. A draft/undelivered invoice should resend to the corrected inbox.
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: true, ap_email: 'corrected@westbay.com' }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'draft',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'stale@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    // Identity stays frozen; AP email tracks the live payer until delivery.
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'corrected@westbay.com' }));
+  });
+
+  test('parses a JSON-string snapshot', async () => {
+    const database = jest.fn(() => { throw new Error('should not query'); });
+    // Issued (sent_at) + a frozen AP email → no live lookup needed, so the
+    // "should not query" mock holds while we exercise JSON-string parsing.
+    const inv = { id: 'i1', payer_id: 7, status: 'sent', sent_at: '2026-06-18T12:00:00Z', payer_snapshot: JSON.stringify({ company_name: 'West Bay', ap_email: 'ap@westbay.com' }) };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'West Bay' }));
+  });
+
+  test('recovers the live AP email when the frozen snapshot has none (minted before AP email was set)', async () => {
+    // Snapshot froze the identity but no AP email; ops later filled it in.
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: true, ap_email: 'ap@westbay.com' }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7,
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: null },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    // Frozen identity preserved, AP email recovered for delivery.
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'ap@westbay.com' }));
+  });
+
+  test('an UNFROZEN invoice whose payer was deactivated after minting is UNATTACHABLE (fails closed)', async () => {
+    // Never-delivered invoice + payer turned off after minting: must NOT attach
+    // and silently deliver to the stale snapshot AP inbox — leave invoice.payer
+    // unset so the send paths fail closed for operator correction.
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: false, ap_email: 'ap@westbay.com' }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'draft',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toBeUndefined();
+  });
+
+  test('an UNFROZEN invoice clears a stale snapshot AP email when the live active payer has none (fails closed)', async () => {
+    // Live payer is active but its AP email was removed; a draft must NOT fall
+    // back to the stale creation-snapshot AP — clear it so delivery fails closed.
+    const database = jest.fn(() => ({ where: () => ({ first: () => Promise.resolve({ id: 7, active: true, ap_email: null }) }) }));
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'draft',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'stale@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay' }));
+    expect(inv.payer.ap_email).toBeNull();
+  });
+
+  test('an ISSUED invoice keeps its frozen snapshot even if the payer was later deactivated', async () => {
+    // Once delivered, the bill-to is an immutable record — a later deactivation
+    // must not strip it (the homeowner must never become the bill-to).
+    const database = jest.fn(() => { throw new Error('should not query the live payer for an issued invoice with a frozen AP email'); });
+    const inv = {
+      id: 'i1', payer_id: 7, status: 'sent', sent_at: '2026-06-18T12:00:00Z',
+      payer_snapshot: { company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' },
+    };
+    await PayerService.attachToInvoice(inv, database);
+    expect(inv.payer).toEqual(expect.objectContaining({ company_name: 'Homes by West Bay', ap_email: 'frozen@westbay.com' }));
+  });
+});

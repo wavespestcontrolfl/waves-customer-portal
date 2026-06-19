@@ -502,9 +502,23 @@ async function calculateUpdateFinancials({
   const isCommercial =
     customer?.property_type === "commercial" ||
     customer?.property_type === "business";
+  // Third-party Bill-To: a tax-exempt payer zeroes tax on its invoices (create()
+  // forces rate 0). Preserve that on edit — otherwise re-taxing a commercial
+  // invoice here would put tax back on a tax-exempt payer's AP total that
+  // creation/preview correctly omitted. Read the exemption off the invoice's
+  // FROZEN payer_id (honors a per-job payer); degrades to normal tax if the
+  // payers table doesn't exist yet (migration not run) or the payer is inactive.
+  let payerTaxExempt = false;
+  if (invoice?.payer_id) {
+    const payerRow = await db("payers")
+      .where({ id: invoice.payer_id })
+      .first("tax_exempt", "active")
+      .catch(() => null);
+    payerTaxExempt = !!(payerRow && payerRow.active !== false && payerRow.tax_exempt);
+  }
   let rate = 0;
   let taxAmount = 0;
-  if (isCommercial) {
+  if (isCommercial && !payerTaxExempt) {
     const defaultRate =
       invoice?.tax_rate != null ? Number(invoice.tax_rate) : 0.07;
     rate = taxRate !== undefined ? Number(taxRate) : defaultRate;
@@ -659,6 +673,44 @@ const InvoiceService = {
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
+
+    // Resolve third-party Bill-To payer (builder / property manager / etc.):
+    // scheduled_service.payer_id ?? customer.payer_id. Snapshot onto the
+    // invoice so the bill-to is frozen on the document even if the link later
+    // changes. resolveForInvoice() fails soft to self-pay and never throws, so
+    // a payer lookup can never block invoicing — and the inserted row is
+    // unchanged for the (overwhelmingly common) self-pay case.
+    const PayerService = require("./payer");
+    // When the caller passes only a serviceRecordId (e.g. completion-time
+    // invoicing), derive that visit's scheduled_service_id so a per-job payer
+    // override on the appointment is honored — resolveForInvoice keys per-job
+    // Bill-To routing off the scheduled service, and without this the invoice
+    // would fall back to the customer default (or self-pay) and bill the wrong
+    // party. Only the payer lookup uses the derived id; the row's own
+    // scheduled_service_id linkage below is unchanged.
+    let payerScheduledServiceId = scheduledServiceId;
+    if (!payerScheduledServiceId && serviceRecordId) {
+      const srLink = await database("service_records")
+        .where({ id: serviceRecordId, customer_id: customerId })
+        .first("scheduled_service_id")
+        .catch(() => null);
+      if (srLink?.scheduled_service_id) payerScheduledServiceId = srLink.scheduled_service_id;
+    }
+    const {
+      payerId: resolvedPayerId,
+      poNumber: resolvedPoNumber,
+      taxExempt: resolvedTaxExempt,
+      snapshot: resolvedPayerSnapshot,
+    } = await PayerService.resolveForInvoice({
+      database,
+      customerId,
+      customer,
+      scheduledServiceId: payerScheduledServiceId,
+    });
+    // A tax-exempt payer (builder/HOA with a resale/exemption cert on file)
+    // zeroes tax on its invoices — even commercial jobs that would otherwise
+    // carry the +7%. Force the rate to 0 so the tax block below resolves to 0.
+    if (resolvedTaxExempt) taxRate = 0;
 
     // Pull service record context if linked
     let serviceData = serviceDate ? { service_date: serviceDate } : {};
@@ -994,8 +1046,17 @@ const InvoiceService = {
     // The `depositCredit` param is capped HERE against the actual after-tax
     // value so no requested dollar is consumed without appearing in the
     // total. The floor guards rounding edges.
+    // Third-party Bill-To: a homeowner's estimate deposit must never be credited
+    // against a payer-billed invoice — that applies the service recipient's money
+    // to the third-party AP's bill (wrong-party credit) and would consume the
+    // homeowner's deposit ledger against an invoice they don't owe, leaving the
+    // payer invoice/ledger unreconcilable. Skip the credit entirely when this
+    // invoice resolved to a payer; the deposit stays received on the homeowner's
+    // ledger (callers gate their consume on the returned applied_deposit_credit,
+    // so 0 here leaves the ledger untouched). Payer-billed deposit handling
+    // (roll-forward / refund) is Phase 2.
     let appliedDepositCredit = 0;
-    if (depositCredit && Number(depositCredit.amount) > 0) {
+    if (!resolvedPayerId && depositCredit && Number(depositCredit.amount) > 0) {
       const ceilingCents = Math.max(
         0,
         Math.round((afterDiscount + taxAmount) * 100),
@@ -1050,6 +1111,9 @@ const InvoiceService = {
           ...(scheduledServiceId
             ? { scheduled_service_id: scheduledServiceId }
             : {}),
+          ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
+          ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
+          ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...serviceData,
         });
         break;
@@ -1169,10 +1233,34 @@ const InvoiceService = {
       }
     }
 
+    // A tax-exempt third-party payer zeroes tax — mirror create()'s resolution
+    // so the confirmation total matches the invoice that will actually be
+    // created (esp. for WDO report+invoice bundles billed to an exempt builder).
+    let payerTaxExempt = false;
+    try {
+      const PayerService = require("./payer");
+      // Mirror create(): when linked only by serviceRecordId, derive the visit's
+      // scheduled_service_id so a per-job (tax-exempt) payer override is reflected
+      // in the dry-run total — otherwise the preview shows tax the real, exempt
+      // invoice won't actually bill.
+      let previewScheduledServiceId = scheduledServiceId;
+      if (!previewScheduledServiceId && serviceRecordId) {
+        const srLink = await database("service_records")
+          .where({ id: serviceRecordId, customer_id: customerId })
+          .first("scheduled_service_id")
+          .catch(() => null);
+        if (srLink?.scheduled_service_id) previewScheduledServiceId = srLink.scheduled_service_id;
+      }
+      const resolved = await PayerService.resolveForInvoice({
+        database, customerId, customer: cust, scheduledServiceId: previewScheduledServiceId,
+      });
+      payerTaxExempt = !!resolved.taxExempt;
+    } catch { /* preview proceeds with the normal tax calc */ }
+
     const isCommercial =
       cust.property_type === "commercial" || cust.property_type === "business";
     let rate, taxAmount;
-    if (!isCommercial) {
+    if (!isCommercial || payerTaxExempt) {
       rate = 0;
       taxAmount = 0;
     } else {
@@ -1398,6 +1486,13 @@ const InvoiceService = {
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { invoice, previousStatus, claimed } = claim;
 
+    // Third-party Bill-To: never text the homeowner a pay link for a
+    // payer-billed invoice — the pay link + AR route to the payer (email).
+    if (invoice.payer_id) {
+      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      return { sent: false, reason: "Suppressed — invoice billed to a third-party payer", code: "payer_billed" };
+    }
+
     const customer = await db("customers")
       .where({ id: invoice.customer_id })
       .first();
@@ -1593,21 +1688,29 @@ const InvoiceService = {
       }
     }
 
-    try {
-      const smsResult = await this.sendViaSMS(invoiceId, {
-        allowClaimed: true,
-        payUrlParams,
-      });
-      if (smsResult?.payUrl) payUrl = smsResult.payUrl;
-      if (smsResult?.sent) {
-        sms.ok = true;
-      } else {
-        sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
-        if (smsResult?.code) sms.code = smsResult.code;
+    // Third-party Bill-To: a payer-billed invoice must NOT text the homeowner
+    // a pay link — AR and the pay link route to the payer (email) instead.
+    // The homeowner is the service recipient, not the party being asked to pay.
+    if (claim.invoice?.payer_id) {
+      sms.error = "Suppressed — invoice billed to a third-party payer";
+      sms.code = "payer_billed";
+    } else {
+      try {
+        const smsResult = await this.sendViaSMS(invoiceId, {
+          allowClaimed: true,
+          payUrlParams,
+        });
+        if (smsResult?.payUrl) payUrl = smsResult.payUrl;
+        if (smsResult?.sent) {
+          sms.ok = true;
+        } else {
+          sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
+          if (smsResult?.code) sms.code = smsResult.code;
+        }
+      } catch (err) {
+        sms.error = err.message;
+        if (err.code) sms.code = err.code;
       }
-    } catch (err) {
-      sms.error = err.message;
-      if (err.code) sms.code = err.code;
     }
 
     try {
@@ -1862,6 +1965,13 @@ const InvoiceService = {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
+
+    // Third-party Bill-To: never text the homeowner a receipt for a
+    // payer-billed invoice — the receipt page would expose the payer's
+    // payment-method last4, and AR/receipts route to the payer (email).
+    if (invoice.payer_id) {
+      return { sent: false, reason: "payer_billed" };
+    }
 
     if (invoice.receipt_sent_at && !force) {
       logger.info(

@@ -313,7 +313,7 @@ function publicEmailRecipient(recipient) {
 async function getInvoiceDeliveryRecipients(invoiceId) {
   const invoice = await db('invoices')
     .where({ id: invoiceId })
-    .select('id', 'customer_id', 'invoice_number')
+    .select('id', 'customer_id', 'invoice_number', 'payer_id', 'payer_snapshot', 'status', 'sent_at')
     .first();
   if (!invoice) return null;
 
@@ -322,6 +322,38 @@ async function getInvoiceDeliveryRecipients(invoiceId) {
     .select('id', 'first_name', 'last_name', 'company_name', 'email', 'phone')
     .first();
   if (!customer) return null;
+
+  // Third-party Bill-To: a payer-billed invoice is delivered to the payer's AP
+  // inbox, never the homeowner — homeowner SMS is suppressed server-side (it
+  // would expose the payer's pay link / card last4). Report the payer AP as the
+  // only email recipient and NO SMS recipient, so the admin UI gates Send
+  // Invoice / Send Receipt / Record-Payment-receipt correctly. A payer with no
+  // usable AP email (or an unattachable/deactivated payer) reports no recipient
+  // → Send stays disabled until the operator adds an AP email or one-off.
+  if (invoice.payer_id) {
+    const PayerService = require('../services/payer');
+    await PayerService.attachToInvoice(invoice);
+    const payerRcpt = invoice.payer ? PayerService.payerRecipient(invoice.payer) : null;
+    return {
+      invoiceId: invoice.id,
+      invoiceNumber: invoice.invoice_number,
+      customerId: customer.id,
+      customerName: fullName(customer),
+      payerBilled: true,
+      primaryContact: {
+        name: payerRcpt?.name || '',
+        email: payerRcpt?.email || '',
+        phone: '',
+        role: 'payer',
+      },
+      smsRecipient: null,
+      emailRecipient: payerRcpt,
+      billingPreference: {
+        name: payerRcpt?.name || '',
+        email: payerRcpt?.email || '',
+      },
+    };
+  }
 
   const prefs = await db('notification_prefs')
     .where({ customer_id: invoice.customer_id })
@@ -659,8 +691,16 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         });
         let sendResult = null;
         if (sendImmediately) {
-          try { sendResult = await InvoiceService.sendViaSMS(invoice.id); }
-          catch (sendErr) {
+          try {
+            // Third-party Bill-To: a payer-billed invoice can't be delivered by
+            // the homeowner SMS (sendViaSMS short-circuits to payer_billed and
+            // never finalizes). Route it through the email-capable path so the
+            // payer AP inbox receives it and the invoice is finalized; self-pay
+            // invoices keep the existing SMS-only immediate send.
+            sendResult = invoice.payer_id
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id)
+              : await InvoiceService.sendViaSMS(invoice.id);
+          } catch (sendErr) {
             logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
             sendResult = { sent: false, error: sendErr.message };
           }
@@ -874,13 +914,20 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       if (shouldSaveBillingRecipient) {
         const invoice = await db('invoices')
           .where({ id })
-          .select('customer_id')
+          .select('customer_id', 'payer_id')
           .first();
         if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-        await saveBillingRecipientPreference(invoice.customer_id, {
-          email: overrideEmail,
-          name: overrideName,
-        });
+        // Third-party Bill-To: a one-off AP override on a payer invoice is the
+        // payer's address — never persist it to the homeowner's billing prefs
+        // (that would reroute the homeowner's own future self-pay invoices to
+        // the third party). The payer snapshot/AP path (payer.freezeApEmail)
+        // handles persisting the delivered AP email for payer invoices.
+        if (!invoice.payer_id) {
+          await saveBillingRecipientPreference(invoice.customer_id, {
+            email: overrideEmail,
+            name: overrideName,
+          });
+        }
       }
     }
 
@@ -1416,14 +1463,24 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // (`stripe`); leaving it null is the existing convention for off-
     // gateway money (see admin-payments-reconcile.js manual branch).
     try {
-      await db('payments').insert({
+      const paymentRow = {
         customer_id: updatedInvoice.customer_id,
         amount: Number(updatedInvoice.total),
         status: 'paid',
         description: `Invoice ${updatedInvoice.invoice_number} — ${method}`
           + `${trimmedReference ? ` (${trimmedReference})` : ''}`,
         payment_date: etDateString(),
-      });
+      };
+      // Third-party Bill-To: link a payer-billed manual payment to its invoice so
+      // the customer-facing billing history/balance can filter it out (it's the
+      // payer's offline payment, recorded under the homeowner's customer_id, not
+      // the homeowner's own). Self-pay rows intentionally stay unlinked to
+      // preserve the existing receipt-total fallback (no metadata.invoice_id →
+      // loadPaymentForInvoice returns null → receipt uses invoice totals).
+      if (updatedInvoice.payer_id) {
+        paymentRow.metadata = JSON.stringify({ invoice_id: updatedInvoice.id });
+      }
+      await db('payments').insert(paymentRow);
     } catch (err) {
       logger.error(`[admin-invoices:record-payment] payments-ledger insert failed for ${updatedInvoice.invoice_number}: ${err.message}`);
     }
@@ -1551,6 +1608,14 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     // ── Pre-checks (no lock): status, amount due, sufficient balance ──
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Third-party Bill-To: account credit belongs to the homeowner. A
+    // payer-billed invoice is owed by the payer, not the homeowner — drawing
+    // down the service customer's credit to mark the AP invoice prepaid would
+    // consume the wrong party's money. Reject it before any state change (a
+    // payer-facing credit flow is Phase 2).
+    if (invoice.payer_id) {
+      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -1827,6 +1892,14 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     const body = req.body || {};
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Third-party Bill-To: a payment plan is a homeowner-scoped arrangement
+    // (payment_plans.customer_id) that pauses the invoice's collection path. A
+    // payer-billed invoice is owed by the payer, not the homeowner — reject it
+    // here before inserting a plan / pausing follow-ups (a payer-facing plan
+    // flow is Phase 2).
+    if (invoice.payer_id) {
+      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — payment plans are not supported for payer invoices' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {

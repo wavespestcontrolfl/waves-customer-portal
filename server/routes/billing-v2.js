@@ -16,12 +16,63 @@ router.use(authenticate);
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const { limit = 20 } = req.query;
+    const requestedLimit = parseInt(req.query.limit) || 20;
     const service = await PaymentRouter.getServiceForCustomer(req.customerId);
-    const payments = await service.getPaymentHistory(req.customerId, parseInt(limit));
+
+    // Third-party Bill-To: a payment against a payer-billed invoice belongs to
+    // the payer (AP contact), not the homeowner — drop those rows so the
+    // logged-in customer never sees the payer's card brand / last4 / Stripe
+    // PaymentIntent id in their own history. Over-fetch first so excluding those
+    // rows still returns up to `requestedLimit` customer-visible payments (the
+    // exclusion can't be a SQL filter without casting arbitrary payment metadata
+    // to jsonb table-wide). Payer payments are a small minority, so a padded
+    // buffer fills the page in realistic cases.
+    const payerInvRows = await db('invoices')
+      .where({ customer_id: req.customerId })
+      .whereNotNull('payer_id')
+      .select('id')
+      .catch(() => []);
+    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+    const invoiceIdOf = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return m && m.invoice_id != null ? String(m.invoice_id) : null;
+      } catch {
+        return null;
+      }
+    };
+    const isPayerLinked = (p) => {
+      const invId = invoiceIdOf(p);
+      return !!(invId && payerInvoiceIds.has(invId));
+    };
+    let visiblePayments;
+    if (payerInvoiceIds.size === 0) {
+      visiblePayments = await service.getPaymentHistory(req.customerId, requestedLimit);
+    } else {
+      // Page through history (excluding payer-linked rows) until we have the
+      // requested number of customer-visible payments or the table is exhausted.
+      // Avoids both under-filling (a hard cap that drops payer rows) and a
+      // metadata::jsonb cast over the whole payments table.
+      visiblePayments = [];
+      const pageSize = Math.max(requestedLimit, 20);
+      let offset = 0;
+      // Bound the loop so a customer with a huge history of payer payments can't
+      // scan unboundedly; ~10 pages is far beyond any realistic visible page.
+      for (let page = 0; page < 10 && visiblePayments.length < requestedLimit; page += 1) {
+        const batch = await service.getPaymentHistory(req.customerId, pageSize, offset);
+        if (!batch.length) break;
+        for (const p of batch) {
+          if (!isPayerLinked(p)) visiblePayments.push(p);
+          if (visiblePayments.length >= requestedLimit) break;
+        }
+        if (batch.length < pageSize) break; // exhausted
+        offset += pageSize;
+      }
+      visiblePayments = visiblePayments.slice(0, requestedLimit);
+    }
 
     res.json({
-      payments: payments.map(p => ({
+      payments: visiblePayments.map(p => ({
         id: p.id,
         date: p.payment_date,
         amount: parseFloat(p.amount),
@@ -219,45 +270,92 @@ router.get('/balance', async (req, res, next) => {
   try {
     const customer = req.customer;
 
-    const upcoming = await db('payments')
-      .where({ customer_id: req.customerId, status: 'upcoming' })
-      .sum('amount as total')
-      .first();
+    // Third-party Bill-To: a payment against a payer-billed invoice is the
+    // payer's, even though the row sits under the homeowner's customer_id. Pull
+    // this customer's payer-billed invoice ids once so the failed-balance sum and
+    // the "last payment failed" banner can exclude those rows (otherwise an AP
+    // payment failure would show as the homeowner's own balance / failure).
+    const payerInvRows = await db('invoices')
+      .where({ customer_id: req.customerId })
+      .whereNotNull('payer_id')
+      .select('id')
+      .catch(() => []);
+    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+    const metadataInvoiceId = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return m && m.invoice_id != null ? String(m.invoice_id) : null;
+      } catch {
+        return null;
+      }
+    };
+    const isPayerPayment = (p) => {
+      const invId = metadataInvoiceId(p);
+      return !!(invId && payerInvoiceIds.has(invId));
+    };
 
     // Failed attempts whose retry later collected are superseded — the
     // money arrived on the retry's own paid row, so they must not count
     // as balance still owed (the customer would be shown — and could
-    // pay — an amount already taken).
-    const failed = await db('payments')
+    // pay — an amount already taken). Payer-linked failures are excluded too.
+    const failedRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .sum('amount as total')
-      .first();
+      .select('amount', 'metadata');
+    const failedTotal = failedRows
+      .filter((p) => !isPayerPayment(p))
+      .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 
-    const nextPayment = await db('payments')
+    // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
+    // homeowner's upcomingCharges / nextCharge never show the payer's amount/date.
+    const upcomingRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'upcoming' })
       .orderBy('payment_date', 'asc')
-      .first();
+      .select('amount', 'payment_date', 'description', 'metadata');
+    const visibleUpcoming = upcomingRows.filter((p) => !isPayerPayment(p));
+    const upcomingTotal = visibleUpcoming.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+    const nextPayment = visibleUpcoming[0] || null;
 
-    // Check for unpaid invoices
+    // Check for unpaid invoices. Third-party Bill-To: a payer-billed invoice is
+    // owed by the payer, not the homeowner — exclude it so the logged-in
+    // customer never sees the payer's unpaid amount as their own balance.
     const unpaidInvoices = await db('invoices')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['sent', 'viewed', 'overdue'])
+      .whereNull('payer_id')
       .sum('total as total')
       .first();
 
     // The portal's billing banner flips to "failed" when the most recent
     // completed attempt failed — not when there's any failed row in history.
-    const mostRecentAttempt = await db('payments')
+    // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
+    // banner.
+    // Bounded scan: with no payer rows to skip, the most-recent attempt is just
+    // the first row (the pre-payer-filter behavior). Only when payer rows exist
+    // do we look past them — page in small batches (capped) so this billing-page
+    // load never scales with the customer's full ledger.
+    const recentAttemptsQuery = () => db('payments')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['paid', 'failed', 'refunded'])
       .whereNull('superseded_by_payment_id')
       .orderBy('payment_date', 'desc')
-      .first();
+      .select('status', 'metadata');
+    let mostRecentAttempt = null;
+    if (payerInvoiceIds.size === 0) {
+      mostRecentAttempt = await recentAttemptsQuery().first();
+    } else {
+      const PAGE = 50;
+      for (let offset = 0; offset < 500; offset += PAGE) {
+        const batch = await recentAttemptsQuery().limit(PAGE).offset(offset);
+        if (!batch.length) break;
+        mostRecentAttempt = batch.find((p) => !isPayerPayment(p)) || null;
+        if (mostRecentAttempt || batch.length < PAGE) break;
+      }
+    }
 
     res.json({
-      currentBalance: parseFloat(failed?.total || 0) + parseFloat(unpaidInvoices?.total || 0),
-      upcomingCharges: parseFloat(upcoming?.total || 0),
+      currentBalance: failedTotal + parseFloat(unpaidInvoices?.total || 0),
+      upcomingCharges: upcomingTotal,
       monthlyRate: parseFloat(customer.monthly_rate || 0),
       tier: customer.waveguard_tier,
       processor: 'stripe',

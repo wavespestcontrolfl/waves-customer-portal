@@ -11,21 +11,19 @@ function firstRecommendation(findings = []) {
   return findings.find((finding) => String(finding.recommendation || '').trim()) || null;
 }
 
-function readableActivityLine(currentFindings = [], priorFindings = []) {
+function readableActivityLine(currentFindings = []) {
+  // Report the technician's actual finding title. Never assert a magnitude,
+  // location, or direction ("reduced", "front entry") that wasn't recorded —
+  // this line is shown verbatim to the customer.
   const current = currentFindings.find((finding) => String(finding.title || '').trim());
   if (!current) return undefined;
-  const title = String(current.title || '').trim();
-  const lower = title.toLowerCase();
-  if (lower.includes('ant') && priorFindings.some((finding) => String(finding.title || '').toLowerCase().includes('ant'))) {
-    return 'Ant activity reduced to a small trail at the front entry.';
-  }
-  return title;
+  return String(current.title || '').trim();
 }
 
 async function buildSinceLastVisitContext({ record, currentPressureIndexOverride, knex = db } = {}) {
   if (!record?.id || !record.customer_id) return undefined;
   const serviceLine = record.service_line || detectServiceLine(record.service_type);
-  const prior = await knex('service_records')
+  let priorQuery = knex('service_records')
     .where({ customer_id: record.customer_id, status: 'completed' })
     .whereNot({ id: record.id })
     .where(function sameServiceLine() {
@@ -33,22 +31,34 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
         .orWhere(function legacyType() {
           this.whereNull('service_line').where({ service_type: record.service_type });
         });
-    })
+    });
+  // Only consider visits strictly before this one. Report tokens are permanent
+  // and sinceLastVisit is computed at render time, so without this bound a newer
+  // visit completed after this report would be picked as the "prior" baseline —
+  // reversing the "Pressure: X -> Y" delta the customer reads. started_at breaks
+  // ties on the same service date; when it's missing we fall back to a strict
+  // date bound so a later same-day visit still can't slip in as the baseline.
+  if (record.service_date) {
+    priorQuery = priorQuery.where(function priorBoundary() {
+      this.where('service_date', '<', record.service_date);
+      if (record.started_at) {
+        this.orWhere(function sameDayEarlier() {
+          this.where('service_date', record.service_date)
+            .where('started_at', '<', record.started_at);
+        });
+      }
+    });
+  }
+  const prior = await priorQuery
     .orderBy('service_date', 'desc')
     .orderBy('started_at', 'desc')
     .first('id', 'pressure_index')
     .catch(() => null);
 
-  const ids = [prior?.id, record.id].filter(Boolean);
-  const findings = ids.length
-    ? await knex('service_findings')
-      .whereIn('service_record_id', ids)
-      .select('id', 'service_record_id', 'title', 'detail', 'recommendation', 'severity')
-      .catch(() => [])
-    : [];
-
-  const currentFindings = findings.filter((finding) => String(finding.service_record_id) === String(record.id));
-  const priorFindings = findings.filter((finding) => String(finding.service_record_id) === String(prior?.id));
+  const currentFindings = await knex('service_findings')
+    .where({ service_record_id: record.id })
+    .select('id', 'service_record_id', 'title', 'detail', 'recommendation', 'severity')
+    .catch(() => []);
   const currentPressure = pressureValue(currentPressureIndexOverride !== undefined ? currentPressureIndexOverride : record.pressure_index);
   const priorPressure = pressureValue(prior?.pressure_index);
   const recommendation = firstRecommendation(currentFindings);
@@ -58,7 +68,7 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
   return {
     priorServiceRecordId: prior?.id,
     pressureLine: priorPressure && currentPressure ? `Pressure: ${priorPressure} -> ${currentPressure}` : undefined,
-    activityLine: readableActivityLine(currentFindings, priorFindings),
+    activityLine: readableActivityLine(currentFindings),
     actionLine: recommendation?.recommendation
       ? `Customer action: ${String(recommendation.recommendation).trim()}`
       : undefined,

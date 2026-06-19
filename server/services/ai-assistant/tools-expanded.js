@@ -199,6 +199,7 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
       if (!invoiceId) {
         const unpaid = await db('invoices')
           .where({ customer_id: customerId })
+          .whereNull('payer_id')
           .whereNotIn('status', ['paid', 'prepaid', 'void'])
           .orderBy('created_at', 'desc')
           .first();
@@ -206,7 +207,16 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
         if (unpaid) {
           invoiceId = unpaid.id;
         } else if (input.amount && input.description) {
-          // Create a new invoice
+          // Third-party Bill-To: don't mint from a customer-facing tool for a
+          // customer with a default payer — InvoiceService.create() auto-resolves
+          // the payer, so this would create a draft AP bill just to redact it
+          // below. Check the effective payer FIRST and redact without minting.
+          const PayerService = require('../../services/payer');
+          const resolvedPayer = await PayerService.resolveForInvoice({ customerId });
+          if (resolvedPayer?.payerId) {
+            return { sent: false, payer_billed: true, message: 'This invoice is billed to a third-party payer and is not payable by the customer.' };
+          }
+          // Create a new self-pay invoice
           const customer = await db('customers').where('id', customerId).first();
           const newInvoice = await InvoiceService.create({
             customerId,
@@ -220,17 +230,29 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
         }
       }
 
-      // Send the pay link via SMS
+      // Third-party Bill-To: a payer-billed invoice is owed by the payer (AP
+      // contact), not the homeowner — never hand the homeowner the payer's pay
+      // link (an explicit invoice_id can still reference one). Redact it; the
+      // payer is billed through the admin/dispatch payer-send path, not the
+      // customer-facing assistant.
+      const invoiceForSend = await db('invoices')
+        .where({ id: invoiceId, customer_id: customerId })
+        .first('payer_id');
+      if (!invoiceForSend) return { error: 'Invoice not found.' };
+      if (invoiceForSend.payer_id) {
+        return { sent: false, payer_billed: true, message: 'This invoice is billed to a third-party payer and is not payable by the customer.' };
+      }
       const sendResult = await InvoiceService.sendViaSMS(invoiceId);
+      const sent = !!(sendResult?.sent || sendResult?.ok);
       const invoice = await db('invoices').where('id', invoiceId).first();
 
       return {
-        sent: !!sendResult?.sent,
+        sent,
         invoiceNumber: invoice.invoice_number,
         amount: parseFloat(invoice.total),
         payUrl: sendResult?.payUrl,
         status: invoice.status,
-        ...(!sendResult?.sent && { error: sendResult?.code || sendResult?.reason || 'send_failed' }),
+        ...(!sent && { error: sendResult?.code || sendResult?.reason || sendResult?.email?.error || 'send_failed' }),
       };
     }
 
@@ -241,14 +263,21 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
       if (input.invoice_id) {
         invoice = await db('invoices').where({ id: input.invoice_id, customer_id: customerId }).first();
       } else {
-        // Most recent invoice
+        // Most recent invoice (never a payer-billed one — that's the payer's)
         invoice = await db('invoices')
           .where({ customer_id: customerId })
+          .whereNull('payer_id')
           .orderBy('created_at', 'desc')
           .first();
       }
 
       if (!invoice) return { found: false, message: 'No invoices found for this customer.' };
+
+      // Third-party Bill-To: never expose the payer's payment details
+      // (card brand / last4, status) to the homeowner, even for an explicit id.
+      if (invoice.payer_id) {
+        return { found: false, payer_billed: true, message: 'This invoice is billed to a third-party payer.' };
+      }
 
       return {
         found: true,

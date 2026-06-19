@@ -109,6 +109,11 @@ router.get('/:token', async (req, res, next) => {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
 
+    // Third-party Bill-To: an AP contact opening the emailed pay link must see
+    // the payer as "Billed to" (not the homeowner) and must not be offered
+    // "save card" (server already refuses to save it onto the homeowner).
+    await require('../services/payer').attachToInvoice(data);
+
     const customer = data.customer || {};
     const lineItems = data.line_items || [];
     const productsApplied = data.products_applied || [];
@@ -172,6 +177,32 @@ router.get('/:token', async (req, res, next) => {
         zip: customer.zip,
         isCommercial: customer.property_type === 'commercial' || customer.property_type === 'business',
       },
+      payer: data.payer
+        ? {
+            name: data.payer.company_name || data.payer.display_name || null,
+            email: data.payer.ap_email || null,
+            address: data.payer.billing_address_line1 || null,
+            city: data.payer.billing_city || null,
+            state: data.payer.billing_state || null,
+            zip: data.payer.billing_zip || null,
+            poNumber: data.po_number || null,
+          }
+        // Fail closed: this invoice IS payer-billed (payer_id set) but the payer
+        // couldn't be attached (legacy invoice with no snapshot + an inactive/
+        // deleted payer row). Serialize a third-party-billed placeholder rather
+        // than null, so the pay page does NOT render as self-pay with the
+        // homeowner as bill-to (keeps save-card suppressed / billing email blank).
+        : data.payer_id
+          ? {
+              name: 'Third-party payer',
+              email: null,
+              address: null,
+              city: null,
+              state: null,
+              zip: null,
+              poNumber: data.po_number || null,
+            }
+          : null,
       processor: 'stripe',
       stripe: {
         available: StripeService.isAvailable(),
@@ -640,6 +671,16 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
+    // Downloaded/printed PDF must show the same Bill-To = payer block as the
+    // emailed copy (getByToken doesn't attach the payer on its own).
+    await require('../services/payer').attachToInvoice(data);
+    // Fail closed: a payer-billed invoice whose payer can't attach (legacy, no
+    // snapshot, inactive/deleted) must NOT render the homeowner as Bill-To on
+    // the printable PDF. Synthesize a third-party placeholder so the bill-to
+    // block stays non-self-pay (mirrors the JSON pay-page fail-closed state).
+    if (!data.payer && data.payer_id) {
+      data.payer = { company_name: 'Third-party payer', ap_email: null };
+    }
     generateInvoicePDF(data, res);
   } catch (err) {
     next(err);

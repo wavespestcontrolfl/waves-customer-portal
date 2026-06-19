@@ -9,6 +9,7 @@ const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
+const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -149,7 +150,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
 
     const [
       revMTD, revLastMonth, activeCustomers, newThisMonth,
-      estimatesPending, servicesWeek, avgResponse, mrr, oneTimeMonth,
+      estimatesPending, servicesWeek, avgResponse, mrrBreakdown, oneTimeMonth,
       todaysSchedule, recentActivity, tierRevenue, reviewStats
     ] = await Promise.all([
       paidRevenueTotal(som, today),
@@ -163,7 +164,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
       ).first(),
       db('estimates').where({ status: 'accepted' }).whereNotNull('accepted_at').whereNotNull('sent_at').where('accepted_at', '>=', som)
         .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first(),
-      db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
+      computeMrrBreakdown(db, today),
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
       // Today's schedule
       db('scheduled_services')
@@ -242,11 +243,16 @@ router.get('/', dashboardCache, async (req, res, next) => {
         estimatesPending: parseInt(estimatesPending?.count || 0),
         servicesThisWeek: { total: parseInt(servicesWeek?.total || 0), completed: parseInt(servicesWeek?.completed || 0) },
         avgResponseTimeHours: (Number(avgResponse?.avg_hrs) || 0).toFixed(1),
-        googleReviewRating: parseFloat(reviewStats?.avg_rating || 0) || 4.9,
+        // No reviews/rating data → null (UI shows "—"), never a fabricated 4.9.
+        googleReviewRating: parseFloat(reviewStats?.avg_rating) || null,
         googleReviewCount: parseInt(reviewStats?.total || 0) || 0,
         googleUnresponded: parseInt(reviewStats?.unresponded || 0),
       },
-      mrr: parseFloat(mrr?.total || 0),
+      // `mrr` stays the full run-rate for backward compat; `mrrBreakdown`
+      // splits it into the portion that's actually going to bill (committed)
+      // vs. paused-autopay / overdue accounts (atRisk).
+      mrr: mrrBreakdown.total,
+      mrrBreakdown,
       oneTimeThisMonth: parseFloat(oneTimeMonth?.total || 0),
       revenueChart: { daily: dailyRevenue.map(d => ({ date: d.date, total: parseFloat(d.total || 0) })) },
       todaysSchedule: todaysSchedule.map(s => ({
@@ -267,134 +273,12 @@ router.get('/', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/dashboard/forecast — revenue forecasting
-router.get('/forecast', dashboardCache, async (req, res, next) => {
-  try {
-    const today = new Date();
-    const todayStr = etDateString(today);
-
-    // MRR — sum of monthly_rate for all active, non-deleted customers
-    const mrrResult = await db('customers')
-      .where({ active: true })
-      .whereNull('deleted_at')
-      .where('monthly_rate', '>', 0)
-      .sum('monthly_rate as total')
-      .count('* as count')
-      .first();
-    const mrr = parseFloat(mrrResult?.total || 0);
-    const arr = mrr * 12;
-    const activeRecurringCount = parseInt(mrrResult?.count || 0);
-
-    // Helper: get ET calendar date N days from now
-    function futureDate(days) {
-      return etDateString(addETDays(today, days));
-    }
-
-    const date30 = futureDate(30);
-    const date60 = futureDate(60);
-    const date90 = futureDate(90);
-
-    // One-time scheduled services revenue in next 30/60/90 days
-    // Use estimated_price if available, otherwise a default estimate
-    const DEFAULT_SERVICE_PRICE = 150;
-
-    async function getOneTimeRevenue(endDate) {
-      try {
-        const result = await db('scheduled_services')
-          .where('scheduled_date', '>=', todayStr)
-          .where('scheduled_date', '<=', endDate)
-          .whereNotIn('status', ['cancelled'])
-          .select(
-            db.raw('COUNT(*) as count'),
-            db.raw('COALESCE(SUM(estimated_price), 0) as estimated_total')
-          )
-          .first();
-        const count = parseInt(result?.count || 0);
-        const estimatedTotal = parseFloat(result?.estimated_total || 0);
-        // If no estimated_price column or all zeros, use default
-        return estimatedTotal > 0 ? estimatedTotal : count * DEFAULT_SERVICE_PRICE;
-      } catch {
-        // estimated_price column may not exist
-        const result = await db('scheduled_services')
-          .where('scheduled_date', '>=', todayStr)
-          .where('scheduled_date', '<=', endDate)
-          .whereNotIn('status', ['cancelled'])
-          .count('* as count')
-          .first();
-        return parseInt(result?.count || 0) * DEFAULT_SERVICE_PRICE;
-      }
-    }
-
-    // Pipeline estimates — sent/viewed status, apply conversion rate
-    const PIPELINE_CONVERSION_RATE = 0.35; // 35% estimated close rate
-
-    async function getPipelineRevenue() {
-      const estimates = await db('estimates')
-        .whereIn('status', ['sent', 'viewed'])
-        .where('expires_at', '>', db.raw('NOW()'))
-        .select('monthly_total', 'annual_total', 'onetime_total');
-
-      let totalMonthly = 0;
-      let totalOneTime = 0;
-      for (const e of estimates) {
-        totalMonthly += parseFloat(e.monthly_total || 0);
-        totalOneTime += parseFloat(e.onetime_total || 0);
-      }
-
-      return {
-        count: estimates.length,
-        rawMonthly: totalMonthly,
-        rawOneTime: totalOneTime,
-        weightedMonthly: totalMonthly * PIPELINE_CONVERSION_RATE,
-        weightedOneTime: totalOneTime * PIPELINE_CONVERSION_RATE,
-      };
-    }
-
-    const [oneTime30, oneTime60, oneTime90, pipeline] = await Promise.all([
-      getOneTimeRevenue(date30),
-      getOneTimeRevenue(date60),
-      getOneTimeRevenue(date90),
-      getPipelineRevenue(),
-    ]);
-
-    // Recurring revenue projections for each window
-    const recurring30 = mrr;
-    const recurring60 = mrr * 2;
-    const recurring90 = mrr * 3;
-
-    res.json({
-      mrr,
-      arr,
-      activeRecurringCustomers: activeRecurringCount,
-      pipeline: {
-        estimateCount: pipeline.count,
-        conversionRate: PIPELINE_CONVERSION_RATE,
-        rawMonthly: pipeline.rawMonthly,
-        rawOneTime: pipeline.rawOneTime,
-        weightedMonthly: pipeline.weightedMonthly,
-        weightedOneTime: pipeline.weightedOneTime,
-      },
-      next30: {
-        recurring: recurring30,
-        oneTime: oneTime30,
-        pipeline: pipeline.weightedMonthly + pipeline.weightedOneTime,
-        total: recurring30 + oneTime30 + pipeline.weightedMonthly + pipeline.weightedOneTime,
-      },
-      next60: {
-        recurring: recurring60,
-        oneTime: oneTime60,
-        pipeline: pipeline.weightedMonthly * 2 + pipeline.weightedOneTime,
-        total: recurring60 + oneTime60 + pipeline.weightedMonthly * 2 + pipeline.weightedOneTime,
-      },
-      next90: {
-        recurring: recurring90,
-        oneTime: oneTime90,
-        pipeline: pipeline.weightedMonthly * 3 + pipeline.weightedOneTime,
-        total: recurring90 + oneTime90 + pipeline.weightedMonthly * 3 + pipeline.weightedOneTime,
-      },
-    });
-  } catch (err) { next(err); }
-});
+// NOTE: GET /api/admin/dashboard/forecast was removed (2026-06-19). It had no
+// consumer (no client/IB/test/mobile reference) and projected recurring
+// revenue off the FULL MRR total (recurring30/60/90 = mrr×1/2/3, arr = mrr×12),
+// i.e. it carried the same paused-autopay/overdue overstatement the headline
+// MRR tile was just fixed for. If forecasting comes back, project off
+// committed MRR via services/mrr-breakdown.js, not the raw total.
 
 // GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
 // ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv

@@ -98,10 +98,14 @@ function makeKnex(store) {
     });
 
     q.update = jest.fn((patch) => {
-      if (table === 'service_records' && store.records.length) {
-        const rec = store.records[store.records.length - 1];
-        if (Object.prototype.hasOwnProperty.call(patch, 'recap_sms_sent_at')) {
-          rec.recap_sms_sent_at = patch.recap_sms_sent_at;
+      if (table === 'service_records') {
+        store.recordUpdates = store.recordUpdates || [];
+        store.recordUpdates.push(patch);
+        if (store.records.length) {
+          const rec = store.records[store.records.length - 1];
+          if (Object.prototype.hasOwnProperty.call(patch, 'recap_sms_sent_at')) {
+            rec.recap_sms_sent_at = patch.recap_sms_sent_at;
+          }
         }
       }
       // Support both `await update(...)` and `update(...).catch(...)` (the
@@ -383,5 +387,46 @@ describe('pest recap idempotency (Codex P1)', () => {
     // Empty product submit must NOT touch service_products — history intact.
     expect(store.productDeletes).toBe(0);
     expect(store.productInserts).toBe(0);
+  });
+
+  test('re-completing an existing record invalidates its cached report PDF', async () => {
+    // The record was already completed (e.g. via the heavy /complete path,
+    // which rendered + cached a PDF). Re-running the recap rewrites the
+    // technician notes / products the report renders, so the stale cached PDF
+    // must be dropped (pdf_storage_key -> null) for a fresh render on next view.
+    const store = { serviceStatus: 'completed', records: [{ id: 'rec-old', recap_sms_sent_at: null }] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Re-treated the garage and updated the recap.',
+      products: [{ product_name: 'Termidor' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect((store.recordUpdates || []).some((patch) => patch.pdf_storage_key === null)).toBe(true);
+  });
+
+  test('a brand-new recap record issues no pdf cache invalidation (nothing cached yet)', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'First visit.',
+      products: [{ product_name: 'Termidor' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    const updates = store.recordUpdates || [];
+    expect(updates.some((patch) => patch && Object.prototype.hasOwnProperty.call(patch, 'pdf_storage_key'))).toBe(false);
   });
 });

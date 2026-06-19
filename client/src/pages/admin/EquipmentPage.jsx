@@ -234,11 +234,6 @@ export default function EquipmentPage() {
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       {" "}
-      <style>{`
-        @media (max-width: 640px) {
-          .equipment-tab-bar { justify-content: flex-start !important; }
-        }
-      `}</style>{" "}
       <AdminCommandHeader
         title="Equipment"
         icon={Wrench}

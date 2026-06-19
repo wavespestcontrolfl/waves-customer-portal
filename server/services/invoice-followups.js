@@ -248,6 +248,11 @@ async function scheduleForInvoice(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return null;
   if (!isSchedulableInvoice(invoice)) return null;
+  // Third-party Bill-To: the follow-up/dunning sequence emails and texts the
+  // homeowner with the pay link, but a payer-billed invoice's AR rolls to the
+  // payer's AP inbox — never chase the homeowner for it. Phase 1 has no payer
+  // dunning sequence, so we simply don't arm follow-ups for payer invoices.
+  if (invoice.payer_id) return null;
 
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
   const onAutopay = await customerOnAutopay(customer);
@@ -298,9 +303,17 @@ async function runPending() {
     .where('s.status', 'active')
     .where('s.next_touch_at', '<=', now)
     .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    // Third-party Bill-To: never dun a payer-billed invoice through this
+    // homeowner sequence — fireStep would text the payer's bearer /pay/:token to
+    // row.customer_id (the service recipient). scheduleForInvoice already refuses
+    // to arm these, but an active row can pre-date the payer (backfill run after
+    // payer invoices issued, or an older/manual sequence); exclude them here and
+    // guard fireStep too.
+    .whereNull('i.payer_id')
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.status as invoice_status',
+      'i.payer_id as invoice_payer_id',
       'i.service_date', 'i.due_date', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
       'i.created_at as invoice_created_at',
@@ -330,6 +343,26 @@ async function fireStep(row) {
       status: 'completed',
       next_touch_at: null,
     });
+    return;
+  }
+
+  // Third-party Bill-To: never send a dunning touch for a payer-billed invoice —
+  // fireStep builds /pay/:token and texts it to row.customer_id (the homeowner),
+  // leaking the payer's bearer pay link. runPending already filters these out;
+  // this covers sendNextTouchNow's direct call too. Pause terminally (not a bare
+  // return) so a later re-arm can't fire a stale touch. Prefer the selected
+  // invoice_payer_id; fall back to a lookup when the caller didn't select it.
+  let payerId = row.invoice_payer_id;
+  if (payerId === undefined) {
+    const inv = await db('invoices').where({ id: row.invoice_id }).first('payer_id').catch(() => null);
+    payerId = inv?.payer_id ?? null;
+  }
+  if (payerId) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      status: 'paused',
+      next_touch_at: null,
+    });
+    logger.info(`[invoice-followups] paused sequence ${row.id} — invoice ${row.invoice_id} is billed to a third-party payer`);
     return;
   }
 

@@ -3669,6 +3669,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const invoiceAmount = hasVisitPrice
       ? Number(svc.estimated_price)
       : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    // Third-party Bill-To: a payer-billed visit is owed by the payer's AP inbox,
+    // so the service customer's autopay/prepay must neither suppress the AP
+    // invoice (autopayCoversVisit / prepaidCovered) nor be credited against it
+    // (applyPrepaidCreditToInvoice). Resolve the effective payer up front —
+    // BEFORE autopay coverage is computed — so every coverage gate can exclude
+    // payer visits. resolveForInvoice never throws (it falls back to self-pay),
+    // and we keep the existing self-pay flow on any lookup error.
+    let visitIsPayerBilled = false;
+    try {
+      const PayerService = require('../services/payer');
+      const resolvedPayer = await PayerService.resolveForInvoice({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+      });
+      visitIsPayerBilled = !!resolvedPayer?.payerId;
+    } catch (e) {
+      logger.warn(`[dispatch] payer resolve failed on completion for service ${svc.id}: ${e.message}`);
+    }
     const customerAutopayActive = await customerOnAutopay({
       id: svc.customer_id,
       autopay_enabled: svc.cust_autopay_enabled,
@@ -3676,7 +3694,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autopay_payment_method_id: svc.cust_autopay_payment_method_id,
       ach_status: svc.cust_ach_status,
     });
-    const autopayCoversVisit = customerAutopayActive
+    // Never let the homeowner's autopay cover a payer-billed WaveGuard visit —
+    // the AP invoice must still be cut and sent to the payer.
+    const autopayCoversVisit = !visitIsPayerBilled
+      && customerAutopayActive
       && !hasVisitPrice
       && !!svc.cust_waveguard_tier
       && Number(svc.cust_monthly_rate || 0) > 0;
@@ -3741,7 +3762,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } catch (e) { /* non-blocking */ }
     // If the admin/tech marked this visit prepaid (cash, Zelle, phone CC, etc.)
     // and the recorded amount covers the would-be invoice, skip auto-invoicing.
-    const prepaidCovered = svc.prepaid_amount != null
+    // Never for a payer-billed visit (visitIsPayerBilled resolved above) — the
+    // homeowner's prepay can't cover the payer's bill, so the AP invoice must
+    // still be cut.
+    const prepaidCovered = !visitIsPayerBilled
+      && svc.prepaid_amount != null
       && Number(svc.prepaid_amount) > 0
       && Number(svc.prepaid_amount) >= invoiceAmount;
     // If the tech already minted an invoice for this visit pre-completion
@@ -3851,6 +3876,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const applyPrepaidCreditToInvoice = async (invoiceRow) => {
       const prepaidCents = svc.prepaid_amount != null ? toCents(svc.prepaid_amount) : 0;
       if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
+      // Third-party Bill-To: never credit the homeowner's prepaid amount against
+      // a payer-billed invoice — that money isn't owed by the payer. The invoice
+      // row is the source of truth (createFromService auto-resolves a default
+      // payer, and any pre-minted invoice carries its own payer_id), so guard on
+      // it directly.
+      if (invoiceRow.payer_id) return invoiceRow;
 
       return db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
@@ -4122,7 +4153,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && includePayLink !== false
           && !prepaidCovered
           && !alreadyPaid
-          && !autopayCoversVisit;
+          && !autopayCoversVisit
+          // Third-party Bill-To: never text the homeowner the pay link for a
+          // payer-billed invoice — AR routes to the payer's AP inbox. The
+          // homeowner still gets the report-only completion SMS (no pay_url).
+          && !invoice?.payer_id;
         const usePaidCompletionTemplate = alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
@@ -4589,6 +4624,39 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Third-party Bill-To: a payer-billed auto-invoice is intentionally NOT
+    // carried by the homeowner completion SMS (pay link suppressed) and is never
+    // collected in person, so the homeowner channel can't finalize it. Route it
+    // to the payer's AP inbox here and finalize on success — otherwise the
+    // third-party AR is silently stranded as an unsent draft. A payer with no
+    // usable AP email leaves the invoice unfinalized for operator correction
+    // (sendInvoiceEmail returns ok:false rather than mailing the homeowner).
+    // Only deliver to the payer when this invoice hasn't already been sent —
+    // `invoiceCreated` is also true when a completion REUSES an existing unpaid
+    // invoice (a pre-minted invoice already `sent`/`viewed`, or a request where
+    // invoiceAlreadySent suppressed the homeowner link). Re-sending would
+    // duplicate the AP billing email. Fresh completion invoices are `draft`.
+    const payerInvoiceAlreadyDelivered = !!invoiceAlreadySent
+      || ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled']
+        .includes(String(invoice?.status || '').toLowerCase());
+    if (invoice?.id && invoiceCreated && invoice.payer_id && !payerInvoiceAlreadyDelivered) {
+      try {
+        const InvoiceEmail = require('../services/invoice-email');
+        const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
+        if (payerSend?.ok) {
+          const InvoiceService = require('../services/invoice');
+          invoice = await InvoiceService.markDeliverySent(invoice.id, {
+            email: true,
+            source: 'dispatch_completion_payer',
+          });
+        } else {
+          logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
+        }
+      } catch (payerSendErr) {
+        logger.error(`[dispatch] Payer invoice AP send failed for ${invoice.id}: ${payerSendErr.message}`);
+      }
+    }
+
     const finalRecordNotes = parseJsonObject(record.structured_notes);
     const completionSmsStatus = finalRecordNotes.completionSmsStatus
       || (suppressTypedCustomerComms && sendCompletionSms
@@ -4608,7 +4676,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && !prepaidCovered
       && !alreadyPaid
       && !autopayCoversVisit
-      && !suppressCompletionInvoiceLink;
+      && !suppressCompletionInvoiceLink
+      // Third-party Bill-To: never open the in-person payment sheet for a
+      // payer-billed invoice — the tech must not collect the AP's invoice from
+      // the service recipient. AR routes to the payer AP inbox.
+      && !invoice.payer_id;
     // Referral reward: if this customer was referred and just completed their
     // FIRST recurring service, credit both the referrer and the referee $25 to
     // their account. Only a genuinely PERFORMED visit qualifies — an
@@ -4632,7 +4704,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
       invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
-      invoiceToken: invoice?.token || null,
+      // Third-party Bill-To: never hand back the payer invoice's pay token — it
+      // is the AP's bearer pay link (/api/pay/:token); a cached/mobile client or
+      // the tech holding this response could open it and collect the AP's bill
+      // from the service recipient. Keep id/status/total for display only.
+      // (mirrors the track-public.js token suppression)
+      invoiceToken: invoice && !invoice.payer_id ? (invoice.token || null) : null,
       invoiceStatus: invoice?.status || null,
       reportUrl,
       invoicePaymentActionRequired,

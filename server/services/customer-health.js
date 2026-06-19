@@ -51,11 +51,40 @@ async function tableExists(name) {
 async function computePaymentScore(customerId) {
   const details = { source: 'none', onTimeRate: null, lateCount: 0, failedCount: 0 };
 
+  // Third-party Bill-To: payer-billed invoices — and the payments linked to them
+  // (stored under the homeowner's customer_id but joined via metadata.invoice_id)
+  // — belong to the payer (AP contact), not the homeowner. They must NOT count
+  // toward the homeowner's payment-health score, or an AP late/failed payment
+  // would surface as the customer's delinquency. Fixing it here (not just at the
+  // webhook rescore triggers) also covers the nightly batch rescore. Resolve the
+  // customer's payer-billed invoice id set once; degrades to "no exclusion" if
+  // the payer_id column doesn't exist yet (migration not run).
+  let payerInvoiceIds = new Set();
+  if (await tableExists('invoices')) {
+    try {
+      const pr = await db('invoices').where('customer_id', customerId).whereNotNull('payer_id').select('id');
+      payerInvoiceIds = new Set(pr.map(r => String(r.id)));
+    } catch (err) {
+      logger.debug(`[health] payer-invoice lookup error for ${customerId}: ${err.message}`);
+    }
+  }
+  const isPayerRow = (tbl, r) => {
+    if (tbl === 'invoices') return r.payer_id != null;
+    if (!payerInvoiceIds.size) return false; // payments link to a payer invoice via metadata.invoice_id
+    let m = r.metadata;
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch { m = null; } }
+    const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
+    return !!(invId && payerInvoiceIds.has(invId));
+  };
+
   // Try invoices table first, then payments table
   for (const tbl of ['invoices', 'payments']) {
     if (!(await tableExists(tbl))) continue;
     try {
-      const rows = await db(tbl).where('customer_id', customerId).orderBy('created_at', 'desc').limit(24);
+      // Over-fetch then drop payer-billed rows so a customer with payer history
+      // still gets a representative self-pay sample.
+      const fetched = await db(tbl).where('customer_id', customerId).orderBy('created_at', 'desc').limit(payerInvoiceIds.size ? 48 : 24);
+      const rows = fetched.filter(r => !isPayerRow(tbl, r)).slice(0, 24);
       if (rows.length === 0) continue;
 
       details.source = tbl;

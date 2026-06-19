@@ -118,6 +118,7 @@ describe('late-payment email sidecar', () => {
       customers: [chain({ result: [activeCustomer] })],
       payments: [chain({ result: [overduePayment(8)] })],
       invoices: [
+        chain({ result: [] }), // getCustomerBalance payer-billed invoice-id lookup (none)
         chain({ first: { id: openInvoice.id, token: openInvoice.token } }),
         chain({ first: openInvoice }),
         chain({ first: openInvoice }),
@@ -261,6 +262,7 @@ describe('late-payment email sidecar', () => {
       customers: [chain({ result: [customer()] })],
       payments: [chain({ result: [overduePayment(8)] })],
       invoices: [
+        chain({ result: [] }), // getCustomerBalance payer-billed invoice-id lookup (none)
         chain({ first: { id: 'inv-1', token: 'token-1' } }),
         chain({ first: invoice() }),
         chain({ first: invoice() }),

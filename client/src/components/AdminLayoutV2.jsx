@@ -16,6 +16,7 @@ import { useState, useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { cn } from "./ui/cn";
+import { Building2 } from "lucide-react";
 import {
   LayoutDashboard,
   Users,
@@ -136,6 +137,7 @@ const NAV_SECTIONS = [
     section: "Finance",
     items: [
       { path: "/admin/invoices", icon: FileText, label: "Invoices" },
+      { path: "/admin/payers", icon: Building2, label: "Payers" },
       { path: "/admin/banking", icon: Landmark, label: "Banking" },
       { path: "/admin/tax", icon: Receipt, label: "Taxes" },
       { path: "/admin/pricing-logic", icon: Calculator, label: "Pricing" },

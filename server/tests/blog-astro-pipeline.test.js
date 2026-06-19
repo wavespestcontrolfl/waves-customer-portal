@@ -255,6 +255,39 @@ describe('blog Astro frontmatter validation', () => {
       .toEqual(['Article']);
   });
 
+  describe('categoryRouteSlug (blog URL protocol /{category}/{slug}/)', () => {
+    const { categoryRouteSlug } = AstroPublisher._internals;
+
+    test('prefixes a flat writer slug with the category', () => {
+      expect(categoryRouteSlug('plaster-bagworms-southwest-florida', 'pest-control'))
+        .toBe('pest-control/plaster-bagworms-southwest-florida');
+    });
+
+    test('is idempotent on an already-correct {category}/{leaf}', () => {
+      expect(categoryRouteSlug('lawn-care/chinch-bugs-bradenton', 'lawn-care'))
+        .toBe('lawn-care/chinch-bugs-bradenton');
+    });
+
+    test('realigns a wrong-category prefix to the resolved category (keeps the leaf)', () => {
+      expect(categoryRouteSlug('lawn-care/dangerous-ants-in-florida', 'pest-control'))
+        .toBe('pest-control/dangerous-ants-in-florida');
+    });
+
+    test('uses the category for every supported vertical, not a hardcoded one', () => {
+      expect(categoryRouteSlug('dollar-spot-venice', 'lawn-care')).toBe('lawn-care/dollar-spot-venice');
+      expect(categoryRouteSlug('drywood-swarmers-venice', 'termite')).toBe('termite/drywood-swarmers-venice');
+      expect(categoryRouteSlug('summer-mosquitoes', 'mosquito')).toBe('mosquito/summer-mosquitoes');
+    });
+
+    test('collapses a deeper-than-two-segment slug to {category}/{leaf}', () => {
+      expect(categoryRouteSlug('/pest-control/sub/foo/', 'pest-control')).toBe('pest-control/foo');
+    });
+
+    test('falls back to the bare leaf when no category resolves', () => {
+      expect(categoryRouteSlug('/foo/', '')).toBe('foo');
+    });
+  });
+
   test('does not build live URLs from unsupported target_sites hosts', () => {
     expect(AstroPublisher.liveUrlForPost({
       title: 'Bad host',
@@ -375,11 +408,11 @@ describe('blog Astro frontmatter validation', () => {
       { action_type: 'new_supporting_blog' }
     );
 
-    expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-ant-trails-bradenton-/));
+    expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-pest-control-ant-trails-bradenton-/));
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/ant-trails-bradenton.mdx',
+      path: 'src/content/blog/pest-control/ant-trails-bradenton.mdx',
       content: expect.stringContaining('Waves Pest Control guidance'),
-      message: 'feat(blog): publish ant-trails-bradenton',
+      message: 'feat(blog): publish pest-control/ant-trails-bradenton',
       sha: undefined,
     }));
     expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
@@ -391,7 +424,7 @@ describe('blog Astro frontmatter validation', () => {
     }));
     expect(gh.createIssueComment).toHaveBeenCalledWith(123, expect.stringContaining('@codex review'));
     expect(result).toMatchObject({
-      url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
+      url: 'https://www.wavespestcontrol.com/pest-control/ant-trails-bradenton/',
       status: 'pr_open',
       live: false,
       pr_number: 123,
@@ -435,7 +468,7 @@ describe('blog Astro frontmatter validation', () => {
       domains: ['wavespestcontrol.com'],
       robots: 'index, follow',
     });
-    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/ant-trails-bradenton/');
+    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/pest-control/ant-trails-bradenton/');
   });
 
   test('normalizes raw autonomous blog frontmatter before schema validation', async () => {
@@ -516,8 +549,16 @@ describe('blog Astro frontmatter validation', () => {
     const fmModule = require('../services/content-astro/frontmatter');
     const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('/banana-spiders-in-florida.mdx'));
     const parsed = fmModule.parse(markdownCall[0].content);
-    expect(result.url).toBe('https://www.wavespestcontrol.com/banana-spiders-in-florida/');
-    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/banana-spiders-in-florida/');
+    expect(result.url).toBe('https://www.wavespestcontrol.com/pest-control/banana-spiders-in-florida/');
+    expect(parsed.data.canonical).toBe('https://www.wavespestcontrol.com/pest-control/banana-spiders-in-florida/');
+    // Blog URL protocol: the FLAT writer slug is realigned to /{category}/{slug}/
+    // so the astro blog-slug-protocol guardrail (slug.first-segment === category)
+    // passes instead of failing every Pages build.
+    expect(parsed.data.slug).toBe('/pest-control/banana-spiders-in-florida/');
+    expect(parsed.data.category).toBe('pest-control');
+    // …and the committed markdown FILE lives at the category route path (1:1 with
+    // the URL), so no flat/nested duplicate of the same route can be committed.
+    expect(markdownCall[0].path).toBe('src/content/blog/pest-control/banana-spiders-in-florida.mdx');
     expect(validateBlogFrontmatter(parsed.data)).toEqual({ ok: true, errors: [] });
     expect(parsed.data).not.toHaveProperty('tags');
   });
@@ -557,7 +598,7 @@ describe('blog Astro frontmatter validation', () => {
       content: expect.stringContaining('FAQPage'),
     }));
     expect(result).toMatchObject({
-      url: 'https://www.wavespestcontrol.com/yellow-lawn-sarasota/',
+      url: 'https://www.wavespestcontrol.com/pest-control/yellow-lawn-sarasota/',
       status: 'pr_open',
     });
   });
@@ -660,13 +701,13 @@ describe('Astro publisher autonomous draft adapter', () => {
     });
 
     expect(result).toMatchObject({
-      url: 'https://www.wavespestcontrol.com/autonomous-ant-control-bradenton/',
+      url: 'https://www.wavespestcontrol.com/pest-control/autonomous-ant-control-bradenton/',
       pr_number: 42,
       pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
     });
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/autonomous-ant-control-bradenton.mdx',
-      branch: expect.stringMatching(/^content\/autonomous-autonomous-ant-control-bradenton-/),
+      path: 'src/content/blog/pest-control/autonomous-ant-control-bradenton.mdx',
+      branch: expect.stringMatching(/^content\/autonomous-pest-control-autonomous-ant-control-bradenton-/),
       sha: undefined,
     }));
     expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
@@ -678,11 +719,13 @@ describe('Astro publisher autonomous draft adapter', () => {
   test('migrates a legacy .md post to .mdx instead of writing components into Markdown', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
-    // .mdx does not exist yet; the legacy .md does.
+    // .mdx does not exist yet; the legacy .md lives at the FLAT path (legacy
+    // posts pre-date category subdirs). The route-first lookup must fall through
+    // the nested category path and find it here.
     gh.getFile.mockImplementation(async (path) =>
-      path.endsWith('.mdx')
-        ? null
-        : { sha: 'legacy-md-sha', path, content: '---\ntitle: Old\n---\nold body' }
+      path === 'src/content/blog/legacy-ant-post.md'
+        ? { sha: 'legacy-md-sha', path, content: '---\ntitle: Old\n---\nold body' }
+        : null
     );
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.deleteFile.mockResolvedValue({});
@@ -701,16 +744,57 @@ describe('Astro publisher autonomous draft adapter', () => {
       { action_type: 'new_supporting_blog' }
     );
 
-    // Writes the .mdx (no sha — it is a new file), not the legacy .md.
+    // Writes the .mdx at the category route path (no sha — it is a new file),
+    // migrating the post off the flat legacy .md.
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'src/content/blog/legacy-ant-post.mdx',
+      path: 'src/content/blog/pest-control/legacy-ant-post.mdx',
       sha: undefined,
     }));
-    // Deletes the superseded .md so we never leave both.
+    // Deletes the superseded flat .md so we never leave both.
     expect(gh.deleteFile).toHaveBeenCalledWith(expect.objectContaining({
       path: 'src/content/blog/legacy-ant-post.md',
       sha: 'legacy-md-sha',
     }));
+  });
+
+  test('updates an existing category-path post in place for a flat draft slug (no duplicate route)', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    // An existing post already lives at the NESTED category path and renders the
+    // /pest-control/… route. A flat draft slug with the same leaf must update it
+    // in place — not open a second flat file with the same Astro slug/canonical.
+    gh.getFile.mockImplementation(async (path) =>
+      path === 'src/content/blog/pest-control/drain-flies-sarasota-kitchens.mdx'
+        ? { sha: 'existing-nested-sha', path, content: '---\ntitle: Old\nslug: /pest-control/drain-flies-sarasota-kitchens/\n---\nold body' }
+        : null
+    );
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 88, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({
+          slug: '/drain-flies-sarasota-kitchens/',
+          canonical: 'https://www.wavespestcontrol.com/drain-flies-sarasota-kitchens/',
+        }),
+        body: 'Refreshed drain fly guidance for Sarasota kitchens.',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    const fmModule = require('../services/content-astro/frontmatter');
+    const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('drain-flies-sarasota-kitchens.mdx'));
+    // Writes the EXISTING nested file (its sha) — an in-place update, not a new file.
+    expect(markdownCall[0].path).toBe('src/content/blog/pest-control/drain-flies-sarasota-kitchens.mdx');
+    expect(markdownCall[0].sha).toBe('existing-nested-sha');
+    // Never opens a second flat file with the same route.
+    expect(gh.putFile).not.toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/drain-flies-sarasota-kitchens.mdx',
+    }));
+    expect(fmModule.parse(markdownCall[0].content).data.slug).toBe('/pest-control/drain-flies-sarasota-kitchens/');
   });
 
   test('declines unsupported autonomous action types', () => {
@@ -825,8 +909,8 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
       title: 'Dollar Spot in Venice',
     }));
     expect(gh.putBinary).toHaveBeenCalledWith(expect.objectContaining({
-      path: 'public/images/blog/dollar-spot-venice/hero.webp',
-      branch: expect.stringMatching(/^content\/autonomous-dollar-spot-venice-/),
+      path: 'public/images/blog/pest-control/dollar-spot-venice/hero.webp',
+      branch: expect.stringMatching(/^content\/autonomous-pest-control-dollar-spot-venice-/),
       sha: undefined,
     }));
     // Compressed to WebP (RIFF/WEBP container) before commit — LCP path.
@@ -839,10 +923,10 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
     // Frontmatter stamped with the path that was actually committed.
     const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
     expect(parsed.data.hero_image).toEqual({
-      src: '/images/blog/dollar-spot-venice/hero.webp',
+      src: '/images/blog/pest-control/dollar-spot-venice/hero.webp',
       alt: 'Dollar spot lesions on a Venice lawn',
     });
-    expect(parsed.data.og_image).toBe('/images/blog/dollar-spot-venice/hero.webp');
+    expect(parsed.data.og_image).toBe('/images/blog/pest-control/dollar-spot-venice/hero.webp');
   });
 
   test('existing post with a committed hero: reuses it, no regeneration, no binary commit', async () => {
@@ -899,8 +983,8 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
     const content = gh.putFile.mock.calls[0][0].content;
     expect(content).not.toContain('hero.png');
     const parsed = fmModule.parse(content);
-    expect(parsed.data.hero_image.src).toBe('/images/blog/dollar-spot-venice/hero.webp');
-    expect(parsed.data.og_image).toBe('/images/blog/dollar-spot-venice/hero.webp');
+    expect(parsed.data.hero_image.src).toBe('/images/blog/pest-control/dollar-spot-venice/hero.webp');
+    expect(parsed.data.og_image).toBe('/images/blog/pest-control/dollar-spot-venice/hero.webp');
   });
 
   test('an agent hero path that DOES exist in the repo is kept (no regeneration)', async () => {
