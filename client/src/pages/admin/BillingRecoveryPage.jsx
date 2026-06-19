@@ -47,6 +47,16 @@ export function daysSince(dateStr) {
   return Math.max(0, Math.floor((Date.now() - then.getTime()) / 86400000));
 }
 
+// Date-only billing fields (e.g. invoice due_date 'YYYY-MM-DD') must NOT go
+// through new Date(), which parses as midnight UTC and renders the prior day
+// in ET. Format the calendar components directly.
+export function formatDateOnly(d) {
+  if (!d) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d));
+  if (!m) return String(d);
+  return `${Number(m[2])}/${Number(m[3])}/${m[1]}`; // M/D/YYYY
+}
+
 async function adminFetch(path, options = {}) {
   const r = await fetch(`${API_BASE}${path}`, {
     headers: {
@@ -264,7 +274,7 @@ export default function BillingRecoveryPage() {
                       <TR key={b.invoice_id}>
                         <TD>{b.customer}</TD>
                         <TD><Badge tone={String(b.status).toLowerCase() === "overdue" ? "alert" : "neutral"}>{b.status}</Badge></TD>
-                        <TD className="text-zinc-500">{b.due_date ? new Date(b.due_date).toLocaleDateString("en-US") : "—"}</TD>
+                        <TD className="text-zinc-500">{formatDateOnly(b.due_date)}</TD>
                         <TD nums>{formatMoney(b.amount)}</TD>
                       </TR>
                     ))}

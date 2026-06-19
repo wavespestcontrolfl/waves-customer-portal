@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMoney, daysSince, FREE_REASONS } from "./BillingRecoveryPage";
+import { formatMoney, daysSince, formatDateOnly, FREE_REASONS } from "./BillingRecoveryPage";
 
 describe("BillingRecoveryPage helpers", () => {
   it("formats money with USD + thousands separators", () => {
@@ -16,6 +16,13 @@ describe("BillingRecoveryPage helpers", () => {
     const d = daysSince(new Date(Date.now() - 3 * 86400000).toISOString());
     expect(d).toBeGreaterThanOrEqual(2);
     expect(d).toBeLessThanOrEqual(4);
+  });
+
+  it("formatDateOnly renders date-only fields without UTC drift", () => {
+    expect(formatDateOnly("2026-06-19")).toBe("6/19/2026");
+    expect(formatDateOnly("2026-06-19T00:00:00Z")).toBe("6/19/2026");
+    expect(formatDateOnly(null)).toBe("—");
+    expect(formatDateOnly("garbage")).toBe("garbage");
   });
 
   it("free reasons cover the Adam-locked no-cost taxonomy", () => {

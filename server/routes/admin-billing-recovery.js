@@ -51,8 +51,16 @@ const FREE_TYPE_PATTERNS = [
   '%inspection%',   // inspections (often waived/credited)
   '%re-service%', '%reservice%', '%re service%', // free re-services
   '%estimate%',     // estimate visits
+  '%follow-up%', '%followup%', '%follow up%', '%re-visit%', '%revisit%', // follow-up re-visits
   '%trap%', '%rodent%', // rodent trapping setup + in-window trap checks (judge manually)
 ];
+
+// JS mirror of the FREE_TYPE_PATTERNS ILIKE check, for the write path (POST /bill)
+// so a stale or direct request can't bill a visit type the leak query excludes.
+function isNoCostServiceType(serviceType) {
+  const s = String(serviceType || '').toLowerCase();
+  return FREE_TYPE_PATTERNS.some((p) => s.includes(p.replace(/%/g, '')));
+}
 
 // SQL fragment: TRUE when a non-void invoice already exists for the visit.
 // Aliases: `sr` = service_records, `ss` = scheduled_services.
@@ -196,6 +204,12 @@ router.get('/aging', async (req, res) => {
   try {
     const minAmount = Math.max(0, parseFloat(req.query.min_amount) || 0);
     const aging = await executeDashboardTool('get_outstanding_balances', { min_amount: minAmount });
+    // The tool catches its own errors and returns { error } rather than throwing —
+    // don't pass that through as a successful 200 (the client would read $0 AR).
+    if (aging && aging.error) {
+      logger.error(`[billing-recovery] aging tool error: ${aging.error}`);
+      return res.status(502).json({ error: 'Failed to load AR aging' });
+    }
     res.json(aging);
   } catch (err) {
     logger.error(`[billing-recovery] aging query failed: ${err.message}`);
@@ -258,6 +272,9 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     }
     if (visit.ss_callback || visit.sr_callback) {
       return res.status(409).json({ error: 'Visit is flagged as a callback / re-treat (no-cost).' });
+    }
+    if (isNoCostServiceType(visit.service_type)) {
+      return res.status(409).json({ error: 'Visit type is in the no-cost allowlist (appointment / inspection / re-service / estimate / rodent trap / follow-up) — not billable here.' });
     }
     const prepaid = parseFloat(visit.prepaid_amount || 0);
     const price = parseFloat(visit.estimated_price || 0);

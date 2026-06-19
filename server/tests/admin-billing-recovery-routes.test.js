@@ -174,6 +174,23 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  test('billing a no-cost-type visit is blocked (write path enforces the allowlist)', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, service_type: 'WDO Inspection Service' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(false);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.error).toMatch(/no-cost/i);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
   test('billing a visit that already has an invoice is blocked', async () => {
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: BILLABLE_VISIT });
@@ -245,6 +262,14 @@ describe('admin billing-recovery routes', () => {
       expect(res.status).toBe(200);
       expect(executeDashboardTool).toHaveBeenCalledWith('get_outstanding_balances', { min_amount: 0 });
       expect(body.total_outstanding).toBe(500);
+    });
+  });
+
+  test('GET /aging surfaces tool failures as non-2xx (not a silent $0)', async () => {
+    executeDashboardTool.mockResolvedValue({ error: 'db unavailable' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/aging`, { headers: { Authorization: 'Bearer admin' } });
+      expect(res.status).toBe(502);
     });
   });
 });
