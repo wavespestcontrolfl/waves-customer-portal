@@ -154,17 +154,20 @@ function collectJsonLdOffers(jsonLdStrings) {
 }
 
 // Buyability rank for choosing among same-pool offers: a limited-stock price is
-// still purchasable and must beat a sold-out one (which ranking later drops).
-const AVAIL_RANK = { in_stock: 3, limited: 2, unknown: 1, backorder: 1, out_of_stock: 0 };
+// still purchasable and must beat a sold-out one; backorder is unbuyable like
+// out_of_stock (lower than 'unknown', so an unknown buyable offer wins over it).
+const AVAIL_RANK = { in_stock: 3, limited: 2, unknown: 1, backorder: 0, out_of_stock: 0 };
 
-// Choose, by buyability then order, one offer from a pool and shape it.
+// Choose one offer from a pool: highest buyability, then CHEAPEST among equals
+// (so a sale price beats MSRP, not just whichever the page listed first).
 function pickBestOffer(pool) {
   let best = null;
   let bestRank = -1;
   for (const o of pool) {
     const availability = mapAvailability(o.availabilityRaw);
     const rank = AVAIL_RANK[availability] ?? 1;
-    if (!best || rank > bestRank) {
+    const better = !best || rank > bestRank || (rank === bestRank && o.price < best.price);
+    if (better) {
       best = { price: o.price, currency: o.currency || 'USD', availability, name: o.name };
       bestRank = rank;
     }
@@ -238,12 +241,26 @@ function extractSizeToken(text) {
   return `${m[1].replace(/\s+/g, '')} ${cleanUnit(m[2])}`.trim();
 }
 
+// A non-USD currency marker: a non-$ symbol, a 3-letter ISO code (not USD), or a
+// letter-prefixed dollar (C$, CA$, AU$ …; US$ / bare $ stay USD).
+function hasNonUsdCurrency(s) {
+  return /[€£¥₹₩₪₫₴฿]/.test(s)
+    || /\b(?:EUR|GBP|CAD|AUD|JPY|CNY|CHF|MXN|NZD|HKD|SEK|NOK|DKK|BRL|INR|RUB|ZAR)\b/i.test(s)
+    || /\b(?:C|CA|A|AU|NZ|HK|MX|R|S)\$/i.test(s);
+}
+
 // DOM fallback when JSON-LD has no price. `snapshot` is a small object the
 // adapter builds via page.evaluate: { priceTexts: [], title, availabilityText }.
+// DOM prices are assumed USD, so a text carrying a non-USD currency is skipped
+// (it would otherwise be queued as a USD price, bypassing the scanner's guard).
 function extractDomPrice(snapshot = {}) {
   const texts = Array.isArray(snapshot.priceTexts) ? snapshot.priceTexts : [];
   let price = null;
-  for (const t of texts) { const p = parsePriceText(t); if (p != null) { price = p; break; } }
+  for (const t of texts) {
+    if (hasNonUsdCurrency(t)) continue;
+    const p = parsePriceText(t);
+    if (p != null) { price = p; break; }
+  }
   if (price == null) return null;
   return {
     price,

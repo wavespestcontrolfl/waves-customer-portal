@@ -118,6 +118,28 @@ describe('price-scan extract', () => {
       expect(got.price).toBe(90);
       expect(got.availability).toBe('in_stock');
     });
+    test('among same-rank in-stock offers, picks the cheapest (sale over MSRP)', () => {
+      const ld = JSON.stringify({
+        '@type': 'Product', name: 'A',
+        offers: [
+          { '@type': 'Offer', price: 99, availability: 'InStock' },
+          { '@type': 'Offer', price: 89, availability: 'InStock' },
+        ],
+      });
+      expect(extractJsonLdOffer([ld]).price).toBe(89);
+    });
+    test('a buyable unknown beats an unbuyable backorder', () => {
+      const ld = JSON.stringify({
+        '@type': 'Product', name: 'A',
+        offers: [
+          { '@type': 'Offer', price: 50, availability: 'BackOrder' },
+          { '@type': 'Offer', price: 90 }, // no availability -> unknown
+        ],
+      });
+      const got = extractJsonLdOffer([ld]);
+      expect(got.price).toBe(90);
+      expect(got.availability).toBe('unknown');
+    });
     test('within one offers array, prefers in-stock over an earlier sold-out offer', () => {
       const ld = JSON.stringify({
         '@type': 'Product', name: 'A',
@@ -282,6 +304,11 @@ describe('price-scan extract', () => {
     test('no price -> null', () => {
       expect(extractDomPrice({ priceTexts: ['Call for price'], title: 'X' })).toBeNull();
       expect(extractDomPrice({})).toBeNull();
+    });
+    test('skips non-USD DOM prices (assumed USD otherwise)', () => {
+      expect(extractDomPrice({ priceTexts: ['CA$95', '$89.00'], title: 'X', availabilityText: 'In Stock' }).price).toBe(89);
+      expect(extractDomPrice({ priceTexts: ['€95', 'EUR 95'], title: 'X' })).toBeNull();
+      expect(extractDomPrice({ priceTexts: ['£95'], title: 'X' })).toBeNull();
     });
     test('skips a unit-price snippet to find the package price', () => {
       expect(extractDomPrice({ priceTexts: ['$1.22 / oz', '$95.00'], title: 'X', availabilityText: 'In Stock' }).price).toBe(95);
