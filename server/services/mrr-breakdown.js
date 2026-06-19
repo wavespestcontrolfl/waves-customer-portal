@@ -6,10 +6,15 @@ const { etDateString } = require('../utils/datetime-et');
 //
 //   1. Autopay is paused. `autopay_paused_until` is in the future, so the
 //      automated charge will be skipped. (A null/past pause date = not paused.)
-//   2. The account is already overdue: it carries an unpaid invoice that is
-//      past due (or explicitly flagged `overdue`). Matches the same overdue
-//      definition the dashboard AR tile and command-center use
-//      (status='overdue' OR due_date < today).
+//   2. The account is already overdue: it carries an OUTSTANDING invoice that
+//      is past due (or explicitly flagged `overdue`). "Outstanding" mirrors
+//      the dashboard AR query's own definition exactly — `paid_at IS NULL`
+//      (paid_at, not status, is the authoritative paid signal) AND
+//      status NOT IN ('void','cancelled','draft'). That EXCLUSION model is
+//      used instead of an inclusion list so a paid-but-status-stale invoice
+//      can't falsely flag a customer, and a future status (`unpaid`,
+//      `pending`, …) that's past due is still caught. Past-due test matches
+//      command-center: status='overdue' OR due_date < today.
 //
 // Autopay being *disabled* is deliberately NOT at-risk: many Waves customers
 // are invoiced after each visit and pay on receipt, so a disabled autopay
@@ -27,7 +32,8 @@ const AT_RISK_PREDICATE = `(
   OR EXISTS (
     SELECT 1 FROM invoices iv
     WHERE iv.customer_id = c.id
-      AND iv.status IN ('sent', 'viewed', 'overdue')
+      AND iv.paid_at IS NULL
+      AND iv.status NOT IN ('void', 'cancelled', 'draft')
       AND (iv.status = 'overdue' OR iv.due_date < ?::date)
   )
 )`;

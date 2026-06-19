@@ -66,10 +66,13 @@ describe('AT_RISK_PREDICATE definition', () => {
     expect(AT_RISK_PREDICATE).toContain('c.autopay_paused_until >= ?::date');
   });
 
-  test('flags overdue accounts via correlated unpaid/past-due invoice', () => {
+  test('flags overdue accounts via correlated outstanding/past-due invoice', () => {
     expect(AT_RISK_PREDICATE).toContain('FROM invoices iv');
     expect(AT_RISK_PREDICATE).toContain('iv.customer_id = c.id');
-    expect(AT_RISK_PREDICATE).toContain("iv.status IN ('sent', 'viewed', 'overdue')");
+    // "Outstanding" mirrors the AR query's exclusion model, not an inclusion
+    // list: unpaid (paid_at IS NULL) and not a non-collectible status.
+    expect(AT_RISK_PREDICATE).toContain('iv.paid_at IS NULL');
+    expect(AT_RISK_PREDICATE).toContain("iv.status NOT IN ('void', 'cancelled', 'draft')");
     expect(AT_RISK_PREDICATE).toContain("iv.status = 'overdue' OR iv.due_date < ?::date");
   });
 
