@@ -719,11 +719,13 @@ describe('Astro publisher autonomous draft adapter', () => {
   test('migrates a legacy .md post to .mdx instead of writing components into Markdown', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
-    // .mdx does not exist yet; the legacy .md does.
+    // .mdx does not exist yet; the legacy .md lives at the FLAT path (legacy
+    // posts pre-date category subdirs). The route-first lookup must fall through
+    // the nested category path and find it here.
     gh.getFile.mockImplementation(async (path) =>
-      path.endsWith('.mdx')
-        ? null
-        : { sha: 'legacy-md-sha', path, content: '---\ntitle: Old\n---\nold body' }
+      path === 'src/content/blog/legacy-ant-post.md'
+        ? { sha: 'legacy-md-sha', path, content: '---\ntitle: Old\n---\nold body' }
+        : null
     );
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.deleteFile.mockResolvedValue({});
@@ -752,6 +754,46 @@ describe('Astro publisher autonomous draft adapter', () => {
       path: 'src/content/blog/legacy-ant-post.md',
       sha: 'legacy-md-sha',
     }));
+  });
+
+  test('updates an existing category-path post in place for a flat draft slug (no duplicate route)', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    // An existing post already lives at the NESTED category path and renders the
+    // /pest-control/… route. A flat draft slug with the same leaf must update it
+    // in place — not open a second flat file with the same Astro slug/canonical.
+    gh.getFile.mockImplementation(async (path) =>
+      path === 'src/content/blog/pest-control/drain-flies-sarasota-kitchens.mdx'
+        ? { sha: 'existing-nested-sha', path, content: '---\ntitle: Old\nslug: /pest-control/drain-flies-sarasota-kitchens/\n---\nold body' }
+        : null
+    );
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 88, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({
+          slug: '/drain-flies-sarasota-kitchens/',
+          canonical: 'https://www.wavespestcontrol.com/drain-flies-sarasota-kitchens/',
+        }),
+        body: 'Refreshed drain fly guidance for Sarasota kitchens.',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    const fmModule = require('../services/content-astro/frontmatter');
+    const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('drain-flies-sarasota-kitchens.mdx'));
+    // Writes the EXISTING nested file (its sha) — an in-place update, not a new file.
+    expect(markdownCall[0].path).toBe('src/content/blog/pest-control/drain-flies-sarasota-kitchens.mdx');
+    expect(markdownCall[0].sha).toBe('existing-nested-sha');
+    // Never opens a second flat file with the same route.
+    expect(gh.putFile).not.toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/drain-flies-sarasota-kitchens.mdx',
+    }));
+    expect(fmModule.parse(markdownCall[0].content).data.slug).toBe('/pest-control/drain-flies-sarasota-kitchens/');
   });
 
   test('declines unsupported autonomous action types', () => {

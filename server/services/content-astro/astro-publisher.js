@@ -1067,7 +1067,17 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // LEGACY .md post exists at this slug, MIGRATE it to .mdx (the body may carry
   // MDX-only components that would render broken in a .md file): write the
   // .mdx and delete the stale .md in the same branch — never leave both.
-  const existingFile = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
+  // Find an existing file that already renders this post's ROUTE — and update it
+  // in place rather than opening a duplicate. The route can resolve under a
+  // category (routeSlug) while the writer's slug is flat, so probe the category
+  // path FIRST: otherwise an existing /{category}/{slug}/ post that lives at a
+  // nested file (e.g. src/content/blog/pest-control/drain-flies-sarasota…mdx)
+  // is missed and a SECOND flat file is committed with the same Astro
+  // slug/canonical → duplicate-route build conflict. Fall back to the raw slug
+  // path (the common flat-file posts whose file name equals the route leaf).
+  const existingFile =
+    (routeSlug !== slug ? await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${routeSlug}`) : null)
+    || await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
   const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
   const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 
