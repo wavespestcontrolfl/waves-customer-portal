@@ -11,7 +11,7 @@
  */
 
 const db = require('../models/db');
-const { stripGreetingNameToken } = require('./newsletter-draft');
+const { stripPersonalizationTokens } = require('./newsletter-draft');
 
 const ENTITIES = {
   amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
@@ -44,9 +44,10 @@ async function getPublishedPosts({ limit = 6 } = {}) {
     slugLink: s.slug ? `/newsletter/archive/${s.slug}` : null,
     slug: s.slug || null,
     pubDate: s.sent_at ? new Date(s.sent_at).toUTCString() : '',
-    // stripGreetingNameToken: sent bodies persist the {{greeting-name}}
-    // substitution token; feed descriptions have no recipient identity.
-    description: s.preview_text || stripHtml(stripGreetingNameToken(s.html_body || '')).slice(0, 200),
+    // stripPersonalizationTokens: sent bodies persist the {{greeting-name}} /
+    // {{city}} / {{grass-type}} tokens; feed descriptions have no recipient
+    // identity, so neutralize them all (city/grass → neutral defaults).
+    description: stripPersonalizationTokens(s.preview_text || '') || stripHtml(stripPersonalizationTokens(s.html_body || '')).slice(0, 200),
     image: null,
     source: 'newsletter',
     sourceName: 'Waves Newsletter',

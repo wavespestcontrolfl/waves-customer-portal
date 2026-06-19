@@ -619,6 +619,27 @@ function stripGreetingNameToken(content) {
   return String(content || '').split(GREETING_NAME_TOKEN).join('');
 }
 
+// Per-recipient merge tags resolved only inside the SendGrid payload at send
+// time. Hyphenated to avoid markdown _italic_ collisions (see GREETING token).
+const CITY_TOKEN = '{{city}}';
+const GRASS_TYPE_TOKEN = '{{grass-type}}';
+// Neutral fallbacks for BOTH the live-send default (no lawn/city on file) and
+// every no-recipient surface. 'St. Augustine' is the owner-directed default
+// grass; 'your area' reads naturally in a city slot.
+const DEFAULT_CITY_LABEL = 'your area';
+const DEFAULT_GRASS_LABEL = 'St. Augustine';
+
+// Neutralize EVERY per-recipient merge tag for surfaces that render the
+// persisted body without substitution (public archive, RSS feed, preview/test
+// send, touchpoint log). Greeting → '' (it carries its own leading ", "); city
+// and grass → their neutral defaults — so a campaign using these tokens never
+// shows a literal "{{city}}" / "{{grass-type}}" in public.
+function stripPersonalizationTokens(content) {
+  return stripGreetingNameToken(content)
+    .split(CITY_TOKEN).join(DEFAULT_CITY_LABEL)
+    .split(GRASS_TYPE_TOKEN).join(DEFAULT_GRASS_LABEL);
+}
+
 // Highlights bullets are plain text with a renderer-added "•" marker
 // (owner decision 2026-06-12: no emoji bullets). The prompt forbids
 // emojis, but strip any leading emoji/marker the model emits anyway —
@@ -1393,6 +1414,12 @@ module.exports = {
   greetingWithNameToken,
   greetingNameValueFor,
   stripGreetingNameToken,
+  // City / grass merge tags + neutral defaults + combined no-recipient stripper
+  CITY_TOKEN,
+  GRASS_TYPE_TOKEN,
+  DEFAULT_CITY_LABEL,
+  DEFAULT_GRASS_LABEL,
+  stripPersonalizationTokens,
   plainBulletText,
   // P.S. label-doubling guard + plain-text entity decode (escapeHtml inverse)
   psBodyText,
