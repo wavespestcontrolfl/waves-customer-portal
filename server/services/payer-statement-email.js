@@ -31,6 +31,33 @@ const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', due_on_receipt: 'Due on r
 // statement would otherwise reach AP looking collectible).
 const SENDABLE_STATUSES = new Set(['finalized', 'sent', 'viewed']);
 
+// Terminal delivery states that permanently dedupe an idempotency key WITHOUT
+// delivering (the blocked/suppressed subset of the email library's
+// DEDUPE_STATUSES). 'failed'/'error' auto-retry under the same key, 'queued' is
+// in-flight, and 'sent'/'delivered' would have stamped the statement out of the
+// first-delivery branch — so a `forceResend` only earns its keyless bypass when
+// the first delivery actually landed in one of these.
+const BLOCKED_DELIVERY_STATUSES = ['blocked', 'bounced', 'bounce', 'dropped', 'spam_report', 'spamreport', 'unsubscribed', 'complained'];
+
+/**
+ * True only if the first delivery under `idempotencyKey` terminally failed
+ * (blocked/suppressed). Used to gate `forceResend`: a stray/double-clicked force
+ * must NOT bypass the stable key unless there is a real blocked attempt to retry.
+ * Fails safe (returns false) so a lookup error never grants a keyless bypass.
+ */
+async function firstDeliveryBlocked(idempotencyKey, database) {
+  try {
+    const row = await database('email_messages')
+      .where({ idempotency_key: idempotencyKey })
+      .whereIn('status', BLOCKED_DELIVERY_STATUSES)
+      .first('id');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[payer-statement-email] blocked-delivery lookup failed for ${idempotencyKey}: ${err.message}`);
+    return false;
+  }
+}
+
 function currency(n) {
   return `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -127,12 +154,15 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
   // double-click / client retry / concurrent close-and-send can't email AP two
   // copies — sendTemplate only dedupes on idempotencyKey (triggerEventId is
   // metadata). This holds for BOTH /close's chained send and a normal /send.
-  // `forceResend` (an explicit retry of a known blocked/suppressed attempt) is
-  // the ONLY keyless first-delivery path — the stable key's terminal blocked row
-  // would otherwise dedupe every retry. Re-delivering an already-sent/viewed
-  // statement is keyless too (intentional re-send).
-  const isFirstDelivery = !forceResend && statement.status === 'finalized' && !statement.sent_at;
-  const idempotencyKey = isFirstDelivery ? `payer_statement_sent:${statement.id}` : undefined;
+  // `forceResend` drops the key to make a fresh attempt, but ONLY when the first
+  // delivery genuinely blocked (else a stray/double-clicked force would bypass
+  // dedupe and double-send). Re-delivering an already-sent/viewed statement is
+  // keyless too (intentional re-send).
+  const isFirstDelivery = statement.status === 'finalized' && !statement.sent_at;
+  let idempotencyKey = isFirstDelivery ? `payer_statement_sent:${statement.id}` : undefined;
+  if (isFirstDelivery && forceResend && (await firstDeliveryBlocked(idempotencyKey, database))) {
+    idempotencyKey = undefined; // genuine retry of a blocked first delivery → fresh attempt
+  }
 
   let sent = false;
   if (sendgrid.isConfigured()) {

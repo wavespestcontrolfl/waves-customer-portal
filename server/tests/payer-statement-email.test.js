@@ -106,14 +106,25 @@ test('a normal (non-forced) send of a finalized statement stays keyed (no double
   expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7');
 });
 
-test('forceResend is keyless — fresh attempt retries a blocked first delivery', async () => {
-  // Still finalized + never sent (the first attempt was blocked). An explicit
-  // force retry must NOT reuse the first-delivery key (sendTemplate would dedupe
-  // to the terminal blocked row); it makes a fresh attempt.
-  mockDbHandler = () => ({ where() { return this; }, first: async () => finalized(), update: async () => 1 });
+test('forceResend retries a genuinely BLOCKED first delivery (keyless fresh attempt)', async () => {
+  // Still finalized + never sent because the first attempt was blocked. A force
+  // retry then drops the key so sendTemplate can't dedupe to the terminal row.
+  mockDbHandler = (t) => {
+    if (t === 'email_messages') return { where() { return this; }, whereIn() { return this; }, first: async () => ({ id: 99 }) };
+    return { where() { return this; }, first: async () => finalized(), update: async () => 1 };
+  };
   await sendStatementEmail(7, { forceResend: true });
   expect(mockSendTemplate).toHaveBeenCalledTimes(1);
   expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBeUndefined();
+});
+
+test('forceResend WITHOUT a blocked prior stays keyed — force cannot bypass dedupe', async () => {
+  mockDbHandler = (t) => {
+    if (t === 'email_messages') return { where() { return this; }, whereIn() { return this; }, first: async () => undefined };
+    return { where() { return this; }, first: async () => finalized(), update: async () => 1 };
+  };
+  await sendStatementEmail(7, { forceResend: true });
+  expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7');
 });
 
 test('refuses to send an OPEN (not-yet-finalized) statement', async () => {
