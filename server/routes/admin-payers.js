@@ -141,6 +141,7 @@ router.post('/:id/statements/:statementId/close', async (req, res, next) => {
     let sendNote = '';
     if (req.body?.send) {
       if (delivery?.skipped) sendNote = ` (already ${frozen?.status}; not re-sent)`;
+      else if (delivery?.deduped) sendNote = ' (already in flight; not re-sent)';
       else if (delivery?.ok) sendNote = delivery.dryRun ? ' (dry-run send ok)' : ' + sent';
       else sendNote = ` (close ok, send FAILED: ${delivery?.error || 'unknown'})`;
     }

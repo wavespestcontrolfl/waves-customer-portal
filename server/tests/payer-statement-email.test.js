@@ -90,6 +90,19 @@ test('sends via SendGrid + stamps finalized→sent', async () => {
   expect(updates[0]).toMatchObject({ status: 'sent' });
 });
 
+test('an in-flight dedupe collision is reported as deduped (no false failure) and does not stamp', async () => {
+  // The dedupe winner already holds a queued email_messages row; sendTemplate
+  // raises EMAIL_SEND_IN_PROGRESS for the loser. That is not a delivery failure —
+  // the statement IS being sent — so we return deduped and never stamp here.
+  const updates = [];
+  mockDbHandler = () => ({ where() { return this; }, first: async () => finalized(), update: async (p) => { updates.push(p); return 1; } });
+  const collision = new Error('email send already in progress'); collision.code = 'EMAIL_SEND_IN_PROGRESS';
+  mockSendTemplate.mockRejectedValueOnce(collision);
+  const res = await sendStatementEmail(7);
+  expect(res).toMatchObject({ ok: true, deduped: true });
+  expect(updates).toHaveLength(0); // the winner stamps finalized→sent, not the loser
+});
+
 test('first delivery passes a stable idempotency key (no double-send on retry)', async () => {
   mockDbHandler = () => ({ where() { return this; }, first: async () => finalized(), update: async () => 1 });
   await sendStatementEmail(7);

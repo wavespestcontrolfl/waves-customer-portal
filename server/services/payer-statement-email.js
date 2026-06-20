@@ -224,6 +224,15 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
       }
       sent = true;
     } catch (err) {
+      // A concurrent first-delivery request (the dedupe winner) already holds an
+      // in-flight email_messages row for this key; we lost the idempotency race.
+      // That is NOT a failure — another request is delivering this exact
+      // statement — so report a deduped/in-progress success and DON'T stamp
+      // sent here (the winner stamps it). Surfacing 422 would be a false AP miss.
+      if (err.code === 'EMAIL_SEND_IN_PROGRESS') {
+        logger.info(`[payer-statement-email] statement ${statementId} already in flight (dedupe race) — not re-sending`);
+        return { ok: true, deduped: true, pending: true, recipient };
+      }
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[payer-statement-email] template send failed for statement ${statementId}: ${err.message}`);
         return { ok: false, error: err.message, recipient };
