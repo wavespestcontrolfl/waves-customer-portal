@@ -526,7 +526,7 @@ async function getCustomerDetail(customerId) {
       property_sqft: customer.property_sqft,
       lot_sqft: customer.lot_sqft,
       lawn_type: customer.lawn_type,
-      notes: customer.notes,
+      notes: customer.crm_notes,
     },
     tags: tags.map(t => t.tag),
     health_score: health ? {
@@ -767,7 +767,7 @@ const UPDATABLE_FIELDS = {
   phone: 'phone', city: 'city', state: 'state', zip: 'zip',
   address_line1: 'address_line1', waveguard_tier: 'waveguard_tier',
   pipeline_stage: 'pipeline_stage', lead_source: 'lead_source',
-  monthly_rate: 'monthly_rate', active: 'active', notes: 'notes',
+  monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
 };
 
 function sanitizeUpdates(updates) {
@@ -922,7 +922,10 @@ async function updateCustomer(customerId, updates) {
     }
   }
 
-  logger.info(`[intelligence-bar] Updated customer ${customerId}:`, changes);
+  // notes maps to free-text crm_notes (gate codes, access details) — redact
+  // it from logs while still persisting the value.
+  const logChanges = changes.notes ? { ...changes, notes: '[redacted]' } : changes;
+  logger.info(`[intelligence-bar] Updated customer ${customerId}:`, logChanges);
 
   return {
     success: true,
@@ -950,7 +953,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
     : {};
   const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
 
-  logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, updates);
+  // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
+  const logUpdates = updates.notes !== undefined ? { ...updates, notes: '[redacted]' } : updates;
+  logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
 
   return {
     success: true,
