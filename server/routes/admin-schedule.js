@@ -1140,7 +1140,7 @@ router.get('/', async (req, res, next) => {
       if (prefs?.property_gate_code) alerts.push({ type: 'gate', text: `Yard: ${prefs.property_gate_code}` });
       if (prefs?.garage_code) alerts.push({ type: 'gate', text: `Garage: ${prefs.garage_code}` });
       if (prefs?.lockbox_code) alerts.push({ type: 'gate', text: `Lockbox: ${prefs.lockbox_code}` });
-      if (prefs?.pet_count > 0) alerts.push({ type: 'pet', text: prefs.pet_details || `${prefs.pet_count} pet(s)` });
+      if (prefs?.pet_count > 0 || prefs?.pet_details) alerts.push({ type: 'pet', text: prefs.pet_details || `${prefs.pet_count} pet(s)` });
       if (prefs?.pets_secured_plan) alerts.push({ type: 'pet_plan', text: prefs.pets_secured_plan });
       if (prefs?.chemical_sensitivities) alerts.push({ type: 'chemical', text: prefs.chemical_sensitivity_details || 'Chemical sensitivity' });
       if (prefs?.access_notes) alerts.push({ type: 'access', text: prefs.access_notes });
