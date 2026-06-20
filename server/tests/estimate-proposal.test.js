@@ -66,6 +66,29 @@ describe('estimate-proposal', () => {
       const estimate = { estimate_data: { proposal: { enabled: true, taxRate: 9, buildings: [{ name: 'B', lineItems: [{ description: 's', unitPrice: 1, frequency: 'monthly' }] }] } } };
       expect(normalizeProposal(estimate).taxRate).toBe(1);
     });
+
+    it('clamps negative unit prices to 0 so totals can never go negative', () => {
+      const estimate = {
+        estimate_data: {
+          proposal: {
+            enabled: true,
+            buildings: [{
+              name: 'Tower A',
+              lineItems: [
+                { description: 'Hostile negative line', unitPrice: -500, frequency: 'monthly' },
+                { description: 'Legit line', unitPrice: 200, frequency: 'monthly' },
+              ],
+            }],
+          },
+        },
+      };
+      const p = normalizeProposal(estimate);
+      expect(p.buildings[0].lineItems[0].unitPrice).toBe(0);
+      expect(p.buildings[0].lineItems[0].amount).toBe(0);
+      const totals = computeProposalTotals(p);
+      expect(totals.monthlyEquivalent).toBeGreaterThanOrEqual(0);
+      expect(totals.annualRecurring).toBe(200 * 12);
+    });
   });
 
   describe('computeProposalTotals', () => {

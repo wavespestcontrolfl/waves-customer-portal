@@ -58,7 +58,12 @@ function normalizeFrequency(value) {
 
 function normalizeLineItem(raw = {}) {
   const quantity = Math.max(1, Math.round(num(raw.quantity, 1)));
-  const unitPrice = roundMoney(num(raw.unitPrice ?? raw.unit_price ?? raw.price, 0));
+  // Proposal lines are commercial quote amounts — never negative. Clamp at the
+  // authoritative normalizer (the PDF and computeProposalTotals both read this)
+  // so a bad/hostile client can't drive the persisted estimate totals negative,
+  // regardless of entry path. The PUT route additionally rejects negatives so an
+  // operator authoring in the modal gets feedback instead of a silent zero.
+  const unitPrice = Math.max(0, roundMoney(num(raw.unitPrice ?? raw.unit_price ?? raw.price, 0)));
   const frequency = normalizeFrequency(raw.frequency);
   // amount is the price per occurrence (qty × unit price). Annualization is
   // derived from the frequency in computeProposalTotals.

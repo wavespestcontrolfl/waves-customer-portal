@@ -723,11 +723,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     updated_at: db.fn.now(),
   };
   // Persist only the send-time pricing snapshot, merged into estimate_data via
-  // a jsonb || merge rather than a full overwrite. Immediate sends don't claim
-  // the row, so a proposal save can commit between this read and the write; the
-  // merge replaces just the `sendSnapshot` key and preserves any concurrently
-  // saved top-level keys (proposal/etc.), so the send can't clobber it. Totals
-  // live in columns and are intentionally left untouched here.
+  // a jsonb || merge rather than a full overwrite, so it replaces just the
+  // `sendSnapshot` (+ proposalDelivery) keys and preserves any concurrently
+  // saved top-level keys (proposal/etc.). Totals live in columns and are
+  // intentionally left untouched here.
   const freshForSnapshot = await db('estimates').where({ id: estimate.id }).first() || estimate;
   const proposalEnabledForDelivery = normalizeProposal(freshForSnapshot).enabled;
   try {
@@ -751,7 +750,28 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   } catch (e) {
     logger.warn(`[admin-estimates] estimate_data snapshot update failed for estimate ${estimate.id}: ${e.message}`);
   }
-  await db('estimates').where({ id: estimate.id }).update(updatePayload);
+  // Scope the final `sent` write to the row we still hold as `sending` and that
+  // has NOT been price-locked. A customer can accept while the SMS/email/PDF
+  // work is in flight (the public accept path treats `sending` as active and
+  // price-locks + creates invoice/conversion); an unconditional update would
+  // then overwrite that accepted, money-bearing state back to `sent`. If the
+  // flip is lost, acceptance won — leave it, and skip the `sent` downstream
+  // effects (which would regress the linked lead from won back to sent).
+  const sentCount = await db('estimates')
+    .where({ id: estimate.id, status: 'sending' })
+    .whereNull('price_locked_at')
+    .update(updatePayload);
+  if (!sentCount) {
+    logger.warn(`[admin-estimates] estimate ${estimate.id} left 'sending' during send (likely accepted concurrently); preserving its current state.`);
+    return {
+      sent: true,
+      superseded: true,
+      partialFailure: failedChannels.length > 0,
+      channels,
+      sentChannels,
+      failedChannels,
+    };
+  }
 
   try {
     await markLinkedLeadEstimateSent({ estimateId: estimate.id, sendMethod });
@@ -1211,6 +1231,15 @@ router.put('/:id/proposal', async (req, res, next) => {
     const incoming = req.body?.proposal || req.body || {};
     if (!Array.isArray(incoming.buildings) || incoming.buildings.length === 0) {
       return res.status(400).json({ error: 'proposal.buildings must be a non-empty array.' });
+    }
+    // Reject negative line pricing outright so the operator sees the error
+    // rather than a silently-clamped zero. (normalizeLineItem also clamps as a
+    // last-resort safety net for any other entry path.)
+    const hasNegativeLine = incoming.buildings.some((b) => Array.isArray(b?.lineItems || b?.line_items)
+      && (b.lineItems || b.line_items).some((i) => Number(i?.unitPrice ?? i?.unit_price ?? i?.price) < 0
+        || Number(i?.quantity) < 0));
+    if (hasNegativeLine) {
+      return res.status(400).json({ error: 'Proposal line items cannot have negative quantities or unit prices.' });
     }
 
     // Normalize through the shared model so what we store matches what the
