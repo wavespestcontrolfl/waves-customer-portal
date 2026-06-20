@@ -108,10 +108,17 @@ homeowner. So:
 - `+ statement_id` bigint FK→payer_statements `ON DELETE SET NULL`.
 - `+ payer_id` bigint FK→payers `ON DELETE SET NULL`.
 - Make `customer_id` **nullable**; a statement settlement writes **one** row with
-  `customer_id = NULL`, `payer_id` + `statement_id` set, `amount` = statement
-  total. (Alternative considered: a separate `payer_statement_payments` table —
-  rejected to keep one ledger for reconciliation/refunds, but it means the
-  customer-keyed readers below MUST be updated.)
+  `customer_id = NULL`, `payer_id` + `statement_id` set. (Alternative considered:
+  a separate `payer_statement_payments` table — rejected to keep one ledger for
+  reconciliation/refunds, but it means the customer-keyed readers below MUST be
+  updated.)
+- **`amount` = the CHARGED total, not the base statement total.** When a card
+  surcharge applies (online card pay), `payments.amount` must be the surcharged
+  total that actually hit the PaymentIntent, with the pre-surcharge / surcharge
+  split in the same cents fields existing Stripe payment rows use. Storing the
+  bare statement total would understate collected cash and make the ledger
+  disagree with the PI/webhook. ACH/offline rows carry no surcharge so `amount` =
+  statement total there.
 - **Every customer-keyed payments reader must exclude payer-scoped rows** —
   mirror the existing payer-invoice exclusion pattern: add `customer_id IS NOT
   NULL` (or `payer_id IS NULL`) to revenue/health/per-customer ledger queries so
@@ -139,11 +146,17 @@ resolvedPayerId set AND resolved terms ∈ {net15, net30}:
 ```
 
 Because every accrued-vs-immediate decision lives in `create()`, the call sites
-(`admin-dispatch.js` completion, `estimate-public.js` accept, `admin-schedule.js`
-charge-now, `admin-projects.js` WDO/non-WDO, `admin-customers.js` manual) need
-only **one** new guard at their *send* step: **`if (invoice.payer_statement_id)
-skip the individual AP email`** (the homeowner-side sends are already skipped by
-Phase 1). They do not each re-implement accrual.
+do not re-implement accrual. **The "don't individually send an accrued invoice"
+guard MUST be centralized in the send helpers, NOT sprinkled at call sites.**
+Accrued invoices stay `draft`, and the admin manual-send / batch-send / scheduled-
+send / resend surfaces all funnel through `InvoiceService.sendViaSMSAndEmail` /
+`sendInvoiceEmail`, which today happily accept a draft payer invoice and email the
+AP a pay link. If the block lived only at the listed completion/accept call sites,
+an operator could still deliver and collect an individual invoice from
+`/admin/invoices` that should be payable ONLY through the consolidated statement.
+So: **`sendViaSMSAndEmail` / `sendInvoiceEmail` (and any admin send/resend path)
+hard-refuse `invoice.payer_statement_id IS NOT NULL`** — one chokepoint, fail-
+closed. (The homeowner-side sends are already skipped by Phase 1.)
 
 **`getOrCreateOpenStatement(payerId, period, trx)`** — transaction-safe, mirrors
 the charge-now mint lock:
@@ -151,9 +164,18 @@ the charge-now mint lock:
 2. `SELECT ... WHERE payer_id=? AND period_start=? AND status='open'` → reuse, else insert.
    The partial unique index is the backstop if two trx race the lock.
 
-This rides the caller's existing transaction (accept/charge-now already pass
-`database: trx`), so the invoice row + statement attach + rollup commit atomically
-with the rest of the accept — no half-accrued invoice.
+**Accrual must be atomic even when the caller has no transaction.** Accept /
+charge-now already pass `database: trx`, so the invoice insert + statement attach
++ rollup commit atomically there. But other callers (`createFromService`, the
+admin manual/batch create paths) call `InvoiceService.create()` with the default
+`db` — and `pg_advisory_xact_lock` releases at end-of-statement (not end-of-
+function) outside a transaction, so the lock + insert + rollup would NOT be atomic
+and two completions could race into duplicate open statements or drift the rollup
+if a later write fails. **`create()` must open its OWN transaction when no
+`database` runner is supplied** (wrap the get-or-create + insert + rollup), so the
+advisory `xact` lock is held for the whole unit regardless of caller. The partial
+unique index on `(payer_id, period_start) WHERE status='open'` is the final
+backstop.
 
 **Charge-now special case** (`admin-schedule.js`): today it hard-rejects ALL
 payer invoices ("do not collect in person"). For NET payers we relax it to *mint
@@ -181,6 +203,17 @@ month / today" via the shared `datetime-et` helpers (`etDateString` etc.) — ne
 and `due_date` are date-only (no timestamptz window leak). Run the close under
 the existing `runExclusive` cron-lease pattern so two instances can't double-close.
 
+**Close must serialize against concurrent accrual, not just other closes.**
+`runExclusive` stops two close jobs, but it does NOT stop a service completion
+that is concurrently `getOrCreateOpenStatement`-attaching a visit to the same open
+statement. If finalize froze totals / rendered the PDF / sent while a child
+invoice was mid-attach, the statement could send a stale total or have an invoice
+land after it was sent. So the close path MUST take the **same per-`(payer,
+period)` advisory lock** (`hashtext('payer.statement.open')`, `hashtext(payerId||
+period)`) — and row-lock the statement (`SELECT … FOR UPDATE`) — before flipping
+`open → finalized` and freezing. Once it is off `open`, `getOrCreateOpenStatement`
+opens the next period's statement instead of attaching.
+
 (Rejected: per-visit NET / rolling windows — more complex AR and not what a
 "monthly statement" means.)
 
@@ -204,6 +237,20 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
   path — today `services/stripe.js` only charges `customer.stripe_customer_id`
   and explicitly rejects `invoice.payer_id`. We add a payer-scoped charge that is
   only ever reachable via a statement token, never a homeowner surface.
+  - **Pay only a FROZEN statement — fail closed otherwise.** A PaymentIntent may
+    be created ONLY for a statement in a payable frozen status
+    (`finalized` / `sent` / `viewed` / `overdue`); `open` (still accruing),
+    `void`, and already-`paid` must be refused. Paying an `open` statement lets AP
+    settle a mutable total while later visits keep accruing into it — leaving
+    those visits unpaid or the total changed after collection. The accrual branch
+    and the pay branch are mutually exclusive on status: nothing attaches to a
+    statement once it leaves `open`.
+  - **Get-or-create the payer's Stripe customer first.** `payers.stripe_customer_id`
+    is nullable + stored-only today; the first online payment by a payer with no
+    Stripe customer would error or mint a no-customer PI. Add an
+    `ensureStripePayerCustomer(payer)` (create-from-payer-metadata + persist the
+    id), kept SEPARATE from the homeowner `ensureStripeCustomer` flow so payer and
+    homeowner Stripe customers never cross.
   - **Surcharge is mandatory for card-family pay** (AGENTS.md / the
     cost-of-acceptance lane). Do NOT restate the rate here — it is configured
     (`CONFIGURED_COST_BPS`) and the lane's rule is *derive the displayed %, never
@@ -250,11 +297,18 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
 ## Dunning (statement-level)
 
 Keep the `invoice-followups.js` payer exclusion. Add a parallel
-`payer_statement_followups` system: when a `sent` statement passes `due_date`,
+`payer_statement_followups` system: when an unpaid statement passes `due_date`,
 fire AP-inbox reminders on a terms-aware schedule (e.g. due+0 reminder, +15
 firmer, +30 final) — no homeowner contact ever. Same shape as the invoice
 followups (cron `runPending`, `fireStep`, pause/stop on payment), so the existing
 patterns transfer.
+
+**Dun `sent` AND `viewed`, not `sent` only.** The status model moves an opened-
+but-unpaid statement `sent → viewed`, so gating dunning on `sent` alone would stop
+reminders the moment the AP contact clicks the link without paying — exactly when
+we most want to keep nudging. The eligibility query covers both `sent` and
+`viewed` (mirrors the invoice followups, which dun opened-but-unpaid invoices);
+`viewed` is a timestamp fact, not a dunning exit. Only `paid` / `void` stop it.
 
 ## Open decisions (need Adam)
 
@@ -291,11 +345,13 @@ Each PR ships behind a gate and is independently revertable; nothing changes for
 `due_on_receipt` payers at any phase.
 
 - **P1 — accrual core (gated, no outward change).** Schema (`payer_statements`,
-  `invoices.payer_statement_id`, `payments.statement_id`); `getOrCreateOpenStatement`;
-  `invoice.create()` links NET-terms payer invoices to the open statement + rollup;
-  the one-line "skip individual AP send if `payer_statement_id`" guard at each send
-  site. Gate `GATE_PAYER_STATEMENTS` off ⇒ everyone stays `due_on_receipt`.
-  Admin can *view* accumulating statements at `/admin/payers/:id`. No delivery yet.
+  `invoices.payer_statement_id`, `payments` payer cols); `getOrCreateOpenStatement`
+  (advisory lock + partial unique index); `invoice.create()` links NET-terms payer
+  invoices to the open statement + rollup, opening its own trx when no caller trx;
+  the **centralized** "refuse to individually send a `payer_statement_id` invoice"
+  guard in `sendViaSMSAndEmail` / `sendInvoiceEmail`. Gate `GATE_PAYER_STATEMENTS`
+  off ⇒ everyone stays `due_on_receipt`. Admin can *view* accumulating statements
+  at `/admin/payers/:id`. No delivery yet.
 - **P2 — close + deliver.** Statement finalize (freeze totals + snapshot +
   due_date), consolidated PDF, AP delivery (`payer-statement-email.js`); manual
   "close & send" first, then a monthly cron (dry-run preview before the first real
@@ -339,6 +395,20 @@ Each PR ships behind a gate and is independently revertable; nothing changes for
 8. **Eastern-time close cron**: month-end close + `due_date` math must use
    `datetime-et` + `timezone: 'America/New_York'` under `runExclusive`, or it
    fires on the wrong UTC date.
+9. **Centralized send-block** (`invoice.sendViaSMSAndEmail` / `sendInvoiceEmail`):
+   accrued invoices stay `draft` and the admin manual/batch/scheduled/resend
+   surfaces funnel through these helpers — the "no individual send" guard must
+   live there (one fail-closed chokepoint), not only at completion/accept sites,
+   or an operator can deliver+collect an invoice that should be statement-only.
+10. **Accrual atomicity without a caller trx**: `createFromService` + admin
+    create paths use the default `db`; `create()` must open its own transaction
+    when none is supplied or the advisory lock + insert + rollup aren't atomic.
+11. **Close vs concurrent accrual**: the close must take the SAME per-(payer,
+    period) advisory lock (not just `runExclusive`) before freezing, or a visit
+    can attach after the statement was sent / the PDF total goes stale.
+12. **Pay only frozen statements**: the statement `/pay` path must refuse `open`
+    (still accruing), `void`, and `paid` — paying a mutable open statement lets AP
+    settle a total that later visits still change.
 
 ## Out of scope (later)
 
