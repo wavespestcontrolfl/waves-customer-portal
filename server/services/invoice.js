@@ -2789,6 +2789,15 @@ const InvoiceService = {
                 invoice: locked,
               };
             }
+            // Phase 2: an accrued child on a FINALIZED/sent statement is a billed
+            // line — skip the auto-void (the cancellation becomes a credit on the
+            // next statement). Lock + re-verify open, mirroring voidInvoice.
+            if (locked.payer_statement_id) {
+              const stmt = await trx("payer_statements").where({ id: locked.payer_statement_id }).forUpdate().first("status");
+              if (stmt && stmt.status !== "open") {
+                return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: locked };
+              }
+            }
             const [voidedInvoice] = await trx("invoices")
               .where({ id: locked.id, status: locked.status })
               .update({ status: "void", updated_at: new Date() })
@@ -2805,6 +2814,11 @@ const InvoiceService = {
             // covered collectible invoice for a cancelled service).
             const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
             await restoreAccountCreditForVoidedInvoice({ invoice: voidedInvoice, createdBy: "system:service_cancel" }, trx);
+            // Phase 2: drop the voided accrued child from its OPEN statement total
+            // in the same transaction (rollupStatement excludes status='void').
+            if (voidedInvoice.payer_statement_id) {
+              await require("./payer-statements").rollupStatement(voidedInvoice.payer_statement_id, trx);
+            }
             return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
           });
 
