@@ -995,12 +995,16 @@ const SocialMediaService = {
         const normalizedUrl = normalizeUrl(item.link) || null;
         const normalizedGuid = item.guid || normalizedUrl;
 
+        // Block on a row that went out or is queued ('scheduled'), but NOT on a
+        // prior 'failed' row — a transient outage (here or in the merge-time
+        // shareUrlOnce path) should stay retryable on the next 4h tick, not be
+        // permanently suppressed.
         const existing = await trx('social_media_posts')
           .where(function() {
             this.where({ source_url: normalizedUrl })
               .orWhere({ source_guid: normalizedGuid });
           })
-          .whereNot('status', 'dry_run')
+          .whereNotIn('status', ['dry_run', 'failed'])
           .first();
 
         if (existing) continue;
@@ -1072,9 +1076,14 @@ const SocialMediaService = {
     return db.transaction(async (trx) => {
       // Same lock checkAndPublish holds across its publish loop.
       await trx.raw('SELECT pg_advisory_xact_lock(?)', [RSS_LOCK_ID]);
+      // Block only on a row that actually went out (or is queued: 'scheduled').
+      // A prior 'failed' row (transient Meta/GBP outage) must NOT block — else a
+      // total failure here would strand the post forever, since the poller has
+      // already finalized the run and won't retry. Leaving it retryable lets the
+      // RSS backstop recover it once platforms come back.
       const existing = await trx('social_media_posts')
         .where('source_url', normalized)
-        .whereNot('status', 'dry_run')
+        .whereNotIn('status', ['dry_run', 'failed'])
         .first();
       if (existing) return { skipped: 'already_posted' };
       const result = await this.publishToAll({

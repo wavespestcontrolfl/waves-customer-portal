@@ -20,7 +20,7 @@ const URL = 'https://www.wavespestcontrol.com/pest-control/drain-flies/';
 function withTrx(existingRow = null) {
   const builder = {
     where: jest.fn().mockReturnThis(),
-    whereNot: jest.fn().mockReturnThis(),
+    whereNotIn: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(existingRow),
   };
   const trx = jest.fn(() => builder);
@@ -43,17 +43,19 @@ describe('shareUrlOnce', () => {
   });
 
   test('acquires the RSS advisory lock, then publishes a brand-new URL', async () => {
-    const { trx } = withTrx(null);
+    const { trx, builder } = withTrx(null);
 
     const res = await social.shareUrlOnce({ title: 'T', description: 'D', link: URL, source: 'autonomous_blog' });
 
     expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), expect.any(Array));
+    // Dedup must NOT block on prior 'failed' rows (kept retryable).
+    expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['dry_run', 'failed']);
     expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({ source: 'autonomous_blog', noAiImage: true }));
     expect(res).toMatchObject({ shared: true });
   });
 
-  test('skips publish when a non-dry_run row already exists (RSS already posted it)', async () => {
-    const { trx } = withTrx({ id: 'sm-1' });
+  test('skips publish when a row that already went out exists (published/scheduled)', async () => {
+    const { trx } = withTrx({ id: 'sm-1', status: 'published' });
 
     const res = await social.shareUrlOnce({ title: 'T', link: URL, source: 'autonomous_blog' });
 
