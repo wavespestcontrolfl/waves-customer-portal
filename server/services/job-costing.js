@@ -82,22 +82,27 @@ function deriveRevenue({ serviceRecord, scheduledService, customer, ignoreExisti
     if (Number.isFinite(recordRevenue) && recordRevenue > 0) return round2(recordRevenue);
   }
 
+  // Always-free visit TYPES (re-service / follow-up / appointment / estimate) and
+  // included follow-ups are $0 even with a stale/inherited positive
+  // estimated_price — the shared no-cost classifier (no-cost-visit-types.js) and
+  // the dispatch auto-invoice gate (admin-dispatch.js) both refuse to bill them.
+  // So this MUST precede the explicit-price check.
+  const serviceType = scheduledService?.service_type || serviceRecord?.service_type;
+  if (scheduledService?.followup_included === true || isAlwaysFreeServiceType(serviceType)) {
+    return 0;
+  }
+
   const visitPrice = Number(scheduledService?.estimated_price);
   if (Number.isFinite(visitPrice) && visitPrice > 0) return round2(visitPrice);
 
-  // A free visit never falls back to monthly_rate. Detect it from EITHER side:
-  // the callback backfill (20260618000002) flags completed re-services on
-  // service_records.is_callback but leaves the terminal scheduled_services row
-  // false, so checking only the scheduled_service would book a full monthly rate
-  // for historical free re-services. The shared no-cost classifier also catches
-  // re-service/follow-up/appointment/estimate visit types by name.
-  const serviceType = scheduledService?.service_type || serviceRecord?.service_type;
-  const isFreeVisit = !!scheduledService?.is_callback
-    || serviceRecord?.is_callback === true
-    || scheduledService?.followup_included === true
-    || isAlwaysFreeServiceType(serviceType);
+  // A callback is free unless the operator set an explicit price (handled above).
+  // Detect it from EITHER side: the callback backfill (20260618000002) flags
+  // completed re-services on service_records.is_callback but leaves the terminal
+  // scheduled_services row false, so checking only the scheduled_service would
+  // book a full monthly rate for historical free re-services.
+  const isCallback = !!scheduledService?.is_callback || serviceRecord?.is_callback === true;
   const monthly = Number(customer?.monthly_rate);
-  if (!isFreeVisit && Number.isFinite(monthly) && monthly > 0) return round2(monthly);
+  if (!isCallback && Number.isFinite(monthly) && monthly > 0) return round2(monthly);
 
   return 0;
 }

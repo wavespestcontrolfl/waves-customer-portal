@@ -69,6 +69,17 @@ describe('deriveRevenue — mirrors the completion handler invoiceAmount', () =>
     expect(rev).toBe(0);
   });
 
+  test('an always-free type with a STALE positive price is still $0 (never bills)', () => {
+    // no-cost-visit-types + the dispatch invoice gate treat these as $0 even with
+    // an inherited estimated_price, so the always-free check precedes the price.
+    const rev = deriveRevenue({
+      serviceRecord: {},
+      scheduledService: { service_type: 'Re-Service', estimated_price: 120, is_callback: false },
+      customer: { monthly_rate: 99 },
+    });
+    expect(rev).toBe(0);
+  });
+
   test('a completed free re-service flagged on the RECORD is $0, not monthly', () => {
     // 20260618000002 backfills service_records.is_callback but leaves the terminal
     // scheduled_services row is_callback=false — so the record flag must be honored.
