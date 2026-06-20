@@ -1,4 +1,9 @@
-const { coverageMonths, annualPrepaySetupFeeWaived } = require('../services/invoice-prepay');
+const {
+  coverageMonths,
+  annualPrepaySetupFeeWaived,
+  buildPrepayCoverageSummary,
+  buildCoverageVisits,
+} = require('../services/invoice-prepay');
 
 describe('invoice-prepay helpers', () => {
   describe('coverageMonths', () => {
@@ -54,6 +59,84 @@ describe('invoice-prepay helpers', () => {
         notes: 'Thanks for your business.',
       };
       expect(annualPrepaySetupFeeWaived(invoice)).toBe(false);
+    });
+  });
+
+  describe('buildPrepayCoverageSummary', () => {
+    const quarterly = {
+      coverageVisitCount: 4,
+      coverageCadence: 'quarterly',
+      coverageServiceType: 'Quarterly Pest Control Service',
+      coverageMonths: 12,
+      termStart: '2026-06-20',
+      termEnd: '2027-06-20',
+    };
+
+    it('builds the full-year quarterly sentence with a clean service label', () => {
+      const summary = buildPrepayCoverageSummary(quarterly);
+      expect(summary).toEqual({
+        serviceLabel: 'pest control',
+        countPhrase: '4 quarterly visits',
+        coverageCount: 4,
+        coverageSummary: 'your full year of pest control: 4 quarterly visits, June 2026 through June 2027',
+      });
+    });
+
+    it('never includes a dollar amount', () => {
+      const { coverageSummary } = buildPrepayCoverageSummary(quarterly);
+      expect(coverageSummary).not.toMatch(/\$/);
+    });
+
+    it('falls back to a plain count when the cadence has no adjective', () => {
+      const summary = buildPrepayCoverageSummary({
+        ...quarterly,
+        coverageVisitCount: 9,
+        coverageCadence: 'every_6_weeks',
+        coverageServiceType: 'Mosquito Program',
+      });
+      expect(summary.countPhrase).toBe('9 visits');
+      expect(summary.coverageSummary).toContain('your full year of mosquito: 9 visits');
+    });
+
+    it('uses a non-full-year shape for partial terms', () => {
+      const summary = buildPrepayCoverageSummary({
+        coverageVisitCount: 2,
+        coverageCadence: 'quarterly',
+        coverageServiceType: 'Pest Control',
+        coverageMonths: 6,
+        termStart: '2026-06-20',
+        termEnd: '2026-12-20',
+      });
+      expect(summary.coverageSummary).toBe('2 quarterly visits of pest control, June 2026 through December 2026');
+    });
+
+    it('returns null when no visit count is configured (display-only flag)', () => {
+      expect(buildPrepayCoverageSummary({ coverageVisitCount: null })).toBeNull();
+      expect(buildPrepayCoverageSummary(null)).toBeNull();
+    });
+  });
+
+  describe('buildCoverageVisits', () => {
+    it('returns the dated quarterly schedule with each visit\'s share of the total', () => {
+      const visits = buildCoverageVisits(
+        {
+          term_start: '2026-06-20',
+          term_end: '2027-06-20',
+          coverage_visit_count: 4,
+          coverage_cadence: 'quarterly',
+          coverage_service_type: 'Quarterly Pest Control',
+        },
+        528,
+      );
+      expect(visits.map((v) => v.date)).toEqual([
+        '2026-06-20', '2026-09-20', '2026-12-20', '2027-03-20',
+      ]);
+      expect(visits.map((v) => v.amount)).toEqual([132, 132, 132, 132]);
+    });
+
+    it('returns an empty array when coverage is not configured', () => {
+      expect(buildCoverageVisits({ term_start: '2026-06-20' }, 528)).toEqual([]);
+      expect(buildCoverageVisits(null, 528)).toEqual([]);
     });
   });
 });

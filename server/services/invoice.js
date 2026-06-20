@@ -6,7 +6,7 @@ const DiscountEngine = require("./discount-engine");
 const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
-const { loadInvoiceAnnualPrepay } = require("./invoice-prepay");
+const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -1646,21 +1646,54 @@ const InvoiceService = {
       }
     }
 
-    // Body comes from the editable invoice_sent template. If the row is
-    // missing/disabled, we skip the SMS rather than falling back to inline copy.
+    // Annual-prepay invoices use a dedicated, coverage-aware template — the
+    // generic invoice_sent copy ("...completed on {service_date}") misframes a
+    // full year of prepaid visits as a single completed service. Resolve the
+    // term up front; a cancelled/refunded term reverts to the standard copy.
+    const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
+    const prepayActive = !!annualPrepay
+      && !["cancelled", "canceled", "refunded"].includes(
+        String(annualPrepay.status || "").toLowerCase(),
+      );
+    const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
+
+    // Body comes from the editable invoice_sent template (or its annual-prepay
+    // variant). If the row is missing/disabled, we skip the SMS rather than
+    // falling back to inline copy.
     let body = null;
     try {
       const templates = require("../routes/admin-sms-templates");
-      body = await templates.getTemplate("invoice_sent", {
-        first_name: customer.first_name || "",
-        service_type: serviceType,
-        service_date: formattedDate || "today",
-        pay_url: payUrl,
-      }, {
+      const tplOpts = {
         workflow: "invoice_send",
         entity_type: "invoice",
         entity_id: invoiceId,
-      });
+      };
+      if (prepayActive) {
+        // Coverage summary is built when a visit count is configured; a
+        // display-only prepay flag (no count) still gets the prepay framing via
+        // a generic phrase instead of the misleading "completed on" copy.
+        const coverageSummary = coverage?.coverageSummary || "your annual service plan";
+        const firstVisitClause = coverage && formattedDate
+          ? ` Today's visit is the first of ${coverage.coverageCount}.`
+          : "";
+        body = await templates.getTemplate("invoice_sent_annual_prepay", {
+          first_name: customer.first_name || "",
+          coverage_summary: coverageSummary,
+          first_visit_clause: firstVisitClause,
+          pay_url: payUrl,
+        }, tplOpts);
+      }
+      if (!body) {
+        // Either an ordinary invoice, or the prepay template was missing/disabled
+        // — fall back to the standard invoice_sent copy so a missing variant row
+        // never blocks the send.
+        body = await templates.getTemplate("invoice_sent", {
+          first_name: customer.first_name || "",
+          service_type: serviceType,
+          service_date: formattedDate || "today",
+          pay_url: payUrl,
+        }, tplOpts);
+      }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
     }

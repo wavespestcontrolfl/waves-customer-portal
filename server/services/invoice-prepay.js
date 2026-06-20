@@ -59,6 +59,98 @@ function annualPrepaySetupFeeWaived(invoice) {
   return texts.some((t) => SETUP_FEE_WAIVED_RE.test(String(t)));
 }
 
+// Date-only (YYYY-MM-DD) extraction that ignores the time component, so a
+// timestamptz term boundary stored at UTC midnight doesn't slip a calendar day
+// when formatted in ET.
+function ymdOnly(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
+  return match ? match[1] : null;
+}
+
+// "June 2026" in ET for a date-only/timestamp value. Empty string when unparseable.
+function monthYearLabel(value) {
+  const ymd = ymdOnly(value);
+  if (!ymd) return '';
+  return new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'America/New_York',
+  });
+}
+
+// Cadence → adjective used in the coverage sentence ("4 quarterly visits").
+// every_6_weeks intentionally has no single-word adjective, so it falls back to
+// the plain "{count} visits" form.
+const CADENCE_WORD = {
+  monthly: 'monthly',
+  bimonthly: 'bimonthly',
+  quarterly: 'quarterly',
+  triannual: 'tri-annual',
+  semiannual: 'semi-annual',
+  annual: 'annual',
+};
+
+// Human service label for the SMS — strips the cadence/program noise words from
+// the stored coverage_service_type so "Quarterly Pest Control Service" reads as
+// "pest control" (the cadence is already stated separately as "4 quarterly").
+function cleanServiceLabel(serviceType) {
+  const cleaned = String(serviceType || '')
+    .replace(/\b(quarterly|monthly|bi-?monthly|tri-?annual|semi-?annual|annual|yearly|recurring|service|services|visit|visits|plan|program)\b/gi, ' ')
+    .replace(/[^a-zA-Z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned ? cleaned.toLowerCase() : 'service';
+}
+
+// One-line coverage sentence for the annual-prepay invoice SMS, built from the
+// normalized descriptor (loadInvoiceAnnualPrepay output). Returns null when the
+// term has no visit count configured (display-only flag) so the caller can fall
+// back to a generic phrase. Never includes a dollar amount — payment-link SMS
+// bodies keep the amount on the pay page only.
+function buildPrepayCoverageSummary(prepay) {
+  if (!prepay) return null;
+  const count = Number(prepay.coverageVisitCount);
+  if (!Number.isInteger(count) || count <= 0) return null;
+  const cadence = String(prepay.coverageCadence || '').toLowerCase();
+  const word = CADENCE_WORD[cadence] || '';
+  const visitNoun = count === 1 ? 'visit' : 'visits';
+  const countPhrase = word ? `${count} ${word} ${visitNoun}` : `${count} ${visitNoun}`;
+  const serviceLabel = cleanServiceLabel(prepay.coverageServiceType);
+  const startMY = monthYearLabel(prepay.termStart);
+  const endMY = monthYearLabel(prepay.termEnd);
+  const window = startMY && endMY ? `, ${startMY} through ${endMY}` : '';
+  const months = prepay.coverageMonths;
+  const fullYear = months != null && months >= 11 && months <= 13;
+  const coverageSummary = fullYear
+    ? `your full year of ${serviceLabel}: ${countPhrase}${window}`
+    : `${countPhrase} of ${serviceLabel}${window}`;
+  return { serviceLabel, countPhrase, coverageSummary, coverageCount: count };
+}
+
+// The individual covered visit dates (canonical cadence schedule) with each
+// visit's share of the prepay total. Computed from the term — not a
+// scheduled_services join — so it's correct even before the invoice is paid and
+// coverage rows are seeded. Empty array when coverage isn't configured.
+function buildCoverageVisits(term, prepayAmount) {
+  const visitCount = term?.coverage_visit_count != null ? Number(term.coverage_visit_count) : null;
+  if (!term?.term_start || !Number.isInteger(visitCount) || visitCount <= 0) return [];
+  try {
+    const { coverageScheduleDates, inferCoverageCadence, splitCoverageAmount } =
+      require('./annual-prepay-renewals')._private;
+    const cadence = term.coverage_cadence || inferCoverageCadence(term);
+    const dates = coverageScheduleDates(term.term_start, visitCount, cadence, term.term_end) || [];
+    const amounts = prepayAmount > 0 ? splitCoverageAmount(prepayAmount, visitCount) : [];
+    return dates.map((date, index) => ({
+      date,
+      amount: amounts[index] != null ? amounts[index] : null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 // Whole months between two date-only values, rounded to nearest. Null if either
 // date is missing/invalid. A standard annual term resolves to 12.
 function coverageMonths(termStart, termEnd) {
@@ -87,18 +179,20 @@ async function loadInvoiceAnnualPrepay(invoice) {
     )
     .catch(() => null);
   if (!term) return null;
+  const prepayAmount = term.prepay_amount != null ? Number(term.prepay_amount) : null;
   return {
     id: term.id,
     status: term.status,
     planLabel: term.plan_label || null,
     monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
-    prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+    prepayAmount,
     termStart: term.term_start,
     termEnd: term.term_end,
     coverageMonths: coverageMonths(term.term_start, term.term_end),
     coverageServiceType: term.coverage_service_type || null,
     coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
     coverageCadence: term.coverage_cadence || null,
+    coverageVisits: buildCoverageVisits(term, prepayAmount),
     setupFeeWaived: annualPrepaySetupFeeWaived(invoice),
   };
 }
@@ -107,4 +201,7 @@ module.exports = {
   loadInvoiceAnnualPrepay,
   annualPrepaySetupFeeWaived,
   coverageMonths,
+  buildPrepayCoverageSummary,
+  buildCoverageVisits,
+  monthYearLabel,
 };
