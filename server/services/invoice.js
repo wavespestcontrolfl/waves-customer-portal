@@ -1492,12 +1492,10 @@ const InvoiceService = {
   async getByToken(token) {
     const invoice = await db("invoices").where({ token }).first();
     if (!invoice) return null;
-    // Phase 2: an accrued invoice (attached to a payer statement) is NOT an
-    // individually viewable/collectible document — it is delivered + paid on the
-    // consolidated statement. Fail closed at this shared pay/receipt/PDF loader so
-    // a copied/leaked child token can't render the statement-only invoice or its
-    // PDF (and don't record a spurious view / flip its status).
-    if (invoice.payer_statement_id) return null;
+    // NOTE: do NOT block payer_statement_id here — getByToken also backs the
+    // PERMANENT receipt endpoints (receipt-v2), which must never 404 (AGENTS.md).
+    // The accrued-invoice "statement-only" block lives in the PAY + invoice-PDF
+    // routes instead (the collection surfaces), not this shared loader.
 
     // Record view
     const updates = { view_count: (invoice.view_count || 0) + 1 };

@@ -108,6 +108,10 @@ router.get('/:token', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is not individually viewable/payable — it
+    // renders on the consolidated statement. Fail closed on the pay surface
+    // (receipts stay permanent; the block is here, not in getByToken).
+    if (data.payer_statement_id) return res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
 
     // Third-party Bill-To: an AP contact opening the emailed pay link must see
     // the payer as "Billed to" (not the homeowner) and must not be offered
@@ -694,6 +698,9 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice's individual PDF is not served — it renders on
+    // the consolidated statement (the receipt PDF stays permanent, unaffected).
+    if (data.payer_statement_id) return res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
     // Downloaded/printed PDF must show the same Bill-To = payer block as the
     // emailed copy (getByToken doesn't attach the payer on its own).
     await require('../services/payer').attachToInvoice(data);
