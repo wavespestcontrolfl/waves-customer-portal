@@ -25,10 +25,13 @@
  *     AND responds live (the hub's production build lags a merge by
  *     30–45 min; completing earlier would count a broken/missing page as
  *     published and trust-building): flip the run to completed_published
- *     with that URL, submit IndexNow, and queue post-merge internal-link
+ *     with that URL, submit IndexNow, queue post-merge internal-link
  *     planning (new_supporting_blog only — rewrite/refresh/metadata
- *     targets already exist in the link corpus). Also best-effort
- *     completes the parked opportunity_queue row. An unresolvable URL
+ *     targets already exist in the link corpus), and auto-share NEW on-hub
+ *     blog posts to social (FB/IG/GBP) the moment they're verified live —
+ *     a deterministic per-post trigger gated by the same SOCIAL_* flags as
+ *     the 4-hourly RSS share cron, which stays as a dedupe-safe backstop.
+ *     Also best-effort completes the parked opportunity_queue row. An unresolvable URL
  *     fails closed: the run stays parked (logged each tick) rather than
  *     completing without a URL.
  *   - PR closed unmerged             → flip the run to failed (no retry).
@@ -69,6 +72,16 @@ const PR_URL_NUMBER = /\/pull\/(\d+)(?:[/?#]|$)/;
 
 function autoMergeEnabled() {
   return /^(1|true|yes|on)$/i.test(String(process.env.AUTONOMOUS_BLOG_AUTO_MERGE || '').trim());
+}
+
+// Kill switch for the deterministic post-merge social share. Defaults ON:
+// enabling SOCIAL_RSS_AUTOPUBLISH_ENABLED turns auto-sharing on, and this
+// merge-trigger shares that same on/off (it's the same "auto-share new blog
+// posts" feature, just fired on confirmed-live merge instead of by the 4-hourly
+// RSS poll). Set SOCIAL_BLOG_MERGE_SHARE_ENABLED=false to fall back to RSS-only
+// sharing without disabling RSS itself.
+function blogMergeSocialShareEnabled() {
+  return !/^(0|false|no|off)$/i.test(String(process.env.SOCIAL_BLOG_MERGE_SHARE_ENABLED || '').trim());
 }
 
 function maxAutoMergesPerPoll() {
@@ -143,6 +156,11 @@ function targetForRun(run) {
     keyword: frontmatter.primary_keyword || null,
     city: Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : null,
     title: frontmatter.title || draft.title || null,
+    // Best-effort meta description for the post-merge social share (card excerpt
+    // + caption seed); blog drafts carry meta_description, tolerate camelCase.
+    // null is fine — publishToAll falls back to a title-only card/caption.
+    excerpt: frontmatter.meta_description || frontmatter.metaDescription
+      || draft.meta_description || draft.metaDescription || draft.excerpt || null,
     // Skip post-merge hub-internal-link planning for spoke-only posts — they
     // render only on their spoke, so proposing hub→spoke-path links 404s.
     planLinks: isNewPage && !canonicalIsOffHub(url),
@@ -424,6 +442,42 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
     }
   }
 
+  // Auto-share NEW hub blog posts to social the moment they're verified live
+  // (PR merged + production deploy contains it + URL responds 200 — all gated
+  // above). A deterministic, per-post trigger so sharing no longer depends on
+  // the 4-hourly RSS feed poll happening to catch the post in the feed's top
+  // slice. Same feature and same SOCIAL_* gates as that poll; the RSS cron
+  // stays as a backstop and dedupes on source_url, so it never double-posts a
+  // URL this already shared. Gated to NEW on-hub posts only (target.planLinks):
+  // refreshes/metadata rewrites aren't new posts, and spoke-only posts are
+  // neither in the hub feed nor written in hub-brand social copy. Fully
+  // fail-soft — a share failure never blocks the completed_published finalize
+  // (already claimed above), and IndexNow/link-planning already ran.
+  if (target.planLinks && target.title && blogMergeSocialShareEnabled()) {
+    try {
+      const social = require('../social-media');
+      const flags = social.SOCIAL_FLAGS || {};
+      if (flags.automationEnabled && flags.rssAutopublish) {
+        // shareUrlOnce serializes against the RSS cron via its advisory lock and
+        // dedupes on source_url, so this deterministic trigger and the 4-hourly
+        // RSS backstop can never double-post the same URL. Brand card only
+        // (noAiImage) — mirrors the RSS cron's autonomous share path.
+        const r = await social.shareUrlOnce({
+          title: target.title,
+          description: target.excerpt || '',
+          link: target.url,
+          source: 'autonomous_blog',
+          noAiImage: true,
+        });
+        const status = r?.skipped ? `skipped (${r.skipped})`
+          : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');
+        logger.info(`[autonomous-pr-poller] social share for ${target.url}: ${status}`);
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-pr-poller] social share failed for ${target.url}: ${err.message}`);
+    }
+  }
+
   await reconcileQueueRow(run, { merged: true });
   logger.info(`[autonomous-pr-poller] run ${run.id} completed_published via PR #${prNumber}${autoMerged ? ' (auto-merged)' : ''} → ${target.url || 'no URL recorded'}`);
   return { merged: true, autoMerged, url: target.url };
@@ -654,6 +708,7 @@ module.exports = {
   pollRun,
   _internals: {
     autoMergeEnabled,
+    blogMergeSocialShareEnabled,
     maxAutoMergesPerPoll,
     prNumberFromUrl,
     pendingSkipReasonForRun,

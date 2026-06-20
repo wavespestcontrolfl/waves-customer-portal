@@ -995,12 +995,16 @@ const SocialMediaService = {
         const normalizedUrl = normalizeUrl(item.link) || null;
         const normalizedGuid = item.guid || normalizedUrl;
 
+        // Block on a row that went out or is queued ('scheduled'), but NOT on a
+        // prior 'failed' row — a transient outage (here or in the merge-time
+        // shareUrlOnce path) should stay retryable on the next 4h tick, not be
+        // permanently suppressed.
         const existing = await trx('social_media_posts')
           .where(function() {
             this.where({ source_url: normalizedUrl })
               .orWhere({ source_guid: normalizedGuid });
           })
-          .whereNot('status', 'dry_run')
+          .whereNotIn('status', ['dry_run', 'failed'])
           .first();
 
         if (existing) continue;
@@ -1048,6 +1052,45 @@ const SocialMediaService = {
 
     if (!lockAcquired) return { processed: 0, results: [], locked: true };
     return { processed: results.length, results };
+  },
+
+  /**
+   * Share a single already-live URL to social exactly once. Used by the
+   * autonomous PR poller to share a blog post the MOMENT it's verified live,
+   * instead of waiting for the 4-hourly RSS poll (checkAndPublish) to catch it.
+   *
+   * Serialized against that RSS cron via the SAME advisory lock so the two
+   * paths can't race the dedup read into a duplicate FB/IG/GBP post. Blocking
+   * lock (not try): if an RSS run is in flight, wait for it (bounded — RSS is
+   * capped at 5 items) then re-check under the lock, so the URL is shared
+   * exactly once with no gap. publishToAll inserts its own social_media_posts
+   * row (source_url = normalizeUrl(link)) before we commit/release the lock, so
+   * a subsequent RSS run sees the row and skips. The caller owns policy gating
+   * (feature flags, post type); this owns concurrency + dedup.
+   */
+  async shareUrlOnce({ title, description, link, source = 'manual', noAiImage = true }) {
+    if (!SOCIAL_FLAGS.automationEnabled) return { skipped: 'automation_disabled' };
+    const normalized = normalizeUrl(link) || null;
+    if (!normalized) return { skipped: 'no_url' };
+
+    return db.transaction(async (trx) => {
+      // Same lock checkAndPublish holds across its publish loop.
+      await trx.raw('SELECT pg_advisory_xact_lock(?)', [RSS_LOCK_ID]);
+      // Block only on a row that actually went out (or is queued: 'scheduled').
+      // A prior 'failed' row (transient Meta/GBP outage) must NOT block — else a
+      // total failure here would strand the post forever, since the poller has
+      // already finalized the run and won't retry. Leaving it retryable lets the
+      // RSS backstop recover it once platforms come back.
+      const existing = await trx('social_media_posts')
+        .where('source_url', normalized)
+        .whereNotIn('status', ['dry_run', 'failed'])
+        .first();
+      if (existing) return { skipped: 'already_posted' };
+      const result = await this.publishToAll({
+        title, description, link: normalized, guid: normalized, source, noAiImage,
+      });
+      return { shared: true, ...result };
+    });
   },
 
   /**
