@@ -352,6 +352,10 @@ describe('price-scan extract', () => {
       expect(extractSizeToken('Concentrate 1,000 mL')).toBe('1000 mL');
       expect(quantityToOz(extractSizeToken('Concentrate 1,000 mL'))).toBeCloseTo(33.814, 2);
     });
+    test('container multipack ("4 tubes / 30 grams") keeps the count', () => {
+      expect(extractSizeToken('Advion Cockroach Gel Bait 4 tubes / 30 grams')).toBe('4 tubes / 30 gram');
+      expect(quantityToOz(extractSizeToken('Advion Cockroach Gel Bait 4 tubes / 30 grams'))).toBeCloseTo(4.23, 2); // 120 g
+    });
   });
 
   describe('quantityToOz', () => {

@@ -234,6 +234,10 @@ const SIZE_UNITS = 'fl\\.?\\s*oz|ounce|oz|gallon|gal|quart|qt|pint|pt|pound|lb|l
 // Numeric tokens allow a thousands comma ("1,000 mL") — stripped on the way out
 // so parsePackSize sees "1000 mL", not a regex match starting at "000 mL".
 const MULTIPACK_RE = new RegExp(`(\\d[\\d,]*)\\s*x\\s*(\\d[\\d,]*(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?)\\s*(${SIZE_UNITS}|gram|g|l)s?\\b`, 'i');
+// Container multipack: "4 tubes / 30 grams", "2 bottles / 1 gal" -> count x size.
+// parsePackSize already reads this "N <container> / M unit" form; the token must
+// keep the container word so the count survives (else it collapses to "30 g").
+const CONTAINER_MULTIPACK_RE = new RegExp(`(\\d+)\\s+([a-z]+)\\s*\\/\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(${SIZE_UNITS}|gram|g|l)s?\\b`, 'i');
 // Mixed number: "2 1/2 gal" -> 2.5 gal. Matched whole before the fraction
 // fallback, which would otherwise read just the "1/2 gal" tail (0.5 gal).
 const MIXED_RE = new RegExp(`(\\d+)\\s+(\\d+\\s*\\/\\s*\\d+)\\s*(${SIZE_UNITS})s?\\b`, 'i');
@@ -246,6 +250,8 @@ function extractSizeToken(text) {
   const s = String(text || '');
   const mp = s.match(MULTIPACK_RE);
   if (mp) return `${cleanNum(mp[1])} x ${cleanNum(mp[2])} ${cleanUnit(mp[3])}`.trim();
+  const cm = s.match(CONTAINER_MULTIPACK_RE);
+  if (cm) return `${cleanNum(cm[1])} ${cm[2]} / ${cleanNum(cm[3])} ${cleanUnit(cm[4])}`.trim();
   const mx = s.match(MIXED_RE);
   if (mx) return `${mx[1]} ${mx[2].replace(/\s+/g, '')} ${cleanUnit(mx[3])}`.trim();
   const m = s.match(SIZE_UNIT_RE);
