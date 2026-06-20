@@ -33,6 +33,7 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
+const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
@@ -50,13 +51,9 @@ const SCHEDULED_SERVICE_INVOICE_MINT_LOCK = 'schedule.invoice.mint';
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
 // Always-free service types — excluded from the leak queue entirely and rejected
-// on the write path. These are never billable.
-const ALWAYS_FREE_PATTERNS = [
-  '%appointment%',  // general_appointment ("Waves Pest Control Appointment Service")
-  '%estimate%',     // estimate visits
-  '%re-service%', '%reservice%', '%re service%', // free re-services
-  '%follow-up%', '%followup%', '%follow up%', '%re-visit%', '%revisit%', // follow-up re-visits
-];
+// on the write path. Shared with the completion auto-invoice gate (admin-dispatch)
+// via no-cost-visit-types so the two paths can't drift; '%'-wrapped for SQL ILIKE.
+const ALWAYS_FREE_PATTERNS = ALWAYS_FREE_SERVICE_TYPE_PATTERNS.map((p) => `%${p}%`);
 
 // Ambiguous types that CAN be paid (paid WDO/inspection, rodent trapping setup)
 // OR free (waived inspection, in-window trap check). Surface these in needs-review
@@ -69,7 +66,7 @@ const matchesPatterns = (serviceType, patterns) => {
 };
 // Always-free check for the write path (POST /bill) — a stale/direct request
 // must not bill an always-free type.
-const isNoCostServiceType = (serviceType) => matchesPatterns(serviceType, ALWAYS_FREE_PATTERNS);
+const isNoCostServiceType = isAlwaysFreeServiceType;
 const isReviewServiceType = (serviceType) => matchesPatterns(serviceType, REVIEW_PATTERNS);
 
 // SQL fragment: TRUE when a non-void invoice already exists for the visit.
