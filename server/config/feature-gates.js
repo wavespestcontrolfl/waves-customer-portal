@@ -236,6 +236,18 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // Card-Present Surcharge (Tap to Pay) — adds the 2.9% credit-card surcharge to
+  // in-person card_present charges, mirroring the online flow. Card-present
+  // funding is only known AFTER the tap, so the PI is minted at base and raised
+  // to base+surcharge between collect and confirm — and only when the card reads
+  // as credit; debit, prepaid, and unknown funding stay at base (never
+  // over-surcharged). Real money on real customer cards, depends on Stripe's
+  // preview surcharge API, and needs on-device disclosure + a real-card field
+  // test, so it is explicit opt-in in EVERY environment and ships dormant: when
+  // off, /apply-surcharge is a no-op and the charge collects base-only exactly
+  // like today.
+  terminalSurcharge: process.env.GATE_TERMINAL_SURCHARGE === 'true',
+
   // Auto-Apply Account Credit — when an invoice is created, automatically draw
   // down the customer's account_credits (e.g. the $25 referral reward) against
   // its amount due via credit_applied, so the reward silently lowers the next

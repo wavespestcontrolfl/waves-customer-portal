@@ -16,6 +16,7 @@ const {
   nextInvoiceStatusAfterFailedPayment,
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
+const { isEnabled } = require('../config/feature-gates');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
@@ -119,6 +120,13 @@ async function paymentDetailsFromIntent(paymentIntent) {
           details.cardFunding = pmd.card.funding || null;
           details.isWallet = !!pmd.card.wallet;
           resolvedFromStripeDetails = true;
+        } else if (pmd?.card_present) {
+          // card_present funding is needed so the surcharge-bypass guard can tell
+          // a credit Tap-to-Pay charge from debit. Brand/last4 are enriched
+          // separately for the payment row; we only need funding here.
+          details.paymentMethod = 'card_present';
+          details.cardFunding = pmd.card_present.funding || null;
+          resolvedFromStripeDetails = true;
         } else if (pmd?.us_bank_account) {
           details.paymentMethod = 'us_bank_account';
           details.cardLastFour = pmd.us_bank_account.last4 || null;
@@ -204,8 +212,11 @@ async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason)
       .insert({
         stripe_payment_intent_id: paymentIntent.id,
         stripe_charge_id: stripeChargeId,
-        customer_id: paymentIntent.metadata?.waves_customer_id || null,
-        invoice_id: paymentIntent.metadata?.waves_invoice_id || null,
+        // Fall back to the terminal PI's metadata keys (invoice_id/customer_id)
+        // so a quarantined card-present charge keeps the linkage operators need
+        // to reconcile it; online PIs use the waves_-prefixed keys.
+        customer_id: paymentIntent.metadata?.waves_customer_id || paymentIntent.metadata?.customer_id || null,
+        invoice_id: paymentIntent.metadata?.waves_invoice_id || paymentIntent.metadata?.invoice_id || null,
         amount,
         source: 'invoice_payment_webhook',
         original_db_error: reason.slice(0, 1000),
@@ -253,8 +264,18 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
   if (recordedSurchargeCents > 0) return null;
 
   const methodTypes = paymentIntent.payment_method_types || [];
-  const isCardCandidate = details.paymentMethod === 'card' || methodTypes.includes('card');
-  if (!isCardCandidate) return null;
+  const isCard = details.paymentMethod === 'card' || methodTypes.includes('card');
+  // Card-present surcharge enforcement is armed only when the feature is live;
+  // until then card_present base-only is the intended behavior and must NOT be
+  // quarantined. When armed, an un-finalized card_present PI (no
+  // surcharge_policy_version) means an old/bypassing client confirmed base-only.
+  const isCardPresent =
+    (details.paymentMethod === 'card_present' || methodTypes.includes('card_present'))
+    && isEnabled('terminalSurcharge');
+  if (!isCard && !isCardPresent) return null;
+  // The caller skips terminal PIs in its generic quarantine block; this flag
+  // lets it quarantine specifically a card_present surcharge bypass.
+  const terminalSurchargeBypass = isCardPresent;
 
   if (details.cardFunding) {
     if (details.cardFunding === 'credit' && !details.isWallet) {
@@ -265,6 +286,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
         title: `Surcharge under-collection (webhook) — invoice ${invoice?.invoice_number || 'unknown'}`,
         description: `Credit card payment confirmed via webhook without surcharge finalization. PI: ${paymentIntent.id}. Charged base-only and was not settled locally.`,
         metadata: { card_funding: details.cardFunding },
+        terminalSurchargeBypass,
       };
     }
     return null;
@@ -279,6 +301,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
       title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
       description: `Card payment succeeded without surcharge finalization and webhook funding verification could not run. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
       metadata: { funding_lookup_error: 'stripe_not_configured' },
+      terminalSurchargeBypass,
     };
   }
 
@@ -289,7 +312,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
     if (!pmId) return null;
 
     const pmObj = await stripe.paymentMethods.retrieve(pmId);
-    const funding = pmObj.card?.funding || null;
+    const funding = pmObj.card?.funding || pmObj.card_present?.funding || null;
     const isWallet = !!pmObj.card?.wallet;
     if (funding === 'credit' && !isWallet) {
       return {
@@ -299,6 +322,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
         title: `Surcharge under-collection (webhook) — invoice ${invoice?.invoice_number || 'unknown'}`,
         description: `Credit card payment confirmed via webhook without surcharge finalization. PI: ${paymentIntent.id}. Charged base-only and was not settled locally.`,
         metadata: { card_funding: funding },
+        terminalSurchargeBypass,
       };
     }
   } catch (pmErr) {
@@ -310,6 +334,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
       title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
       description: `Card payment succeeded without surcharge finalization and funding lookup failed. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
       metadata: { funding_lookup_error: pmErr.message },
+      terminalSurchargeBypass,
     };
   }
 
@@ -565,6 +590,30 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     details,
     invoiceForTenderGuard,
   );
+  // Card-present surcharge bypass: a terminal credit PI never finalized through
+  // /apply-surcharge. The generic block below skips terminal PIs, so enforce it
+  // here — don't mark the invoice paid; record the orphan + alert so the
+  // under-collection is loud, not silent. Only set when the surcharge gate is on.
+  if (surchargeQuarantine?.terminalSurchargeBypass
+    && invoiceForTenderGuard
+    && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)) {
+    logger.error(`[stripe-webhook] Quarantining terminal surcharge-bypass PI ${piId}: ${surchargeQuarantine.reason}`);
+    await alertSurchargeBypass(
+      paymentIntent,
+      invoiceForTenderGuard,
+      surchargeQuarantine.alertType,
+      surchargeQuarantine.severity,
+      surchargeQuarantine.title,
+      surchargeQuarantine.description,
+      surchargeQuarantine.metadata,
+    );
+    await recordOrphanSucceededPaymentIntent(
+      paymentIntent,
+      chargedTotal ?? centsToDollars(paymentIntent.amount),
+      surchargeQuarantine.reason,
+    );
+    return;
+  }
   if (surchargeQuarantine
     && invoiceForTenderGuard
     && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)

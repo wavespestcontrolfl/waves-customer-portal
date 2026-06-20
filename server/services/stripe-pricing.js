@@ -96,13 +96,54 @@ function computeChargeAmount(baseAmountDollars, methodType, opts = {}) {
 // ── Stripe amount_details builder ────────────────────────────
 // Returns the amount_details object to pass to PI create/update/confirm/capture.
 // Returns null when no surcharge applies (caller should omit the field).
-function buildSurchargeAmountDetails(surchargeCents) {
+function buildSurchargeAmountDetails(surchargeCents, opts = {}) {
   if (!surchargeCents || surchargeCents <= 0) return null;
+  // Online card-on-file uses Stripe-side 'enabled' validation. The card-present
+  // flow passes 'disabled' (probe-proven on the live account for card_present):
+  // funding is only known post-tap and we already self-enforce credit-only +
+  // the cost-of-acceptance cap via planCardPresentSurcharge/computeSurchargeCents.
+  const { enforceValidation = 'enabled' } = opts;
   return {
     surcharge: {
       amount: surchargeCents,
-      enforce_validation: 'enabled',
+      enforce_validation: enforceValidation,
     },
+  };
+}
+
+// ── Card-present (Tap to Pay) surcharge planner ──────────────
+// Pure decision for the in-person two-step flow: the card_present PI is minted
+// at base BEFORE the card is read (funding unknown), then this plan decides what
+// to do once the tap reveals funding, just before the device confirms.
+//
+//   alreadyFinalized — the PI already carries surcharge metadata from a prior
+//     /apply-surcharge call (idempotent re-invocation). Re-applying would double
+//     the amount, so we hold and report the existing state.
+//
+// Actions:
+//   'already'        — finalized on a prior call; do not touch the PI again.
+//   'apply_surcharge'— credit card: raise PI amount to total + amount_details.
+//   'finalize_base'  — debit/prepaid/unknown: stamp metadata, amount unchanged.
+//
+// Card-present funding ('debit'/'credit'/'prepaid'/'unknown') flows through the
+// SAME shouldSurcharge gate as online — only positively-confirmed credit is
+// surcharged; everything else (incl. unknown) collects base, fail-safe.
+function planCardPresentSurcharge({ baseCents, funding, alreadyFinalized = false }) {
+  const policyVersion = SURCHARGE_POLICY_VERSION;
+  if (alreadyFinalized) {
+    return { action: 'already', baseCents, surchargeCents: 0, totalCents: baseCents, rateBps: 0, policyVersion, funding: funding || null };
+  }
+  const surchargeCents = shouldSurcharge('card_present', funding)
+    ? computeSurchargeCents(baseCents)
+    : 0;
+  return {
+    action: surchargeCents > 0 ? 'apply_surcharge' : 'finalize_base',
+    baseCents,
+    surchargeCents,
+    totalCents: baseCents + surchargeCents,
+    rateBps: surchargeCents > 0 ? CONFIGURED_COST_BPS : 0,
+    policyVersion,
+    funding: funding || null,
   };
 }
 
@@ -146,6 +187,7 @@ module.exports = {
   computeSurchargeCents,
   computeChargeAmount,
   buildSurchargeAmountDetails,
+  planCardPresentSurcharge,
   computeRefundSurcharge,
 
   // Legacy (deprecated — use cents/bps API)

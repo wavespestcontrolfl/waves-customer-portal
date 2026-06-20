@@ -40,10 +40,42 @@ final class TerminalManager: NSObject {
     }
 
     // Full collect-and-confirm flow. Returns the final PaymentIntent on success.
-    func collect(clientSecret: String) async throws -> PaymentIntent {
+    //
+    // When `surchargeEnabled` is true we run the two-step credit-card surcharge:
+    // collect the card (funding becomes known), ask the server to raise the PI to
+    // base + 2.9% for credit cards, then confirm. The collect uses
+    // updatePaymentIntent so the SDK confirms against the server-updated amount.
+    //
+    // Surcharge is NOT best-effort once the customer has seen the disclosure: we
+    // must never silently settle a credit card at base because the surcharge
+    // step failed. We confirm only on a definitive server result —
+    // applied:true (credit, PI raised) or applied:false with no failure reason
+    // (a real debit/prepaid/unknown no-surcharge, or the gate being off). Any
+    // network/HTTP error or failure reason (awaiting_card / pi_not_updatable /
+    // apply_failed) aborts so the tech can re-tap rather than under-charge.
+    //
+    // ⚠️ FIELD TEST before flipping GATE_TERMINAL_SURCHARGE on: verify on a real
+    // device with real credit AND debit cards that (a) the confirmed amount
+    // equals base + surcharge for credit and base for debit, and (b) the SDK
+    // picks up the server-side amount change here (StripeTerminal 5.x +
+    // 2026-03-25.preview surcharge API). If confirm rejects the amount change,
+    // re-retrieve the PI after apply-surcharge and confirm the fresh object.
+    func collect(clientSecret: String, jti: String, surchargeEnabled: Bool) async throws -> PaymentIntent {
         try await ensureConnected()
         let pi = try await retrievePI(clientSecret: clientSecret)
-        let collected = try await collectMethod(pi: pi)
+        let collected = try await collectMethod(pi: pi, allowAmountUpdate: surchargeEnabled)
+        if surchargeEnabled {
+            // Throws on network/HTTP error → aborts the charge (no silent base settle).
+            let resp = try await API.applyTerminalSurcharge(jti: jti)
+            let failureReasons: Set<String> = ["awaiting_card", "pi_not_updatable", "apply_failed"]
+            if let reason = resp.reason, failureReasons.contains(reason) {
+                throw NSError(domain: "wavespay", code: -4, userInfo: [
+                    NSLocalizedDescriptionKey: "Couldn't finalize the card surcharge. Please tap to collect again.",
+                ])
+            }
+            // applied:true (credit raised) or applied:false w/o failure reason
+            // (debit/prepaid/unknown no-surcharge, or gate off) → safe to confirm.
+        }
         let confirmed = try await confirmPI(pi: collected)
         return confirmed
     }
@@ -115,12 +147,23 @@ final class TerminalManager: NSObject {
         }
     }
 
-    private func collectMethod(pi: PaymentIntent) async throws -> PaymentIntent {
-        try await withCheckedThrowingContinuation { cont in
-            _ = Terminal.shared.collectPaymentMethod(pi) { pi, error in
+    // `allowAmountUpdate` sets updatePaymentIntent so the server can raise the PI
+    // amount (the surcharge) after collect and before confirm. Off → today's
+    // single-amount behavior, byte-for-byte.
+    private func collectMethod(pi: PaymentIntent, allowAmountUpdate: Bool) async throws -> PaymentIntent {
+        let config = try? CollectConfigurationBuilder()
+            .setUpdatePaymentIntent(allowAmountUpdate)
+            .build()
+        return try await withCheckedThrowingContinuation { cont in
+            let completion: (PaymentIntent?, Error?) -> Void = { pi, error in
                 if let error { cont.resume(throwing: error) }
                 else if let pi { cont.resume(returning: pi) }
                 else { cont.resume(throwing: NSError(domain: "wavespay", code: -1)) }
+            }
+            if let config {
+                _ = Terminal.shared.collectPaymentMethod(pi, collectConfig: config, completion: completion)
+            } else {
+                _ = Terminal.shared.collectPaymentMethod(pi, completion: completion)
             }
         }
     }

@@ -8,6 +8,13 @@ const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
 const { adminAuthenticate } = require('../middleware/admin-auth');
+const { isEnabled } = require('../config/feature-gates');
+const {
+  buildSurchargeAmountDetails,
+  computeSurchargeCents,
+  planCardPresentSurcharge,
+  SURCHARGE_API_VERSION,
+} = require('../services/stripe-pricing');
 
 // Accepts both regular admin JWTs and terminal-scoped JWTs (minted by
 // /validate-handoff). Regular adminAuthenticate rejects scope:'terminal'
@@ -464,12 +471,29 @@ router.post('/validate-handoff', async (req, res) => {
       { expiresIn: '15m' },
     );
 
+    const surchargeEnabled = isEnabled('terminalSurcharge');
+    // Pre-tap disclosure amounts come from the SAME server surcharge calc the
+    // PI is later raised by (computeSurchargeCents → planCardPresentSurcharge),
+    // so the dollar amount the customer is shown, the Stripe amount, and the
+    // recorded surcharge all agree. Funding is unknown until the tap, so we
+    // surface BOTH the credit total (incl. 2.9%) and the unchanged debit base.
+    const baseCents = Number(handoffRow.amount_cents);
+    const surchargeCents = surchargeEnabled ? computeSurchargeCents(baseCents) : 0;
     return res.json({
       invoice_id: String(invoice.id),
       customer_name,
-      amount_cents: Number(handoffRow.amount_cents),
+      amount_cents: baseCents,
       currency: 'usd',
       authToken,
+      // Tells the iOS app whether the two-step credit-card surcharge is live.
+      // When false the app skips /apply-surcharge entirely and collects
+      // base-only (today's behavior); when true it shows the pre-tap surcharge
+      // disclosure and runs the apply step between collect and confirm.
+      surcharge_enabled: surchargeEnabled,
+      // Server-calculated so the displayed credit total matches the charge.
+      // Both zero/equal-to-base when the feature is off.
+      surcharge_cents: surchargeCents,
+      credit_total_cents: baseCents + surchargeCents,
     });
   } catch (err) {
     logger.error(`[stripe-terminal] validate-handoff failed: ${err.message}`);
@@ -521,6 +545,19 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     const { jti } = req.body || {};
     if (!jti || typeof jti !== 'string') {
       return res.status(400).json({ error: 'jti required' });
+    }
+
+    // When the surcharge feature is live, only mint a PI for a client that can
+    // run the post-tap surcharge step (it sends surcharge_capable:true). An app
+    // that can't would confirm the base PI directly and settle a credit card
+    // base-only — refuse rather than under-collect; the tech updates WavesPay and
+    // retries. (The webhook also quarantines any un-finalized terminal credit PI
+    // as a settlement-time backstop.)
+    if (isEnabled('terminalSurcharge') && req.body?.surcharge_capable !== true) {
+      return res.status(409).json({
+        error: 'This WavesPay version cannot apply the required card surcharge. Update the app and try again.',
+        code: 'app_update_required',
+      });
     }
 
     // Look up the handoff row. The ONLY trusted source for invoice binding,
@@ -651,6 +688,188 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[stripe-terminal] payment-intent failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/stripe/terminal/apply-surcharge
+// The second step of the card-present surcharge flow. Card-present funding is
+// only known AFTER the tap, so /payment-intent mints the PI at base; the iOS app
+// calls this between collectPaymentMethod and confirmPaymentIntent — once Stripe
+// has read the card and attached the card_present PaymentMethod — to raise the PI
+// to base + 2.9% surcharge, but ONLY when the card reads as credit. Debit,
+// prepaid, and unknown funding stay at base (metadata stamped, amount untouched),
+// matching the online flow's positively-confirmed-credit-only rule.
+//
+// Gate: GATE_TERMINAL_SURCHARGE. When OFF this is a hard no-op (applied:false),
+// so an iOS build that always calls it still collects base-only exactly like
+// today until the feature is field-tested and flipped on.
+//
+// Auth: terminalAuthenticate. Body: { jti }. Like /payment-intent, every
+// trusted field (invoice, base amount, tech) is read from the handoff row.
+//
+// Idempotency: re-invocation is safe. Once a prior call stamps
+// surcharge_policy_version on the PI we report the existing state without
+// re-raising the amount. The Stripe update also carries Idempotency-Key
+// `surcharge_<jti>` so a retried network flake can't double-apply.
+//
+// Structured result, never a 500 for recoverable states: a too-early call
+// (awaiting_card), a non-updatable PI (pi_not_updatable), or a Stripe update
+// failure (apply_failed) all return 200 with applied:false + a reason. The iOS
+// client decides from that reason whether to confirm (applied:true, or a
+// definitive debit/prepaid/unknown no-surcharge) or abort+retry (any failure
+// reason) — it must NOT silently confirm at base once disclosure was shown.
+//
+// Returns: { applied, funding, base, surcharge, total, rateBps, reason? } (cents).
+router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
+  try {
+    const { jti } = req.body || {};
+    if (!jti || typeof jti !== 'string') {
+      return res.status(400).json({ error: 'jti required' });
+    }
+
+    // Feature off → no-op. The PI stays at base and the device confirms it as-is.
+    if (!isEnabled('terminalSurcharge')) {
+      return res.json({ applied: false, reason: 'disabled' });
+    }
+
+    const handoff = await db('terminal_handoff_tokens').where({ jti }).first();
+    if (!handoff) {
+      return res.status(404).json({ error: 'Handoff not found', code: 'handoff_unknown' });
+    }
+    if (!handoff.used_at) {
+      return res.status(409).json({ error: 'Handoff not validated', code: 'handoff_not_validated' });
+    }
+    if (!handoff.stripe_payment_intent_id) {
+      // Surcharge can only be applied after /payment-intent has minted the PI.
+      return res.status(409).json({ error: 'Payment intent not created yet', code: 'payment_intent_not_created' });
+    }
+    if (String(handoff.tech_user_id) !== String(req.technicianId)) {
+      logger.error(
+        `[stripe-terminal] apply-surcharge tech mismatch jti=${jti} ` +
+          `handoff_tech=${handoff.tech_user_id} req_tech=${req.technicianId}`,
+      );
+      return res.status(403).json({ error: 'Handoff belongs to a different technician', code: 'tech_mismatch' });
+    }
+
+    // Re-verify the invoice hasn't gone terminal or changed total since the PI
+    // was minted — mirror of the /payment-intent checks. The surcharge rides on
+    // the PI, not the invoice, but if the base itself moved the whole charge is
+    // stale and the tech must re-handoff.
+    const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
+    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+      return res.status(409).json({
+        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
+        code: 'invoice_status_changed',
+      });
+    }
+    const baseCents = Number(handoff.amount_cents);
+    if (Math.round(Number(invoice.total) * 100) !== baseCents) {
+      return res.status(409).json({ error: 'Invoice amount changed since handoff', code: 'invoice_amount_changed' });
+    }
+
+    const stripe = getStripe();
+    // Retrieve under the preview API version so amount_details (a preview field)
+    // is present on re-reads; expand payment_method to read card_present funding.
+    const pi = await stripe.paymentIntents.retrieve(
+      handoff.stripe_payment_intent_id,
+      { expand: ['payment_method'] },
+      { apiVersion: SURCHARGE_API_VERSION },
+    );
+
+    // Only finalize once the card has actually been read: the PI must be at
+    // requires_confirmation WITH the card_present PaymentMethod attached. Before
+    // that (requires_payment_method / no PM) funding is unknowable — return a
+    // retryable signal and write NOTHING (no metadata, no idempotency-key burn).
+    // Stamping the PI base-only here would otherwise let a later, post-collect
+    // credit-card call short-circuit on the already-finalized path and settle
+    // without the surcharge (the exact leak this route closes).
+    const pm = pi.payment_method && typeof pi.payment_method === 'object' ? pi.payment_method : null;
+    if (pi.status === 'requires_payment_method' || !pm) {
+      return res.json({ applied: false, reason: 'awaiting_card', retryable: true });
+    }
+    if (pi.status !== 'requires_confirmation') {
+      // succeeded / processing / canceled / requires_capture / requires_action —
+      // past the point of a safe amount change.
+      return res.json({ applied: false, reason: 'pi_not_updatable', status: pi.status });
+    }
+
+    // Funding is now final (credit/debit/prepaid/unknown). null/unknown → no
+    // surcharge (fail-safe), same as the online flow.
+    const funding = pm.card_present?.funding || pm.card?.funding || null;
+    const alreadyFinalized = !!pi.metadata?.surcharge_policy_version;
+
+    const plan = planCardPresentSurcharge({ baseCents, funding, alreadyFinalized });
+
+    if (plan.action === 'already') {
+      // A prior call already stamped/raised this PI. Report what's on it now —
+      // derive the surcharge from the amount delta so it's correct regardless of
+      // whether amount_details came back on this read.
+      const existingSurcharge = Math.max(0, Number(pi.amount) - baseCents);
+      return res.json({
+        applied: existingSurcharge > 0,
+        funding,
+        base: baseCents,
+        surcharge: existingSurcharge,
+        total: Number(pi.amount),
+        rateBps: Number(pi.metadata?.surcharge_rate_bps || 0),
+        reason: 'already_finalized',
+      });
+    }
+
+    // Metadata mirrors the online finalize path so the webhook's payment-insert
+    // records base/surcharge/funding identically for card-present and online.
+    const metadata = {
+      base_amount: String(baseCents / 100),
+      card_surcharge: String(plan.surchargeCents / 100),
+      surcharge_rate_bps: String(plan.rateBps),
+      surcharge_policy_version: plan.policyVersion,
+      card_funding: funding || 'unknown',
+    };
+
+    try {
+      if (plan.action === 'apply_surcharge') {
+        // Raise amount + attach the surcharge breakdown. amount_details requires
+        // the preview API version, passed per-request so the rest of the app
+        // stays on the account's stable version.
+        await stripe.paymentIntents.update(
+          pi.id,
+          {
+            amount: plan.totalCents,
+            amount_details: buildSurchargeAmountDetails(plan.surchargeCents, { enforceValidation: 'disabled' }),
+            metadata,
+          },
+          { apiVersion: SURCHARGE_API_VERSION, idempotencyKey: `surcharge_${jti}` },
+        );
+        logger.info(
+          `[stripe-terminal] apply-surcharge jti=${jti} PI=${pi.id} funding=${funding} ` +
+            `base=${baseCents}c surcharge=${plan.surchargeCents}c total=${plan.totalCents}c`,
+        );
+        return res.json({
+          applied: true,
+          funding,
+          base: baseCents,
+          surcharge: plan.surchargeCents,
+          total: plan.totalCents,
+          rateBps: plan.rateBps,
+        });
+      }
+
+      // finalize_base — debit/prepaid/unknown. Stamp funding + zero surcharge so
+      // the payment record is honest; never touch the amount, never go preview.
+      await stripe.paymentIntents.update(pi.id, { metadata }, { idempotencyKey: `surcharge_${jti}` });
+      logger.info(`[stripe-terminal] apply-surcharge jti=${jti} PI=${pi.id} funding=${funding || 'unknown'} no-surcharge (base only)`);
+      return res.json({ applied: false, funding, base: baseCents, surcharge: 0, total: baseCents });
+    } catch (updateErr) {
+      // The update failed, so the PI is untouched (still at base) and no metadata
+      // was stamped — retrying is safe. Report apply_failed so the client aborts
+      // rather than settling a credit card at base after disclosure. Surface for
+      // monitoring; the tech re-taps.
+      logger.error(`[stripe-terminal] apply-surcharge update failed jti=${jti} PI=${pi.id}: ${updateErr.message}`);
+      return res.json({ applied: false, reason: 'apply_failed', funding, base: baseCents });
+    }
+  } catch (err) {
+    logger.error(`[stripe-terminal] apply-surcharge failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
