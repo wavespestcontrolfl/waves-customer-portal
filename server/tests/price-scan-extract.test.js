@@ -440,6 +440,12 @@ describe('price-scan extract', () => {
       const ok = verifyMatch({ name: 'Demand CS 8 oz', quantity: '8 oz', text: 'EPA Reg. No. 100-1066' }, demand);
       expect(ok.matched).toBe(true);
     });
+    test('a plural unit abbreviation ("25 lbs" vs "25 lb") is not a formulation mismatch', () => {
+      const exp = { vendorProductName: 'Talstar Granules 25 lbs', epaReg: '279-3206', packSizeValue: 25, packSizeUnit: 'lb' };
+      const r = verifyMatch({ name: 'Talstar Granules 25 lb', quantity: '25 lb' }, exp);
+      expect(r.signals.name).toBe(true);
+      expect(r.matched).toBe(true);
+    });
     test('different formulation marker (Bifen I/T vs XTS) needs EPA, not name+size', () => {
       // Brand + "Insecticide" overlap + same size would otherwise pass; the I/T
       // vs XTS formulation marker (a slashed / 3-char code) must block it.

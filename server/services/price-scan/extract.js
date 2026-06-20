@@ -378,6 +378,10 @@ const GENERIC_WORDS = new Set([
 // Single-letter formulation suffixes that genuinely separate products:
 // G granular, D dust, F flowable, L liquid, W wettable (Demand CS vs Demand G).
 const SINGLE_CHAR_FORM = new Set(['g', 'd', 'f', 'l', 'w']);
+// A unit abbreviation OR its plural ("lbs" -> "lb", "ozs" -> "oz"), so a plural
+// unit in one name and singular in the other isn't treated as a mismatched
+// formulation code. "cs" -> "c" (not a unit) stays a real formulation.
+const isUnitAbbrev = (w) => UNIT_ABBREVS.has(w) || (w.endsWith('s') && UNIT_ABBREVS.has(w.slice(0, -1)));
 function formulationCodes(name) {
   const raw = String(name || '').toLowerCase();
   const codes = new Set();
@@ -388,7 +392,7 @@ function formulationCodes(name) {
     // 2-3 char alphanumeric codes (must contain a letter), minus units / generics
     // / pure numbers (a bare size like "78" or "96" isn't a formulation).
     if (tok.length >= 2 && tok.length <= 3 && /[a-z]/.test(tok)
-      && !/^\d+$/.test(tok) && !UNIT_ABBREVS.has(tok) && !GENERIC_WORDS.has(tok)) {
+      && !/^\d+$/.test(tok) && !isUnitAbbrev(tok) && !GENERIC_WORDS.has(tok)) {
       codes.add(tok);
     } else if (tok.length === 1 && SINGLE_CHAR_FORM.has(tok)) {
       codes.add(tok);
