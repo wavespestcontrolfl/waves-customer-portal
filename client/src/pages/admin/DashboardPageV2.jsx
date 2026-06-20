@@ -628,7 +628,7 @@ export default function DashboardPageV2() {
                   value={
                     kpis.retention.pct != null ? `${kpis.retention.pct}%` : "—"
                   }
-                  sub={`${kpis.retention.churned} churned`}
+                  sub={`${kpis.retention.lost} lost`}
                   alert={kpis.retention.pct != null && kpis.retention.pct < 85}
                 />{" "}
               </KpiGrid>{" "}
