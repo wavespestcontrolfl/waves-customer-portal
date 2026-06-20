@@ -7,7 +7,7 @@ const {
   etParts,
   parseETDateTime,
 } = require('../utils/datetime-et');
-const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -659,11 +659,9 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   // Owner policy: this sync RE-ALIGNS already-enrolled WaveGuard members only — it must
   // never enroll a customer from recurring services alone. The repo has per-visit
   // recurring customers; auto-enrolling them would wrongly make them monthly/autopay
-  // billable. Enrollment is established explicitly (admin/estimate/payment) and shows up
-  // as a waveguard_tier or a positive monthly_rate. Non-enrolled customers are left
-  // untouched here.
-  const isWaveGuardEnrolled = !!normalizeTierName(customer.waveguard_tier) || Number(customer.monthly_rate || 0) > 0;
-  if (!isWaveGuardEnrolled) {
+  // billable. Use the shared membership predicate, which rejects explicit non-member
+  // tier sentinels (none/onetime/na/...) before the legacy monthly_rate fallback.
+  if (!isMembershipCustomerRow(customer)) {
     return { synced: false, reason: 'not_waveguard_enrolled' };
   }
 

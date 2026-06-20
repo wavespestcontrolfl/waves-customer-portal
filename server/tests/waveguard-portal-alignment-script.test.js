@@ -158,6 +158,21 @@ describe('WaveGuard portal alignment script helpers', () => {
       customerColumns,
       '2026-06-20',
     )).toEqual(expect.objectContaining({ waveguard_tier: 'Silver' }));
+
+    // An explicit non-member sentinel tier ('none') is NOT a member even with a
+    // positive monthly_rate -> no mutations.
+    expect(buildCustomerUpdates(
+      {
+        active: false,
+        pipeline_stage: 'new_lead',
+        waveguard_tier: 'none',
+        monthly_rate: 89,
+        member_since: null,
+      },
+      ['pest_control', 'lawn_care'],
+      customerColumns,
+      '2026-06-20',
+    )).toEqual({});
   });
 
   test('makes no customer-state mutations without recurring-service evidence', () => {

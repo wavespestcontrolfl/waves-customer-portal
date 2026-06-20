@@ -6764,12 +6764,25 @@ function MyPlanTab({ customer }) {
   const isPlanCoverageRow = (s) => !!s && s.isRecurring === true && s.isCallback !== true;
   [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
 
-  const includedServices = detectedServiceIds.length
-    ? detectedServiceIds
-      .slice(0, activeTierName ? tierServiceLimit : detectedServiceIds.length)
-      .map(id => SERVICE_CATALOG.find(svc => svc.id === id))
-      .filter(Boolean)
-    : SERVICE_CATALOG.slice(0, tierServiceLimit);
+  // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
+  // just the rows that happen to be on the visible schedule: surface detected recurring
+  // coverage first, then pad with tier-default catalog services so a Gold/Platinum member
+  // with only a partial future schedule still shows the full count, savings, and copy.
+  // Non-tier customers only ever show what was actually detected (no entitlement padding).
+  let includedServiceIds;
+  if (activeTierName) {
+    includedServiceIds = [...detectedServiceIds];
+    for (const svc of SERVICE_CATALOG) {
+      if (includedServiceIds.length >= tierServiceLimit) break;
+      if (!includedServiceIds.includes(svc.id)) includedServiceIds.push(svc.id);
+    }
+    includedServiceIds = includedServiceIds.slice(0, tierServiceLimit);
+  } else {
+    includedServiceIds = detectedServiceIds;
+  }
+  const includedServices = includedServiceIds
+    .map(id => SERVICE_CATALOG.find(svc => svc.id === id))
+    .filter(Boolean);
   const numServices = includedServices.length;
 
   // Calculate annual savings

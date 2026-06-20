@@ -4,6 +4,7 @@ require('dotenv').config();
 const db = require('../models/db');
 const {
   TERMINAL_STATUSES,
+  isMembershipCustomerRow,
 } = require('../services/waveguard-existing-services');
 const {
   ONE_TIME_BOOKING_SOURCE_VALUES,
@@ -144,16 +145,12 @@ function setIfColumn(target, columns, column, value) {
   if (columnPresent(columns, column)) target[column] = value;
 }
 
-function isWaveGuardEnrolled(customer = {}) {
-  // Owner policy: re-align already-enrolled WaveGuard members only; never enroll a
-  // per-visit recurring customer (incl. pending public self-bookings). Enrollment =
-  // an explicit tier or a positive monthly_rate.
-  return !!normalizeTierName(customer.waveguard_tier) || moneyNumber(customer.monthly_rate) > 0;
-}
-
 function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   const updates = {};
-  if (!isWaveGuardEnrolled(customer)) return updates;
+  // Owner policy: re-align already-enrolled WaveGuard members only; never enroll a
+  // per-visit recurring customer (incl. pending public self-bookings). Use the shared
+  // membership predicate, which rejects explicit non-member tier sentinels.
+  if (!isMembershipCustomerRow(customer)) return updates;
   const existingRate = moneyNumber(customer.monthly_rate);
   const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
   const normalizedExistingTier = normalizeTierName(customer.waveguard_tier);
@@ -408,7 +405,7 @@ async function analyzeCustomer(customer, serviceColumns, customerColumns, servic
   // Re-align enrolled members only: never seed plan-covered recurring rows (which set
   // create_invoice_on_complete=false) for a per-visit customer who is not WaveGuard-enrolled.
   const serviceRepairs = [];
-  for (const key of (isWaveGuardEnrolled(customer) ? detectedKeys : [])) {
+  for (const key of (isMembershipCustomerRow(customer) ? detectedKeys : [])) {
     const plan = SERVICE_PLANS[key];
     const anchor = chooseAnchor(rows, key, today);
     if (!anchor) continue;
