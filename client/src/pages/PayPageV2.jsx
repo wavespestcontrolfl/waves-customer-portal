@@ -299,12 +299,14 @@ function CoverageVisitsList({ visits, status }) {
             alignItems: 'center',
             justifyContent: 'space-between',
             gap: 10,
-            fontSize: 13,
+            fontSize: 14,
             lineHeight: 1.4,
             color: 'var(--text)',
           }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-              <span style={{ color: 'var(--success)', fontWeight: 800 }}>✓</span>
+              <span style={{ color: 'var(--success)', display: 'inline-flex' }}>
+                <Icon name="check" size={14} strokeWidth={3} />
+              </span>
               <span>Visit {i + 1} of {visits.length} · target {fmtDate(v.date)}</span>
             </span>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
