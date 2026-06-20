@@ -3,6 +3,7 @@ const {
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
+  parseBooleanFlag,
   plannedFutureDates,
   representativePlanKeys,
   serviceFamilyKey,
@@ -105,6 +106,35 @@ describe('WaveGuard portal alignment script helpers', () => {
 
     expect(existingRateUpdates).not.toHaveProperty('monthly_rate');
     expect(existingRateUpdates).not.toHaveProperty('member_since');
+  });
+
+  test('makes no customer-state mutations without recurring-service evidence', () => {
+    expect(buildCustomerUpdates(
+      {
+        active: false,
+        pipeline_stage: 'new_lead',
+        waveguard_tier: 'Bronze',
+        monthly_rate: null,
+        member_since: null,
+        earliest_service_date: '2026-06-19',
+      },
+      [],
+      customerColumns,
+      '2026-06-20',
+    )).toEqual({});
+  });
+
+  test('parses --apply/--include-inactive so dry-run stays the default', () => {
+    expect(parseBooleanFlag(true)).toBe(true);
+    expect(parseBooleanFlag('true')).toBe(true);
+    expect(parseBooleanFlag('1')).toBe(true);
+    expect(parseBooleanFlag(' YES ')).toBe(true);
+    expect(parseBooleanFlag('false')).toBe(false);
+    expect(parseBooleanFlag('0')).toBe(false);
+    expect(parseBooleanFlag('no')).toBe(false);
+    expect(parseBooleanFlag(undefined)).toBe(false);
+    expect(parseBooleanFlag(null)).toBe(false);
+    expect(parseBooleanFlag(false)).toBe(false);
   });
 
   test('normalizes recognized tier casing for portal lookups', () => {

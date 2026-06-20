@@ -34,10 +34,18 @@ const ARGS = Object.fromEntries(
   })
 );
 
-const APPLY = !!ARGS.apply;
+function parseBooleanFlag(value) {
+  if (value === true) return true;
+  if (value === undefined || value === false || value === null) return false;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+// Default is dry-run: only a bare `--apply` or an explicit truthy value enables
+// writes, so `--apply=false`/`--apply=0` stays read-only.
+const APPLY = parseBooleanFlag(ARGS.apply);
 const LIMIT = ARGS.limit ? Math.max(1, Number.parseInt(ARGS.limit, 10) || 0) : null;
 const CUSTOMER_ID = ARGS['customer-id'] || null;
-const INCLUDE_INACTIVE = !!ARGS['include-inactive'];
+const INCLUDE_INACTIVE = parseBooleanFlag(ARGS['include-inactive']);
 const TARGET_FUTURE_VISITS = Math.max(1, Math.min(12, Number.parseInt(ARGS['future-visits'] || DEFAULT_TARGET_FUTURE_VISITS, 10) || DEFAULT_TARGET_FUTURE_VISITS));
 
 function moneyNumber(value) {
@@ -138,6 +146,13 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   const normalizedExistingTier = normalizeTierName(customer.waveguard_tier);
   const currentTierRank = normalizedExistingTier ? TIER_ORDER.indexOf(normalizedExistingTier) : -1;
   const inferredTierRank = inferredTier ? TIER_ORDER.indexOf(inferredTier) : -1;
+
+  // Mirror the runtime sync helper (buildCustomerWaveGuardAlignmentUpdates): with no
+  // recurring-service evidence we cannot infer a tier, so we make NO customer-state
+  // mutations. Without this gate a default-Bronze lead/non-member with no qualifying
+  // scheduled services would be promoted to active_customer (and reactivated under
+  // --include-inactive) just by running the alignment script.
+  if (!inferredTier) return updates;
 
   if (columnPresent(columns, 'active') && customer.active !== true) updates.active = true;
   if (columnPresent(columns, 'pipeline_stage') && customer.pipeline_stage !== 'active_customer') {
@@ -506,6 +521,7 @@ module.exports = {
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
+  parseBooleanFlag,
   plannedFutureDates,
   representativePlanKeys,
   serviceFamilyKey,
