@@ -86,6 +86,20 @@ async function sendDraft(db, id, { actor } = {}, deps = {}) {
   }
   const draft = claimed[0];
 
+  // Durably record that a send is being ATTEMPTED against this claim BEFORE calling
+  // SendGrid. Once this stamp is set the email may have gone out, so resetStuckDraft
+  // will NOT reopen the row for a resend (that's how we avoid a duplicate external
+  // email when the finalize write later fails). If THIS write fails we have not sent
+  // yet, so bail without sending — the row is still attempt-unstamped and a later
+  // stale reset can safely recover it.
+  try {
+    await db('price_match_drafts')
+      .where({ id, status: 'sending', claim_token: token })
+      .update({ send_attempted_at: db.fn.now() });
+  } catch (markErr) {
+    return { ok: false, reason: 'send_attempt_unrecorded' };
+  }
+
   let res;
   try {
     res = await mailer.sendOne({
@@ -152,14 +166,20 @@ async function dismissDraft(db, id, { actor, nowMs = Date.now() } = {}) {
   return stale || null;
 }
 
-// Recover a draft STUCK in 'sending' (a crash between claim and finalize): reset
-// it to pending so it can be re-reviewed/sent. The stale predicate is IN the
-// UPDATE, so a fresh in-flight claim is never reopened (no double-send) even if a
-// send-claim races this call.
+// Recover a draft STUCK in 'sending' because it was claimed but the process died
+// BEFORE the send was attempted: reset it to pending so it can be re-reviewed/sent.
+// Two guards live IN the UPDATE so neither a fresh claim nor a sent-but-unfinalized
+// row is ever reopened:
+//   - claimed_at < staleBefore  — never touch a fresh in-flight claim.
+//   - send_attempted_at IS NULL — never reopen a row whose send was attempted; the
+//     email may already have reached Mark, so reopening it would risk a DUPLICATE
+//     external send. Those stay 'sending' for manual reconcile (verify in SendGrid,
+//     then dismiss) rather than auto-resend.
 async function resetStuckDraft(db, id, { nowMs = Date.now() } = {}) {
   const [row] = await db('price_match_drafts')
     .where({ id, status: 'sending' })
     .where('claimed_at', '<', staleBefore(nowMs))
+    .whereNull('send_attempted_at')
     .update({ status: 'pending', claimed_at: null, claim_token: null })
     .returning('*');
   return row || null;

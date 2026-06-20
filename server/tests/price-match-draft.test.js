@@ -14,16 +14,18 @@ function makeFakeDb() {
     return a === b;
   };
   const db = () => {
-    const state = { where: null, whereIn: null, ops: [] };
+    const state = { where: null, whereIn: null, ops: [], nulls: [] };
     const matches = (r) => (!state.where || Object.keys(state.where).every((k) => r[k] === state.where[k]))
       && (!state.whereIn || state.whereIn.arr.includes(r[state.whereIn.col]))
-      && state.ops.every(({ col, op, val }) => cmp(op, r[col], val));
+      && state.ops.every(({ col, op, val }) => cmp(op, r[col], val))
+      && state.nulls.every((col) => r[col] == null);
     const builder = {
       where(...args) {
         if (args.length === 3) state.ops.push({ col: args[0], op: args[1], val: args[2] });
         else state.where = { ...(state.where || {}), ...args[0] };
         return builder;
       },
+      whereNull(col) { state.nulls.push(col); return builder; },
       whereIn(col, arr) { state.whereIn = { col, arr }; return builder; },
       orderBy() { return builder; },
       limit() { return builder; },
@@ -33,7 +35,7 @@ function makeFakeDb() {
           returning: () => {
             const r = {
               id: nextId++, status: 'pending', claimed_at: null, claim_token: null,
-              sent_at: null, dismissed_at: null, message_id: null, sent_by: null, ...data,
+              send_attempted_at: null, sent_at: null, dismissed_at: null, message_id: null, sent_by: null, ...data,
             };
             rows.push(r);
             return Promise.resolve([r]);
@@ -249,6 +251,52 @@ describe('price-match-draft service', () => {
     expect(recovered.status).toBe('pending');
     expect(recovered.claimed_at).toBeNull();
     expect(await resetStuckDraft(db, draft.id, { nowMs: now })).toBeNull(); // not sending anymore
+  });
+
+  test('send_attempted_at is stamped BEFORE SendGrid is called (durable resend guard)', async () => {
+    const db = makeFakeDb();
+    const draft = await createDraft(db, [proofMatch]);
+    let stampedBeforeSend = false;
+    const sendOne = jest.fn(async () => {
+      stampedBeforeSend = db._rows[0].send_attempted_at != null; // already recorded at call time
+      return { messageId: 'ok' };
+    });
+    await sendDraft(db, draft.id, {}, { sendgrid: { sendOne } });
+    expect(stampedBeforeSend).toBe(true);
+  });
+
+  test('resetStuckDraft REFUSES a stale claim whose send was already attempted', async () => {
+    const db = makeFakeDb();
+    const draft = await createDraft(db, [proofMatch]);
+    const now = Date.parse('2026-06-19T12:00:00Z');
+    db._rows[0].status = 'sending';
+    db._rows[0].claimed_at = new Date(now - 20 * 60 * 1000).toISOString(); // stale window passes
+    db._rows[0].send_attempted_at = new Date(now - 20 * 60 * 1000).toISOString(); // ...but a send was attempted
+    expect(await resetStuckDraft(db, draft.id, { nowMs: now })).toBeNull(); // must NOT reopen
+    expect(db._rows[0].status).toBe('sending');
+  });
+
+  test('a reconciled (sent-but-unfinalized) draft can never be stale-reset back to resendable (P1)', async () => {
+    // Finalize fails after the email sent -> reconcile -> row carries send_attempted_at,
+    // so a later stale reset refuses it. Without this, the admin reset would double-send.
+    const base = makeFakeDb();
+    const db = (...a) => {
+      const b = base(...a);
+      const orig = b.update.bind(b);
+      b.update = (data) => (data && data.status === 'sent'
+        ? { returning: () => Promise.reject(new Error('blip')), then: (r, j) => Promise.reject(new Error('blip')).then(r, j) }
+        : orig(data));
+      return b;
+    };
+    db.fn = base.fn; db._rows = base._rows;
+    const draft = await createDraft(db, [proofMatch]);
+    const r = await sendDraft(db, draft.id, {}, { sendgrid: { sendOne: jest.fn(async () => ({ messageId: 'x' })) } });
+    expect(r.reconcile).toBe(true);
+    expect(db._rows[0].send_attempted_at).not.toBeNull();
+    const now = Date.parse('2026-06-19T13:00:00Z');
+    db._rows[0].claimed_at = new Date(now - 20 * 60 * 1000).toISOString(); // make the stale window pass
+    expect(await resetStuckDraft(db, draft.id, { nowMs: now })).toBeNull(); // send_attempted_at still blocks it
+    expect(db._rows[0].status).toBe('sending');
   });
 
   test('dismiss refuses a fresh sending draft, allows a stale one', async () => {

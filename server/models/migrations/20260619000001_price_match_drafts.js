@@ -22,6 +22,11 @@ exports.up = async function up(knex) {
     t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
     t.timestamp('claimed_at', { useTz: true }).nullable(); // when send claimed it (pending -> sending); for stuck-claim recovery
     t.string('claim_token', 64).nullable(); // per-claim token so a stale send can't finalize a newer claim
+    // Stamped right BEFORE SendGrid is called. Once set, the email MAY have gone
+    // out, so resetStuckDraft refuses to reopen the row (no duplicate external
+    // send) — only a claim that crashed BEFORE the attempt (this still NULL) is
+    // safe to auto-recover. A stale attempted row is cleared by manual dismiss.
+    t.timestamp('send_attempted_at', { useTz: true }).nullable();
     t.timestamp('sent_at', { useTz: true }).nullable();
     t.string('sent_by', 255).nullable(); // admin who clicked send
     t.string('message_id', 255).nullable(); // SendGrid message id
