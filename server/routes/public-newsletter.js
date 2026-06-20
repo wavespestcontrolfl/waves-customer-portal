@@ -17,6 +17,9 @@ const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
+const { resolveAnswer, recordQuizResponse } = require('../services/newsletter-quiz');
+const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } = require('../constants/business');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 // Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
 // index.js is shared across every public endpoint, so a subscribe-spam
@@ -29,6 +32,18 @@ const subscribeLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many subscribe attempts. Try again in a minute.' },
+});
+
+// Per-IP limiter on the public quiz endpoints (GET render + POST tag write).
+// An unauthenticated mutation needs its own cap on top of the global /api/
+// limiter so a token-guessing / tag-spam loop can't churn. 30/min is generous
+// for a real recipient (one tap) but well below what abuse needs.
+const quizLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again in a minute.' },
 });
 
 function escapeHtml(s) {
@@ -151,6 +166,78 @@ router.get('/unsubscribe/:token', async (req, res) => {
   } catch (err) {
     logger.error(`[newsletter] unsubscribe GET failed: ${err.message}`);
     res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com to unsubscribe.');
+  }
+});
+
+// ── In-email engagement quiz ─────────────────────────────────────────
+// A per-recipient answer link tags the matching subscriber for segmentation
+// (newsletter-quiz.js). Same GET-renders / POST-mutates split as confirm, AND
+// for the same reason: corporate mail gateways (Defender/Mimecast/Proofpoint,
+// Outlook safe-link) pre-fetch every URL in a message — some execute JS — so
+// the tag write must hang off a DELIBERATE user gesture (the confirm <form>
+// submit below), never a GET or an on-load script. A scanner that opens all
+// four answer links sees only the render and writes nothing.
+
+// GET /api/public/newsletter/quiz/:token/:quizId/:answer
+// Read-only confirm page with a single submit button. No mutation here.
+router.get('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
+  try {
+    const { quizId, answer } = req.params;
+    const ans = resolveAnswer(quizId, answer); // null when unknown — copy degrades gracefully
+    const label = ans ? ans.label : null;
+    const tokenSafe = escapeHtml(req.params.token);
+    const quizIdSafe = encodeURIComponent(quizId);
+    const answerSafe = encodeURIComponent(answer);
+
+    const heading = 'One tap to confirm.';
+    const bodyHtml = `
+          <p>${label
+            ? `You picked <strong>${escapeHtml(label)}</strong>. Confirm and we'll bring a free lawn check on your next visit.`
+            : `Confirm and we'll bring a free lawn check on your next visit.`}</p>
+          <form method="POST" action="/api/public/newsletter/quiz/${tokenSafe}/${quizIdSafe}/${answerSafe}">
+            <button type="submit" class="btn">Confirm${label ? ` — ${escapeHtml(label)}` : ''}</button>
+          </form>
+          <p style="margin-bottom:0; font-size:12px; color:#888;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>
+        `;
+    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+  } catch (err) {
+    logger.error(`[newsletter] quiz GET failed: ${err.message}`);
+    res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com and we\'ll help.');
+  }
+});
+
+// POST /api/public/newsletter/quiz/:token/:quizId/:answer
+// The mutation: tag the subscriber + stamp the delivery row. Fired by the
+// confirm <form> above (deliberate user gesture). Two response shapes like the
+// confirm flow — HTML for the form submit, JSON for any fetch() client. Always
+// 200 (mirrors unsubscribe) so the endpoint can't probe which tokens/answers
+// are real.
+router.post('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
+  try {
+    const { token, quizId, answer } = req.params;
+    await recordQuizResponse({ token, quizId, answerKey: answer });
+
+    const isFormSubmission = req.is('application/x-www-form-urlencoded') || req.is('multipart/form-data');
+    if (!isFormSubmission) {
+      return res.status(200).json({ ok: true });
+    }
+
+    const ans = resolveAnswer(quizId, answer);
+    const headache = ans && ans.key !== 'not-sure' ? ans.label.toLowerCase() : null;
+    const bookUrl = `${publicPortalUrl()}/book`;
+    const heading = "Thanks — we've got you.";
+    const bodyHtml = `
+          <p>${headache
+            ? `We'll take a closer look at the <strong>${escapeHtml(headache)}</strong> on your lawn during your next visit.`
+            : `We'll bring a free lawn check on your next visit.`}</p>
+          <p style="margin-bottom:6px;">Want it sooner?</p>
+          <p style="margin:0 0 10px;"><a href="${escapeHtml(bookUrl)}" class="btn">Book a lawn check</a></p>
+          <p style="margin-bottom:0; font-size:14px;">or call us at <a href="${WAVES_SUPPORT_PHONE_TEL}">${escapeHtml(WAVES_SUPPORT_PHONE_DISPLAY)}</a>.</p>
+        `;
+    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+  } catch (err) {
+    logger.error(`[newsletter] quiz POST failed: ${err.message}`);
+    res.status(200).json({ ok: true });
   }
 });
 

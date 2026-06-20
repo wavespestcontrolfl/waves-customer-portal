@@ -2355,3 +2355,78 @@ describe('event isEligibleForFreshDigest — merged_into durability', () => {
     expect(isEligibleForFreshDigest({ ...base(), admin_status: 'featured', merged_into: 'some-primary-uuid' })).toBe(false);
   });
 });
+
+describe('newsletter quiz — config, rendering, tag resolution', () => {
+  const quiz = require('../services/newsletter-quiz');
+  const { stripPersonalizationTokens } = require('../services/newsletter-draft');
+  const TOK = '11111111-2222-3333-4444-555555555555';
+
+  test('hasQuizToken detects both the html and text tokens', () => {
+    expect(quiz.hasQuizToken('hello {{quiz}} world')).toBe(true);
+    expect(quiz.hasQuizToken('plain {{quiz-text}} part')).toBe(true);
+    expect(quiz.hasQuizToken('no token here')).toBe(false);
+    expect(quiz.hasQuizToken(null)).toBe(false);
+  });
+
+  test('resolveAnswer returns the answer + its interest tags, null for unknowns', () => {
+    expect(quiz.resolveAnswer('lawn-headache-v1', 'brown-patch')).toEqual({
+      key: 'brown-patch', label: 'Brown patches', tags: ['lawn-interested', 'lawn:brown-patch'],
+    });
+    expect(quiz.resolveAnswer('lawn-headache-v1', 'not-sure').tags).toEqual(['lawn-interested']);
+    expect(quiz.resolveAnswer('lawn-headache-v1', 'nope')).toBeNull();
+    expect(quiz.resolveAnswer('no-such-quiz', 'brown-patch')).toBeNull();
+  });
+
+  test('every answer carries the broad lawn-interested tag so "any engager" stays targetable', () => {
+    for (const a of quiz.getQuiz('lawn-headache-v1').answers) {
+      expect(a.tags).toContain('lawn-interested');
+    }
+  });
+
+  test('renderQuizHtml emits one tokenized answer link per answer', () => {
+    const html = quiz.renderQuizHtml({ token: TOK, quizId: 'lawn-headache-v1' });
+    const links = html.match(/\/api\/public\/newsletter\/quiz\//g) || [];
+    expect(links.length).toBe(4);
+    expect(html).toContain(TOK);
+    expect(html).toContain('/lawn-headache-v1/brown-patch');
+  });
+
+  test('renderQuizHtml falls back to a link-free neutral block when the token is missing/invalid', () => {
+    expect(quiz.renderQuizHtml({ token: null }).includes('/quiz/')).toBe(false);
+    expect(quiz.renderQuizHtml({ token: 'not-a-uuid' }).includes('/quiz/')).toBe(false);
+    // still shows the question so archive/preview readers see content
+    expect(quiz.renderQuizHtml({ token: null })).toContain("biggest headache");
+  });
+
+  test('renderQuizText lists each answer with its per-recipient URL', () => {
+    const txt = quiz.renderQuizText({ token: TOK });
+    expect(txt).toContain("What's your lawn's biggest headache?");
+    expect((txt.match(/https:\/\//g) || []).length).toBe(4);
+  });
+
+  test('quizAnswerUrl URL-encodes its path segments', () => {
+    const url = quiz.quizAnswerUrl(TOK, 'lawn-headache-v1', 'brown-patch');
+    expect(url).toMatch(/\/quiz\/11111111-2222-3333-4444-555555555555\/lawn-headache-v1\/brown-patch$/);
+  });
+
+  test('neutralizeQuizTokens strips both raw tokens (no literal {{quiz}} leaks)', () => {
+    const out = quiz.neutralizeQuizTokens('a {{quiz}} b {{quiz-text}} c');
+    expect(out).not.toContain('{{quiz}}');
+    expect(out).not.toContain('{{quiz-text}}');
+  });
+
+  test('stripPersonalizationTokens neutralizes the quiz AND still handles greeting/city/grass', () => {
+    const out = stripPersonalizationTokens('Hi{{greeting-name}} in {{city}} ({{grass-type}}) {{quiz}}');
+    expect(out).not.toContain('{{quiz}}');
+    expect(out).not.toContain('{{greeting-name}}');
+    expect(out).not.toContain('{{city}}');
+    expect(out).not.toContain('{{grass-type}}');
+  });
+
+  test('recordQuizResponse fails closed on a bad token or bad answer without touching the DB', async () => {
+    await expect(quiz.recordQuizResponse({ token: 'not-a-uuid', quizId: 'lawn-headache-v1', answerKey: 'weeds' }))
+      .resolves.toEqual({ ok: false, reason: 'bad-token' });
+    await expect(quiz.recordQuizResponse({ token: TOK, quizId: 'lawn-headache-v1', answerKey: 'nope' }))
+      .resolves.toEqual({ ok: false, reason: 'bad-answer' });
+  });
+});
