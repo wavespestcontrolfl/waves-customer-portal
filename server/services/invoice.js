@@ -2617,6 +2617,19 @@ const InvoiceService = {
     // can never run twice for one invoice.
     let invoice = null;
     await db.transaction(async (trx) => {
+      // Phase 2: lock + re-verify the parent statement is still OPEN inside the
+      // transaction (the pre-check above is a fast fail, but a concurrent close
+      // could finalize the statement between it and this write — that would let
+      // the void commit while rollupStatement no-ops against a frozen total).
+      if (current.payer_statement_id) {
+        const locked = await trx("payer_statements")
+          .where({ id: current.payer_statement_id })
+          .forUpdate()
+          .first("status");
+        if (locked && locked.status !== "open") {
+          throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
+        }
+      }
       const [updated] = await trx("invoices")
         .where({ id, status: current.status })
         .update({ status: "void", updated_at: new Date() })

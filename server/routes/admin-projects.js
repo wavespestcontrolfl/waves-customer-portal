@@ -3253,9 +3253,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // invoice go out. A missing/failed AP recipient makes it partial/failed even
     // when the homeowner report succeeded, so the UI never claims delivered while
     // the bill-to party never received the invoice.
-    const payerLegOk = !isPayerInvoice || !!channels.payer_email?.ok;
+    // Phase 2: an accrued invoice has NO individual AP leg (it ships on the
+    // consolidated statement), so its payer leg is satisfied for REPORT-delivery
+    // status — otherwise a successfully-sent homeowner report would be marked
+    // failed, the claim restored, and retries duplicate the report.
+    // invoiceDelivered (below) is still gated on !accruedOnStatement, so the
+    // accrued invoice itself is never finalized here.
+    const payerLegOk = !isPayerInvoice || accruedOnStatement || !!channels.payer_email?.ok;
     const delivered = delivered_report && payerLegOk;
-    const anySuccess = successfulChannelCount > 0 || (isPayerInvoice && !!channels.payer_email?.ok);
+    const anySuccess = successfulChannelCount > 0
+      || (isPayerInvoice && (accruedOnStatement || !!channels.payer_email?.ok));
     const deliveryStatus = !delivered
       ? (anySuccess ? 'partial' : 'failed')
       : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
