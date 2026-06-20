@@ -467,15 +467,25 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
-    // Collection rate — of invoices ISSUED in the window (paid vs issued),
-    // excluding void/cancelled (never owed) and draft (not issued yet). created_at
-    // is ET-anchored so the window can't drift at the UTC-midnight boundary.
+    // Collection rate — of invoices actually ISSUED in the window, paid vs issued.
+    // "Issued" = presented to the customer as a bill: sent (sent_at stamped) OR
+    // paid (paid_at — covers in-person card_present/cash/check that are never
+    // electronically "sent"; ~22% of paid invoices). This excludes drafts and
+    // scheduled-but-unsent invoices (sent_at + paid_at both null) from the
+    // denominator, and void/cancelled (never owed). The window is anchored on the
+    // real issue date — sent_at, else paid_at — ET-anchored so it can't drift at
+    // the UTC-midnight boundary; created_at (creation, not issuance) is only a
+    // last-resort fallback the issued-filter never actually reaches.
+    const issueDateET = "(COALESCE(sent_at, paid_at, created_at) AT TIME ZONE 'America/New_York')::date";
     let collectionRate = null, collectedCount = 0, issuedCount = 0, collectedTotal = 0, billedTotal = 0;
     try {
       const cAgg = await db('invoices')
-        .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date >= ?", [start])
-        .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date <= ?", [todayStr])
         .whereNotIn('status', ['void', 'cancelled', 'draft'])
+        .where(function issued() {
+          this.whereNotNull('sent_at').orWhereNotNull('paid_at');
+        })
+        .whereRaw(`${issueDateET} >= ?`, [start])
+        .whereRaw(`${issueDateET} <= ?`, [todayStr])
         .select(
           db.raw("COUNT(*) as issued"),
           db.raw("COUNT(*) FILTER (WHERE paid_at IS NOT NULL) as paid"),
