@@ -158,6 +158,17 @@ So: **`sendViaSMSAndEmail` / `sendInvoiceEmail` (and any admin send/resend path)
 hard-refuse `invoice.payer_statement_id IS NOT NULL`** — one chokepoint, fail-
 closed. (The homeowner-side sends are already skipped by Phase 1.)
 
+**Block the PAY paths too, not just send.** Blocking delivery is necessary but
+not sufficient: a `create()`d invoice still mints a `/pay` token, and the invoice
+payment paths (`/api/pay/:token` setup/finalize and the Stripe invoice-payment
+path) gate mainly on *collectible status* — so a leaked or admin-visible child
+token could be paid individually, then paid **again** by the statement cascade
+(double collection). The accrued invoice must be uncollectible by ANY path except
+its statement: add an explicit **`payer_statement_id IS NULL`** guard to the
+invoice `/pay` token resolution and the Stripe invoice-PaymentIntent path (fail
+closed → "this charge is billed on your monthly statement"). Statement payment is
+the ONLY collection path for an accrued invoice.
+
 **`getOrCreateOpenStatement(payerId, period, trx)`** — transaction-safe, mirrors
 the charge-now mint lock:
 1. `pg_advisory_xact_lock(hashtext('payer.statement.open'), hashtext(payerId||period))`
@@ -395,11 +406,13 @@ Each PR ships behind a gate and is independently revertable; nothing changes for
 8. **Eastern-time close cron**: month-end close + `due_date` math must use
    `datetime-et` + `timezone: 'America/New_York'` under `runExclusive`, or it
    fires on the wrong UTC date.
-9. **Centralized send-block** (`invoice.sendViaSMSAndEmail` / `sendInvoiceEmail`):
-   accrued invoices stay `draft` and the admin manual/batch/scheduled/resend
-   surfaces funnel through these helpers — the "no individual send" guard must
-   live there (one fail-closed chokepoint), not only at completion/accept sites,
-   or an operator can deliver+collect an invoice that should be statement-only.
+9. **Centralized send AND pay block** (`sendViaSMSAndEmail` / `sendInvoiceEmail`
+   for delivery; `/api/pay/:token` + the Stripe invoice-PaymentIntent path for
+   collection): accrued invoices stay `draft` and still mint a `/pay` token, so
+   both the send helpers AND the pay paths must fail-closed on
+   `payer_statement_id IS NOT NULL` — else a leaked child token is delivered or
+   paid individually (and then double-collected by the statement cascade).
+   Statement payment is the only collection path for an accrued invoice.
 10. **Accrual atomicity without a caller trx**: `createFromService` + admin
     create paths use the default `db`; `create()` must open its own transaction
     when none is supplied or the advisory lock + insert + rollup aren't atomic.
