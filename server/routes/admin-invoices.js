@@ -1403,6 +1403,12 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
 
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is collected ONLY via its consolidated
+    // statement — never mark an individual accrued invoice paid here (it would
+    // settle once manually and again when the statement settles).
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement — record the payment against the statement, not the individual invoice' });
+    }
     // Terminal or in-flight invoices can never be manually marked paid.
     // This shares the same transition guard as Stripe collection paths.
     try {

@@ -158,7 +158,7 @@ function parseSnapshot(value) {
 }
 
 async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null, throwOnError = false } = {}) {
-  const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false, snapshot: null };
+  const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false, snapshot: null, paymentTerms: null };
   // throwOnError: callers whose contract is "skip on uncertainty" (e.g. the
   // deposit-abandonment nudge must NOT text a payer-billed homeowner just because
   // a lookup blipped) pass this to get a genuine DB/schema failure re-thrown
@@ -202,7 +202,14 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
     const payer = await softNull(getPayer(payerId, database));
     if (!payer || payer.active === false) return SELF_PAY;
 
-    return { payerId, poNumber, taxExempt: !!payer.tax_exempt, snapshot: payerSnapshot(payer) };
+    return {
+      payerId,
+      poNumber,
+      taxExempt: !!payer.tax_exempt,
+      snapshot: payerSnapshot(payer),
+      // Phase 2: drives the accrual-vs-instant-invoice branch in invoice.create().
+      paymentTerms: payer.payment_terms || 'due_on_receipt',
+    };
   } catch (err) {
     if (throwOnError) throw err;
     logger.warn(`[payer] resolveForInvoice failed (falling back to self-pay): ${err.message}`);

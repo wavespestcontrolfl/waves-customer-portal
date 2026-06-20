@@ -1242,6 +1242,12 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
+    // Phase 2: an accrued invoice is payable ONLY through its consolidated
+    // statement — never mint an individual PaymentIntent for it (it would
+    // double-collect once the statement settles).
+    if (invoice.payer_statement_id) {
+      throw new Error('Invoice is billed on the payer’s monthly statement — pay the statement, not the individual invoice');
+    }
 
     // Never save the payer's payment method onto the homeowner's account.
     // For a third-party-billed invoice the person paying is the builder/AP

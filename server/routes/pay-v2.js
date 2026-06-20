@@ -239,6 +239,10 @@ router.post('/:token/setup', async (req, res, next) => {
     const { saveCard, cardOnly } = req.body || {};
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -285,6 +289,10 @@ router.post('/:token/update-amount', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -336,6 +344,10 @@ router.post('/:token/quote', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -369,6 +381,10 @@ router.post('/:token/finalize', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {

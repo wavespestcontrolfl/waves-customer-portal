@@ -681,6 +681,8 @@ const InvoiceService = {
     // a payer lookup can never block invoicing — and the inserted row is
     // unchanged for the (overwhelmingly common) self-pay case.
     const PayerService = require("./payer");
+    const PayerStatements = require("./payer-statements");
+    const { isEnabled } = require("../config/feature-gates");
     // When the caller passes only a serviceRecordId (e.g. completion-time
     // invoicing), derive that visit's scheduled_service_id so a per-job payer
     // override on the appointment is honored — resolveForInvoice keys per-job
@@ -701,12 +703,39 @@ const InvoiceService = {
       poNumber: resolvedPoNumber,
       taxExempt: resolvedTaxExempt,
       snapshot: resolvedPayerSnapshot,
+      paymentTerms: resolvedPaymentTerms,
     } = await PayerService.resolveForInvoice({
       database,
       customerId,
       customer,
       scheduledServiceId: payerScheduledServiceId,
     });
+
+    // Phase 2 (gated by GATE_PAYER_STATEMENTS): a NET-terms payer invoice is held
+    // from individual AP delivery and ACCRUED to the payer's OPEN monthly
+    // statement. We resolve/attach the statement here and stamp
+    // `payer_statement_id` on the insert below; the rollup runs after insert. The
+    // statement get-or-create is concurrency-safe via the partial unique index
+    // and rides the caller's transaction when one was passed. due_on_receipt
+    // payers (everyone today) and the gate-off path are byte-identical to before.
+    // Fail soft: a statement-resolution error never blocks invoicing — it falls
+    // back to a normal payer invoice (the Phase-1 guards still protect the
+    // homeowner; the AP just gets an individual invoice instead of a line).
+    let accruedStatementId = null;
+    if (resolvedPayerId
+      && ['net15', 'net30'].includes(resolvedPaymentTerms)
+      && isEnabled('payerStatements')) {
+      try {
+        const stmt = await PayerStatements.getOrCreateOpenStatement({
+          payerId: resolvedPayerId,
+          termsSnapshot: resolvedPaymentTerms,
+          database,
+        });
+        accruedStatementId = stmt.id;
+      } catch (err) {
+        logger.error(`[invoice] payer-statement accrual failed for payer ${resolvedPayerId}; routing as an individual payer invoice: ${err.message}`);
+      }
+    }
     // A tax-exempt payer (builder/HOA with a resale/exemption cert on file)
     // zeroes tax on its invoices — even commercial jobs that would otherwise
     // carry the +7%. Force the rate to 0 so the tax block below resolves to 0.
@@ -1114,6 +1143,7 @@ const InvoiceService = {
           ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
+          ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,
         });
         break;
@@ -1128,6 +1158,17 @@ const InvoiceService = {
       }
     }
     if (!invoice) throw new Error("Could not allocate invoice number");
+
+    // Recompute the statement rollup now this accrued invoice is attached.
+    // Best-effort: a stale rollup self-heals on the next accrual and is frozen
+    // correctly at close, so a rollup hiccup never blocks the invoice.
+    if (accruedStatementId) {
+      try {
+        await PayerStatements.rollupStatement(accruedStatementId, database);
+      } catch (err) {
+        logger.warn(`[invoice] statement rollup failed for ${accruedStatementId}: ${err.message}`);
+      }
+    }
 
     // Record applied discounts in invoice_discounts table
     try {
@@ -1667,6 +1708,13 @@ const InvoiceService = {
       payUrlParams = null,
     } = {},
   ) {
+    // Phase 2: an accrued invoice (on a payer statement) is never delivered
+    // individually. Refuse BEFORE claiming so we don't flip its status to
+    // 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id");
+    if (accrualPre?.payer_statement_id) {
+      return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
+    }
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { previousStatus, claimed } = claim;
     const { sendInvoiceEmail } = require("./invoice-email");
