@@ -769,6 +769,14 @@ const InvoiceService = {
       && resolvedPayerId
       && ['net15', 'net30'].includes(resolvedPaymentTerms)
       && isEnabled('payerStatements')) {
+      // TOCTOU guard: the transaction wrap at the top was decided from a preflight
+      // resolve. If the payer/terms flipped to NET between that preflight and this
+      // definitive resolution, we can reach here with database === db (no
+      // transaction) — re-enter create() in one so accrual stays atomic. (The
+      // re-entry's database is the trx, so its own preflight won't re-wrap.)
+      if (database === db) {
+        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+      }
       try {
         const stmt = await PayerStatements.getOrCreateOpenStatement({
           payerId: resolvedPayerId,
