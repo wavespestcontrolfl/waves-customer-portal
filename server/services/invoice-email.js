@@ -10,6 +10,7 @@
 
 const logger = require('./logger');
 const db = require('../models/db');
+const { invoiceAmountDue } = require('./invoice-helpers');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
 const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./email-template');
@@ -109,6 +110,8 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
+  // Amount the customer pays = total − applied account credit (what Stripe charges).
+  const amountDue = invoiceAmountDue(invoice);
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
@@ -189,21 +192,21 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const attachmentNote = extraAttachmentCount > 0
     ? ` ${extraAttachmentCount} additional attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the online invoice.`
     : '';
-  const intro = `Hi ${first}, thank you for letting us take care of ${svcType}. Your invoice for ${currency(invoice.total)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
+  const intro = `Hi ${first}, thank you for letting us take care of ${svcType}. Your invoice for ${currency(amountDue)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
   const lines = [
     ['Invoice', invoice.invoice_number],
     ['Service', invoice.service_type || '—'],
     invoice.service_date ? ['Service date', formatDateOnly(invoice.service_date)] : null,
     invoice.due_date ? ['Due', formatDateOnly(invoice.due_date)] : null,
-    ['Amount due', currency(invoice.total), true],
+    ['Amount due', currency(amountDue), true],
   ].filter(Boolean);
   const html = wrapEmail({
-    preheader: `Invoice ${invoice.invoice_number} — ${currency(invoice.total)} due.`,
+    preheader: `Invoice ${invoice.invoice_number} — ${currency(amountDue)} due.`,
     heading,
     intro,
     lines,
     ctaHref: payUrl,
-    ctaLabel: `Pay ${currency(invoice.total)}`,
+    ctaLabel: `Pay ${currency(amountDue)}`,
     footerNote: extraAttachmentCount > 0
       ? `Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
       : `Your PDF invoice is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`,
@@ -216,7 +219,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     `Invoice: ${invoice.invoice_number}`,
     invoice.service_type ? `Service: ${invoice.service_type}` : null,
     invoice.due_date ? `Due: ${formatDateOnly(invoice.due_date)}` : null,
-    `Amount due: ${currency(invoice.total)}`,
+    `Amount due: ${currency(amountDue)}`,
     '',
     `Pay online: ${payUrl}`,
     extraAttachmentCount > 0 ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from that link.` : null,
@@ -234,7 +237,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           first_name: first,
           invoice_url: payUrl,
           invoice_number: invoice.invoice_number,
-          amount_due: currency(invoice.total),
+          amount_due: currency(amountDue),
           due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
           service_label: invoice.service_type || '',
           service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
@@ -281,7 +284,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
       to: recipient.email,
-      subject: `Invoice ${invoice.invoice_number} — ${currency(invoice.total)}`,
+      subject: `Invoice ${invoice.invoice_number} — ${currency(amountDue)}`,
       html,
       text,
       attachments: [{
@@ -340,6 +343,18 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     .first()
     .catch(() => null);
 
+  // Receipt amount comes from the PAYMENT row, not invoiceAmountDue(invoice): a
+  // full refund zeroes credit_applied, after which invoiceAmountDue would return
+  // the gross total and contradict the attached PDF (which is built from this
+  // same payment row). When a refund is recorded, show net cash actually kept
+  // (payment.amount − refunded) to match the PDF's "Net paid"; otherwise amount
+  // due (total − applied credit), which matches the PDF's "Amount due". Fall back
+  // to amount due when there is no payment row.
+  const refundedAmount = payment ? Number(payment.refund_amount || 0) : 0;
+  const amountDue = refundedAmount > 0
+    ? Math.max(0, Number(payment.amount || 0) - refundedAmount)
+    : invoiceAmountDue(invoice);
+
   const domain = publicPortalUrl();
   const longReceiptUrl = `${domain}/receipt/${invoice.token}`;
   const receiptUrl = await shortenOrPassthrough(longReceiptUrl, {
@@ -365,7 +380,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const memoHtml = memo
     ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${memoEscaped}</div>`
     : '';
-  const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
+  const intro = `Hi ${first}, we received your payment of ${currency(amountDue)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
   const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;
   const cardText = (payment?.card_brand && payment?.card_last_four)
     ? `${payment.card_brand.toUpperCase()} ···· ${payment.card_last_four}`
@@ -377,10 +392,10 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     invoice.service_type ? ['Service', invoice.service_type] : null,
     ['Paid', formatDate(invoice.paid_at)],
     cardText ? ['Method', cardText] : null,
-    ['Amount paid', currency(invoice.total), true],
+    ['Amount paid', currency(amountDue), true],
   ].filter(Boolean);
   const html = wrapEmail({
-    preheader: `Receipt for ${invoice.invoice_number} — ${currency(invoice.total)} paid.`,
+    preheader: `Receipt for ${invoice.invoice_number} — ${currency(amountDue)} paid.`,
     heading,
     intro: introWithMemo,
     lines,
@@ -398,7 +413,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     `Invoice: ${invoice.invoice_number}`,
     `Paid: ${formatDate(invoice.paid_at)}`,
     cardText ? `Method: ${cardText}` : null,
-    `Amount: ${currency(invoice.total)}`,
+    `Amount: ${currency(amountDue)}`,
     '',
     `View receipt online: ${receiptUrl}`,
     '',
@@ -414,7 +429,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
           first_name: first,
           receipt_url: receiptUrl,
           invoice_number: invoice.invoice_number,
-          amount_paid: currency(invoice.total),
+          amount_paid: currency(amountDue),
           paid_at: invoice.paid_at ? formatDate(invoice.paid_at) : '',
           service_label: invoice.service_type || '',
           payment_method: cardText || '',
@@ -457,7 +472,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
       to: recipient.email,
-      subject: `Receipt for ${invoice.invoice_number} — ${currency(invoice.total)}`,
+      subject: `Receipt for ${invoice.invoice_number} — ${currency(amountDue)}`,
       html,
       text,
       attachments: [{

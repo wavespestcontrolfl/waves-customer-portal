@@ -32,6 +32,7 @@ const {
   assertInvoiceCollectible,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
+  invoiceAmountDue,
 } = require('../services/invoice-helpers');
 const {
   classifyExistingWebhookEvent,
@@ -357,6 +358,34 @@ describe('invoice assertInvoiceVoidable', () => {
     for (const s of ['draft', 'sent', 'viewed', 'overdue', 'void', 'prepaid']) {
       expect(() => assertInvoiceVoidable(s)).not.toThrow();
     }
+  });
+});
+
+describe('invoice invoiceAmountDue (charge base = total − credit_applied)', () => {
+  test('no credit → full total', () => {
+    expect(invoiceAmountDue({ total: 60, credit_applied: 0 })).toBe(60);
+    expect(invoiceAmountDue({ total: 60 })).toBe(60);
+  });
+
+  test('partial credit → reduced amount due', () => {
+    expect(invoiceAmountDue({ total: 60, credit_applied: 25 })).toBe(35);
+    expect(invoiceAmountDue({ total: 60.10, credit_applied: 0.05 })).toBe(60.05);
+  });
+
+  test('full / over credit → 0 (clamped, never negative)', () => {
+    expect(invoiceAmountDue({ total: 25, credit_applied: 25 })).toBe(0);
+    expect(invoiceAmountDue({ total: 25, credit_applied: 40 })).toBe(0);
+  });
+
+  test('missing/garbage fields → 0-safe', () => {
+    expect(invoiceAmountDue({})).toBe(0);
+    expect(invoiceAmountDue(null)).toBe(0);
+    expect(invoiceAmountDue({ total: '60.00', credit_applied: '25.00' })).toBe(35);
+  });
+
+  test('cents math avoids float drift', () => {
+    // 0.1 + 0.2 in floats is 0.30000000000000004 — cents math keeps it exact.
+    expect(invoiceAmountDue({ total: 0.3, credit_applied: 0.1 })).toBe(0.2);
   });
 });
 

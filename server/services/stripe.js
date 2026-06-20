@@ -48,7 +48,7 @@ const {
   assertInvoicePaymentIntentTenderMatches,
   invoicePaymentStatusForIntent,
 } = require('./stripe-invoice-state');
-const { assertInvoiceCollectible } = require('./invoice-helpers');
+const { assertInvoiceCollectible, invoiceAmountDue } = require('./invoice-helpers');
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -938,7 +938,8 @@ const StripeService = {
           }
         }
 
-        const chargeInfo = computeChargeAmount(parseFloat(lockedInvoice.total), card.method_type, { funding: card.card_funding });
+        // Charge base = amount due (total − applied account credit), not raw total.
+        const chargeInfo = computeChargeAmount(invoiceAmountDue(lockedInvoice), card.method_type, { funding: card.card_funding });
         const { baseCents: invBaseCents, surchargeCents: invSurchargeCents, totalCents: invTotalCents, rateBps: invRateBps, policyVersion: invPolicyVersion } = chargeInfo;
         base = invBaseCents / 100;
         surcharge = invSurchargeCents / 100;
@@ -999,7 +1000,10 @@ const StripeService = {
             payment_method: 'card',
             card_brand: card.card_brand || null,
             card_last_four: card.last_four || null,
-            total,
+            // `total` here is the CASH charged (amount due + surcharge); add back
+            // applied account credit so the invoice keeps its real total rather
+            // than collapsing to the reduced cash amount with credit_applied set.
+            total: Math.round((total + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
           });
         if (!invoiceRowsUpdated) throw new Error('Invoice is no longer collectible');
 
@@ -1022,6 +1026,10 @@ const StripeService = {
             ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} credit card surcharge)`
             : `Invoice ${invoice.invoice_number} — card on file`,
           metadata: JSON.stringify({
+            // Link to the invoice so /api/receipt/:token + the receipt email find
+            // this row (and its actual cash amount) instead of falling back to the
+            // pre-credit invoice.total when account credit was applied.
+            invoice_id: invoice.id,
             base_amount: base,
             card_surcharge: surcharge,
             surcharge_rate_bps: invRateBps,
@@ -1198,6 +1206,18 @@ const StripeService = {
         } catch (syncErr) {
           logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
         }
+        // Return any applied account credit to the customer's balance — a full
+        // refund gives back the cash, so the credit they used must return too
+        // (else it stays consumed). Idempotent vs the charge.refunded webhook.
+        try {
+          const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
+          if (inv) {
+            const { returnAppliedCreditOnRefund } = require('./customer-credit');
+            await db.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx));
+          }
+        } catch (creditErr) {
+          logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
+        }
       }
 
       const updated = await db('payments').where({ id: paymentId }).first();
@@ -1266,7 +1286,8 @@ const StripeService = {
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
 
-        baseAmount = parseFloat(lockedInvoice.total);
+        // Charge base = amount due (total − applied account credit), not raw total.
+        baseAmount = invoiceAmountDue(lockedInvoice);
         // PI starts at BASE amount only — no surcharge at setup time.
         // Card payments: surcharge is applied via the /quote → /finalize two-step flow.
         // Express Checkout (wallets): intentionally base-only in phase 1 (no surcharge).
@@ -1426,7 +1447,8 @@ const StripeService = {
     // Element loads, so guard the update path too.
     const saveCard = !!opts.saveCard && !invoice.payer_id;
     const selectedMethodCategory = methodCategory || 'card';
-    const base = parseFloat(invoice.total);
+    // Charge base = amount due (total − applied account credit), not raw total.
+    const base = invoiceAmountDue(invoice);
     const baseCents = Math.round(base * 100);
 
     // Lock the PI to the selected tender family before Stripe can confirm.
@@ -1631,7 +1653,9 @@ const StripeService = {
 
     const methodType = pm.type || 'card';
     const funding = pm.card?.funding || null;
-    const baseAmount = parseFloat(invoice.total);
+    // Charge base = amount due (total − applied account credit), not raw total.
+    // The quote stores this as invoiceTotal below, so /finalize matches.
+    const baseAmount = invoiceAmountDue(invoice);
 
     const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
@@ -1703,7 +1727,9 @@ const StripeService = {
     // Re-derive charge from PM + invoice — never trust client-provided amounts
     const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
     const funding = pm.card?.funding || null;
-    const baseAmount = parseFloat(invoice.total);
+    // Charge base = amount due (total − applied account credit), not raw total —
+    // must match the same calc the quote captured as invoiceTotal.
+    const baseAmount = invoiceAmountDue(invoice);
 
     if (quote.invoiceTotal != null && Math.abs(baseAmount - quote.invoiceTotal) > 0.01) {
       throw new Error('Invoice total changed since quote was created. Please request a new quote.');
@@ -1991,7 +2017,8 @@ const StripeService = {
       }
 
       const actualMethodType = pmdType || resolvedPaymentMethod;
-      const invoiceBaseAmount = Number(invoice.total);
+      // Tender match prices from amount due (total − applied credit), not raw total.
+      const invoiceBaseAmount = invoiceAmountDue(invoice);
       assertInvoicePaymentIntentTenderMatches(pi, actualMethodType, invoiceBaseAmount);
 
       const paymentStatus = invoicePaymentStatusForIntent(pi, actualMethodType);
@@ -2103,7 +2130,8 @@ const StripeService = {
           throw new Error('Invoice has a different active payment');
         }
         if (paymentStatus === 'processing') {
-          const expected = computeChargeAmount(parseFloat(lockedInvoice.total), resolvedPaymentMethod);
+          // Expected ACH amount prices from amount due (total − applied credit).
+          const expected = computeChargeAmount(invoiceAmountDue(lockedInvoice), resolvedPaymentMethod);
           const expectedCents = Math.round(expected.total * 100);
           const actualCents = Number(pi.amount_received || pi.amount || 0);
           if (actualCents !== expectedCents) {
@@ -2132,7 +2160,11 @@ const StripeService = {
           // template can render "Bank •1234" via {card_line}.
           card_last_four: cardLastFour || bankLastFour,
           receipt_url: receiptUrl,
-          total: chargedTotal,
+          // chargedTotal is the CASH taken (amount due + surcharge). Add back any
+          // applied account credit so the invoice keeps its real total (credit +
+          // cash) — without this, total would collapse to the reduced cash amount
+          // and the credit_applied math (amount due) would double-count.
+          total: Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
         };
         if (paymentStatus === 'paid') {
           invoiceUpdates.paid_at = new Date().toISOString();

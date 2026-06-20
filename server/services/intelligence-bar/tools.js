@@ -663,7 +663,7 @@ async function queryRevenue(input) {
     .select(
       db.raw('SUM(total) as total_revenue'),
       db.raw('COUNT(*) as total_invoices'),
-      db.raw("SUM(CASE WHEN status = 'overdue' THEN total ELSE 0 END) as overdue_amount"),
+      db.raw("SUM(CASE WHEN status = 'overdue' THEN GREATEST(total - COALESCE(credit_applied, 0), 0) ELSE 0 END) as overdue_amount"),
     ).first();
 
   return {

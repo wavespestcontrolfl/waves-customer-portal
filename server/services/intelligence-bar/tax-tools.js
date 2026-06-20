@@ -518,19 +518,24 @@ async function getMileageSummary(yearInput) {
 async function getArAging(input) {
   const { min_amount = 0 } = input;
 
+  // AR ages amount DUE (total − applied account credit), not gross total — a
+  // partially credit-applied invoice owes only the reduced amount.
   const invoices = await db('invoices')
     .whereIn('status', ['sent', 'viewed', 'overdue'])
-    .where('total', '>', min_amount)
+    .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > ?', [min_amount])
     .leftJoin('customers', 'invoices.customer_id', 'customers.id')
-    .select('invoices.*', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customers.phone')
-    .orderBy('invoices.total', 'desc');
+    .select(
+      'invoices.*', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customers.phone',
+      db.raw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) as amount_due'),
+    )
+    .orderByRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) desc');
 
   const todayAnchor = parseETDateTime(etDateString() + 'T12:00');
   const aging = { current: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, days_90_plus: 0 };
   let total = 0;
 
   invoices.forEach(i => {
-    const amt = parseFloat(i.total || 0);
+    const amt = parseFloat(i.amount_due || 0);
     total += amt;
     let age = 0;
     if (i.due_date) {
@@ -557,7 +562,7 @@ async function getArAging(input) {
     },
     top_balances: invoices.slice(0, 10).map(i => ({
       customer: `${i.first_name} ${i.last_name}`, tier: i.waveguard_tier,
-      amount: parseFloat(i.total || 0), status: i.status,
+      amount: parseFloat(i.amount_due || 0), status: i.status,
       due_date: i.due_date, phone: i.phone,
     })),
   };

@@ -8,6 +8,7 @@ const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
 const { adminAuthenticate } = require('../middleware/admin-auth');
+const { invoiceAmountDue } = require('../services/invoice-helpers');
 
 // Accepts both regular admin JWTs and terminal-scoped JWTs (minted by
 // /validate-handoff). Regular adminAuthenticate rejects scope:'terminal'
@@ -115,7 +116,8 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // service recipient. AR routes to the payer AP inbox.
     if (invoice.payer_id) return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
 
-    const amount_cents = Math.round(Number(invoice.total) * 100);
+    // Collect the amount DUE (total − applied account credit), not raw total.
+    const amount_cents = Math.round(invoiceAmountDue(invoice) * 100);
     if (!amount_cents || amount_cents < 50) {
       return res.status(400).json({ error: 'Invalid invoice amount' });
     }
@@ -406,7 +408,7 @@ router.post('/validate-handoff', async (req, res) => {
     // the invoice between mint and validate, that shows up here and the tech
     // re-handoffs for the new total. handoffRow.amount_cents is the durable
     // reconciliation record.
-    const invoiceAmountCents = Math.round(Number(invoice.total) * 100);
+    const invoiceAmountCents = Math.round(invoiceAmountDue(invoice) * 100);
     if (invoiceAmountCents !== Number(handoffRow.amount_cents)) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
@@ -568,7 +570,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         code: 'invoice_status_changed',
       });
     }
-    const currentAmountCents = Math.round(Number(invoice.total) * 100);
+    const currentAmountCents = Math.round(invoiceAmountDue(invoice) * 100);
     if (currentAmountCents !== Number(handoff.amount_cents)) {
       return res.status(409).json({
         error: 'Invoice amount changed since handoff',
@@ -619,6 +621,19 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       if (!locked || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(locked.status)) {
         return { ok: false, status: locked ? locked.status : null };
       }
+      // Amount agreement under the lock. Partial account credit can land between
+      // the unlocked pre-create check and here WITHOUT flipping the invoice
+      // terminal (it stays collectible at a reduced amount due), so the status
+      // recheck above wouldn't catch it. Re-verify amount due against the minted
+      // PI's amount — a mismatch means we'd bind a stale, pre-credit PI and
+      // overcharge the card (and the terminal webhook, which skips tender
+      // matching, would fold credit_applied back into total and corrupt
+      // reconciliation). Back off and cancel the PI. (apply-credit skips when a
+      // PI is already attached, so the two paths can't both commit.)
+      const lockedAmountCents = Math.round(invoiceAmountDue(locked) * 100);
+      if (lockedAmountCents !== Number(handoff.amount_cents)) {
+        return { ok: false, amountChanged: true };
+      }
       // SET only if still NULL — two concurrent /payment-intent calls for the
       // same jti share an idempotency key and get the same PI back; first
       // UPDATE wins, second is a no-op.
@@ -633,11 +648,18 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     });
 
     if (!bound.ok) {
-      // PI was minted but the invoice is no longer collectible — cancel it so
-      // the card can't be charged, then report the changed state.
+      // PI was minted but the invoice changed under the lock (went terminal, or
+      // account credit reduced the amount due) — cancel it so the card can't be
+      // charged at the stale amount, then report the changed state.
       await stripe.paymentIntents
         .cancel(pi.id, { cancellation_reason: 'abandoned' })
         .catch((e) => logger.warn(`[stripe-terminal] failed to cancel orphaned PI ${pi.id}: ${e.message}`));
+      if (bound.amountChanged) {
+        return res.status(409).json({
+          error: 'Invoice amount changed since handoff',
+          code: 'invoice_amount_changed',
+        });
+      }
       return res.status(409).json({
         error: bound.status ? `Invoice is ${bound.status}` : 'Invoice not found',
         code: 'invoice_status_changed',
