@@ -950,6 +950,33 @@ function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 
   return { body: best, truncated: true };
 }
 
+function completionAllowsTechnicianPestRating({ typedFindingsType = null, isInternalOnlyCompletion = false } = {}) {
+  return !typedFindingsType && !isInternalOnlyCompletion;
+}
+
+function pestPressureConfigAllowsTechnicianRating({ pestPressureConfig = null, serviceLine = null } = {}) {
+  const techEntryAllowed = !!(pestPressureConfig
+    && pestPressureConfig.allowTechnicianClientRatingEntry === true);
+  const enabledLines = Array.isArray(pestPressureConfig && pestPressureConfig.enabledServiceLines)
+    ? pestPressureConfig.enabledServiceLines
+    : [];
+  const serviceLineAllowed = enabledLines.length === 0
+    || (serviceLine && enabledLines.includes(serviceLine));
+  return techEntryAllowed && serviceLineAllowed;
+}
+
+function technicianPestRatingAllowedForService({ completionProfile = null, pestPressureConfig = null, serviceLine = null } = {}) {
+  const deliveryPosture = resolveCompletionDeliveryPosture({
+    typedFindingsType: completionProfile?.findingsType || null,
+    completionMode: completionProfile?.completionMode || null,
+    profileDeliveryMode: completionProfile?.deliveryMode || null,
+  });
+  return completionAllowsTechnicianPestRating({
+    typedFindingsType: completionProfile?.findingsType || null,
+    isInternalOnlyCompletion: deliveryPosture.isInternalOnly,
+  }) && pestPressureConfigAllowsTechnicianRating({ pestPressureConfig, serviceLine });
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/dispatch/:serviceId/tech-rating-allowed
@@ -973,20 +1000,22 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'service_type');
+      .first('id', 'service_id', 'service_type');
     if (!svc) {
       return res.status(404).json({ error: 'Service not found' });
     }
-    const config = await loadPestPressureConfig(db);
-    const techEntryAllowed = !!(config
-      && config.allowTechnicianClientRatingEntry === true);
-    const enabledLines = Array.isArray(config && config.enabledServiceLines)
-      ? config.enabledServiceLines
-      : [];
+    const [config, completionProfile] = await Promise.all([
+      loadPestPressureConfig(db),
+      resolveCompletionProfileForScheduledService(svc),
+    ]);
     const serviceLine = detectServiceLine(svc.service_type);
-    const serviceLineAllowed = enabledLines.length === 0
-      || (serviceLine && enabledLines.includes(serviceLine));
-    res.json({ allowed: techEntryAllowed && serviceLineAllowed });
+    res.json({
+      allowed: technicianPestRatingAllowedForService({
+        completionProfile,
+        pestPressureConfig: config,
+        serviceLine,
+      }),
+    });
   } catch (err) { next(err); }
 });
 
@@ -2949,8 +2978,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
           // Tech-side Pest Pressure rating capture — write iff (a) the
           // request supplied a valid integer 0-5 (validated near top of
-          // handler), (b) the active config has
-          // `allowTechnicianClientRatingEntry` enabled, AND (c) this
+          // handler), (b) the completion is neither typed nor internal-only,
+          // (c) the active config has
+          // `allowTechnicianClientRatingEntry` enabled, AND (d) this
           // record's `service_line` is in the config's
           // `enabledServiceLines` allow-list. The engine's score calc
           // skips lines outside the allow-list anyway, so writing the
@@ -2959,18 +2989,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // config inside the txn so we read a consistent snapshot with
           // the score calc that runs a few lines below.
           if (clientPestRating != null
-            && !typedFindingsType
+            && completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion })
             && serviceRecordCols.client_pest_rating
             && serviceRecordCols.client_pest_rating_source) {
             const pestPressureConfig = await loadPestPressureConfig(trx);
-            const techEntryAllowed = !!(pestPressureConfig
-              && pestPressureConfig.allowTechnicianClientRatingEntry === true);
-            const enabledLines = Array.isArray(pestPressureConfig && pestPressureConfig.enabledServiceLines)
-              ? pestPressureConfig.enabledServiceLines
-              : [];
-            const serviceLineAllowed = enabledLines.length === 0
-              || (reportServiceLine && enabledLines.includes(reportServiceLine));
-            if (techEntryAllowed && serviceLineAllowed) {
+            if (pestPressureConfigAllowsTechnicianRating({
+              pestPressureConfig,
+              serviceLine: reportServiceLine,
+            })) {
               recordInsert.client_pest_rating = clientPestRating;
               recordInsert.client_pest_rating_source = 'technician';
               if (serviceRecordCols.client_pest_rating_at) {
@@ -6335,4 +6361,7 @@ module.exports = router;
 module.exports._test = {
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
+  completionAllowsTechnicianPestRating,
+  pestPressureConfigAllowsTechnicianRating,
+  technicianPestRatingAllowedForService,
 };

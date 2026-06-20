@@ -3,6 +3,8 @@ const adminDispatchRouter = require('../routes/admin-dispatch');
 const {
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
+  completionAllowsTechnicianPestRating,
+  technicianPestRatingAllowedForService,
 } = adminDispatchRouter._test;
 
 function fakeAssessmentKnex(firstResult) {
@@ -132,5 +134,40 @@ describe('admin dispatch lawn assessment completion guard', () => {
       customerId: 'customer-1',
       reportServiceLine: 'lawn',
     })).rejects.toThrow('assessment lookup failed');
+  });
+
+  test('does not allow technician Pest Pressure rating for internal-only consultations', () => {
+    expect(completionAllowsTechnicianPestRating({
+      typedFindingsType: null,
+      isInternalOnlyCompletion: true,
+    })).toBe(false);
+
+    expect(technicianPestRatingAllowedForService({
+      completionProfile: {
+        completionMode: 'internal_only',
+        findingsType: null,
+        deliveryMode: null,
+      },
+      pestPressureConfig: {
+        allowTechnicianClientRatingEntry: true,
+        enabledServiceLines: ['pest'],
+      },
+      serviceLine: 'pest',
+    })).toBe(false);
+  });
+
+  test('allows technician Pest Pressure rating for routine pest services when config allows it', () => {
+    expect(technicianPestRatingAllowedForService({
+      completionProfile: {
+        completionMode: 'service_report',
+        findingsType: null,
+        deliveryMode: 'auto_send',
+      },
+      pestPressureConfig: {
+        allowTechnicianClientRatingEntry: true,
+        enabledServiceLines: ['pest'],
+      },
+      serviceLine: 'pest',
+    })).toBe(true);
   });
 });
