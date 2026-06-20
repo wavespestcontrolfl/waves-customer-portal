@@ -21,6 +21,10 @@ function parseJsonObject(value) {
   return {};
 }
 
+function suppressesCustomerArtifacts(structuredNotes = {}) {
+  return Boolean(structuredNotes.typedReportDelivery) && structuredNotes.typedReportDelivery !== 'auto_send';
+}
+
 const listQuerySchema = Joi.object({
   limit: Joi.number().integer().min(1).max(100).default(20),
   offset: Joi.number().integer().min(0).default(0),
@@ -59,17 +63,23 @@ router.get('/', async (req, res, next) => {
 
     // Attach products and photo counts
     const enriched = await Promise.all(services.map(async (svc) => {
-      const products = await db('service_products')
-        .where({ service_record_id: svc.id })
-        .select('product_name', 'product_category', 'active_ingredient', 'moa_group', 'notes');
+      const structuredNotes = parseJsonObject(svc.structured_notes);
+      const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes);
 
-      const photoCount = await db('service_photos')
-        .where({ service_record_id: svc.id })
-        .count('id as count')
-        .first();
+      const products = suppressCustomerArtifacts
+        ? []
+        : await db('service_products')
+          .where({ service_record_id: svc.id })
+          .select('product_name', 'product_category', 'active_ingredient', 'moa_group', 'notes');
+
+      const photoCount = suppressCustomerArtifacts
+        ? { count: 0 }
+        : await db('service_photos')
+          .where({ service_record_id: svc.id })
+          .count('id as count')
+          .first();
 
       const photoCountNum = parseInt(photoCount?.count) || 0;
-      const structuredNotes = parseJsonObject(svc.structured_notes);
       const isProjectCompletion = svc.completion_source === 'project_completion'
         || structuredNotes.projectCompletion === true;
       const projectReport = structuredNotes.projectReport || {};
@@ -78,8 +88,7 @@ router.get('/', async (req, res, next) => {
         : null;
       // Any typed delivery posture other than auto_send (internal_only
       // shadow, disabled kill switch) keeps report links off customer surfaces.
-      const internalOnlyReport = Boolean(structuredNotes.typedReportDelivery)
-        && structuredNotes.typedReportDelivery !== 'auto_send';
+      const internalOnlyReport = suppressCustomerArtifacts;
       return {
         id: svc.id,
         date: svc.service_date,
@@ -88,15 +97,15 @@ router.get('/', async (req, res, next) => {
         technician: svc.technician_name || null,
         checkInTime: svc.effective_check_in_time || null,
         checkOutTime: svc.effective_check_out_time || null,
-        notes: svc.technician_notes || null,
+        notes: suppressCustomerArtifacts ? null : (svc.technician_notes || null),
         soilTemp: svc.soil_temp ? parseFloat(svc.soil_temp) : null,
         thatchMeasurement: svc.thatch_measurement ? parseFloat(svc.thatch_measurement) : null,
         soilPh: svc.soil_ph ? parseFloat(svc.soil_ph) : null,
         soilMoisture: svc.soil_moisture || null,
         // field_flags are internal QA markers, not customer-facing.
         products: products || [],
-        hasPhotos: photoCountNum > 0,
-        photoCount: photoCountNum,
+        hasPhotos: suppressCustomerArtifacts ? false : photoCountNum > 0,
+        photoCount: suppressCustomerArtifacts ? 0 : photoCountNum,
         isProjectCompletion,
         projectId: structuredNotes.projectId || null,
         projectType: structuredNotes.projectType || null,
@@ -161,12 +170,19 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Service record not found' });
     }
 
-    const products = await db('service_products')
-      .where({ service_record_id: service.id });
+    const structuredNotes = parseJsonObject(service.structured_notes);
+    const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes);
 
-    const photos = await db('service_photos')
-      .where({ service_record_id: service.id })
-      .orderBy('sort_order');
+    const products = suppressCustomerArtifacts
+      ? []
+      : await db('service_products')
+        .where({ service_record_id: service.id });
+
+    const photos = suppressCustomerArtifacts
+      ? []
+      : await db('service_photos')
+        .where({ service_record_id: service.id })
+        .orderBy('sort_order');
 
     // Generate signed URLs for photos
     const photosWithUrls = await Promise.all(photos.map(async (photo) => ({
@@ -184,7 +200,7 @@ router.get('/:id', async (req, res, next) => {
       technician: service.technician_name,
       checkInTime: service.effective_check_in_time || null,
       checkOutTime: service.effective_check_out_time || null,
-      notes: service.technician_notes,
+      notes: suppressCustomerArtifacts ? null : service.technician_notes,
       measurements: {
         soilTemp: service.soil_temp ? parseFloat(service.soil_temp) : null,
         thatchMeasurement: service.thatch_measurement ? parseFloat(service.thatch_measurement) : null,
@@ -250,3 +266,7 @@ router.get('/stats/summary', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._test = {
+  parseJsonObject,
+  suppressesCustomerArtifacts,
+};

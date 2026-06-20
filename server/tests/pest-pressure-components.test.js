@@ -2,6 +2,10 @@ const { mapFindingsToRating } = require('../services/pest-pressure/components/te
 const { mapCountToRating, extractReServiceImpact } = require('../services/pest-pressure/components/re-service-impact');
 const { mapPriorCycleCountToRating, buildSignatureSet, extractRecurringIssue } = require('../services/pest-pressure/components/recurring-issue');
 const { mapRiskFindingsToRating } = require('../services/pest-pressure/components/risk-factor');
+const {
+  serviceRecordSuppressesCustomerArtifacts,
+  customerVisibleServiceRecordPredicate,
+} = require('../services/pest-pressure/history-filter');
 
 describe('technician-rating: mapFindingsToRating', () => {
   test('empty array → 0 (no evidence)', () => {
@@ -60,11 +64,14 @@ describe('re-service-impact: extractReServiceImpact (mocked knex)', () => {
   function mockKnex(rows) {
     const builder = {
       where: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
       whereBetween: jest.fn().mockReturnThis(),
       whereNot: jest.fn().mockReturnThis(),
       select: jest.fn().mockResolvedValue(rows),
     };
-    return jest.fn().mockReturnValue(builder);
+    const knex = jest.fn().mockReturnValue(builder);
+    knex.builder = builder;
+    return knex;
   }
 
   const baseArgs = {
@@ -89,6 +96,15 @@ describe('re-service-impact: extractReServiceImpact (mocked knex)', () => {
     const result = await extractReServiceImpact({ knex, ...baseArgs });
     expect(result.value).toBe(4);
     expect(result.count).toBe(2);
+  });
+
+  test('excludes suppressed internal-only records from callback history query', async () => {
+    const knex = mockKnex([]);
+    await extractReServiceImpact({ knex, ...baseArgs });
+
+    expect(knex.builder.whereRaw).toHaveBeenCalledWith(
+      customerVisibleServiceRecordPredicate('service_records'),
+    );
   });
 });
 
@@ -163,13 +179,14 @@ describe('recurring-issue: extractRecurringIssue cutoff date (codex P1 regressio
   // current record's date from service_records.
 
   function buildKnex({ currentFindings = [], currentRecord = null, priorRecords = [], priorFindings = [], expectLookup = true } = {}) {
-    const calls = { priorRecordsQuery: { whereCalls: [], orderBy: null, limit: null } };
+    const calls = { priorRecordsQuery: { whereCalls: [], whereRawCalls: [], orderBy: null, limit: null } };
 
     function priorRecordsChain() {
       // Capture .where(...) and .whereNot(...) invocations so the test
       // can assert the cutoff filter was applied.
       const chain = {};
       chain.where = jest.fn((...args) => { calls.priorRecordsQuery.whereCalls.push(['where', args]); return chain; });
+      chain.whereRaw = jest.fn((...args) => { calls.priorRecordsQuery.whereRawCalls.push(args); return chain; });
       chain.whereNot = jest.fn((...args) => { calls.priorRecordsQuery.whereCalls.push(['whereNot', args]); return chain; });
       chain.orderBy = jest.fn((col, dir) => { calls.priorRecordsQuery.orderBy = [col, dir]; return chain; });
       chain.limit = jest.fn((n) => { calls.priorRecordsQuery.limit = n; return chain; });
@@ -247,6 +264,9 @@ describe('recurring-issue: extractRecurringIssue cutoff date (codex P1 regressio
     );
     expect(cutoffFilter).toBeDefined();
     expect(cutoffFilter[1][2]).toBe('2026-05-15');
+    expect(calls.priorRecordsQuery.whereRawCalls).toContainEqual([
+      customerVisibleServiceRecordPredicate('service_records'),
+    ]);
   });
 
   test('looks up cutoff from service_records when serviceDate is not passed', async () => {
@@ -292,5 +312,20 @@ describe('recurring-issue: extractRecurringIssue cutoff date (codex P1 regressio
       ([, args]) => args[0] === 'service_date' && args[1] === '<',
     );
     expect(cutoffFilter).toBeUndefined();
+  });
+});
+
+describe('pest-pressure history visibility filter', () => {
+  test('suppresses non-auto_send service records from Pest Pressure history', () => {
+    expect(serviceRecordSuppressesCustomerArtifacts({
+      structured_notes: JSON.stringify({ typedReportDelivery: 'disabled' }),
+    })).toBe(true);
+    expect(serviceRecordSuppressesCustomerArtifacts({
+      structured_notes: { typedReportDelivery: 'internal_only' },
+    })).toBe(true);
+    expect(serviceRecordSuppressesCustomerArtifacts({
+      structured_notes: { typedReportDelivery: 'auto_send' },
+    })).toBe(false);
+    expect(serviceRecordSuppressesCustomerArtifacts({ structured_notes: '{}' })).toBe(false);
   });
 });
