@@ -107,6 +107,7 @@ describe('rollupStatement', () => {
       if (t === 'payer_statements') {
         return {
           where() { return this; },
+          forUpdate() { return this; },
           first: async () => ({ id: 10, status: 'open' }),
           update: async (p) => { updates.push(p); return 1; },
         };
@@ -127,6 +128,7 @@ describe('rollupStatement', () => {
     let updated = false;
     mockDbHandler = () => ({
       where() { return this; },
+      forUpdate() { return this; },
       first: async () => ({ id: 10, status: 'sent' }),
       update: async () => { updated = true; return 1; },
     });

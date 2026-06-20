@@ -91,9 +91,16 @@ async function getOrCreateOpenStatement({ payerId, termsSnapshot, database = db,
  * No-op once the statement is frozen (finalized+) — a billed document never
  * mutates; corrections become a credit on the next statement. Call after an
  * accrued invoice is attached, edited, or voided.
+ *
+ * MUST run inside the caller's transaction (create/edit/void all pass their trx):
+ * it takes `SELECT … FOR UPDATE` on the statement row BEFORE reading the invoice
+ * aggregate, so concurrent rollups serialize on the row. Without the lock, a void
+ * could read a snapshot that excludes a concurrent edit, block on the final
+ * UPDATE, then overwrite the edit's freshly-computed total once that lock frees.
+ * (Re-locking a row the same transaction already holds is a no-op.)
  */
 async function rollupStatement(statementId, database = db) {
-  const stmt = await database('payer_statements').where({ id: statementId }).first('id', 'status');
+  const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first('id', 'status');
   if (!stmt || stmt.status !== 'open') return;
 
   const agg = await database('invoices')
