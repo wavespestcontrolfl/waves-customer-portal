@@ -857,6 +857,9 @@ async function createCustomer(input) {
       is_primary_profile: true,
       profile_label: 'Primary',
       pipeline_stage_changed_at: new Date(),
+      // Created directly into a customer stage → stamp the became-a-customer date
+      // (creation = conversion here) so they're counted by member_since metrics.
+      ...(['active_customer', 'won', 'at_risk'].includes(record.pipeline_stage) ? { member_since: etDateString() } : {}),
       crm_notes: input.notes ? String(input.notes).trim() : null,
       active: true,
     }).returning('*');
@@ -899,6 +902,15 @@ async function updateCustomer(customerId, updates) {
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
 
+  // Moving into a customer stage → stamp member_since so the metrics count them.
+  // Matches the route lifecycle: a pre-sale lead gets the conversion date
+  // (overwriting its intake date); a current/former customer keeps its real
+  // start but is filled if missing (e.g. a churned/dormant reactivation).
+  if (clean.pipeline_stage && ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
+    const wasCustomer = ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(before.pipeline_stage);
+    clean.member_since = wasCustomer ? (before.member_since || etDateString()) : etDateString();
+  }
+
   await db('customers').where('id', customerId).update(clean);
   const after = await db('customers').where('id', customerId).first();
 
@@ -926,7 +938,17 @@ async function bulkUpdateCustomers(customerIds, updates) {
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
 
-  const count = await db('customers').whereIn('id', customerIds).update(clean);
+  // Moving rows into a customer stage in bulk → set member_since per row from
+  // the OLD pipeline_stage (a CASE, since there's no per-row before-state),
+  // mirroring the route lifecycle: a pre-sale lead gets the conversion date
+  // (overwriting any intake date), a current/former customer keeps its real
+  // start (COALESCE fills only the missing).
+  const stageStamp = ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
+    ? { member_since: db.raw(
+        `CASE WHEN pipeline_stage IN ('active_customer','won','at_risk','churned','dormant') THEN COALESCE(member_since, ?) ELSE ? END`,
+        [etDateString(), etDateString()]) }
+    : {};
+  const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
 
   logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, updates);
 
