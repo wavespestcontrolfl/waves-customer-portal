@@ -37,12 +37,19 @@ jest.mock('../services/content-astro/astro-publisher', () => ({
 jest.mock('../services/seo/indexnow-submit', () => ({
   submit: jest.fn(),
 }));
+jest.mock('../services/social-media', () => ({
+  SOCIAL_FLAGS: { automationEnabled: true, rssAutopublish: true },
+  isPausedByAdmin: jest.fn().mockResolvedValue(false),
+  normalizeUrl: jest.fn((u) => u),
+  publishToAll: jest.fn().mockResolvedValue({ success: true, platforms: [] }),
+}));
 
 const db = require('../models/db');
 const gh = require('../services/content-astro/github-client');
 const pagesPoll = require('../services/content-astro/pages-poll');
 const publisher = require('../services/content-astro/astro-publisher');
 const indexNow = require('../services/seo/indexnow-submit');
+const social = require('../services/social-media');
 const poller = require('../services/content/autonomous-pr-poller');
 
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
@@ -179,6 +186,7 @@ describe('helpers', () => {
       keyword: 'test keyword',
       city: 'Venice',
       title: 'Test Post',
+      excerpt: null,
       planLinks: true,
     });
   });
@@ -298,6 +306,91 @@ describe('merged-by-human reconciliation', () => {
     expect(runUpdates(updates)).toHaveLength(0);
     expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalled();
     expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+});
+
+describe('post-merge social share (new on-hub blog posts)', () => {
+  beforeEach(() => {
+    social.SOCIAL_FLAGS.automationEnabled = true;
+    social.SOCIAL_FLAGS.rssAutopublish = true;
+    social.isPausedByAdmin.mockResolvedValue(false);
+    delete process.env.SOCIAL_BLOG_MERGE_SHARE_ENABLED;
+  });
+
+  test('shares the just-merged live post to social with the brand card', async () => {
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    await poller.pollPending();
+
+    expect(social.publishToAll).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Test Post',
+      link: CANONICAL,
+      source: 'autonomous_blog',
+      noAiImage: true,
+    }));
+  });
+
+  test('skips when the URL was already shared (RSS backstop won the race)', async () => {
+    setupDb({ pending: [makeRun()], updateResult: 1 });
+    // social_media_posts.first() returns an existing row → skip.
+    const realDb = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = realDb(table);
+      if (table === 'social_media_posts') q.first = jest.fn(() => Promise.resolve({ id: 'sm-1' }));
+      return q;
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    await poller.pollPending();
+
+    expect(social.publishToAll).not.toHaveBeenCalled();
+  });
+
+  test('does NOT share refresh/metadata lanes (planLinks false)', async () => {
+    setupDb({ pending: [makeMetadataRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    await poller.pollPending();
+
+    expect(social.publishToAll).not.toHaveBeenCalled();
+  });
+
+  test('does NOT share when social automation / RSS autopublish is off', async () => {
+    setupDb({ pending: [makeRun()] });
+    social.SOCIAL_FLAGS.rssAutopublish = false;
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    await poller.pollPending();
+
+    expect(social.publishToAll).not.toHaveBeenCalled();
+  });
+
+  test('honors the SOCIAL_BLOG_MERGE_SHARE_ENABLED=false kill switch', async () => {
+    setupDb({ pending: [makeRun()] });
+    process.env.SOCIAL_BLOG_MERGE_SHARE_ENABLED = 'false';
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    await poller.pollPending();
+
+    expect(social.publishToAll).not.toHaveBeenCalled();
+  });
+
+  test('a social share failure never blocks the completed_published finalize', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    social.publishToAll.mockRejectedValueOnce(new Error('Meta API down'));
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published' });
   });
 });
 
