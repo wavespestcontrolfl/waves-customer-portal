@@ -678,6 +678,12 @@ const InvoiceService = {
       // on the invoice as `applied_deposit_credit`; consume exactly that from
       // the ledger, never the requested amount.
       depositCredit = null,
+      // skipAccrual: this invoice must NOT accrue to a payer statement even for a
+      // NET-terms payer — set by callers that immediately settle the invoice
+      // (annual-prepay, paid in the same flow) or create a throwaway preview
+      // (project send dry-run). Accruing those would double-bill (already paid) or
+      // leave a phantom statement line (cancelled preview).
+      skipAccrual = false,
     } = createArgs;
 
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
@@ -689,7 +695,7 @@ const InvoiceService = {
     // resolution THROWS under the gate (fail closed — a NET-terms job must not
     // silently fall back to an individually-collectible invoice). insertInvoiceRow
     // savepoints each insert, so the collision retry still works inside the txn.
-    if (database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
+    if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
       const PayerSvc = require("./payer");
       let preSsId = scheduledServiceId;
       if (!preSsId && serviceRecordId) {
@@ -759,7 +765,8 @@ const InvoiceService = {
     // back to a normal payer invoice (the Phase-1 guards still protect the
     // homeowner; the AP just gets an individual invoice instead of a line).
     let accruedStatementId = null;
-    if (resolvedPayerId
+    if (!skipAccrual
+      && resolvedPayerId
       && ['net15', 'net30'].includes(resolvedPaymentTerms)
       && isEnabled('payerStatements')) {
       try {
@@ -1233,9 +1240,17 @@ const InvoiceService = {
         });
       }
       if (auditRows.length > 0) {
-        const recordArgs = [invoice.id, auditRows, "system"];
-        if (database !== db) recordArgs.push(database);
-        await DiscountEngine.recordInvoiceDiscounts(...recordArgs);
+        // This is best-effort (the catch below swallows errors), but for a
+        // NET-terms accrual create() runs inside a transaction — and a SQL error
+        // inside a Postgres txn leaves it ABORTED, so a swallowed error here would
+        // still roll back the invoice + statement rollup on commit. Run the audit
+        // in a SAVEPOINT (nested transaction) when inside a txn so its failure
+        // rolls back only the savepoint and the catch can keep it best-effort.
+        if (database !== db) {
+          await database.transaction((sp) => DiscountEngine.recordInvoiceDiscounts(invoice.id, auditRows, "system", sp));
+        } else {
+          await DiscountEngine.recordInvoiceDiscounts(invoice.id, auditRows, "system");
+        }
       }
     } catch (err) {
       logger.warn(

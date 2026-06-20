@@ -2914,11 +2914,35 @@ router.put('/:id/update-details', async (req, res, next) => {
                 if (hasInvLink) {
                   const voidSiblings = { status: 'void' };
                   if (await trx.schema.hasColumn('invoices', 'updated_at').catch(() => false)) voidSiblings.updated_at = trx.fn.now();
+                  // Non-accrued siblings: bulk void as before.
                   await trx('invoices')
                     .whereIn('scheduled_service_id', siblingIds)
                     .whereNotIn('status', ['paid', 'prepaid', 'void'])
+                    .whereNull('payer_statement_id')
                     .update(voidSiblings)
                     .catch(() => {});
+                  // Phase 2 accrued siblings: void only those on an OPEN statement
+                  // (frozen = billed line, left) and reroll the parent in the same
+                  // txn. GATE off ⇒ no accrued children, so a no-op then.
+                  const hasStmtCol = await trx.schema.hasColumn('invoices', 'payer_statement_id').catch(() => false);
+                  if (hasStmtCol) {
+                    const accruedSibs = await trx('invoices')
+                      .whereIn('scheduled_service_id', siblingIds)
+                      .whereNotIn('status', ['paid', 'prepaid', 'void'])
+                      .whereNotNull('payer_statement_id')
+                      .select('id', 'payer_statement_id')
+                      .catch(() => []);
+                    const rerollSibs = new Set();
+                    for (const inv of accruedSibs) {
+                      const stmt = await trx('payer_statements').where({ id: inv.payer_statement_id }).forUpdate().first('status');
+                      if (!stmt || stmt.status !== 'open') continue;
+                      await trx('invoices').where({ id: inv.id }).whereNotIn('status', ['paid', 'prepaid', 'void']).update(voidSiblings);
+                      rerollSibs.add(inv.payer_statement_id);
+                    }
+                    for (const sid of rerollSibs) {
+                      await require('../services/payer-statements').rollupStatement(sid, trx);
+                    }
+                  }
                 }
               }
             }

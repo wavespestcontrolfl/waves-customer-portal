@@ -2560,6 +2560,11 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
+        // Annual prepay is created and PAID in this same transaction (below), so
+        // it must never accrue to a payer's open statement — accruing an
+        // already-collected invoice would keep it in the statement total and
+        // double-bill it at settlement.
+        skipAccrual: true,
         title: `${coverageServiceType} - Annual Prepay`,
         lineItems: [{
           description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
