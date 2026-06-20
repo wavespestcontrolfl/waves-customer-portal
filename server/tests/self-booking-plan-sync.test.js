@@ -328,6 +328,14 @@ describe('self-booking plan sync helpers', () => {
     expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: false })).not.toHaveProperty('create_invoice_on_complete');
   });
 
+  test('normalizes pg DATE base dates without an ET day shift', () => {
+    // buildRecurringOccurrenceDates runs the base through normalizeDateString; a pg DATE
+    // column arrives as a midnight Date and must not be converted as an ET instant
+    // (which would move 2026-06-19 to 2026-06-18 on a UTC server).
+    expect(buildRecurringOccurrenceDates(new Date('2026-06-19T00:00:00.000Z'), 'quarterly', 1)[0]).toBe('2026-06-19');
+    expect(buildRecurringOccurrenceDates('2026-06-19', 'quarterly', 1)[0]).toBe('2026-06-19');
+  });
+
   test('identifies self-booked rows so pending bookings do not bootstrap membership', () => {
     expect(isSelfBookedRow({ source: 'self_booked' })).toBe(true);
     expect(isSelfBookedRow({ source: 'SELF_BOOKED' })).toBe(true);

@@ -241,6 +241,10 @@ const SELF_BOOKING_RECURRING_PLANS = {
 function normalizeDateString(value) {
   if (!value) return null;
   if (typeof value === 'string') return value.split('T')[0];
+  // pg/Knex DATE columns (scheduled_date) arrive as midnight Date objects; on a UTC
+  // server etDateString() would shift them to the previous ET day. Read the stored
+  // calendar date directly (repo DATE-column convention) instead of converting as an instant.
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
   return etDateString(value);
 }
 

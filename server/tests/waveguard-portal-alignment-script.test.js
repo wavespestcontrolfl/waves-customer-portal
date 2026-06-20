@@ -1,5 +1,6 @@
 const {
   buildCustomerUpdates,
+  dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
@@ -207,6 +208,16 @@ describe('WaveGuard portal alignment script helpers', () => {
       '2026-06-20',
       3,
     )).toEqual(['2026-07-31', '2026-09-11', '2026-10-23']);
+  });
+
+  test('reads pg DATE columns as the stored calendar day without an ET shift', () => {
+    // pg returns a DATE column as a midnight Date; on a UTC server converting it as an
+    // instant through ET would shift it back a day. etDateString always uses ET, so an
+    // explicit UTC-midnight Date reproduces the Railway off-by-one regardless of host TZ.
+    expect(dateKey(new Date('2026-06-19T00:00:00.000Z'))).toBe('2026-06-19');
+    expect(dateKey('2026-06-19')).toBe('2026-06-19');
+    expect(dateKey('2026-06-19T00:00:00.000Z')).toBe('2026-06-19');
+    expect(dateKey(null)).toBeNull();
   });
 
   test('infers tier from unique qualifying service count for reporting only', () => {

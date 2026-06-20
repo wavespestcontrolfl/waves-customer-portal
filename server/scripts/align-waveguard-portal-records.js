@@ -56,6 +56,11 @@ function moneyNumber(value) {
 function dateKey(value) {
   if (!value) return null;
   if (typeof value === 'string') return value.split('T')[0];
+  // pg/Knex DATE columns (scheduled_date, member_since) arrive as midnight Date objects;
+  // on a UTC server etDateString() would shift them to the previous ET day, corrupting
+  // anchors, future-date dedupe, inserted child dates, and member_since. Read the stored
+  // calendar date directly (repo DATE-column convention).
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
   return etDateString(value);
 }
 
@@ -532,6 +537,7 @@ if (require.main === module) {
 module.exports = {
   buildChildRow,
   buildCustomerUpdates,
+  dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
