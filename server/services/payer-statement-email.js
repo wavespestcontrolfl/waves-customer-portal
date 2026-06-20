@@ -101,7 +101,7 @@ async function sendStatementEmail(statementId, { dryRun = false, database = db }
   const recipient = { email: apEmail, company, count: lines.length };
 
   if (dryRun) {
-    logger.info(`[payer-statement-email] DRY-RUN statement ${statementId} → ${apEmail} (${lines.length} visits, ${pdfBuffer.length}B PDF)`);
+    logger.info(`[payer-statement-email] DRY-RUN statement ${statementId} (payer ${statement.payer_id}, ${lines.length} visits, ${pdfBuffer.length}B PDF) — AP recipient resolved`);
     return { ok: true, dryRun: true, recipient, total: statement.total };
   }
 
@@ -183,7 +183,7 @@ async function sendStatementEmail(statementId, { dryRun = false, database = db }
     .where({ id: statementId, status: 'finalized' })
     .update({ status: 'sent', sent_at: database.fn.now(), updated_at: database.fn.now() });
 
-  logger.info(`[payer-statement-email] statement ${statementId} sent to ${apEmail} (${lines.length} visits)`);
+  logger.info(`[payer-statement-email] statement ${statementId} sent to payer ${statement.payer_id} AP inbox (${lines.length} visits)`);
   return { ok: true, recipient, total: statement.total };
 }
 

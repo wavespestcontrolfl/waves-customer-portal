@@ -127,9 +127,21 @@ router.post('/:id/statements/:statementId/close', async (req, res, next) => {
     if (req.body?.send) {
       delivery = await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun });
     }
-    logger.info(
-      `[payers] statement ${statement.id} closed${req.body?.send ? (req.body?.dryRun ? ' (dry-run send)' : ' + sent') : ''}`,
-    );
+    // Log the ACTUAL send outcome — a failed AP delivery must not read as sent.
+    const sendNote = !req.body?.send
+      ? ''
+      : delivery?.ok
+        ? (delivery.dryRun ? ' (dry-run send ok)' : ' + sent')
+        : ` (close ok, send FAILED: ${delivery?.error || 'unknown'})`;
+    logger.info(`[payers] statement ${statement.id} closed${sendNote}`);
+
+    // Close committed; if the chained send was requested and failed, surface it
+    // (mirror /send → 422) so "close & send" never reports a silent AP miss. The
+    // frozen statement is still returned — re-close is idempotent, so the operator
+    // can safely retry the send.
+    if (req.body?.send && delivery && !delivery.ok) {
+      return res.status(422).json({ statement: frozen, delivery, error: delivery.error || 'send_failed' });
+    }
     res.json({ statement: frozen, delivery });
   } catch (err) {
     next(err);

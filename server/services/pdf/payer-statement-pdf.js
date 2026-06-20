@@ -14,7 +14,8 @@ const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
 } = require('../../constants/business');
-const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
+const { formatDateOnly, formatDisplayDate, dateOnlyString } = require('../../utils/date-only');
+const { etDateString } = require('../../utils/datetime-et');
 
 // Brand palette — mirrors invoice-pdf.js (single source kept in sync by hand).
 const NAVY = '#1B2C5B';
@@ -40,6 +41,16 @@ function dateOnly(d) { return formatDateOnly(d, { fallback: '—' }); }
 function dateTime(d) { return formatDisplayDate(d, { fallback: '—' }); }
 
 const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', due_on_receipt: 'Due on receipt' };
+
+// Overdue in ET, not UTC: due_date is an ET-derived DATE (stored as a 'YYYY-MM-DD'
+// calendar day). Compare its calendar date against TODAY in ET as plain strings —
+// `new Date('YYYY-MM-DD')` would parse UTC midnight and flip overdue the prior
+// evening in America/New_York. Past-due = due day strictly before today (ET).
+function isStatementOverdue(statement, now = new Date()) {
+  if (!statement || ['paid', 'void'].includes(statement.status)) return false;
+  const dueYmd = dateOnlyString(statement.due_date);
+  return !!dueYmd && dueYmd < etDateString(now);
+}
 
 function headerBar(doc, statusLabel, statusColor) {
   doc.save();
@@ -92,8 +103,7 @@ function billBlock(doc, payer, x, y) {
 
 function metaBlock(doc, statement, x, y) {
   y = sectionLabel(doc, 'Statement details', x, y);
-  const isOverdue = statement.due_date && new Date(statement.due_date).getTime() < Date.now()
-    && !['paid', 'void'].includes(statement.status);
+  const isOverdue = isStatementOverdue(statement);
   const rows = [
     ['Statement #', `S-${statement.id}`],
     ['Period', `${dateOnly(statement.period_start)} – ${dateOnly(statement.period_end)}`],
@@ -193,8 +203,7 @@ function generatePayerStatementPDF({ statement, payer, lines }, sink) {
   doc.pipe(sink);
 
   const isPaid = statement.status === 'paid';
-  const isOverdue = !isPaid && statement.status !== 'void'
-    && statement.due_date && new Date(statement.due_date).getTime() < Date.now();
+  const isOverdue = isStatementOverdue(statement);
   const statusLabel = isPaid ? 'Paid' : isOverdue ? 'Overdue' : 'Due';
   const statusColor = isPaid ? GREEN : isOverdue ? RED : WAVES_BLUE;
   headerBar(doc, statusLabel, statusColor);
@@ -233,4 +242,5 @@ async function buildPayerStatementPDFBuffer({ statement, payer, lines }) {
 module.exports = {
   generatePayerStatementPDF,
   buildPayerStatementPDFBuffer,
+  isStatementOverdue,
 };
