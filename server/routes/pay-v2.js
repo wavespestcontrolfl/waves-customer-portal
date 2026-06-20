@@ -420,6 +420,10 @@ router.post('/:token/confirm', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is collected only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       try {
         assertInvoiceCollectible(invoice.status);

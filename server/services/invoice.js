@@ -648,28 +648,43 @@ const InvoiceService = {
    * Create an invoice — optionally linked to a service record.
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
-  async create({
-    database = db,
-    customerId,
-    serviceRecordId,
-    scheduledServiceId,
-    title,
-    lineItems,
-    notes,
-    dueDate,
-    taxRate,
-    discountIds,
-    serviceDate,
-    trustedStoredDiscountSources = [],
-    // Deposit credit REQUEST: create() caps it against its own
-    // post-discount, after-tax total and appends the line item itself —
-    // callers that compute the cap from raw line items get it wrong as soon
-    // as discounts or commercial tax are in play (the cap must see the same
-    // math that produces `total`). The amount actually applied is returned
-    // on the invoice as `applied_deposit_credit`; consume exactly that from
-    // the ledger, never the requested amount.
-    depositCredit = null,
-  }) {
+  async create(createArgs) {
+    // `let` (not const): create() reassigns some of these below (e.g. taxRate for
+    // a tax-exempt payer), matching the original mutable function-parameter shape.
+    let {
+      database = db,
+      customerId,
+      serviceRecordId,
+      scheduledServiceId,
+      title,
+      lineItems,
+      notes,
+      dueDate,
+      taxRate,
+      discountIds,
+      serviceDate,
+      trustedStoredDiscountSources = [],
+      // Deposit credit REQUEST: create() caps it against its own
+      // post-discount, after-tax total and appends the line item itself —
+      // callers that compute the cap from raw line items get it wrong as soon
+      // as discounts or commercial tax are in play (the cap must see the same
+      // math that produces `total`). The amount actually applied is returned
+      // on the invoice as `applied_deposit_credit`; consume exactly that from
+      // the ledger, never the requested amount.
+      depositCredit = null,
+    } = createArgs;
+
+    // Phase 2 atomicity: when the statements gate is ON and the caller supplied
+    // no transaction, run the WHOLE create in one transaction so a NET-terms
+    // accrual (statement get/create + invoice insert + rollup) is atomic — else
+    // the advisory lock releases after one statement and the writes can interleave
+    // with a concurrent close. insertInvoiceRow savepoints each insert, so the
+    // invoice-number collision retry still works inside the transaction. Self-pay
+    // and gate-off creates are byte-identical (no wrap, no behaviour change).
+    if (database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
+      return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+    }
+
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
@@ -1166,15 +1181,12 @@ const InvoiceService = {
     }
     if (!invoice) throw new Error("Could not allocate invoice number");
 
-    // Recompute the statement rollup now this accrued invoice is attached.
-    // Best-effort: a stale rollup self-heals on the next accrual and is frozen
-    // correctly at close, so a rollup hiccup never blocks the invoice.
+    // Recompute the statement rollup now this accrued invoice is attached. This
+    // runs inside the create transaction (the caller's, or the one opened above),
+    // so a rollup failure ABORTS the create — we never commit an accrued invoice
+    // beside a drifted statement total.
     if (accruedStatementId) {
-      try {
-        await PayerStatements.rollupStatement(accruedStatementId, database);
-      } catch (err) {
-        logger.warn(`[invoice] statement rollup failed for ${accruedStatementId}: ${err.message}`);
-      }
+      await PayerStatements.rollupStatement(accruedStatementId, database);
     }
 
     // Record applied discounts in invoice_discounts table
@@ -2389,6 +2401,16 @@ const InvoiceService = {
     // (line-item path) for their own ledger reasons.
     const existing = await db("invoices").where({ id }).first();
     if (!existing) return null;
+    // Phase 2: a draft invoice ACCRUED to a payer statement may be edited only
+    // while that statement is still OPEN. Once it is finalized/sent the invoice is
+    // a billed line — editing it would change the document under the frozen total.
+    // (The post-edit reroll below no-ops on a frozen statement, so block here.)
+    if (existing.payer_statement_id) {
+      const stmt = await db("payer_statements").where({ id: existing.payer_statement_id }).first("status");
+      if (stmt && stmt.status !== "open") {
+        throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by editing a billed line");
+      }
+    }
     const currentStatus = String(existing.status || "").toLowerCase();
     if (currentStatus !== "draft" && currentStatus !== "scheduled") {
       throw new Error(
@@ -2554,6 +2576,16 @@ const InvoiceService = {
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
     assertInvoiceVoidable(current.status);
+    // Phase 2: an accrued invoice on a FINALIZED/sent statement is a billed line —
+    // refuse to void it (which would change the document under the frozen total);
+    // the correction is a credit on the next statement. Voiding while the
+    // statement is still OPEN is fine (the reroll below drops it from the total).
+    if (current.payer_statement_id) {
+      const stmt = await db("payer_statements").where({ id: current.payer_statement_id }).first("status");
+      if (stmt && stmt.status !== "open") {
+        throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
+      }
+    }
     if (current.status === "void") {
       await stopInvoiceFollowupSequence(id, "invoice_voided");
       return current;

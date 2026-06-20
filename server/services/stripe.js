@@ -1800,6 +1800,11 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
+    // Phase 2: an accrued invoice is collected ONLY via its consolidated
+    // statement — never confirm an individual payment for it.
+    if (invoice.payer_statement_id) {
+      throw new Error('Invoice is billed on the payer’s monthly statement — pay the statement, not the individual invoice');
+    }
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       assertInvoiceCollectible(invoice.status);
     }
