@@ -49,7 +49,7 @@ async function computeDashboardAlerts() {
       .whereRaw("due_date < ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '60 days')")
       .select(
         db.raw('COUNT(*) as count'),
-        db.raw('SUM(total) as amount'),
+        db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as amount'),
       ).first();
     const count = parseInt(overdue60?.count || 0);
     if (count > 0) {

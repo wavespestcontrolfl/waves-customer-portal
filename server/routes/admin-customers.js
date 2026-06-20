@@ -1150,7 +1150,7 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
       // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
       db.raw("(SELECT NULL) as last_rating"),
-      db.raw("(SELECT COALESCE(SUM(total), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
+      db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
       healthScoreSelect,
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
     );

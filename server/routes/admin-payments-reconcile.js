@@ -6,7 +6,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { auditPaymentReconcile, ipFromReq, uaFromReq } = require('../services/audit-log');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
 
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require('stripe')(stripeKey) : null;
@@ -125,7 +125,7 @@ router.post('/reconcile', async (req, res, next) => {
 
       // Sanity check amount (within $1 tolerance for tax rounding)
       const chargeAmt = chargeDetails.amount / 100;
-      const invoiceTotal = parseFloat(invoice.total || 0);
+      const invoiceTotal = invoiceAmountDue(invoice);
       if (Math.abs(chargeAmt - invoiceTotal) > 1) {
         return res.status(400).json({
           error: `Amount mismatch — charge is $${chargeAmt.toFixed(2)} but invoice is $${invoiceTotal.toFixed(2)}`,
@@ -151,7 +151,7 @@ router.post('/reconcile', async (req, res, next) => {
       // recording a materially different collected amount would silently
       // drift revenue reports from the invoice ledger (e.g. a $1 typo on a
       // $500 invoice). Edit the invoice first if the total really changed.
-      const invoiceTotal = parseFloat(invoice.total || 0);
+      const invoiceTotal = invoiceAmountDue(invoice);
       if (Math.abs(Number(amount) - invoiceTotal) > 1) {
         return res.status(400).json({
           error: `Amount mismatch — collected $${Number(amount).toFixed(2)} but invoice is $${invoiceTotal.toFixed(2)}. Edit the invoice total first if it changed.`,
@@ -180,7 +180,7 @@ router.post('/reconcile', async (req, res, next) => {
     // reconciles honor the operator-supplied amount, else the invoice total.
     const collectedAmount = chargeDetails
       ? chargeDetails.amount / 100
-      : (amount != null ? Number(amount) : parseFloat(invoice.total));
+      : (amount != null ? Number(amount) : invoiceAmountDue(invoice));
 
     // Also create a payments ledger row so revenue reports pick up the collection
     try {

@@ -252,8 +252,8 @@ async function getKpiSnapshot() {
       .whereNull('paid_at')
       .whereNotIn('status', ['draft', 'void'])
       .select(
-        db.raw('SUM(total) as total_owed'),
-        db.raw("SUM(CASE WHEN due_date < (NOW() AT TIME ZONE 'America/New_York')::date THEN total ELSE 0 END) as overdue"),
+        db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as total_owed'),
+        db.raw("SUM(CASE WHEN due_date < (NOW() AT TIME ZONE 'America/New_York')::date THEN GREATEST(total - COALESCE(credit_applied, 0), 0) ELSE 0 END) as overdue"),
         db.raw('COUNT(*) as count'),
       ).first(),
     // Latest per customer keys on scored_at (current rows are updated in
@@ -726,19 +726,23 @@ async function getOutstandingBalances(input) {
   // 'in_collections' state ever gets added, those invoices would silently
   // disappear from AR. matches the cleaner pattern already used by the
   // /admin/dashboard/core-kpis AR Days query.
+  // Report amount DUE (total − applied account credit), not gross total: a
+  // partially credit-applied invoice owes the reduced amount, so it must filter,
+  // age, sort, and surface on the cash the customer actually still owes.
   const invoices = await excludeInternalCustomers(
     db({ i: 'invoices' })
       .leftJoin({ c: 'customers' }, 'i.customer_id', 'c.id')
       .whereNull('i.paid_at')
       .whereNotIn('i.status', ['draft', 'void'])
-      .where('i.total', '>', minAmount)
+      .whereRaw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) > ?', [minAmount])
   )
     .select(
       'i.id', 'i.total', 'i.status', 'i.created_at', 'i.due_date',
+      db.raw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) as amount_due'),
       'c.id as customer_id', 'c.first_name', 'c.last_name',
       'c.waveguard_tier', 'c.phone',
     )
-    .orderBy('i.total', 'desc');
+    .orderByRaw('GREATEST(i.total - COALESCE(i.credit_applied, 0), 0) desc');
 
   // ET-anchored "today" so the days-past-due math doesn't drift at the
   // UTC midnight boundary. due_date is a date-only column — parse it as
@@ -748,7 +752,7 @@ async function getOutstandingBalances(input) {
   const aging = { current: 0, days_30: 0, days_60: 0, days_90_plus: 0 };
 
   invoices.forEach((row) => {
-    const amt = parseFloat(row.total || 0);
+    const amt = parseFloat(row.amount_due || 0);
     total += amt;
 
     let age = 0;
@@ -785,7 +789,7 @@ async function getOutstandingBalances(input) {
       customer: `${row.first_name} ${row.last_name}`,
       tier: row.waveguard_tier,
       phone: row.phone,
-      amount: parseFloat(row.total || 0),
+      amount: parseFloat(row.amount_due || 0),
       status: row.status,
       created: row.created_at,
       due_date: row.due_date,

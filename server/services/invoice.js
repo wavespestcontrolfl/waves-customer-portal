@@ -554,6 +554,7 @@ const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   assertInvoiceVoidable,
+  invoiceAmountDue,
 } = require("./invoice-helpers");
 
 function invoiceNotSendableError(invoice) {
@@ -1472,6 +1473,11 @@ const InvoiceService = {
       ...updates,
       customer,
       annual_prepay,
+      // Amount the customer actually pays = total − applied account credit. The
+      // pay page renders this (and a credit line) so the displayed amount matches
+      // what the Stripe/Terminal charge paths bill.
+      amount_due: invoiceAmountDue(invoice),
+      credit_applied: Number(invoice.credit_applied) || 0,
       line_items,
       products_applied:
         typeof invoice.products_applied === "string"
@@ -1645,7 +1651,7 @@ const InvoiceService = {
         .insert({
           customer_id: customer.id,
           action: "invoice_sent",
-          description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoice.total}`,
+          description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
           metadata: JSON.stringify({ invoiceId, payUrl }),
         })
         .catch(() => {});
@@ -2013,7 +2019,22 @@ const InvoiceService = {
       cardBrand && cardLast4
         ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})`
         : "";
-    const receiptAmount = Number.parseFloat(invoice.total || 0);
+    // Receipt amount from the PAYMENT row, not invoiceAmountDue(invoice): a full
+    // refund zeroes credit_applied, after which invoiceAmountDue returns the gross
+    // total. On a recorded refund show net cash kept (amount − refunded) to match
+    // the receipt page/PDF; otherwise amount due (total − applied credit). Falls
+    // back to amount due when no payment row exists.
+    const receiptPayment = await db("payments")
+      .where({ customer_id: invoice.customer_id })
+      .whereIn("status", ["paid", "refunded"])
+      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
+      .orderBy("created_at", "desc")
+      .first()
+      .catch(() => null);
+    const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
+    const receiptAmount = receiptRefunded > 0
+      ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
+      : invoiceAmountDue(invoice);
     const amount = Number.isFinite(receiptAmount)
       ? receiptAmount.toFixed(2)
       : "0.00";
@@ -2724,10 +2745,13 @@ const InvoiceService = {
           [today],
         ),
         db.raw(
-          "COALESCE(SUM(total) FILTER (WHERE status = 'paid'), 0) as total_collected",
+          // Cash collected, not invoiced value: a partial-credit paid invoice keeps
+          // its gross `total`, so summing it would book referral/goodwill account
+          // credit as collected revenue. Sum amount due (total − credit_applied).
+          "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) FILTER (WHERE status = 'paid'), 0) as total_collected",
         ),
         db.raw(
-          "COALESCE(SUM(total) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
+          "COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) FILTER (WHERE status NOT IN ('paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled')), 0) as total_outstanding",
         ),
       )
       .whereNull("archived_at");

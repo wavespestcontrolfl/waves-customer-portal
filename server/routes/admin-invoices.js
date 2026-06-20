@@ -9,7 +9,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -1465,19 +1465,22 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     try {
       const paymentRow = {
         customer_id: updatedInvoice.customer_id,
-        amount: Number(updatedInvoice.total),
+        // Record the CASH actually received — amount due (total − applied account
+        // credit) — not the full total, or manual cash/check/Zelle over-states
+        // revenue by the applied credit (which isn't cash).
+        amount: invoiceAmountDue(updatedInvoice),
         status: 'paid',
         description: `Invoice ${updatedInvoice.invoice_number} — ${method}`
           + `${trimmedReference ? ` (${trimmedReference})` : ''}`,
         payment_date: etDateString(),
       };
       // Third-party Bill-To: link a payer-billed manual payment to its invoice so
-      // the customer-facing billing history/balance can filter it out (it's the
-      // payer's offline payment, recorded under the homeowner's customer_id, not
-      // the homeowner's own). Self-pay rows intentionally stay unlinked to
-      // preserve the existing receipt-total fallback (no metadata.invoice_id →
-      // loadPaymentForInvoice returns null → receipt uses invoice totals).
-      if (updatedInvoice.payer_id) {
+      // the customer-facing billing history/balance can filter it out. Self-pay
+      // rows normally stay unlinked to use the receipt-total fallback — BUT when
+      // account credit was applied the recorded cash (amount due) differs from
+      // invoice.total, so they MUST be linked or the receipt falls back to the
+      // pre-credit total instead of the amount actually received.
+      if (updatedInvoice.payer_id || Number(updatedInvoice.credit_applied) > 0) {
         paymentRow.metadata = JSON.stringify({ invoice_id: updatedInvoice.id });
       }
       await db('payments').insert(paymentRow);
@@ -1504,7 +1507,7 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       customer_id: updatedInvoice.customer_id,
       action: 'invoice_payment_recorded',
       description: `Manual payment recorded for ${updatedInvoice.invoice_number}`
-        + ` ($${Number(updatedInvoice.total).toFixed(2)} via ${method}`
+        + ` ($${invoiceAmountDue(updatedInvoice).toFixed(2)} via ${method}`
         + `${trimmedReference ? ` · ref ${trimmedReference}` : ''})`
         + ` — ${recordedBy}`,
     }).catch((err) => logger.warn(`[admin-invoices:record-payment] activity_log insert failed: ${err.message}`));
@@ -1922,7 +1925,15 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       });
     }
 
-    const totalBalance = parsePositiveMoney(body.totalBalance ?? body.total_balance ?? invoice.balance_due ?? invoice.total, 'totalBalance');
+    // Server-authoritative plan balance: amount DUE (total − applied account
+    // credit) is the canonical max. CLAMP any client-supplied totalBalance to it —
+    // a stale admin modal posts the pre-credit invoice.total, which would create a
+    // plan that over-collects the applied credit.
+    const amountDue = invoiceAmountDue(invoice);
+    const totalBalance = Math.min(
+      parsePositiveMoney(body.totalBalance ?? body.total_balance ?? amountDue, 'totalBalance'),
+      amountDue,
+    );
     const paymentAmount = parsePositiveMoney(body.paymentAmount ?? body.payment_amount, 'paymentAmount');
     if (paymentAmount > totalBalance) {
       return res.status(400).json({ error: 'paymentAmount cannot exceed totalBalance' });

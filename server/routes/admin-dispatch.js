@@ -3989,8 +3989,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // residual collectible bill — runs for BOTH the freshly-created (shouldInvoice)
     // and pre-minted completion-invoice paths, AFTER annual-prepay allocation, and
     // only when the customer still owes a collectible invoice (not paid/prepaid,
-    // not payer-billed). The helper also fail-closes on a live PaymentIntent and
-    // applies full-coverage-only. Gated + best-effort; never blocks completion.
+    // not payer-billed). Applies PARTIAL credit (the charge/verify paths now price
+    // amount due), reducing what the customer pays; fully-covered → prepaid. The
+    // helper also fail-closes on a live PaymentIntent. Gated + best-effort.
     if (invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
@@ -4726,7 +4727,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       success: true,
       serviceRecordId: record.id,
       invoiceId: invoice?.id || null,
-      invoiceTotal: invoice?.total != null ? Number(invoice.total) : null,
+      // Amount DUE (total − applied account credit) so the mobile payment sheet
+      // collects/validates what Stripe/Terminal actually charge, not the pre-credit total.
+      invoiceTotal: invoice?.total != null ? require('../services/invoice-helpers').invoiceAmountDue(invoice) : null,
       // Third-party Bill-To: never hand back the payer invoice's pay token — it
       // is the AP's bearer pay link (/api/pay/:token); a cached/mobile client or
       // the tech holding this response could open it and collect the AP's bill
