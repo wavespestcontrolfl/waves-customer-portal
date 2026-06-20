@@ -909,6 +909,11 @@ const EstimateConverter = {
           monthly_rate: monthlyRate,
           active: true,
           deleted_at: null,
+          // Reactivating to active_customer — clear any churn stamp so a former
+          // (churned/dormant) customer who accepts a recurring estimate isn't
+          // still counted as churned by churned_at-based queries (e.g. MRR trend).
+          churned_at: null,
+          churn_reason: null,
         };
     await database('customers').where({ id: customerId }).update(customerUpdates);
 
