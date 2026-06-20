@@ -360,16 +360,28 @@ async function backfillServiceRecordFinancials(db, { onError } = {}) {
   // Nothing to populate if the financial columns were never added.
   if (!srCols.revenue) return { processed: 0, updated: 0, skipped: 0 };
 
-  let ids = [];
+  // Drive from completed scheduled_services and let calculateJobCost ->
+  // resolveServiceRecord attach the right service_record (the scheduled_service_id
+  // FK when present, else the legacy customer+date+type soft-join). Driving from
+  // service_records.scheduled_service_id alone would SKIP legacy records whose FK
+  // was never backfilled — migration 20260427000007 added the column but left
+  // older rows NULL — leaving their dashboard/revenue financials blank. We also
+  // union in the FK referenced by any completed service_record, so a completed
+  // record whose scheduled_service carries a non-completed status is still caught.
+  const fromServices = await db('scheduled_services')
+    .where('status', 'completed')
+    .pluck('id')
+    .catch(() => []);
+  let fromRecords = [];
   if (srCols.scheduled_service_id) {
-    ids = await db('service_records')
+    fromRecords = await db('service_records')
       .whereNotNull('scheduled_service_id')
       .where('status', 'completed')
       .distinct('scheduled_service_id')
-      .pluck('scheduled_service_id');
-  } else {
-    ids = await db('scheduled_services').where('status', 'completed').pluck('id');
+      .pluck('scheduled_service_id')
+      .catch(() => []);
   }
+  const ids = [...new Set([...fromServices, ...fromRecords])];
 
   let processed = 0;
   let updated = 0;
