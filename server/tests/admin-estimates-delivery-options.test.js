@@ -213,6 +213,37 @@ describe('admin estimate delivery option validation', () => {
     })).toBeNull();
   });
 
+  test('allows invoice mode for a commercial proposal with billable lines (#1917)', () => {
+    // A proposal carries its pricing in estimate_data.proposal — top-level
+    // totals stay 0 — so the proposal lines are the billable basis.
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: false,
+      billByInvoice: true,
+      onetimeTotal: 0,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        proposal: {
+          enabled: true,
+          buildings: [{ name: 'Tower A', lineItems: [{ description: 'Pest', quantity: 1, unitPrice: 260 }] }],
+        },
+      },
+    })).toBeNull();
+  });
+
+  test('still rejects invoice mode for a proposal with no priced lines', () => {
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: false,
+      billByInvoice: true,
+      onetimeTotal: 0,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [{ description: 'TBD', quantity: 1, unitPrice: 0 }] }] },
+      },
+    })).toMatch(/billable/i);
+  });
+
   test('detects unresolved St. Augustine dethatching manager approval', () => {
     expect(estimateDataHasUnresolvedManagerApproval({
       result: {

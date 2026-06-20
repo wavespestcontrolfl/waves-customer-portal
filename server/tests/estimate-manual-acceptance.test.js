@@ -5,8 +5,14 @@ jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccep
 jest.mock('../services/account-membership-email', () => ({
   sendMembershipStarted: jest.fn().mockResolvedValue({ sent: true }),
 }));
+jest.mock('../services/proposal-win', () => ({
+  ensureCustomerForProposalWin: jest.fn(),
+  promoteLinkedCustomerForProposalWin: jest.fn(),
+  createProposalAcceptanceInvoice: jest.fn(),
+}));
 
 const AccountMembershipEmail = require('../services/account-membership-email');
+const proposalWin = require('../services/proposal-win');
 const {
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
@@ -704,5 +710,141 @@ describe('manual annual prepay public eligibility reuse', () => {
     expect(isManualAnnualPrepayEligibleServiceMix({
       estimate_data: { recurring: { services: [{ service: 'tree_shrub', name: 'Tree & Shrub Care' }] } },
     })).toBe(false);
+  });
+});
+
+describe('commercial proposal win paths (#1917)', () => {
+  beforeEach(() => {
+    proposalWin.ensureCustomerForProposalWin.mockReset();
+    proposalWin.promoteLinkedCustomerForProposalWin.mockReset();
+    proposalWin.createProposalAcceptanceInvoice.mockReset();
+  });
+
+  const proposalData = {
+    proposal: {
+      enabled: true,
+      taxRate: 0.07,
+      buildings: [{ name: 'Tower A', lineItems: [
+        { description: 'Monthly pest', quantity: 1, unitPrice: 260, frequency: 'monthly', taxable: true, amount: 260 },
+      ] }],
+    },
+  };
+
+  function baseProposalEstimate(extra) {
+    return {
+      status: 'viewed',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      estimate_data: proposalData,
+      ...extra,
+    };
+  }
+
+  test('lead-win: a no-customer proposal auto-creates the customer and links it', async () => {
+    const estimate = baseProposalEstimate({
+      id: 'prop-lead', customer_id: null,
+      customer_name: 'Siesta Key HOA', customer_phone: '9415551234',
+    });
+    const { database, updates } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+    proposalWin.ensureCustomerForProposalWin.mockResolvedValue({ customerId: 'new-cust', created: true });
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    });
+
+    expect(proposalWin.ensureCustomerForProposalWin).toHaveBeenCalledTimes(1);
+    // ensureCustomerForProposalWin already promotes; the pre-linked promote path
+    // must NOT also run for a no-customer win.
+    expect(proposalWin.promoteLinkedCustomerForProposalWin).not.toHaveBeenCalled();
+    // Status flip happens first (no customer_id); the customer is linked by a
+    // follow-up update only after the flip wins — race-safe.
+    expect(updates[0].patch).toMatchObject({ status: 'accepted' });
+    expect(updates[0].patch).not.toHaveProperty('customer_id');
+    expect(updates.some((u) => u.patch.customer_id === 'new-cust')).toBe(true);
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(result.createdCustomer).toEqual({ id: 'new-cust' });
+    expect(leadLinkService.markLinkedLeadEstimateAccepted)
+      .toHaveBeenCalledWith(expect.objectContaining({ customerId: 'new-cust' }));
+  });
+
+  test('invoice-mode win: builds the proposal invoice and surfaces it', async () => {
+    const estimate = baseProposalEstimate({ id: 'prop-inv', customer_id: 'cust-1', bill_by_invoice: true });
+    const { database } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+    proposalWin.createProposalAcceptanceInvoice.mockResolvedValue({
+      id: 7, invoice_number: 'WPC-2026-0007', token: 'tok', total: 2259.7,
+    });
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    });
+
+    expect(proposalWin.createProposalAcceptanceInvoice).toHaveBeenCalledTimes(1);
+    expect(proposalWin.createProposalAcceptanceInvoice.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1' });
+    // Pre-linked customer is promoted/reactivated (proposals skip the converter).
+    expect(proposalWin.promoteLinkedCustomerForProposalWin)
+      .toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(result.proposalInvoice).toEqual({
+      id: 7, invoiceNumber: 'WPC-2026-0007', token: 'tok', total: 2259.7,
+    });
+  });
+
+  test('lead + invoice-mode: creates the customer then invoices that new customer', async () => {
+    const estimate = baseProposalEstimate({
+      id: 'prop-both', customer_id: null, bill_by_invoice: true,
+      customer_name: 'Siesta Key HOA', customer_phone: '9415551234',
+    });
+    const { database } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+    proposalWin.ensureCustomerForProposalWin.mockResolvedValue({ customerId: 'new-cust', created: true });
+    proposalWin.createProposalAcceptanceInvoice.mockResolvedValue({
+      id: 8, invoice_number: 'WPC-2026-0008', token: 'tok2', total: 100,
+    });
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    });
+
+    expect(proposalWin.createProposalAcceptanceInvoice.mock.calls[0][0]).toMatchObject({ customerId: 'new-cust' });
+    expect(result.createdCustomer).toEqual({ id: 'new-cust' });
+    expect(result.proposalInvoice).toMatchObject({ invoiceNumber: 'WPC-2026-0008' });
+  });
+
+  test('non-invoice proposal win records the win without invoice or converter', async () => {
+    const estimate = baseProposalEstimate({ id: 'prop-std', customer_id: 'cust-1' });
+    const { database } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    });
+
+    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled();
+    expect(proposalWin.ensureCustomerForProposalWin).not.toHaveBeenCalled();
+    // Pre-linked customer is still promoted/reactivated even with no invoice.
+    expect(proposalWin.promoteLinkedCustomerForProposalWin)
+      .toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(result.proposalInvoice).toBeNull();
+    expect(result.createdCustomer).toBeNull();
+    expect(result.estimate.status).toBe('accepted');
+  });
+
+  test('invoice-mode win with no billable lines is rejected so the accept rolls back', async () => {
+    const estimate = baseProposalEstimate({ id: 'prop-empty', customer_id: 'cust-1', bill_by_invoice: true });
+    const { database } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+    proposalWin.createProposalAcceptanceInvoice.mockResolvedValue(null);
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    })).rejects.toThrow(/no billable line items/i);
   });
 });

@@ -1668,21 +1668,34 @@ function EstimatePipelineViewV2() {
 
   const markEstimateAccepted = useCallback(
     async (e) => {
-      if (
-        !window.confirm(
-          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`,
-        )
-      )
-        return;
+      // A commercial proposal win auto-creates the customer when none is linked
+      // and, in invoice mode, builds the first invoice from the proposal lines.
+      const proposalInvoiceMode = !!e.isCommercialProposal && !!e.billByInvoice;
+      const confirmMsg = proposalInvoiceMode
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
+        : e.isCommercialProposal
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
+        : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
+      if (!window.confirm(confirmMsg)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
           method: "POST",
           body: JSON.stringify({ source: "verbal_yes" }),
         });
         refreshEstimates();
-        if (result?.warnings?.length) {
-          window.alert(`Marked accepted, but:\n\n${result.warnings.join("\n")}`);
+        const notes = [];
+        if (result?.createdCustomer?.id) {
+          notes.push("A new customer record was created from the proposal.");
         }
+        if (result?.proposalInvoice?.invoiceNumber) {
+          notes.push(
+            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(
+              result.proposalInvoice.total || 0,
+            ).toFixed(2)} was created.`,
+          );
+        }
+        if (result?.warnings?.length) notes.push(...result.warnings);
+        if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
       } catch (err) {
         window.alert("Mark accepted failed: " + err.message);
       }
@@ -2778,8 +2791,12 @@ function mobileStatusClass(status) {
 }
 
 function canMarkEstimateWon(estimate) {
+  if (!["sent", "viewed"].includes(estimate.status)) return false;
+  // Commercial proposals are won manually even with no linked customer or in
+  // invoice mode — the win auto-creates/promotes the customer and (in invoice
+  // mode) builds the first invoice from the proposal lines (#1917).
+  if (estimate.isCommercialProposal) return true;
   return (
-    ["sent", "viewed"].includes(estimate.status) &&
     !!estimate.customerId &&
     !estimate.billByInvoice &&
     !estimate.showOneTimeOption
@@ -3207,21 +3224,34 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
 
   const markEstimateAccepted = useCallback(
     async (e) => {
-      if (
-        !window.confirm(
-          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`,
-        )
-      )
-        return;
+      // A commercial proposal win auto-creates the customer when none is linked
+      // and, in invoice mode, builds the first invoice from the proposal lines.
+      const proposalInvoiceMode = !!e.isCommercialProposal && !!e.billByInvoice;
+      const confirmMsg = proposalInvoiceMode
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
+        : e.isCommercialProposal
+        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
+        : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
+      if (!window.confirm(confirmMsg)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
           method: "POST",
           body: JSON.stringify({ source: "verbal_yes" }),
         });
         refreshEstimates();
-        if (result?.warnings?.length) {
-          window.alert(`Marked accepted, but:\n\n${result.warnings.join("\n")}`);
+        const notes = [];
+        if (result?.createdCustomer?.id) {
+          notes.push("A new customer record was created from the proposal.");
         }
+        if (result?.proposalInvoice?.invoiceNumber) {
+          notes.push(
+            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(
+              result.proposalInvoice.total || 0,
+            ).toFixed(2)} was created.`,
+          );
+        }
+        if (result?.warnings?.length) notes.push(...result.warnings);
+        if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
       } catch (err) {
         window.alert("Mark accepted failed: " + err.message);
       }
