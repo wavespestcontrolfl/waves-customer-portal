@@ -3014,6 +3014,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
   const quoteRequired = est.quoteRequired === true || est.status === 'quote_required';
+  // An authored commercial proposal is quote-required by design (manual
+  // acceptance), but its public copy must describe the emailed PDF + account-
+  // manager follow-up, NOT the generic "inspection required" field-review state.
+  const commercialProposal = estData?.proposal?.enabled === true;
+  // Was the formal proposal PDF actually emailed on the send? Stamped by the
+  // send path (estimate_data.proposalDelivery). For an SMS-only send — or one
+  // where the email/PDF failed — this is false, and the copy must not claim an
+  // emailed PDF the customer never received.
+  const proposalPdfEmailed = estData?.proposalDelivery?.pdfEmailed === true;
   const quoteRequirementForDisplay = quoteRequired ? resolveEstimateQuoteRequirement(null, estData) : { reason: null };
   const quoteDisplayReason = quoteRequired
     ? quoteRequiredReasonText({ reason: est.quoteRequiredReason || quoteRequirementForDisplay.reason })
@@ -3912,7 +3921,11 @@ ${shellTopBar()}
 <div class="wrap">
 
   ${est.status === 'accepted' ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
-  ${quoteRequired ? `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>` : ''}
+  ${quoteRequired && est.status !== 'accepted' ? (commercialProposal
+    ? `<div class="quote-required-banner">${proposalPdfEmailed
+        ? 'Your formal proposal is attached as a PDF to the email we sent.'
+        : 'Your Waves account manager has your formal proposal and will share the PDF with you directly.'} There\u2019s no online checkout for a commercial bid \u2014 your account manager will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
+    : `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>`) : ''}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
@@ -4054,7 +4067,17 @@ ${shellTopBar()}
     </div>
   </div>
 
-  ${quoteRequired ? `
+  ${quoteRequired && est.status !== 'accepted' ? (commercialProposal ? `
+  <div class="final">
+    <h2>Your commercial proposal is ready</h2>
+    <p>${proposalPdfEmailed
+      ? 'We’ve emailed your formal proposal as a PDF.'
+      : 'Your Waves account manager has your formal proposal and will send the PDF to you directly.'} There’s no online checkout for a commercial bid — your account manager will follow up to answer questions and finalize the agreement.</p>
+    <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
+    <div style="margin-top:20px;font-size:14px">
+      Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
+    </div>
+  </div>` : `
   <div class="final">
     <h2>Inspection required to finish this quote</h2>
     <p>${escapeHtml(quoteDisplayReason || 'This treatment needs a field review before we can finalize pricing or book it online.')}</p>
@@ -4062,7 +4085,7 @@ ${shellTopBar()}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
     </div>
-  </div>` : `
+  </div>`) : `
   <div class="final">
     <h2${isOneTimeOnly ? '' : ' data-mode-only="recurring"'}>${escapeHtml(isOneTimeOnly ? 'Ready to book?' : pageCopy.finalHeading)}</h2>
     ${pageCopy.finalSubhead && !isOneTimeOnly ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
@@ -5595,7 +5618,14 @@ async function handleEstimateView(req, res, next) {
     // Admin preview links should render the exact customer page without
     // making the estimate look customer-opened.
     if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, requestIp, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
-      await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
+      // Don't break an in-flight send's `sending` claim (which also gates
+      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
+      // the send's final write reconciles to `viewed` via viewed_at. Any other
+      // non-terminal status flips to `viewed` as before.
+      await db('estimates').where({ id: estimate.id }).update({
+        viewed_at: db.fn.now(),
+        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+      });
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
       } catch (e) {
@@ -5803,9 +5833,12 @@ router.put('/:token/accept', async (req, res, next) => {
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
+      const commercialProposal = quoteRequirement.reason === 'commercial_proposal';
       return res.status(409).json({
         error: needsManagerApproval
           ? 'Manager approval is required before this estimate can be accepted online'
+          : commercialProposal
+          ? 'This is a custom commercial proposal — your Waves account manager will finalize acceptance with you directly.'
           : 'This estimate requires an inspection before it can be accepted online',
         quoteRequired: true,
         managerApprovalRequired: needsManagerApproval,
@@ -7800,16 +7833,25 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const quoteRequiredItems = Array.isArray(breakdown?.quoteRequiredItems)
     ? breakdown.quoteRequiredItems
     : (Array.isArray(breakdown?.items) ? breakdown.items.filter((item) => item.quoteRequired === true) : []);
+  // An authored commercial proposal (the multi-building PDF) is accepted
+  // manually after a board review — never through the residential self-serve
+  // accept-and-charge flow, whose single-cadence, pre-tax stored totals would
+  // disagree with the emailed proposal PDF. Surface it as a custom quote so
+  // the public view shows the formal-proposal state and the accept endpoint
+  // refuses online acceptance.
+  const commercialProposal = estData?.proposal?.enabled === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
-    || managerApprovalRequired;
+    || managerApprovalRequired
+    || commercialProposal;
 
   return {
     quoteRequired,
     reason: managerApprovalRequired
       ? 'st_augustine_dethatching'
-      : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason || null),
+      : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason
+        || (commercialProposal ? 'commercial_proposal' : null)),
     items: quoteRequiredItems,
   };
 }
@@ -10249,9 +10291,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // First-view transition — keep admin preview clicks from making the
     // estimate look customer-opened.
     if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+      // Don't break an in-flight send's `sending` claim (which also gates
+      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
+      // the send's final write reconciles to `viewed` via viewed_at.
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
-        status: 'viewed',
+        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
       }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
@@ -10404,6 +10449,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         terminalState: ctaTerminalState,
         quoteRequired: quoteRequirement.quoteRequired,
         quoteRequiredReason: quoteRequirement.reason || null,
+        // Proposal-aware fields so the React view renders the formal-proposal
+        // state (PDF + account-manager follow-up), not the generic
+        // "inspection required" quote-required copy — and is channel-aware
+        // about whether the PDF was actually emailed.
+        commercialProposal: quoteRequirement.reason === 'commercial_proposal',
+        proposalPdfEmailed: estimateDataForIntelligence?.proposalDelivery?.pdfEmailed === true,
       },
       meta: {
         generatedAt: new Date().toISOString(),

@@ -518,12 +518,16 @@ async function processLeadEstimateAutoSendBatch({
       if (sendResult.sent) {
         const sentEstimate = await database('estimates').where({ id: claimed.id }).first();
         if (sentEstimate) {
+          // Preserve the status sendEstimateNow settled on — a customer who
+          // opens the link mid-send finalizes the row as `viewed`, so don't
+          // force it back to `sent` (which would drop it from viewed/follow-up
+          // metrics). updateAutoSendMetadata defaults status to sentEstimate.status.
           await updateAutoSendMetadata(database, sentEstimate, {
             attemptedAt: now.toISOString(),
             result: 'sent',
             sentChannels: sendResult.sentChannels || [],
             failedChannels: sendResult.failedChannels || [],
-          }, 'sent');
+          });
         }
         results.sent += 1;
         logger.info(`[lead-estimate-auto-send] sent estimate ${claimed.id}`);

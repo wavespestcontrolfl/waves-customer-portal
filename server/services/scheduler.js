@@ -197,6 +197,45 @@ async function recoverStaleScheduledEstimateClaims(now) {
     const failedCount = recovered.filter(row => row.status === 'send_failed').length;
     logger.warn(`[scheduled-estimates] Recovered ${recovered.length} stale claim(s): ${retryCount} retried, ${failedCount} failed`);
   }
+
+  // Immediate sends (POST /:id/send) claim the row as `sending` for the
+  // duration of the send and release it in the route, but a hard crash between
+  // the claim and the release would strand the estimate as `sending` — with no
+  // scheduled_at, the sweep above never touches it. An immediate send completes
+  // in seconds, so any `sending` row with no scheduled_at older than the stale
+  // window is a crashed send; surface it as `send_failed` so it stays editable
+  // and re-sendable rather than permanently locked.
+  //
+  // EXCLUDE lead-auto-send claims: they reuse the same row shape
+  // (source='lead_webhook', status='sending', no scheduled_at) but have their
+  // OWN recovery that returns an unattempted claim to `draft` for retry. Leave
+  // a row that still has an unattempted autoSend claim to that recovery so a
+  // crashed auto-send isn't downgraded to a manual `send_failed`.
+  const immediate = await db.raw(`
+    UPDATE estimates
+    SET status = 'send_failed',
+        last_send_error = COALESCE(last_send_error, 'Immediate estimate send was interrupted'),
+        updated_at = ?
+    WHERE status = 'sending'
+      AND scheduled_at IS NULL
+      AND updated_at <= ?
+      AND NOT (
+        source = 'lead_webhook'
+        AND COALESCE(
+          estimate_data->'automation'->'autoSend'->>'claimedAt',
+          estimate_data->'automation'->'autoSend'->>'claimed_at'
+        ) IS NOT NULL
+        AND estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL
+      )
+    RETURNING id
+  `, [now, staleBefore]);
+  const immediateRows = immediate.rows || [];
+  if (immediateRows.length > 0) {
+    logger.warn(`[scheduled-estimates] Recovered ${immediateRows.length} stale immediate send claim(s) to send_failed`);
+  }
 }
 
 async function claimDueScheduledEstimates(now) {

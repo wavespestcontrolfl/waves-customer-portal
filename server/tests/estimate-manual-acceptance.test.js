@@ -303,6 +303,77 @@ describe('estimate manual acceptance', () => {
     expect(inserts).toEqual([]);
   });
 
+  test('manual annual prepay rejects commercial proposals before marking accepted', async () => {
+    // A proposal-enabled estimate skips EstimateConverter (its pricing lives in
+    // estimate_data.proposal.buildings, which the converter does not read), so
+    // an annual-prepay accept would silently create no invoice/term. Reject it.
+    const estimate = {
+      id: 'estimate-proposal-prepay',
+      status: 'sent',
+      customer_id: 'customer-board',
+      monthly_total: '1200.00',
+      annual_total: '14400.00',
+      onetime_total: '0.00',
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          buildings: [{ name: 'Tower A', lineItems: [{ label: 'Quarterly pest', amount: 3600, cadence: 'quarterly' }] }],
+        },
+        // Legacy recurring rows present too, so the prepay row/mix checks would
+        // otherwise pass — the proposal guard must still short-circuit first.
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'monthly' }] },
+      },
+    };
+    const { database, updates, inserts } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      billingTerm: 'prepay_annual',
+      database,
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Annual prepay is not available for a commercial proposal. Mark it accepted as a standard win and bill it through the proposal invoice flow.',
+    });
+
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
+  test('standard manual accept of a commercial proposal records the win but skips the converter', async () => {
+    const estimate = {
+      id: 'estimate-proposal-standard',
+      status: 'viewed',
+      customer_id: 'customer-board-2',
+      monthly_total: '1200.00',
+      annual_total: '14400.00',
+      onetime_total: '0.00',
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          buildings: [{ name: 'Tower A', lineItems: [{ label: 'Quarterly pest', amount: 3600, cadence: 'quarterly' }] }],
+        },
+      },
+    };
+    const { database, updates } = makeDb(estimate);
+    const estimateConverter = { convertEstimate: jest.fn() };
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      database,
+      leadLinkService,
+      estimateConverter,
+    });
+
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(1);
+    expect(updates[0].patch).toMatchObject({ status: 'accepted' });
+    expect(result.estimate.status).toBe('accepted');
+  });
+
 
   test('manual annual prepay rolls back when conversion does not create a draft invoice', async () => {
     const estimate = {

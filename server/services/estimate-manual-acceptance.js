@@ -61,6 +61,10 @@ function isManualAnnualPrepayEligibleServiceMix(estimate = {}) {
   return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
 }
 
+function isCommercialProposalEstimate(estimate = {}) {
+  return parseEstimateData(estimate.estimate_data || estimate.estimateData)?.proposal?.enabled === true;
+}
+
 function httpError(message, statusCode = 400) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -150,6 +154,21 @@ async function markEstimateManuallyAccepted({
       );
     }
 
+    // A commercial proposal's pricing/cadence lives in estimate_data.proposal,
+    // which EstimateConverter does not read, so the proposal branch below marks
+    // the win and skips conversion. Annual prepay, though, promises a real draft
+    // invoice + pending renewal term that ONLY the converter creates — under the
+    // skip it would silently produce nothing. Reject prepay for proposals so the
+    // operator bills the board deal through the proposal's own invoice flow
+    // rather than getting a no-op "annual prepay" win. (Lead/invoice-mode win
+    // paths for proposals are tracked in #1917.)
+    if (annualPrepaySelected && isCommercialProposalEstimate(estimate)) {
+      throw httpError(
+        'Annual prepay is not available for a commercial proposal. Mark it accepted as a standard win and bill it through the proposal invoice flow.',
+        400,
+      );
+    }
+
     const annualPrepayAmount = annualPrepaySelected ? resolveAnnualPrepayAmount(estimate) : null;
     if (annualPrepaySelected && !annualPrepayAmount) {
       throw httpError('Annual prepay requires a recurring estimate with a monthly or annual total.', 400);
@@ -199,8 +218,15 @@ async function markEstimateManuallyAccepted({
       billingTerm: normalizedBillingTerm,
     });
 
+    // A commercial proposal's pricing lives in estimate_data.proposal.buildings,
+    // which EstimateConverter does not read — it converts from the legacy
+    // result/recurring service mix. Auto-converting here would activate the
+    // wrong (or empty) service mix and drop the proposal's tax/cadence, so for
+    // a proposal-enabled estimate we record the win (status + linked-lead) and
+    // leave commercial onboarding/billing to the operator.
+    const isCommercialProposal = isCommercialProposalEstimate(updatedEstimate);
     let conversion = null;
-    if (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected) {
+    if (!isCommercialProposal && (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected)) {
       try {
         // Manual Mark Won keeps scheduling under operator control. Standard
         // verbal wins also skip the setup invoice. Annual-prepay verbal wins
@@ -291,4 +317,5 @@ module.exports = {
   resolveAnnualPrepayAmount,
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
+  isCommercialProposalEstimate,
 };

@@ -28,6 +28,7 @@ import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineComposerModal";
+import CommercialProposalModal from "../../components/estimates/CommercialProposalModal";
 import WinLossSlicesCard from "./WinLossSlicesCard";
 import PipelineAnalytics, {
   isFollowUpOverdueEstimate,
@@ -59,6 +60,7 @@ import {
   CalendarCheck,
   ExternalLink,
   ClipboardList,
+  FileText,
   MoreHorizontal,
   Archive,
   Link as LinkIcon,
@@ -1521,6 +1523,7 @@ function EstimatePipelineViewV2() {
   const [auditTarget, setAuditTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
+  const [proposalTarget, setProposalTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
 
@@ -1837,6 +1840,15 @@ function EstimatePipelineViewV2() {
           estimate={outlineTarget}
           adminFetch={adminFetch}
           onClose={() => setOutlineTarget(null)}
+        />
+      )}
+
+      {proposalTarget && (
+        <CommercialProposalModal
+          estimate={proposalTarget}
+          adminFetch={adminFetch}
+          onClose={() => setProposalTarget(null)}
+          onSaved={refreshEstimates}
         />
       )}
 
@@ -2442,6 +2454,14 @@ function EstimatePipelineViewV2() {
                                 />
                               ),
                               onClick: () => setOutlineTarget(e),
+                            },
+                            {
+                              key: "proposal",
+                              label: "Commercial proposal",
+                              icon: <FileText size={16} strokeWidth={1.75} />,
+                              title:
+                                "Build a multi-building line-item proposal PDF",
+                              onClick: () => setProposalTarget(e),
                             },
                             {
                               key: "audit",
