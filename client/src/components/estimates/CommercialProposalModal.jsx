@@ -148,11 +148,13 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
     },
   });
 
+  // Returns true on a successful save so downloadPdf can persist edits before
+  // rendering the (server-side) PDF.
   const save = async () => {
     const payload = buildPayload();
     if (payload.proposal.buildings.length === 0) {
       setError('Add at least one building with a described line item.');
-      return;
+      return false;
     }
     setSaving(true);
     setError(null);
@@ -166,17 +168,31 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
       });
       setSavedOnce(true);
       onSaved?.();
+      return true;
     } catch (e) {
       setError(e.message);
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
   const downloadPdf = async () => {
-    setDownloading(true);
     setError(null);
+    // Open the tab synchronously, tied to the click — Safari/iOS and popup
+    // blockers block a window.open issued after the async save/fetch below.
+    const win = window.open('', '_blank');
+    if (win) {
+      win.opener = null;
+      try { win.document.write('Generating proposal PDF…'); } catch { /* about:blank write can throw in some browsers */ }
+    }
+    setDownloading(true);
     try {
+      // The PDF is rendered server-side from persisted estimate_data, so save
+      // the current modal edits first — otherwise the download is the last
+      // saved / synthesized proposal, not what's on screen.
+      const saved = await save();
+      if (!saved) { if (win) win.close(); return; }
       // The shared adminFetch always parses the body as JSON, which corrupts
       // PDF bytes — so hit the endpoint with a raw fetch (same auth header)
       // and read the response as a blob.
@@ -187,9 +203,11 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
       if (!r.ok) throw new Error(`Could not generate PDF (${r.status})`);
       const blob = await r.blob();
       const url = URL.createObjectURL(blob);
-      window.open(url, '_blank', 'noopener,noreferrer');
+      if (win) win.location = url;
+      else window.open(url, '_blank', 'noopener,noreferrer');
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (e) {
+      if (win) win.close();
       setError(e.message);
     } finally {
       setDownloading(false);

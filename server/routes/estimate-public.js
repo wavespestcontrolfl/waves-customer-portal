@@ -3921,7 +3921,7 @@ ${shellTopBar()}
 <div class="wrap">
 
   ${est.status === 'accepted' ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
-  ${quoteRequired ? (commercialProposal
+  ${quoteRequired && est.status !== 'accepted' ? (commercialProposal
     ? `<div class="quote-required-banner">${proposalPdfEmailed
         ? 'Your formal proposal is attached as a PDF to the email we sent.'
         : 'Your Waves account manager has your formal proposal and will share the PDF with you directly.'} There\u2019s no online checkout for a commercial bid \u2014 your account manager will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
@@ -4067,7 +4067,7 @@ ${shellTopBar()}
     </div>
   </div>
 
-  ${quoteRequired ? (commercialProposal ? `
+  ${quoteRequired && est.status !== 'accepted' ? (commercialProposal ? `
   <div class="final">
     <h2>Your commercial proposal is ready</h2>
     <p>${proposalPdfEmailed
