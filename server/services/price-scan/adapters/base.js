@@ -87,8 +87,14 @@ function collectSnapshot(sel) {
     ? sel.priceSelectors
     : ['[itemprop="price"]', '.price', '.product-price', '.our-price']);
 
+  // Collect ALL availability-selector matches, not just the first — a grouped
+  // selector (Keystone's includes a generic BigCommerce field used for SKU/brand
+  // rows before the stock row) would otherwise miss an out-of-stock signal.
+  // Joined with a separator so mapAvailability's out-of-stock/backorder precedence
+  // catches "Out of Stock" wherever it appears, without forming a false phrase
+  // across element boundaries.
   const availabilityText = sel.availabilitySelector
-    ? textOf(document.querySelector(sel.availabilitySelector))
+    ? allText([sel.availabilitySelector]).join(' | ')
     : '';
 
   // A bounded slice of body text so extract.js can hunt for an EPA reg number
