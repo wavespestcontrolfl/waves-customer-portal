@@ -632,11 +632,11 @@ describe('blog Astro frontmatter validation', () => {
     expect(body).toContain('Codex review completed');
   });
 
-  test('rejects autonomous drafts whose canonical does not match the emitted slug', async () => {
+  test('rejects autonomous drafts whose canonical points to a DIFFERENT post (different leaf)', async () => {
     jest.clearAllMocks();
     const frontmatter = validFrontmatter({
       slug: '/ant-trails-bradenton/',
-      canonical: 'https://example.com/ant-trails-bradenton/',
+      canonical: 'https://www.wavespestcontrol.com/roach-trails-sarasota/',
     });
 
     await expect(AstroPublisher.publishOrUpdatePage(
@@ -648,6 +648,54 @@ describe('blog Astro frontmatter validation', () => {
       { action_type: 'new_supporting_blog' }
     )).rejects.toThrow(/canonical must match slug/);
     expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe('autonomous frontmatter normalization (Bucket A generator fixes)', () => {
+  const { assertCanonicalMatchesSlug, canonicalUrlForSlug, clampMetaDescription } = AstroPublisher._internals;
+
+  describe('assertCanonicalMatchesSlug — writer canonical is advisory', () => {
+    test('derives canonical from slug when the draft omits it', () => {
+      const fm = { slug: '/pest-control/ant-trails/', canonical: '' };
+      const out = assertCanonicalMatchesSlug(fm, 'pest-control/ant-trails');
+      expect(out).toBe(canonicalUrlForSlug('pest-control/ant-trails'));
+      expect(fm.canonical).toBe(out);
+    });
+
+    test('accepts a category-prefix variant (flat slug + category canonical, same leaf) and normalizes to the slug', () => {
+      const fm = { slug: '/ant-trails/', canonical: 'https://www.wavespestcontrol.com/pest-control/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).not.toThrow();
+      expect(fm.canonical).toBe(canonicalUrlForSlug('ant-trails'));
+    });
+
+    test('accepts a malformed canonical (derives from slug instead of wasting the generation)', () => {
+      const fm = { slug: '/ant-trails/', canonical: 'not a valid url' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).not.toThrow();
+      expect(fm.canonical).toBe(canonicalUrlForSlug('ant-trails'));
+    });
+
+    test('still rejects a canonical pointing to a genuinely different post (different leaf)', () => {
+      const fm = { slug: '/ant-trails/', canonical: 'https://www.wavespestcontrol.com/roach-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical must match slug/);
+    });
+  });
+
+  describe('clampMetaDescription — over-160 is normalized, not rejected', () => {
+    test('leaves a within-limit meta unchanged', () => {
+      const m = 'A clear, useful meta description about ant trails in Bradenton homes and when it is worth calling a pro for help.';
+      expect(m.length).toBeLessThanOrEqual(160);
+      expect(clampMetaDescription(m)).toBe(m);
+    });
+
+    test('clamps an over-160 meta to <=160 at a word boundary, staying >=115 with no trailing punctuation', () => {
+      const long = 'Ant trails in Bradenton homes can signal a much bigger colony nearby; here is exactly how to identify them, seal the entry points, and decide when a professional inspection is genuinely worth the cost this season.';
+      expect(long.length).toBeGreaterThan(160);
+      const out = clampMetaDescription(long);
+      expect(out.length).toBeLessThanOrEqual(160);
+      expect(out.length).toBeGreaterThanOrEqual(115);
+      expect(long.startsWith(out)).toBe(true);
+      expect(/[\s.,;:–—-]$/u.test(out)).toBe(false);
+    });
   });
 });
 
