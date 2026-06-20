@@ -148,6 +148,13 @@ describe('price-scan extract', () => {
       });
       expect(extractJsonLdOffer([ld], { targetOz: 78 }).currency).toBe('CAD');
     });
+    test('nested AggregateOffer children inherit the parent availability', () => {
+      const ld = JSON.stringify({
+        '@type': 'Product', name: 'X 78 oz',
+        offers: { '@type': 'AggregateOffer', availability: 'OutOfStock', offers: [{ '@type': 'Offer', name: 'X 78 oz', price: '95', priceCurrency: 'USD' }] },
+      });
+      expect(extractJsonLdOffer([ld], { targetOz: 78 }).availability).toBe('out_of_stock');
+    });
     test('prefers in-stock offer over out-of-stock', () => {
       const oos = JSON.stringify({ '@type': 'Product', name: 'A', offers: { price: 80, availability: 'OutOfStock' } });
       const ins = JSON.stringify({ '@type': 'Product', name: 'A', offers: { price: 90, availability: 'InStock' } });

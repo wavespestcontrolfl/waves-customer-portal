@@ -138,11 +138,18 @@ function collectJsonLdOffers(jsonLdStrings) {
       for (const o of list) {
         if (o && o['@type'] === 'AggregateOffer' && o.offers) {
           const nested = Array.isArray(o.offers) ? o.offers : [o.offers];
-          // Children that omit priceCurrency inherit the aggregate's, so a CAD
-          // parent isn't read as USD past the non-USD filter.
+          // Children that omit priceCurrency / availability inherit the
+          // aggregate's — so a CAD parent isn't read as USD, and a sold-out
+          // aggregate's children aren't emitted as 'unknown' (which compare
+          // keeps eligible).
           const parentCur = o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency) || null;
+          const parentAvail = o.availability || o.availabilityStatus || null;
           for (const n of nested) {
-            flat.push(parentCur && n && !n.priceCurrency ? { ...n, priceCurrency: parentCur } : n);
+            if (!n) { flat.push(n); continue; }
+            const child = { ...n };
+            if (parentCur && !child.priceCurrency) child.priceCurrency = parentCur;
+            if (parentAvail && !child.availability && !child.availabilityStatus) child.availability = parentAvail;
+            flat.push(child);
           }
           if (offerPrice(o) != null && !nested.some((n) => offerPrice(n) != null)) flat.push(o);
         } else {
