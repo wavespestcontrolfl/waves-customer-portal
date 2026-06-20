@@ -39,9 +39,7 @@ jest.mock('../services/seo/indexnow-submit', () => ({
 }));
 jest.mock('../services/social-media', () => ({
   SOCIAL_FLAGS: { automationEnabled: true, rssAutopublish: true },
-  isPausedByAdmin: jest.fn().mockResolvedValue(false),
-  normalizeUrl: jest.fn((u) => u),
-  publishToAll: jest.fn().mockResolvedValue({ success: true, platforms: [] }),
+  shareUrlOnce: jest.fn().mockResolvedValue({ shared: true, success: true }),
 }));
 
 const db = require('../models/db');
@@ -313,40 +311,22 @@ describe('post-merge social share (new on-hub blog posts)', () => {
   beforeEach(() => {
     social.SOCIAL_FLAGS.automationEnabled = true;
     social.SOCIAL_FLAGS.rssAutopublish = true;
-    social.isPausedByAdmin.mockResolvedValue(false);
     delete process.env.SOCIAL_BLOG_MERGE_SHARE_ENABLED;
   });
 
-  test('shares the just-merged live post to social with the brand card', async () => {
+  test('shares the just-merged live post once, via the lock-serialized helper', async () => {
     setupDb({ pending: [makeRun()] });
     gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
 
     await poller.pollPending();
 
-    expect(social.publishToAll).toHaveBeenCalledWith(expect.objectContaining({
+    expect(social.shareUrlOnce).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Test Post',
       link: CANONICAL,
       source: 'autonomous_blog',
       noAiImage: true,
     }));
-  });
-
-  test('skips when the URL was already shared (RSS backstop won the race)', async () => {
-    setupDb({ pending: [makeRun()], updateResult: 1 });
-    // social_media_posts.first() returns an existing row → skip.
-    const realDb = db.getMockImplementation();
-    db.mockImplementation((table) => {
-      const q = realDb(table);
-      if (table === 'social_media_posts') q.first = jest.fn(() => Promise.resolve({ id: 'sm-1' }));
-      return q;
-    });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
-    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
-
-    await poller.pollPending();
-
-    expect(social.publishToAll).not.toHaveBeenCalled();
   });
 
   test('does NOT share refresh/metadata lanes (planLinks false)', async () => {
@@ -356,7 +336,7 @@ describe('post-merge social share (new on-hub blog posts)', () => {
 
     await poller.pollPending();
 
-    expect(social.publishToAll).not.toHaveBeenCalled();
+    expect(social.shareUrlOnce).not.toHaveBeenCalled();
   });
 
   test('does NOT share when social automation / RSS autopublish is off', async () => {
@@ -367,7 +347,7 @@ describe('post-merge social share (new on-hub blog posts)', () => {
 
     await poller.pollPending();
 
-    expect(social.publishToAll).not.toHaveBeenCalled();
+    expect(social.shareUrlOnce).not.toHaveBeenCalled();
   });
 
   test('honors the SOCIAL_BLOG_MERGE_SHARE_ENABLED=false kill switch', async () => {
@@ -378,12 +358,12 @@ describe('post-merge social share (new on-hub blog posts)', () => {
 
     await poller.pollPending();
 
-    expect(social.publishToAll).not.toHaveBeenCalled();
+    expect(social.shareUrlOnce).not.toHaveBeenCalled();
   });
 
   test('a social share failure never blocks the completed_published finalize', async () => {
     const updates = setupDb({ pending: [makeRun()] });
-    social.publishToAll.mockRejectedValueOnce(new Error('Meta API down'));
+    social.shareUrlOnce.mockRejectedValueOnce(new Error('Meta API down'));
     gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
 

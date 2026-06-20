@@ -1051,6 +1051,40 @@ const SocialMediaService = {
   },
 
   /**
+   * Share a single already-live URL to social exactly once. Used by the
+   * autonomous PR poller to share a blog post the MOMENT it's verified live,
+   * instead of waiting for the 4-hourly RSS poll (checkAndPublish) to catch it.
+   *
+   * Serialized against that RSS cron via the SAME advisory lock so the two
+   * paths can't race the dedup read into a duplicate FB/IG/GBP post. Blocking
+   * lock (not try): if an RSS run is in flight, wait for it (bounded — RSS is
+   * capped at 5 items) then re-check under the lock, so the URL is shared
+   * exactly once with no gap. publishToAll inserts its own social_media_posts
+   * row (source_url = normalizeUrl(link)) before we commit/release the lock, so
+   * a subsequent RSS run sees the row and skips. The caller owns policy gating
+   * (feature flags, post type); this owns concurrency + dedup.
+   */
+  async shareUrlOnce({ title, description, link, source = 'manual', noAiImage = true }) {
+    if (!SOCIAL_FLAGS.automationEnabled) return { skipped: 'automation_disabled' };
+    const normalized = normalizeUrl(link) || null;
+    if (!normalized) return { skipped: 'no_url' };
+
+    return db.transaction(async (trx) => {
+      // Same lock checkAndPublish holds across its publish loop.
+      await trx.raw('SELECT pg_advisory_xact_lock(?)', [RSS_LOCK_ID]);
+      const existing = await trx('social_media_posts')
+        .where('source_url', normalized)
+        .whereNot('status', 'dry_run')
+        .first();
+      if (existing) return { skipped: 'already_posted' };
+      const result = await this.publishToAll({
+        title, description, link: normalized, guid: normalized, source, noAiImage,
+      });
+      return { shared: true, ...result };
+    });
+  },
+
+  /**
    * Publish content to all configured platforms.
    */
   async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, customContent, channels, gbpLocationIds, noAiImage = false }) {

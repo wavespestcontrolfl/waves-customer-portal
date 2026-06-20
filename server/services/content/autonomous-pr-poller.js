@@ -457,30 +457,21 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
     try {
       const social = require('../social-media');
       const flags = social.SOCIAL_FLAGS || {};
-      if (flags.automationEnabled && flags.rssAutopublish && !(await social.isPausedByAdmin())) {
-        const normalized = social.normalizeUrl(target.url);
-        // Pre-check: if the RSS backstop (or any path) already posted this URL,
-        // skip — avoids a double post in the rare window where an RSS tick lands
-        // between go-live and this finalize tick.
-        const already = normalized
-          ? await db('social_media_posts').where('source_url', normalized).whereNot('status', 'dry_run').first()
-          : null;
-        if (already) {
-          logger.info(`[autonomous-pr-poller] social share skipped for ${target.url} — already posted`);
-        } else {
-          const shareResult = await social.publishToAll({
-            title: target.title,
-            description: target.excerpt || '',
-            link: target.url,
-            guid: normalized,
-            source: 'autonomous_blog',
-            // Brand card only — never the AI literal-image generator (mirrors the
-            // RSS cron's autonomous share path).
-            noAiImage: true,
-          });
-          const status = shareResult?.dryRun ? 'dry_run' : (shareResult?.success ? 'published' : 'failed');
-          logger.info(`[autonomous-pr-poller] social share for ${target.url}: ${status}`);
-        }
+      if (flags.automationEnabled && flags.rssAutopublish) {
+        // shareUrlOnce serializes against the RSS cron via its advisory lock and
+        // dedupes on source_url, so this deterministic trigger and the 4-hourly
+        // RSS backstop can never double-post the same URL. Brand card only
+        // (noAiImage) — mirrors the RSS cron's autonomous share path.
+        const r = await social.shareUrlOnce({
+          title: target.title,
+          description: target.excerpt || '',
+          link: target.url,
+          source: 'autonomous_blog',
+          noAiImage: true,
+        });
+        const status = r?.skipped ? `skipped (${r.skipped})`
+          : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');
+        logger.info(`[autonomous-pr-poller] social share for ${target.url}: ${status}`);
       }
     } catch (err) {
       logger.warn(`[autonomous-pr-poller] social share failed for ${target.url}: ${err.message}`);
