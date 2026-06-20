@@ -125,21 +125,30 @@ router.post('/:id/statements/:statementId/close', async (req, res, next) => {
 
     let delivery = null;
     if (req.body?.send) {
-      delivery = await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun });
+      // First-delivery-only: send ONLY when this request actually freshly closed
+      // the statement (finalized, never sent). finalizeStatement is idempotent —
+      // a double-click / retry returns an already-sent/viewed row, and re-sending
+      // it here would mail AP a duplicate (the email idempotency key has already
+      // lapsed once status flipped to 'sent'). Intentional resends go via /send.
+      const freshClose = frozen?.status === 'finalized' && !frozen?.sent_at;
+      delivery = freshClose
+        ? await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun })
+        : { ok: true, skipped: 'already_delivered', status: frozen?.status };
     }
     // Log the ACTUAL send outcome — a failed AP delivery must not read as sent.
-    const sendNote = !req.body?.send
-      ? ''
-      : delivery?.ok
-        ? (delivery.dryRun ? ' (dry-run send ok)' : ' + sent')
-        : ` (close ok, send FAILED: ${delivery?.error || 'unknown'})`;
+    let sendNote = '';
+    if (req.body?.send) {
+      if (delivery?.skipped) sendNote = ` (already ${frozen?.status}; not re-sent)`;
+      else if (delivery?.ok) sendNote = delivery.dryRun ? ' (dry-run send ok)' : ' + sent';
+      else sendNote = ` (close ok, send FAILED: ${delivery?.error || 'unknown'})`;
+    }
     logger.info(`[payers] statement ${statement.id} closed${sendNote}`);
 
-    // Close committed; if the chained send was requested and failed, surface it
-    // (mirror /send → 422) so "close & send" never reports a silent AP miss. The
-    // frozen statement is still returned — re-close is idempotent, so the operator
-    // can safely retry the send.
-    if (req.body?.send && delivery && !delivery.ok) {
+    // Close committed; if the chained send was requested and genuinely failed,
+    // surface it (mirror /send → 422) so "close & send" never reports a silent AP
+    // miss. A skipped already-delivered send is not a failure. The frozen
+    // statement is always returned (re-close is idempotent).
+    if (req.body?.send && delivery && !delivery.ok && !delivery.skipped) {
       return res.status(422).json({ statement: frozen, delivery, error: delivery.error || 'send_failed' });
     }
     res.json({ statement: frozen, delivery });
