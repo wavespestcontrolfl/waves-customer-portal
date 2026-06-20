@@ -453,6 +453,20 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
 
     // Do NOT log the free-text reason — it can contain customer PII. Log IDs only.
     logger.info(`[billing-recovery] dismissed visit ${scheduledServiceId} as intentionally_free (reason ${reason ? 'provided' : 'none'}) by tech ${req.technicianId}`);
+
+    // Re-sync the visit's financials so this no-cost decision zeroes any revenue
+    // a priced completion already wrote to service_records — otherwise the
+    // Dashboard + /admin/revenue keep counting it. Fire-and-forget (the
+    // disposition is already committed); recomputeRevenue makes calculateJobCost
+    // read the disposition we just stored and force revenue 0.
+    try {
+      const { calculateJobCost } = require('../services/job-costing');
+      void calculateJobCost(scheduledServiceId, undefined, { recomputeRevenue: true })
+        .catch((e) => logger.error(`[billing-recovery] financial resync failed for ${scheduledServiceId}: ${e.message}`));
+    } catch (e) {
+      logger.error(`[billing-recovery] job-costing require failed: ${e.message}`);
+    }
+
     res.json({ ok: true });
   } catch (err) {
     if (err && err.status) return res.status(err.status).json({ error: err.message });
