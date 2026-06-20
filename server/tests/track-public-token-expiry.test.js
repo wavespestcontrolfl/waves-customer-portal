@@ -22,13 +22,16 @@ function makeQuery({ firstResult = null, selectResult = [] } = {}) {
   return chain;
 }
 
-function installSummaryDb({ record = null, photos = [] } = {}) {
+function installSummaryDb({ record = null, photos = [], reviewRequest = null } = {}) {
   mockDb.mockImplementation((table) => {
     if (table === 'service_records') {
       return makeQuery({ firstResult: record });
     }
     if (table === 'service_photos') {
       return makeQuery({ selectResult: photos });
+    }
+    if (table === 'review_requests') {
+      return makeQuery({ firstResult: reviewRequest });
     }
     return makeQuery();
   });
@@ -100,6 +103,7 @@ describe('public track token expiry', () => {
         structured_notes: JSON.stringify({ typedReportDelivery: 'disabled' }),
       },
       photos: [{ s3_key: 'service-photos/record-1/internal.jpg' }],
+      reviewRequest: { token: 'old-review-token' },
     });
 
     const summary = await trackPublicRouter._test.buildSummary({
@@ -110,11 +114,13 @@ describe('public track token expiry', () => {
 
     expect(summary.serviceReportToken).toBeNull();
     expect(summary.photos).toEqual([]);
+    expect(summary.reviewUrl).toBeNull();
     expect(mockDb.mock.calls.map(([table]) => table)).not.toContain('service_photos');
+    expect(mockDb.mock.calls.map(([table]) => table)).not.toContain('review_requests');
     expect(mockGetViewUrl).not.toHaveBeenCalled();
   });
 
-  test('presigns completion photos when the frozen delivery is customer-visible', async () => {
+  test('presigns completion photos and review CTA when the frozen delivery is customer-visible', async () => {
     installSummaryDb({
       record: {
         id: 'record-1',
@@ -126,6 +132,7 @@ describe('public track token expiry', () => {
         { s3_key: null },
         { s3_key: 'service-photos/record-1/after-2.jpg' },
       ],
+      reviewRequest: { token: 'review-token' },
     });
     mockGetViewUrl
       .mockResolvedValueOnce('https://signed.example/after-1.jpg')
@@ -142,7 +149,9 @@ describe('public track token expiry', () => {
       'https://signed.example/after-1.jpg',
       'https://signed.example/after-2.jpg',
     ]);
+    expect(summary.reviewUrl).toBe('/rate/review-token');
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('service_photos');
+    expect(mockDb.mock.calls.map(([table]) => table)).toContain('review_requests');
     expect(mockGetViewUrl).toHaveBeenCalledTimes(2);
   });
 });

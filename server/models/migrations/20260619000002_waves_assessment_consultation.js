@@ -40,11 +40,12 @@
 // them, and the completion resolver matches by name, so all must be relabeled.
 const OLD_ASSESSMENT_LABELS = ['Lawn Assessment', 'Lawn Assessment Service', 'Lawn Health Inspection'];
 // Open (still-to-be-completed) visit statuses — the only rows whose
-// denormalized label we relabel. An explicit allowlist (rather than a
-// terminal denylist) guarantees we never rewrite a closed visit's history
-// (completed / cancelled / rescheduled / skipped / no_show), even if new
-// closed statuses are added later.
-const OPEN_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+// denormalized label we relabel. `rescheduled` is still resumable back into
+// confirmation/completion, so it needs the same gate-free consultation label.
+// The explicit allowlist guarantees we never rewrite closed visit history
+// (completed / cancelled / skipped / no_show), even if new closed statuses are
+// added later.
+const OPEN_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 
 const WAVES_ASSESSMENT_DESCRIPTION =
   'Advisory walkthrough of the property to evaluate lawn and/or pest conditions and recommend a plan. Findings are reviewed with the customer; no treatment is performed during the visit.';

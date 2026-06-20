@@ -977,6 +977,26 @@ function technicianPestRatingAllowedForService({ completionProfile = null, pestP
   }) && pestPressureConfigAllowsTechnicianRating({ pestPressureConfig, serviceLine });
 }
 
+function photoCaptionBannedCopyPayload(captionBannedViolations = new Set()) {
+  const violations = [...captionBannedViolations];
+  return {
+    error: `Photo captions contain wording we can't put on a customer report (${violations.join(', ')}).`,
+    code: 'photo_caption_banned_copy',
+    violations,
+  };
+}
+
+function shouldRejectPhotoCaptionBannedCopy({
+  captionBannedViolations = new Set(),
+  isInternalOnlyCompletion = false,
+  resumingCommittedCompletion = false,
+  typedDeliveryMode = null,
+} = {}) {
+  if (!captionBannedViolations.size) return false;
+  if (resumingCommittedCompletion) return typedDeliveryMode === 'auto_send';
+  return !isInternalOnlyCompletion;
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/dispatch/:serviceId/tech-rating-allowed
@@ -2212,17 +2232,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // customer-facing gates (documents, paid-invoice review) honor it.
     const isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
 
-    // Deferred photo-caption banned-copy gate (sanitized above). Skip it for
-    // internal-only consultations — they produce no customer-facing report, so
-    // banned customer-copy wording can't reach a customer here.
-    if (!isInternalOnlyCompletion && captionBannedViolations.size) {
-      return res.status(422).json({
-        error: `Photo captions contain wording we can't put on a customer report (${[...captionBannedViolations].join(', ')}).`,
-        code: 'photo_caption_banned_copy',
-        violations: [...captionBannedViolations],
-      });
-    }
-
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
 
@@ -2313,6 +2322,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    // Deferred photo-caption banned-copy gate (captions were sanitized above).
+    // Run only after replay/conflict handling so idempotent retries of an
+    // already-final response do not start failing due to a later profile/copy
+    // policy change. Fresh internal-only consultations skip this because they
+    // produce no customer-facing report.
+    if (claim.action === 'proceed' && shouldRejectPhotoCaptionBannedCopy({
+      captionBannedViolations,
+      isInternalOnlyCompletion,
+      resumingCommittedCompletion,
+      typedDeliveryMode,
+    })) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('photo_caption_banned_copy'),
+      );
+      return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
+    }
 
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
@@ -3861,6 +3888,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         suppressTypedCustomerComms = typedDeliveryMode !== 'auto_send';
         effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
       }
+    }
+    if (resumingCommittedCompletion && shouldRejectPhotoCaptionBannedCopy({
+      captionBannedViolations,
+      isInternalOnlyCompletion,
+      resumingCommittedCompletion,
+      typedDeliveryMode,
+    })) {
+      return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
     }
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
@@ -6364,4 +6399,5 @@ module.exports._test = {
   completionAllowsTechnicianPestRating,
   pestPressureConfigAllowsTechnicianRating,
   technicianPestRatingAllowedForService,
+  shouldRejectPhotoCaptionBannedCopy,
 };

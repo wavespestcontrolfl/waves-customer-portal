@@ -5,6 +5,7 @@ const {
   preflightLawnAssessmentCompletion,
   completionAllowsTechnicianPestRating,
   technicianPestRatingAllowedForService,
+  shouldRejectPhotoCaptionBannedCopy,
 } = adminDispatchRouter._test;
 
 function fakeAssessmentKnex(firstResult) {
@@ -168,6 +169,35 @@ describe('admin dispatch lawn assessment completion guard', () => {
         enabledServiceLines: ['pest'],
       },
       serviceLine: 'pest',
+    })).toBe(true);
+  });
+
+  test('skips banned-caption rejection for fresh internal-only consultations', () => {
+    const captionBannedViolations = new Set(['guarantee']);
+
+    expect(shouldRejectPhotoCaptionBannedCopy({
+      captionBannedViolations,
+      isInternalOnlyCompletion: true,
+      resumingCommittedCompletion: false,
+      typedDeliveryMode: 'disabled',
+    })).toBe(false);
+  });
+
+  test('uses frozen delivery posture for banned-caption rejection on resume', () => {
+    const captionBannedViolations = new Set(['guarantee']);
+
+    expect(shouldRejectPhotoCaptionBannedCopy({
+      captionBannedViolations,
+      isInternalOnlyCompletion: false,
+      resumingCommittedCompletion: true,
+      typedDeliveryMode: 'disabled',
+    })).toBe(false);
+
+    expect(shouldRejectPhotoCaptionBannedCopy({
+      captionBannedViolations,
+      isInternalOnlyCompletion: false,
+      resumingCommittedCompletion: true,
+      typedDeliveryMode: 'auto_send',
     })).toBe(true);
   });
 });
