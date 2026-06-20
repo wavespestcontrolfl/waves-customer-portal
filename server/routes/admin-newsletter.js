@@ -585,6 +585,11 @@ router.post('/sends/:id/test', async (req, res) => {
       GREETING_NAME_TOKEN, greetingNameValueFor,
       CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL,
     } = require('../services/newsletter-draft');
+    // A test send has no per-recipient delivery row, so there's no engagement
+    // token to build live quiz links from — render the quiz NEUTRALLY (inert
+    // answer chips) so the operator validates the block layout instead of
+    // seeing literal {{quiz}}/{{quiz-text}}. Mirrors the /preview modal.
+    const { neutralizeQuizTokens } = require('../services/newsletter-quiz');
     const testSub = await db('newsletter_subscribers')
       .whereRaw('LOWER(email) = ?', [String(testEmail).toLowerCase()])
       .first();
@@ -598,10 +603,12 @@ router.post('/sends/:id/test', async (req, res) => {
         grassValue = pctx.grassLabel || DEFAULT_GRASS_LABEL;
       }
     }
-    const applyTokens = (s) => String(s)
-      .split(GREETING_NAME_TOKEN).join(greetingValue)
-      .split(CITY_TOKEN).join(cityValue)
-      .split(GRASS_TYPE_TOKEN).join(grassValue);
+    const applyTokens = (s) => neutralizeQuizTokens(
+      String(s)
+        .split(GREETING_NAME_TOKEN).join(greetingValue)
+        .split(CITY_TOKEN).join(cityValue)
+        .split(GRASS_TYPE_TOKEN).join(grassValue),
+    );
     html = applyTokens(html);
     const testText = send.text_body ? applyTokens(send.text_body) : undefined;
 
