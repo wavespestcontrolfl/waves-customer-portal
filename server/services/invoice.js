@@ -2535,35 +2535,48 @@ const InvoiceService = {
     // transactions. Left as-is on purpose: it needs two admins on the SAME
     // draft within a sub-second window, the already-exists cases are blocked
     // above, and any resulting total mismatch is visible and recoverable.
-    const [invoice] = await db("invoices")
-      .where({ id })
-      .whereIn("status", ["draft", "scheduled"])
-      .whereNull("stripe_payment_intent_id")
-      .whereNull("annual_prepay_term_id")
-      .whereNotExists(function () {
-        this.select(db.raw("1"))
-          .from("payment_plans")
-          .whereRaw("payment_plans.invoice_id = invoices.id")
-          .where("payment_plans.status", "active");
-      })
-      .update(data)
-      .returning("*");
-    if (!invoice) {
-      throw new Error(
-        "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
-      );
-    }
-    // Phase 2: an edited accrued invoice changes the statement total — reroll the
-    // open statement so its total / PDF / payment amount stay correct. No-op once
-    // the statement is frozen (rollupStatement only touches `open`).
-    if (invoice.payer_statement_id) {
-      try {
-        await require("./payer-statements").rollupStatement(invoice.payer_statement_id);
-      } catch (err) {
-        logger.warn(`[invoice] statement reroll after edit failed for ${invoice.payer_statement_id}: ${err.message}`);
+    const runEdit = async (client) => {
+      // Accrued: lock the parent statement and re-verify it's still OPEN inside
+      // this transaction, so a concurrent close can't finalize between the
+      // pre-check above and this write.
+      if (existing.payer_statement_id) {
+        const locked = await client("payer_statements")
+          .where({ id: existing.payer_statement_id })
+          .forUpdate()
+          .first("status");
+        if (locked && locked.status !== "open") {
+          throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by editing a billed line");
+        }
       }
-    }
-    return invoice;
+      const [edited] = await client("invoices")
+        .where({ id })
+        .whereIn("status", ["draft", "scheduled"])
+        .whereNull("stripe_payment_intent_id")
+        .whereNull("annual_prepay_term_id")
+        .whereNotExists(function () {
+          this.select(db.raw("1"))
+            .from("payment_plans")
+            .whereRaw("payment_plans.invoice_id = invoices.id")
+            .where("payment_plans.status", "active");
+        })
+        .update(data)
+        .returning("*");
+      if (!edited) {
+        throw new Error(
+          "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      // Phase 2: an edited accrued invoice changes the statement total — reroll in
+      // the SAME transaction so a reroll failure ABORTS the edit; we never commit
+      // a changed invoice beside a stale statement subtotal/tax/total.
+      if (edited.payer_statement_id) {
+        await require("./payer-statements").rollupStatement(edited.payer_statement_id, client);
+      }
+      return edited;
+    };
+    // An accrued invoice's edit + statement reroll must commit atomically; other
+    // invoices keep the existing single-statement write (no transaction).
+    return existing.payer_statement_id ? db.transaction(runEdit) : runEdit(db);
   },
 
   async voidInvoice(id) {
