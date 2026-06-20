@@ -902,13 +902,13 @@ async function updateCustomer(customerId, updates) {
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
 
-  // Converting a lead into a customer stage → stamp member_since (the
-  // conversion date) so member_since metrics count them. Matches the route
-  // lifecycle: overwrite a lead's intake date; keep a former customer's start.
-  if (clean.pipeline_stage
-      && ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
-      && !['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(before.pipeline_stage)) {
-    clean.member_since = etDateString();
+  // Moving into a customer stage → stamp member_since so the metrics count them.
+  // Matches the route lifecycle: a pre-sale lead gets the conversion date
+  // (overwriting its intake date); a current/former customer keeps its real
+  // start but is filled if missing (e.g. a churned/dormant reactivation).
+  if (clean.pipeline_stage && ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
+    const wasCustomer = ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(before.pipeline_stage);
+    clean.member_since = wasCustomer ? (before.member_since || etDateString()) : etDateString();
   }
 
   await db('customers').where('id', customerId).update(clean);
