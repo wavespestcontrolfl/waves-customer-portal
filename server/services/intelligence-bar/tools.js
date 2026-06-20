@@ -187,6 +187,37 @@ IMPORTANT: Always show the list of affected customers and ask for confirmation b
     },
   },
   {
+    name: 'update_property_access',
+    description: `Update the STRUCTURED property-access and pet fields on a customer's property profile (the property_preferences record). Use this — not the free-text customer notes — for gate/lockbox/garage codes, pet info, parking/access details, and how a tech should keep pets safe. These fields render as their own labeled alerts on the technician's stop card (e.g. "Gate: 9292", a pet warning, a pet-securing reminder), so they are far more reliable in the field than a free-text note.
+
+Pass ONLY the fields you want to set or change:
+- neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code for the home/yard gate, neighborhood_gate_code for a community gate)
+- parking_notes / side_gate_access / access_notes — where to park / how to get in
+- pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property
+- pets_secured_plan — how the tech should keep pets safe, e.g. "keep the screen doors closed during service so the cats don't get out"
+- special_instructions — any other field instruction
+
+IMPORTANT: Always show the operator exactly what you plan to set and ask for approval before saving.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_id: { type: 'string' },
+        neighborhood_gate_code: { type: 'string' },
+        property_gate_code: { type: 'string' },
+        garage_code: { type: 'string' },
+        lockbox_code: { type: 'string' },
+        parking_notes: { type: 'string' },
+        side_gate_access: { type: 'string' },
+        access_notes: { type: 'string' },
+        pet_count: { type: 'integer' },
+        pet_details: { type: 'string' },
+        pets_secured_plan: { type: 'string' },
+        special_instructions: { type: 'string' },
+      },
+      required: ['customer_id'],
+    },
+  },
+  {
     name: 'create_appointment',
     description: `Create a new scheduled service appointment.
 service_type examples: "Pest Control", "Lawn Care Visit", "Mosquito Barrier Treatment", "Tree & Shrub Care", "Quarterly Pest Control".
@@ -261,6 +292,7 @@ async function executeTool(toolName, input) {
       case 'create_customer': return await createCustomer(input);
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
+      case 'update_property_access': return await updatePropertyAccess(input);
       case 'create_appointment': return await createAppointment(input);
       case 'reschedule_appointment': return await rescheduleAppointment(input);
       case 'cancel_appointment': return await cancelAppointment(input);
@@ -961,6 +993,78 @@ async function bulkUpdateCustomers(customerIds, updates) {
     success: true,
     updated_count: count,
     fields_updated: Object.keys(updates),
+  };
+}
+
+
+// Structured property_preferences fields the IB may set. These render as their
+// own labeled alerts on the tech's dispatch stop card (see routes/admin-schedule.js).
+const PROPERTY_ACCESS_FIELDS = {
+  neighborhood_gate_code: 'string', property_gate_code: 'string',
+  garage_code: 'string', lockbox_code: 'string',
+  parking_notes: 'string', side_gate_access: 'string', access_notes: 'string',
+  pet_count: 'int', pet_details: 'string', pets_secured_plan: 'string',
+  special_instructions: 'string',
+};
+
+// Access/lockbox codes are sensitive — never log their values (cf. the
+// crm_notes log redaction in updateCustomer).
+function sanitizePropertyAccess(input) {
+  const clean = {};
+  for (const [key, kind] of Object.entries(PROPERTY_ACCESS_FIELDS)) {
+    if (input[key] === undefined || input[key] === null) continue;
+    if (kind === 'int') {
+      const n = parseInt(input[key], 10);
+      if (Number.isFinite(n) && n >= 0) clean[key] = n;
+    } else {
+      clean[key] = String(input[key]).trim();
+    }
+  }
+  return clean;
+}
+
+// Two-step write (issue #1568): no mutation without confirmed === true, which
+// only /confirm-action attaches server-side. Registered in write-gates.js.
+async function updatePropertyAccess(input) {
+  const customerId = input.customer_id;
+  if (!customerId) return { error: 'customer_id is required' };
+
+  const updates = sanitizePropertyAccess(input);
+  if (Object.keys(updates).length === 0) {
+    return { error: 'No valid property-access fields to update' };
+  }
+
+  const customer = await db('customers').where('id', customerId).first();
+  const customerName = customer
+    ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
+    : null;
+
+  if (input.confirmed !== true) {
+    return {
+      preview: true,
+      customer_id: customerId,
+      customer_name: customerName,
+      would_update: updates,
+      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. After the operator approves, this commits via the confirmation card.',
+    };
+  }
+
+  if (!customer) return { error: 'Customer not found' };
+
+  const now = new Date();
+  await db('property_preferences')
+    .insert({ customer_id: customerId, ...updates, updated_at: now })
+    .onConflict('customer_id')
+    .merge({ ...updates, updated_at: now });
+
+  // Log only which fields changed — codes/notes are sensitive.
+  logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${Object.keys(updates).join(', ')}`);
+
+  return {
+    success: true,
+    customer_id: customerId,
+    customer_name: customerName,
+    updated_fields: Object.keys(updates),
   };
 }
 

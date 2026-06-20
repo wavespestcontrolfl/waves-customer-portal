@@ -90,6 +90,8 @@ const ADMIN_ONLY_TOOL_NAMES = new Set(['create_customer']);
 // are redacted from logs and query telemetry per the PII-in-logs rule.
 const PII_TOOL_NAMES = new Set([
   'create_customer',
+  'update_property_access',
+  'get_stop_details',
   'get_unanswered_threads',
   'get_conversation_thread',
   'search_messages',

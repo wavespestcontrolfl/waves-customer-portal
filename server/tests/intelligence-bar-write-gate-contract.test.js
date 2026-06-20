@@ -91,6 +91,7 @@ function discoverAllTools() {
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
   'create_customer',
+  'update_property_access',
   'optimize_all_routes',
   'optimize_tech_route',
   'assign_technician',
@@ -361,6 +362,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
   const UNCONFIRMED_CALLS = [
     ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
+    ['tools', 'executeTool', 'update_property_access', { customer_id: 'cust-1', pets_secured_plan: 'Keep screen doors closed' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],
