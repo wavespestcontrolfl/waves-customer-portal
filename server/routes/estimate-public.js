@@ -5618,7 +5618,14 @@ async function handleEstimateView(req, res, next) {
     // Admin preview links should render the exact customer page without
     // making the estimate look customer-opened.
     if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, requestIp, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
-      await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
+      // Don't break an in-flight send's `sending` claim (which also gates
+      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
+      // the send's final write reconciles to `viewed` via viewed_at. Any other
+      // non-terminal status flips to `viewed` as before.
+      await db('estimates').where({ id: estimate.id }).update({
+        viewed_at: db.fn.now(),
+        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+      });
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
       } catch (e) {
@@ -10284,9 +10291,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // First-view transition — keep admin preview clicks from making the
     // estimate look customer-opened.
     if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+      // Don't break an in-flight send's `sending` claim (which also gates
+      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
+      // the send's final write reconciles to `viewed` via viewed_at.
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
-        status: 'viewed',
+        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
       }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });

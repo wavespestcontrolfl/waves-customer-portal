@@ -729,11 +729,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   }
 
   const updatePayload = {
-    // Promote the claim to `sent`, but never regress a row the customer already
-    // advanced to `viewed` during the send window — only stamp `sent` when the
-    // row is still our `sending` claim; otherwise keep its current status while
-    // still persisting the send fields below.
-    status: db.raw("CASE WHEN status = 'sending' THEN 'sent' ELSE status END"),
+    // Finalize the claim. The row is held as `sending` for the whole send (a
+    // first view stamps viewed_at but does NOT leave `sending`, so the lock and
+    // the PUT /:id/proposal block stay airtight), so resolve to `viewed` if the
+    // customer opened the link mid-send, otherwise `sent`.
+    status: db.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"),
     sent_at: db.fn.now(),
     scheduled_at: null,
     send_method: null,
@@ -770,22 +770,20 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   } catch (e) {
     logger.warn(`[admin-estimates] estimate_data snapshot update failed for estimate ${estimate.id}: ${e.message}`);
   }
-  // Persist the send fields to the row UNLESS it has reached a terminal/locked
-  // state. A customer can accept while the SMS/email/PDF work is in flight (the
-  // public accept path price-locks + creates invoice/conversion); an
-  // unconditional update would overwrite that accepted, money-bearing state, so
-  // exclude accepted/declined/expired and any price-locked row. A first view
-  // (sending → viewed) is NOT excluded — the send fields still persist and the
-  // CASE above keeps the row `viewed` rather than regressing it to `sent`. When
-  // the write is lost to a terminal/locked state, that state won — leave it and
-  // skip the `sent` downstream effects (which would regress a won lead to sent).
+  // Finalize only while we still hold the `sending` claim. A customer can accept
+  // while the SMS/email/PDF work is in flight (the public accept path price-locks
+  // + creates invoice/conversion and moves the row off `sending`); scoping the
+  // write to status='sending' leaves that accepted, money-bearing state intact.
+  // A first view does NOT leave `sending` (it only stamps viewed_at), so the
+  // normal send still finalizes here. When the claim is lost, a terminal state
+  // won — leave it and skip the `sent` downstream effects (which would regress a
+  // won lead back to sent). price_locked_at is belt-and-suspenders.
   const sentCount = await db('estimates')
-    .where({ id: estimate.id })
+    .where({ id: estimate.id, status: 'sending' })
     .whereNull('price_locked_at')
-    .whereNotIn('status', ['accepted', 'declined', 'expired'])
     .update(updatePayload);
   if (!sentCount) {
-    logger.warn(`[admin-estimates] estimate ${estimate.id} reached a terminal/locked state during send (likely accepted concurrently); preserving its current state.`);
+    logger.warn(`[admin-estimates] estimate ${estimate.id} left the 'sending' claim during send (likely accepted/declined concurrently); preserving its current state.`);
     return {
       sent: true,
       superseded: true,
