@@ -857,6 +857,9 @@ async function createCustomer(input) {
       is_primary_profile: true,
       profile_label: 'Primary',
       pipeline_stage_changed_at: new Date(),
+      // Created directly into a customer stage → stamp the became-a-customer date
+      // (creation = conversion here) so they're counted by member_since metrics.
+      ...(['active_customer', 'won', 'at_risk'].includes(record.pipeline_stage) ? { member_since: etDateString() } : {}),
       crm_notes: input.notes ? String(input.notes).trim() : null,
       active: true,
     }).returning('*');
@@ -899,6 +902,15 @@ async function updateCustomer(customerId, updates) {
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
 
+  // Converting a lead into a customer stage → stamp member_since (the
+  // conversion date) so member_since metrics count them. Matches the route
+  // lifecycle: overwrite a lead's intake date; keep a former customer's start.
+  if (clean.pipeline_stage
+      && ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
+      && !['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(before.pipeline_stage)) {
+    clean.member_since = etDateString();
+  }
+
   await db('customers').where('id', customerId).update(clean);
   const after = await db('customers').where('id', customerId).first();
 
@@ -926,7 +938,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
 
-  const count = await db('customers').whereIn('id', customerIds).update(clean);
+  // Moving rows into a customer stage in bulk → ensure member_since is set so
+  // they're counted by member_since metrics. COALESCE keeps each existing start
+  // (no per-row before-state in a bulk update) and only fills the missing ones.
+  const stageStamp = ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
+    ? { member_since: db.raw('COALESCE(member_since, ?)', [etDateString()]) }
+    : {};
+  const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
 
   logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, updates);
 
