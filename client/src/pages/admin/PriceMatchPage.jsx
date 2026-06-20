@@ -286,12 +286,20 @@ export default function PriceMatchPage() {
                     <ActionButton tone="ghost" disabled={busy} onClick={() => setConfirmSend(false)}>Cancel</ActionButton>
                   </div>
                 )}
-                {detail.status === "sending" && (
+                {detail.status === "sending" && !detail.send_attempted_at && (
                   <>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.amber, fontSize: 13, fontWeight: 600 }}>
-                      <AlertTriangle size={15} /> Sending… if it's stuck, reset it to re-review.
+                      <AlertTriangle size={15} /> Claimed but the send wasn't attempted — if it's stuck, reset to re-review.
                     </span>
                     <ActionButton tone="ghost" icon={RotateCcw} disabled={busy} onClick={() => act(detail.id, "reset")}>Reset</ActionButton>
+                  </>
+                )}
+                {detail.status === "sending" && detail.send_attempted_at && (
+                  <>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.red, fontSize: 13, fontWeight: 600 }}>
+                      <AlertTriangle size={15} /> A send was attempted — it may already have reached {detail.recipient}. Verify in SendGrid before acting; if it went out, dismiss it (never resend).
+                    </span>
+                    <ActionButton tone="ghost" icon={XCircle} disabled={busy} onClick={() => act(detail.id, "dismiss")}>Dismiss</ActionButton>
                   </>
                 )}
                 {detail.status === "sent" && (
