@@ -46,6 +46,7 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => fals
 const {
   clearQuoteRequirementFlags,
   resolveBlockingAutomationForProposal,
+  clearStaleProposalDelivery,
   estimateDataHasBlockingLeadAutomation,
   assertEstimateSendable,
 } = require('../routes/admin-estimates')._internals;
@@ -98,6 +99,27 @@ describe('resolveBlockingAutomationForProposal', () => {
     const data = { automation: { draftEstimateAutomation: { status: 'generated' } } };
     resolveBlockingAutomationForProposal(data);
     expect(data.automation.draftEstimateAutomation.status).toBe('generated');
+  });
+});
+
+describe('clearStaleProposalDelivery (re-authored proposal)', () => {
+  it('drops the prior send\'s emailed-PDF state so re-priced proposals do not over-claim', () => {
+    // A prior send stamped proposalDelivery.pdfEmailed=true for the OLD PDF;
+    // saving a new proposal must clear it so the public link does not keep
+    // saying the edited proposal was emailed until the next send re-stamps it.
+    const data = {
+      proposal: { enabled: true, buildings: [{ name: 'Tower A', lineItems: [] }] },
+      proposalDelivery: { pdfEmailed: true, channels: ['email'], stampedAt: '2026-06-19T00:00:00.000Z' },
+    };
+    clearStaleProposalDelivery(data);
+    expect(data.proposalDelivery).toBeUndefined();
+    expect(data.proposal.enabled).toBe(true);
+  });
+
+  it('is a no-op when no prior delivery state exists', () => {
+    const data = { proposal: { enabled: true, buildings: [] } };
+    clearStaleProposalDelivery(data);
+    expect(data).toEqual({ proposal: { enabled: true, buildings: [] } });
   });
 });
 

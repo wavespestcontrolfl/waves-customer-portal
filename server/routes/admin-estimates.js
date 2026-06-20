@@ -134,6 +134,14 @@ function resolveBlockingAutomationForProposal(data) {
   }
 }
 
+// proposalDelivery records how a PREVIOUS send delivered the proposal PDF
+// (estimate_data.proposalDelivery.pdfEmailed drives the public "PDF emailed"
+// copy). Re-authoring the proposal makes that emailed-PDF claim stale, so drop
+// it when saving — the next send re-stamps it against the new PDF.
+function clearStaleProposalDelivery(data) {
+  if (data && typeof data === 'object') delete data.proposalDelivery;
+}
+
 function leadEstimateAutomationSummary(estimateData) {
   const data = parseEstimateData(estimateData) || {};
   const automation = data.automation || {};
@@ -1221,6 +1229,12 @@ router.put('/:id/proposal', async (req, res, next) => {
       ...existingData,
       proposal: { ...normalized, updatedAt: new Date().toISOString() },
     };
+    // The prior send's delivery state describes the PREVIOUS proposal PDF. Once
+    // the operator re-authors the proposal, that emailed-PDF claim is stale, so
+    // drop it — the public copy falls back to "your account manager has the
+    // proposal" until the next send re-stamps proposalDelivery against the new
+    // PDF. Otherwise the link would keep saying the edited proposal was emailed.
+    clearStaleProposalDelivery(nextData);
     // Make the authored proposal sendable: clear the auto-quote-required
     // booleans the commercial estimate was created with, and resolve any
     // blocking lead/draft automation status. proposal.enabled (set above) is
@@ -1755,6 +1769,7 @@ router.post('/cleanup-demo', async (req, res, next) => {
 router._internals = {
   clearQuoteRequirementFlags,
   resolveBlockingAutomationForProposal,
+  clearStaleProposalDelivery,
   assertEstimateSendable,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
