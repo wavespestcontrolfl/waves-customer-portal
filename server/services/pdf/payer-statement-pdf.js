@@ -107,7 +107,7 @@ function metaBlock(doc, statement, x, y) {
   const rows = [
     ['Statement #', `S-${statement.id}`],
     ['Period', `${dateOnly(statement.period_start)} – ${dateOnly(statement.period_end)}`],
-    ['Issued', dateOnly(statement.finalized_at)],
+    ['Issued', dateTime(statement.finalized_at)], // timestamp → ET calendar date (NOT dateOnly, which is UTC)
     ['Terms', TERM_LABEL[statement.terms_snapshot] || statement.terms_snapshot || '—'],
     ['Due', dateOnly(statement.due_date)],
   ];
