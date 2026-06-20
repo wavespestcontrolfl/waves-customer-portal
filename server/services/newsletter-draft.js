@@ -635,9 +635,14 @@ const DEFAULT_GRASS_LABEL = 'St. Augustine';
 // and grass → their neutral defaults — so a campaign using these tokens never
 // shows a literal "{{city}}" / "{{grass-type}}" in public.
 function stripPersonalizationTokens(content) {
-  return stripGreetingNameToken(content)
-    .split(CITY_TOKEN).join(DEFAULT_CITY_LABEL)
-    .split(GRASS_TYPE_TOKEN).join(DEFAULT_GRASS_LABEL);
+  // require here (not at top) so newsletter-quiz — which requires db — stays a
+  // leaf of newsletter-draft's dependency graph regardless of load order.
+  const { neutralizeQuizTokens } = require('./newsletter-quiz');
+  return neutralizeQuizTokens(
+    stripGreetingNameToken(content)
+      .split(CITY_TOKEN).join(DEFAULT_CITY_LABEL)
+      .split(GRASS_TYPE_TOKEN).join(DEFAULT_GRASS_LABEL),
+  );
 }
 
 // Highlights bullets are plain text with a renderer-added "•" marker

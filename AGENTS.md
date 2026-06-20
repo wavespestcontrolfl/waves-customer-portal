@@ -263,8 +263,13 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
   `/api/sendgrid-webhook`, `/api/lead-webhook`,
   `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
-  posts/by-slug/:slug, rss — rate-limited, read-only for posts/rss,
-  double-opt-in for subscribe),
+  posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer — rate-limited,
+  read-only for posts/rss, double-opt-in for subscribe; the quiz token is a
+  per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
+  renders a confirm page only and the subscriber-tag write happens on a
+  deliberate POST form submission (scanner-safe, mirrors confirm), answer key
+  validated against the server-side quiz config, 30 req/min per IP, always
+  returns 200 so it can't probe which tokens/answers are real),
   `/api/public/prep/:token` (read-only, 32-hex token format gate,
   60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
   filters email-only blocks, server-side interpolation, generic 404),

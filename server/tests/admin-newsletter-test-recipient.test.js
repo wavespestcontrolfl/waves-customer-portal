@@ -30,7 +30,7 @@ const adminNewsletterRouter = require('../routes/admin-newsletter');
 
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => {
+  ['where', 'whereRaw', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
   q.first = jest.fn(async () => first);
@@ -89,6 +89,41 @@ describe('admin newsletter test recipient guardrails', () => {
       expect(response.status).toBe(400);
       expect(body.error).toBe('test email recipient must be an internal/admin address');
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+  });
+
+  test('test send neutralizes quiz tokens — operator never previews a literal {{quiz}}', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 'send-1',
+            html_body: '<p>Hi {{quiz}}</p>',
+            text_body: 'Hi {{quiz-text}}',
+            subject: 'Test newsletter',
+            from_email: 'newsletter@wavespestcontrol.com',
+            from_name: 'Waves',
+            reply_to: 'contact@wavespestcontrol.com',
+          },
+        });
+      }
+      if (table === 'newsletter_subscribers') return chain({ first: null });
+      throw new Error(`Unexpected table ${table}`);
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'm1' });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/newsletter/sends/send-1/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'owner@example.com' }),
+      });
+      expect(response.status).toBe(200);
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      const arg = sendgrid.sendOne.mock.calls[0][0];
+      expect(arg.html).not.toContain('{{quiz}}');
+      expect(arg.html).toContain("biggest headache"); // neutral quiz block rendered
+      expect(arg.text).not.toContain('{{quiz-text}}');
     });
   });
 });

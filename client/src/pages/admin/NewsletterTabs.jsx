@@ -264,6 +264,8 @@ export function ComposeView({
   const [previewText, setPreviewText] = useState("");
   const [htmlBody, setHtmlBody] = useState("");
   const [textBody, setTextBody] = useState("");
+  // Ref on the HTML body textarea so the quiz token inserts at the cursor.
+  const htmlBodyRef = useRef(null);
   // Locked event ids from the last AI draft — carried into the /sends save so
   // the sent newsletter can advance events_raw.times_featured for what shipped.
   const [draftEventIds, setDraftEventIds] = useState([]);
@@ -293,6 +295,36 @@ export function ComposeView({
   // Prevents the autopilot preload from binding draftId to the
   // autopilot row when the user has already started typing.
   const userHasEdited = useRef(false);
+
+  // Insert the {{quiz}} engagement-quiz token at the cursor (falls back to
+  // append). At send time each recipient's {{quiz}} resolves to tap-to-answer
+  // buttons whose links tag the subscriber by interest (lawn-interested,
+  // lawn:brown-patch, …) — that tag then feeds the Tags segment filter above.
+  // Also seeds {{quiz-text}} into the plain-text fallback so the text part
+  // carries the quiz too.
+  const insertQuizBlock = useCallback(() => {
+    userHasEdited.current = true;
+    const token = "{{quiz}}";
+    const el = htmlBodyRef.current;
+    setHtmlBody((cur) => {
+      if (cur.includes(token)) return cur; // one quiz per email
+      if (el && typeof el.selectionStart === "number") {
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        return `${cur.slice(0, start)}\n<!-- lawn quiz -->\n${token}\n${cur.slice(end)}`;
+      }
+      return `${cur}\n${token}\n`;
+    });
+    // Only add the text-part quiz when a plain-text fallback already exists —
+    // seeding it into an empty text body would ship a text part that is ONLY
+    // the quiz (worse than no text part, which lets clients render the HTML).
+    setTextBody((cur) =>
+      !cur || cur.includes("{{quiz-text}}") ? cur : `${cur}\n{{quiz-text}}`,
+    );
+    setStatus(
+      "Lawn quiz inserted — each recipient gets tap-to-answer buttons that tag them by interest for segmentation.",
+    );
+  }, []);
 
   // Segment
   const [segmentMode, setSegmentMode] = useState("all"); // all | customers | leads | custom
@@ -884,8 +916,20 @@ export function ComposeView({
           </div>{" "}
           <div>
             {" "}
-            <FieldLabel>HTML body</FieldLabel>{" "}
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <FieldLabel>HTML body</FieldLabel>{" "}
+              <button
+                type="button"
+                onClick={insertQuizBlock}
+                disabled={htmlBody.includes("{{quiz}}")}
+                className="h-7 px-2.5 text-11 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed u-focus-ring"
+                title="Insert a tap-to-answer lawn quiz. Each recipient's answer tags them by interest for segmentation."
+              >
+                {htmlBody.includes("{{quiz}}") ? "Quiz added" : "Insert lawn quiz"}
+              </button>
+            </div>
             <textarea
+              ref={htmlBodyRef}
               value={htmlBody}
               onChange={(e) => { userHasEdited.current = true; setHtmlBody(e.target.value); }}
               rows={16}
@@ -894,7 +938,13 @@ export function ComposeView({
             />{" "}
             <p className="text-11 text-ink-tertiary mt-1">
               The unsubscribe footer + List-Unsubscribe header are added
-              automatically — do not include your own.
+              automatically — do not include your own.{" "}
+              {htmlBody.includes("{{quiz}}") && (
+                <span className="text-ink-secondary">
+                  {"{{quiz}}"} renders per-recipient tap-to-answer buttons that
+                  tag the subscriber by interest.
+                </span>
+              )}
             </p>{" "}
           </div>{" "}
           <div>

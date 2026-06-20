@@ -28,6 +28,7 @@ const { recordTouchpoint } = require('./conversations');
 const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities } = require('./newsletter-draft');
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
+const { QUIZ_HTML_TOKEN, QUIZ_TEXT_TOKEN, DEFAULT_QUIZ_ID, hasQuizToken, renderQuizHtml, renderQuizText } = require('./newsletter-quiz');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -398,7 +399,7 @@ async function sendCampaign(sendId, opts = {}) {
   }
   const existingDeliveries = await db('newsletter_send_deliveries')
     .where({ send_id: send.id })
-    .select('id', 'subscriber_id', 'status', 'ab_variant', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at', 'send_attempt_token');
+    .select('id', 'subscriber_id', 'status', 'ab_variant', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at', 'send_attempt_token', 'engagement_token');
 
   if (opts.existingDeliveriesOnly) {
     const retryableSubscriberIds = Array.from(new Set(existingDeliveries
@@ -461,6 +462,11 @@ async function sendCampaign(sendId, opts = {}) {
   // Batch-loaded once; resolved per recipient in the substitutions map below.
   const personalizationByCustomer = await loadPersonalizationContext(subscribersToSend);
 
+  // Does this campaign carry the in-email quiz? Computed once. When true, each
+  // recipient's {{quiz}} / {{quiz-text}} token resolves to a block whose answer
+  // links carry THAT recipient's engagement_token (newsletter-quiz.js).
+  const quizEnabled = hasQuizToken(send.html_body) || hasQuizToken(send.text_body);
+
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
   const variants = useAb ? ['a', 'b'] : [null];
@@ -503,6 +509,13 @@ async function sendCampaign(sendId, opts = {}) {
             [GREETING_NAME_TOKEN]: greetingNameValueFor(s.first_name),
             [CITY_TOKEN]: pctx?.city || DEFAULT_CITY_LABEL,
             [GRASS_TYPE_TOKEN]: pctx?.grassLabel || DEFAULT_GRASS_LABEL,
+            // Per-recipient quiz block — answer links carry this recipient's
+            // engagement_token so a click tags the right subscriber. Missing
+            // token (shouldn't happen post-migration) → neutral link-free render.
+            ...(quizEnabled ? {
+              [QUIZ_HTML_TOKEN]: renderQuizHtml({ token: deliveryBySub.get(s.id)?.engagement_token, quizId: DEFAULT_QUIZ_ID }),
+              [QUIZ_TEXT_TOKEN]: renderQuizText({ token: deliveryBySub.get(s.id)?.engagement_token, quizId: DEFAULT_QUIZ_ID }),
+            } : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
