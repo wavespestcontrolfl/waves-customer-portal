@@ -144,7 +144,14 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
   if (!res.ok) {
     const text = await res.text();
     logger.error(`[sendgrid] sendOne ${res.status}: ${text}`);
-    throw new Error(`SendGrid ${res.status}: ${text}`);
+    // Expose the HTTP status (like apiCall does) so callers can tell a definite
+    // rejection (4xx — not accepted, safe to retry after a fix) from an ambiguous
+    // 5xx/network failure (may have been accepted). The price-match draft queue
+    // relies on this to release vs. hold a claimed draft.
+    const err = new Error(`SendGrid ${res.status}: ${text}`);
+    err.status = res.status;
+    err.body = text;
+    throw err;
   }
   return { messageId: res.headers.get('x-message-id') || null };
 }

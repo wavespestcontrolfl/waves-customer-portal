@@ -20,6 +20,21 @@ const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 const staleBefore = (nowMs) => new Date(nowMs - STALE_CLAIM_MS);
 
+// HTTP status of a SendGrid send failure, used to tell a DEFINITE rejection (4xx —
+// not accepted) from an AMBIGUOUS 5xx/network failure (maybe accepted). Prefers the
+// structured err.status that sendOne/apiCall set; falls back to parsing the
+// "SendGrid <status>: ..." message so a definite rejection is still classified even
+// if a mailer throws a plain Error.
+function sendFailureStatus(err) {
+  if (err && Number.isInteger(err.status)) return err.status;
+  const m = err && typeof err.message === 'string' && err.message.match(/SendGrid (\d{3})\b/);
+  return m ? Number(m[1]) : null;
+}
+const isDefiniteRejection = (err) => {
+  const s = sendFailureStatus(err);
+  return s != null && s >= 400 && s < 500;
+};
+
 // Compose + persist a PENDING draft from opportunities. Returns the row, or null
 // when there's nothing proof-backed to ask Mark about (no empty drafts).
 //   matches: see composeMarkEmail — each needs a competitor.source_url (proof).
@@ -129,12 +144,11 @@ async function sendDraft(db, id, { actor } = {}, deps = {}) {
     // guard would strand a clearly-failed send forever, recoverable only by DB
     // surgery). The release is claim-scoped, so it never touches a row we no
     // longer own.
-    const status = err && err.status;
-    if (Number.isInteger(status) && status >= 400 && status < 500) {
+    if (isDefiniteRejection(err)) {
       await db('price_match_drafts')
         .where({ id, status: 'sending', claim_token: token })
         .update({ status: 'pending', claimed_at: null, claim_token: null, send_attempted_at: null });
-      return { ok: false, reason: 'rejected', status };
+      return { ok: false, reason: 'rejected', status: sendFailureStatus(err) };
     }
     // Any other failure (5xx, or a network error/timeout with no status) is
     // AMBIGUOUS — SendGrid may have accepted the email — so do NOT reopen the

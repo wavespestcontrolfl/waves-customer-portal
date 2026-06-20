@@ -179,6 +179,18 @@ describe('price-match-draft service', () => {
     expect(retry.ok).toBe(true); // retryable, not stranded
   });
 
+  test('a 4xx rejection is classified from the message even if err.status is absent', async () => {
+    // Guards against the real sendOne shape: a plain Error("SendGrid 400: ...") must
+    // still release the claim, not be mistaken for an ambiguous failure.
+    const db = makeFakeDb();
+    const draft = await createDraft(db, [proofMatch]);
+    const sendOne = jest.fn(async () => { throw new Error('SendGrid 403: forbidden sender'); }); // no .status
+    const result = await sendDraft(db, draft.id, {}, { sendgrid: { sendOne } });
+    expect(result).toEqual({ ok: false, reason: 'rejected', status: 403 });
+    expect(db._rows[0].status).toBe('pending');
+    expect(db._rows[0].send_attempted_at).toBeNull();
+  });
+
   test('a 5xx / network failure stays claimed+attempted (ambiguous, no auto-resend)', async () => {
     const db = makeFakeDb();
     const draft = await createDraft(db, [proofMatch]);
