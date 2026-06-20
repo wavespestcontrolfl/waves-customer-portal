@@ -4531,6 +4531,16 @@ function reportCopyCacheSet(key, value) {
   if (_reportCopyCache.size > 200) _reportCopyCache.delete(_reportCopyCache.keys().next().value);
 }
 
+// Reject empty or liability-laden AI report copy before it reaches the operator
+// (mirrors the photo-analysis / ai-summary banned-copy guards). Returns null
+// when the copy is acceptable, else a short reason string for the retry/error path.
+function reportCopyRejection(report) {
+  const text = String(report || '').trim();
+  if (!text) return 'empty';
+  const banned = ActivityIndicators.findBannedCustomerCopy(text);
+  return banned.length ? `banned:${banned.join(',')}` : null;
+}
+
 // POST /api/admin/schedule/generate-report — AI customer-facing service report copy
 router.post('/generate-report', async (req, res) => {
   try {
@@ -4633,7 +4643,7 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 ## USING THE GROUNDING CONTEXT (when present)
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
-- **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (improvement, a recurring pest, a resolved issue). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
+- **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (an improvement, a recurring pest, a previously-noted concern that has eased). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
 - **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
 - **Product safety / re-entry**: when label REI / rainfast data is given, ground re-entry and rainfast guidance in it. Never invent a number that isn't there.
@@ -4702,7 +4712,7 @@ The examples below show STRUCTURE, LENGTH, and PROVENANCE handling ONLY. Their e
 
 WHAT WE DID
 
-Today's service focused on exterior perimeter management and entry-point treatment around the home's foundation. A fipronil-based residual was applied along structural transitions, door frames, and common harborage areas. Cobwebs were cleared from eaves and overhangs to reduce established pest activity and improve visibility along the foundation line.
+Today's service focused on exterior perimeter management and entry-point treatment around the home's foundation. A fipronil-based residual was applied along structural transitions, door frames, and common harborage areas. Cobwebs were swept from eaves and overhangs to reduce established pest activity and improve visibility along the foundation line.
 
 WHAT WE FOUND
 
@@ -4843,15 +4853,34 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true });
 
-    const msg = await anthropic.messages.create({
-      model,
-      max_tokens: 800,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: fullUserMessage }],
-    });
+    // Generate, validate, and retry once if the model returns empty copy or
+    // liability language ("guaranteed", "eliminated", ...). Never cache or
+    // return unsafe/empty copy as a success — the other AI copy paths
+    // (photo-analysis, ai-summary) guard the same way.
+    let report = '';
+    let rejection = 'empty';
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const msg = await anthropic.messages.create({
+        model,
+        max_tokens: 800,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: fullUserMessage }],
+      });
+      report = (msg.content?.[0]?.text || '').trim();
+      rejection = reportCopyRejection(report);
+      if (!rejection) break;
+      logger.warn(`[generate-report] attempt ${attempt} rejected (${rejection})${attempt < 2 ? '; retrying' : ''}`);
+    }
+    if (rejection) {
+      return res.status(502).json({
+        error: rejection === 'empty'
+          ? 'AI returned empty report copy. Please try again.'
+          : 'AI report copy failed safety checks. Please try again.',
+        type: 'report_copy_unsafe',
+      });
+    }
 
-    const report = msg.content?.[0]?.text || '';
-    if (report) reportCopyCacheSet(cacheKey, report);
+    reportCopyCacheSet(cacheKey, report);
     logger.info('[generate-report] generated', { hasGrounding: !!groundingCustomerId, ...contextSignals });
     res.json({ report });
   } catch (err) {
@@ -5436,6 +5465,7 @@ router._test = {
   getAssignmentTargetIds,
   recurringTemplateTechnicianId,
   shouldPreserveParentTemplateForThisOnlyAssignment,
+  reportCopyRejection,
 };
 
 module.exports = router;
