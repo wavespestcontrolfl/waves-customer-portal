@@ -80,7 +80,7 @@ One open statement per `(payer_id, period)`. Accrued invoices attach to it.
 | `status` | varchar(20) | `open` → `finalized` → `sent` → `viewed` → `processing` → `paid`, or → `void`. `processing` = a payment PI is in flight (esp. ACH, which sits in `processing` for days); it blocks any second collection. (`overdue` is derived from `due_date`, not stored.) |
 | `stripe_payment_intent_id` | varchar | the active/last PI — set when a charge is initiated, used to gate concurrent collection + reconcile the webhook idempotently |
 | `terms_snapshot` | varchar(24) | the payer's `payment_terms` frozen at statement open |
-| `subtotal` / `tax_amount` / `total` | numeric(10,2) | rolled up from accrued invoices; recomputed on attach/detach until `finalized`, frozen after |
+| `subtotal` / `tax_amount` / `total` | numeric(10,2) | rolled up from accrued invoices; recomputed on attach/detach **and on any accrued-child edit/void** while `open`, frozen at `finalized` |
 | `invoice_count` | int | |
 | `token` | varchar(64) unique | public `/pay` token, like `invoices.token` |
 | `payer_snapshot` | jsonb | frozen AP bill-to at finalize (mirror invoices.payer_snapshot) |
@@ -167,20 +167,35 @@ closed. (The homeowner-side sends are already skipped by Phase 1.)
 
 **Block the PAY paths too, not just send.** Blocking delivery is necessary but
 not sufficient: a `create()`d invoice still mints a `/pay` token, and the invoice
-payment paths (`/api/pay/:token` setup/finalize and the Stripe invoice-payment
-path) gate mainly on *collectible status* — so a leaked or admin-visible child
-token could be paid individually, then paid **again** by the statement cascade
-(double collection). The accrued invoice must be uncollectible by ANY path except
-its statement: add an explicit **`payer_statement_id IS NULL`** guard to the
-invoice `/pay` token resolution and the Stripe invoice-PaymentIntent path (fail
-closed → "this charge is billed on your monthly statement"). Statement payment is
-the ONLY collection path for an accrued invoice.
+payment paths gate mainly on *collectible status* — so a leaked or admin-visible
+child token could be paid individually, then paid **again** by the statement
+cascade (double collection). The accrued invoice must be uncollectible by **ANY**
+path except its statement: add an explicit **`payer_statement_id IS NULL`** guard
+(fail closed → "this charge is billed on your monthly statement") to **every**
+invoice collection surface, not just the public link —
+- the public `/api/pay/:token` setup/finalize + the Stripe invoice-PaymentIntent
+  path, AND
+- the admin manual **`record-payment`** route (and any other manual/offline
+  mark-paid endpoint) — an operator could otherwise settle an accrued child
+  directly there and the statement would later settle it again.
+
+Statement payment is the ONLY collection path for an accrued invoice. **This
+send+pay block ships in P1** (the gate's first ON state already creates
+`payer_statement_id` invoices that mint `/pay` tokens), not deferred to the
+statement-payment phase.
 
 **`getOrCreateOpenStatement(payerId, period, trx)`** — transaction-safe, mirrors
 the charge-now mint lock:
 1. `pg_advisory_xact_lock(hashtext('payer.statement.open'), hashtext(payerId||period))`
-2. `SELECT ... WHERE payer_id=? AND period_start=? AND status='open'` → reuse, else insert.
-   The partial unique index is the backstop if two trx race the lock.
+2. `SELECT ... WHERE payer_id=? AND period_start=? AND status='open'` → reuse, else
+   **first check for a non-`open` (finalized/sent/paid) statement in that same
+   period**; if one exists the month already closed, so do NOT insert a second
+   open row for a closed period (it would carry a stale window/due-date and miss
+   the monthly close) — **advance to the next open period** and accrue there. A
+   late completion after close therefore lands on the *current* open statement,
+   not a phantom one for last month. Only when no statement exists for the resolved
+   open period do we insert. The partial unique index
+   `(payer_id, period_start) WHERE status='open'` is the backstop if two trx race.
 
 **Accrual must be atomic even when the caller has no transaction.** Accept /
 charge-now already pass `database: trx`, so the invoice insert + statement attach
@@ -194,6 +209,15 @@ if a later write fails. **`create()` must open its OWN transaction when no
 advisory `xact` lock is held for the whole unit regardless of caller. The partial
 unique index on `(payer_id, period_start) WHERE status='open'` is the final
 backstop.
+
+**Accrued children can still be edited/voided — keep the rollup honest.** An
+accrued invoice stays `draft`, so the existing reprice/void paths can change it
+after it attached. While the parent is `open`, those paths MUST recompute the
+parent `subtotal`/`tax`/`total`/`invoice_count` (parent-aware update/void hooks)
+or the PDF and payment amount go stale. Once the parent is `finalized`/`sent`, the
+child is part of a billed document: **block** the edit/void (or apply it as a
+credit line on the next period's statement, per decision #4 mid-period edits) —
+never silently mutate a sent statement's total.
 
 **Charge-now special case** (`admin-schedule.js`): today it hard-rejects ALL
 payer invoices ("do not collect in person"). For NET payers we relax it to *mint
@@ -306,7 +330,12 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
   rejection for *individual* payer invoices; add a statement reconcile that marks
   the statement paid and **cascades** (see below). Off-platform check/ACH/wire is
   the common AP path. Reconcile must **refuse while `processing`/`paid`** (an
-  online PI is in flight or already settled) so an operator can't double-collect.
+  online PI is confirmed-in-flight or already settled) AND, before recording the
+  offline payment, **cancel any current unconfirmed (`requires_*`)
+  `stripe_payment_intent_id`** and ignore its later `canceled` webhook — otherwise
+  an AP who still has the pay page open could confirm that stale PI after the
+  operator records the check/wire, and Stripe would collect before the portal can
+  reject it (paid offline *and* online). Cancel-then-reconcile in one transaction.
 - **Webhook (`stripe-webhook.js`):** PaymentIntent metadata carries
   `statement_id`; resolve the full PI lifecycle **idempotently** (keyed on the PI
   id): `processing` → keep `processing`; `succeeded` → `paid` + cascade;
@@ -387,10 +416,13 @@ Each PR ships behind a gate and is independently revertable; nothing changes for
   `invoices.payer_statement_id`, `payments` payer cols); `getOrCreateOpenStatement`
   (advisory lock + partial unique index); `invoice.create()` links NET-terms payer
   invoices to the open statement + rollup, opening its own trx when no caller trx;
-  the **centralized** "refuse to individually send a `payer_statement_id` invoice"
-  guard in `sendViaSMSAndEmail` / `sendInvoiceEmail`. Gate `GATE_PAYER_STATEMENTS`
-  off ⇒ everyone stays `due_on_receipt`. Admin can *view* accumulating statements
-  at `/admin/payers/:id`. No delivery yet.
+  the **centralized** `payer_statement_id IS NOT NULL` refusal on BOTH the send
+  helpers (`sendViaSMSAndEmail` / `sendInvoiceEmail`) AND every collection surface
+  (`/api/pay/:token` + Stripe invoice-PI + admin `record-payment` / reconcile) —
+  ships in P1, because the gate's first ON state already mints accrued invoices
+  with `/pay` tokens. Gate `GATE_PAYER_STATEMENTS` off ⇒ everyone stays
+  `due_on_receipt`. Admin can *view* accumulating statements at `/admin/payers/:id`.
+  No delivery yet.
 - **P2 — close + deliver.** Statement finalize (freeze totals + snapshot +
   due_date), consolidated PDF, AP delivery (`payer-statement-email.js`); manual
   "close & send" first, then a monthly cron (dry-run preview before the first real
