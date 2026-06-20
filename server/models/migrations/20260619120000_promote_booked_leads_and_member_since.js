@@ -70,17 +70,30 @@ exports.up = async function up(knex) {
   `);
 
   // 2) Fill missing member_since on existing customer-stage rows. Prefer the
-  // stage-change timestamp (~when they converted) over created_at (the lead
-  // intake date), so tenure/member-since isn't skewed early for leads that
-  // converted later.
+  // first paid/completed (conversion evidence), then the stage-change timestamp
+  // — but NOT for at_risk, whose pipeline_stage_changed_at is the went-at-risk
+  // time, not the conversion — then created_at (lead intake) last.
   await knex.raw(`
-    UPDATE customers
+    UPDATE customers AS c
     SET member_since = COALESCE(
-          (pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date,
-          (created_at AT TIME ZONE 'America/New_York')::date)
-    WHERE deleted_at IS NULL
-      AND pipeline_stage IN ('active_customer', 'won', 'at_risk')
-      AND member_since IS NULL
+          t.first_txn,
+          CASE WHEN c.pipeline_stage <> 'at_risk'
+               THEN (c.pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date END,
+          (c.created_at AT TIME ZONE 'America/New_York')::date)
+    FROM (
+      SELECT cc.id,
+        LEAST(
+          (SELECT MIN((COALESCE(i.paid_at, i.created_at) AT TIME ZONE 'America/New_York')::date) FROM invoices i WHERE i.customer_id = cc.id AND (i.paid_at IS NOT NULL OR i.status = 'paid')),
+          (SELECT MIN(s.scheduled_date) FROM scheduled_services s WHERE s.customer_id = cc.id AND s.status = 'completed'),
+          (SELECT MIN(r.service_date) FROM service_records r WHERE r.customer_id = cc.id AND r.status = 'completed')
+        ) AS first_txn
+      FROM customers cc
+      WHERE cc.deleted_at IS NULL AND cc.pipeline_stage IN ('active_customer', 'won', 'at_risk') AND cc.member_since IS NULL
+    ) AS t
+    WHERE c.id = t.id
+      AND c.deleted_at IS NULL
+      AND c.pipeline_stage IN ('active_customer', 'won', 'at_risk')
+      AND c.member_since IS NULL
   `);
 };
 

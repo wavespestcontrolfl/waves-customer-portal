@@ -962,25 +962,34 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         }).returning('*');
         await createDefaultCustomerRows(trx, created.id);
         customerId = created.id;
-      } else if (existingCustomer && !['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage)) {
-        // Reused an existing customer that's still in a lead (or churned) stage —
-        // promote it on booking (the create branch above inserts stage='won').
-        // Without this, a booked lead whose customer row already exists stays
-        // stuck at new_lead and is under-counted in the customer KPIs. Clear any
-        // churn stamp too, so re-booking a churned customer doesn't leave it
-        // marked both won and churned.
-        await trx('customers').where({ id: customerId }).update({
-          pipeline_stage: 'won',
-          pipeline_stage_changed_at: new Date(),
+      } else if (existingCustomer) {
+        // Reused an existing customer. Booking always means an ACTIVE customer,
+        // so split two concerns:
+        //  1) stage promotion — only when they're still in a lead/churned stage
+        //     (the create branch above inserts 'won'); without it a booked
+        //     customer stays stuck at new_lead and is under-counted.
+        //  2) reactivation — always flip a deactivated or churn-stamped row back
+        //     to active and clear churn, even one already in a customer stage
+        //     (a deactivated active_customer who books should be live again).
+        const inCustomerStage = ['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage);
+        const customerUpdates = {};
+        if (!inCustomerStage) {
+          customerUpdates.pipeline_stage = 'won';
+          customerUpdates.pipeline_stage_changed_at = new Date();
           // Conversion date: keep a former customer's real start (churned/
           // dormant re-booking), but overwrite a lead's intake date with today.
-          member_since: ['churned', 'dormant'].includes(existingCustomer.pipeline_stage)
+          customerUpdates.member_since = ['churned', 'dormant'].includes(existingCustomer.pipeline_stage)
             ? (existingCustomer.member_since || etDateString())
-            : etDateString(),
-          active: true,
-          churned_at: null,
-          churn_reason: null,
-        });
+            : etDateString();
+        }
+        if (!inCustomerStage || existingCustomer.active === false || existingCustomer.churned_at) {
+          customerUpdates.active = true;
+          customerUpdates.churned_at = null;
+          customerUpdates.churn_reason = null;
+        }
+        if (Object.keys(customerUpdates).length) {
+          await trx('customers').where({ id: customerId }).update(customerUpdates);
+        }
       }
 
       // Create the scheduled service. Only set workflow columns the schema has.
