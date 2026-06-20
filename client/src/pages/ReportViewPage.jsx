@@ -808,58 +808,17 @@ function applicationManufacturer(app = {}) {
   return app.product?.manufacturer || '';
 }
 
-// Watering guidance shown on the lawn report so each product answers the
-// customer's "do I water after this, or not?" question. Prefer the per-product
-// irrigation note recorded from the label (DB override); otherwise fall back to
-// conservative, label-aligned defaults keyed off the product type. All copy
-// defers to the technician's service notes. Agronomy defaults pending Adam's
-// sign-off.
+// Product-specific watering guidance for the lawn report, sourced ONLY from the
+// approved per-product irrigation note (label-derived `irrigation_notes`). We do
+// not synthesize watering intervals from product category/name — that would
+// invent label-like guidance, which the product-safety convention forbids
+// (see server report-copy-context.js: "do not invent numbers"). When a product
+// has no approved watering note, returns null and the report shows the neutral,
+// service-note-deferring guidance carried once in the section explainer.
 export function lawnWateringGuidance(app = {}) {
   const note = String(app.product?.irrigation_notes || '').trim();
-  if (note) return { headline: 'Follow the watering note from your technician', detail: note };
-  const category = String(app.product?.category || '').toLowerCase();
-  const type = String(app.product?.product_type || '').toLowerCase();
-  const name = String(app.product?.name || '').toLowerCase();
-  if (category.includes('herb') || name.includes('weed') || name.includes('herbicide')) {
-    return {
-      headline: 'Keep the lawn dry for about 24–48 hours',
-      detail: 'Hold off on watering and mowing for roughly 24 to 48 hours so the treatment can fully absorb into the weeds. Rainfall after the product has dried will not reduce the results.',
-    };
-  }
-  if (category.includes('fung')) {
-    return {
-      headline: 'Let it dry — hold watering for the rest of the day',
-      detail: 'Avoid watering for the remainder of the day so the fungicide can dry onto the leaf surface and protect the turf.',
-    };
-  }
-  if (type === 'fertilizer' || category.includes('fert') || category.includes('micronutrient') || name.includes('manganese')) {
-    return {
-      headline: 'Water it in within 24 hours',
-      detail: 'About a quarter inch of water within 24 hours helps move the nutrients down to the root zone where your turf can use them.',
-    };
-  }
-  if (type === 'wetting_agent' || category.includes('surfactant') || category.includes('adjuvant')) {
-    return {
-      headline: 'Water in lightly to activate',
-      detail: 'A short watering after the application activates the product so it can move moisture evenly through the soil.',
-    };
-  }
-  if (type === 'biostimulant' || category.includes('soil')) {
-    return {
-      headline: 'A light watering helps',
-      detail: 'A brief watering after the application moves the product into the soil where it supports the roots.',
-    };
-  }
-  if (category.includes('insectic')) {
-    return {
-      headline: 'Water it in after application',
-      detail: 'A light watering moves the product down into the soil and thatch where it stays active.',
-    };
-  }
-  return {
-    headline: 'Normal watering is fine once it dries',
-    detail: 'Once the application has dried, your usual watering schedule is fine unless the service notes above say otherwise.',
-  };
+  if (!note) return null;
+  return { headline: 'Watering note for this product', detail: note };
 }
 
 function isRenderableTreatmentApplication(app = {}) {
@@ -2556,9 +2515,9 @@ function AppliedProductsSection({ data, mode = 'live' }) {
       {isLawn && (
         <div className="manufacturer-guideline-note">
           <strong>Following the manufacturer&apos;s directions.</strong> Every product below is
-          applied to its manufacturer&apos;s label directions. Each card lists who makes the
-          product and the manufacturer&apos;s guidance for watering afterward, so you know
-          exactly how to care for your lawn between visits.
+          applied to its manufacturer&apos;s label directions, and each card shows who makes it.
+          Once today&apos;s application has dried, your normal watering schedule is fine — your
+          technician&apos;s service notes call out anything specific for today&apos;s products.
         </div>
       )}
       {applications.length > 0 && (

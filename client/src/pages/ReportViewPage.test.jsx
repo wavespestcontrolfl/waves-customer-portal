@@ -255,33 +255,19 @@ describe('ReportViewPage report chrome helpers', () => {
 });
 
 describe('ReportViewPage lawn watering guidance', () => {
-  it('prefers the recorded per-product irrigation note when present', () => {
+  it('surfaces the approved per-product irrigation note when present', () => {
     const guidance = lawnWateringGuidance({
-      product: { category: 'fertilizer', irrigation_notes: 'Water in only when the service report says so.' },
+      product: { category: 'adjuvant', irrigation_notes: 'Water or rainfall may be needed after application when directed by the service report.' },
     });
-    expect(guidance.detail).toBe('Water in only when the service report says so.');
-    expect(guidance.headline).toMatch(/follow the watering note/i);
+    expect(guidance.detail).toBe('Water or rainfall may be needed after application when directed by the service report.');
+    expect(guidance.headline).toMatch(/watering note/i);
   });
 
-  it('tells customers to water in nutrient applications', () => {
-    expect(lawnWateringGuidance({ product: { category: 'fertilizer', product_type: 'fertilizer' } }).headline)
-      .toMatch(/water it in/i);
-    expect(lawnWateringGuidance({ product: { name: 'High Manganese Combo', category: 'micronutrient' } }).headline)
-      .toMatch(/water it in/i);
-  });
-
-  it('tells customers to keep weed treatments dry', () => {
-    const guidance = lawnWateringGuidance({ product: { category: 'herbicide', name: 'Drive XLR8' } });
-    expect(guidance.headline).toMatch(/keep the lawn dry/i);
-    expect(guidance.detail).toMatch(/24 to 48 hours/i);
-  });
-
-  it('tells customers to let fungicides dry before watering', () => {
-    expect(lawnWateringGuidance({ product: { category: 'fungicide' } }).headline).toMatch(/let it dry/i);
-  });
-
-  it('falls back to normal-watering guidance for unrecognized products', () => {
-    expect(lawnWateringGuidance({ product: { category: 'unknown' } }).headline).toMatch(/normal watering/i);
+  it('does not invent watering intervals from product category when there is no label note', () => {
+    expect(lawnWateringGuidance({ product: { category: 'fertilizer', product_type: 'fertilizer' } })).toBeNull();
+    expect(lawnWateringGuidance({ product: { category: 'herbicide', name: 'Drive XLR8' } })).toBeNull();
+    expect(lawnWateringGuidance({ product: { category: 'fungicide' } })).toBeNull();
+    expect(lawnWateringGuidance({ product: {} })).toBeNull();
   });
 });
 
