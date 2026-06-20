@@ -11,6 +11,7 @@ const {
 } = require('../services/intelligence-bar/dashboard-tools');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
+const { autopayActivePredicate } = require('../services/autopay-eligibility');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -477,10 +478,14 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     // the UTC-midnight boundary; created_at (creation, not issuance) is only a
     // last-resort fallback the issued-filter never actually reaches.
     const issueDateET = "(COALESCE(sent_at, paid_at, created_at) AT TIME ZONE 'America/New_York')::date";
+    // Terminal/uncollectible invoice statuses kept out of both numerator and
+    // denominator: drafts (never issued), void + both canceled/cancelled spellings
+    // (never owed), and refunded (collected then given back → net not collected).
+    const UNCOLLECTIBLE_STATUSES = ['void', 'cancelled', 'canceled', 'refunded', 'draft'];
     let collectionRate = null, collectedCount = 0, issuedCount = 0, collectedTotal = 0, billedTotal = 0;
     try {
       const cAgg = await db('invoices')
-        .whereNotIn('status', ['void', 'cancelled', 'draft'])
+        .whereNotIn('status', UNCOLLECTIBLE_STATUSES)
         .where(function issued() {
           this.whereNotNull('sent_at').orWhereNotNull('paid_at');
         })
@@ -502,12 +507,13 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     }
 
     // Autopay coverage — share of LIVE customers (CUSTOMER_STAGES, real customers
-    // not leads) actually on CHARGEABLE autopay. Mirrors the SQL equivalent of
-    // customerOnAutopay() (services/autopay-eligibility.js), NOT the raw
-    // autopay_enabled flag: not disabled, not paused, and has a default Stripe
-    // autopay payment method with a stripe id — and when ACH isn't active, only a
-    // card qualifies. (Per-customer customerOnAutopay() would be one query per
-    // row; this is the set form for an aggregate.) Point-in-time, not windowed.
+    // not leads) actually on CHARGEABLE autopay, NOT the raw autopay_enabled flag.
+    // Uses the shared autopayActivePredicate() (services/autopay-eligibility.js) —
+    // the single source of truth also used by Billing Recovery — so the coverage
+    // count can't drift from the "would we actually charge them" definition (not
+    // disabled, not paused, default Stripe autopay method present, ACH-active or
+    // card). Set form so it's one aggregate query, not one per customer.
+    // Point-in-time, not windowed.
     let autopayPct = null, autopayCount = 0, customerBase = 0;
     try {
       const liveBase = (qb) => qb
@@ -515,21 +521,9 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       const baseRow = await liveBase(db('customers')).count({ c: '*' }).first();
       customerBase = parseInt(baseRow?.c || 0);
 
+      const { sql: autopaySql, binding: autopayBinding } = autopayActivePredicate();
       const coveredRow = await liveBase(db('customers as c'))
-        .whereRaw('c.autopay_enabled IS DISTINCT FROM false')
-        .where(function notPaused() {
-          this.whereNull('c.autopay_paused_until')
-            .orWhereRaw('c.autopay_paused_until::date < ?', [todayStr]);
-        })
-        .whereExists(function chargeableMethod() {
-          this.select(db.raw('1')).from('payment_methods as pm')
-            .whereRaw('pm.customer_id = c.id')
-            .where('pm.processor', 'stripe')
-            .where('pm.is_default', true)
-            .where('pm.autopay_enabled', true)
-            .whereNotNull('pm.stripe_payment_method_id')
-            .whereRaw("(c.ach_status IS NULL OR c.ach_status = 'active' OR pm.method_type = 'card')");
-        })
+        .whereRaw(autopaySql, [autopayBinding])
         .count({ c: '*' }).first();
       autopayCount = parseInt(coveredRow?.c || 0);
       autopayPct = customerBase > 0 ? Math.round((autopayCount / customerBase) * 1000) / 10 : null;

@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const InvoiceService = require('../services/invoice');
-const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { customerOnAutopay, autopayActivePredicate } = require('../services/autopay-eligibility');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
@@ -78,30 +78,6 @@ const HAS_INVOICE_SQL = `EXISTS (
 )`;
 
 const INTERNAL_NAME_SQL = "LOWER(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,''))";
-
-// Active-autopay predicate mirroring customerOnAutopay(): keyed on the canonical
-// default Stripe payment_methods row (not the customers pointer), with the ET
-// pause check and ACH-not-active → card-only fallback. The single `?` binds
-// today's ET date. Returns { sql, binding } so callers can NOT() it.
-function autopayActivePredicate() {
-  const sql = `(
-    c.autopay_enabled IS NOT FALSE
-    AND NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= ?::date)
-    AND EXISTS (
-      SELECT 1 FROM payment_methods pm
-      WHERE pm.customer_id = c.id
-        AND pm.processor = 'stripe'
-        AND pm.is_default = true
-        AND pm.autopay_enabled = true
-        AND pm.stripe_payment_method_id IS NOT NULL
-        AND (
-          c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'
-          OR pm.method_type = 'card'
-        )
-    )
-  )`;
-  return { sql, binding: etDateString() };
-}
 
 function clampDays(raw) {
   const n = parseInt(raw, 10);
