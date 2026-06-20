@@ -1158,10 +1158,14 @@ router.get('/:date?', async (req, res, next) => {
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push(`Gate: ${prefs.neighborhood_gate_code}`);
       if (prefs?.property_gate_code) alerts.push(`Yard gate: ${prefs.property_gate_code}`);
+      if (prefs?.garage_code) alerts.push(`Garage: ${prefs.garage_code}`);
+      if (prefs?.lockbox_code) alerts.push(`Lockbox: ${prefs.lockbox_code}`);
       if (prefs?.pet_count > 0) alerts.push(`🐾 ${prefs.pet_details || `${prefs.pet_count} pet(s)`}`);
       if (prefs?.pets_secured_plan) alerts.push(`Pet plan: ${prefs.pets_secured_plan}`);
       if (prefs?.chemical_sensitivities) alerts.push(`⚠️ Chemical sensitivity: ${prefs.chemical_sensitivity_details || 'yes'}`);
       if (prefs?.access_notes) alerts.push(prefs.access_notes);
+      if (prefs?.side_gate_access) alerts.push(`Side gate: ${prefs.side_gate_access}`);
+      if (prefs?.parking_notes) alerts.push(`Parking: ${prefs.parking_notes}`);
       if (prefs?.special_instructions) alerts.push(prefs.special_instructions);
       if (s.notes) alerts.push(s.notes);
 
