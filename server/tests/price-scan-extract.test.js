@@ -93,6 +93,12 @@ describe('price-scan extract', () => {
       expect(offerPrice({ price: '89-95' })).toBeNull();
       expect(offerPrice({ lowPrice: '1,099.99' })).toBe(1099.99);
     });
+    test('non-USD string prices are rejected (no priceCurrency to flag them)', () => {
+      expect(offerPrice({ price: 'CA$95' })).toBeNull();
+      expect(offerPrice({ price: '€95' })).toBeNull();
+      expect(offerPrice({ price: 'EUR 95' })).toBeNull();
+      expect(offerPrice({ price: '95.00' })).toBe(95); // plain string price ok
+    });
   });
 
   describe('extractJsonLdOffer', () => {

@@ -73,6 +73,10 @@ function offerPrice(offer) {
   if (typeof raw === 'number') {
     return Number.isFinite(raw) && raw > 0 ? Math.round(raw * 100) / 100 : null;
   }
+  // A string price carrying a non-USD currency marker ("CA$95", "EUR 95") is
+  // rejected — collectJsonLdOffers defaults a missing priceCurrency to USD, so
+  // this would otherwise be ranked/reported as USD past the non-USD guards.
+  if (hasNonUsdCurrency(String(raw))) return null;
   // String prices go through the strict single-token parser, so an ambiguous
   // range like "$95.00-99" or "89-95" is rejected instead of being mashed into
   // a bogus number by stripping the separators.
