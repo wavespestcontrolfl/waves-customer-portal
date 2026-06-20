@@ -66,6 +66,14 @@ describe('WaveGuard portal alignment script helpers', () => {
     expect(representativePlanKeys(['pest_control_quarterly', ...variants, 'mosquito_monthly'])).toEqual(['pest_control_quarterly', 'lawn_care_monthly', 'mosquito_monthly']);
   });
 
+  test('prefers the catalog service_key cadence over a generic service_type', () => {
+    // Rows whose cadence lives in service_id surface svc.service_key via the join;
+    // detection must read it instead of falling back to the generic family plan.
+    expect(detectServiceKeys({ service_type: 'Lawn Care', service_key: 'lawn_care_monthly' })).toEqual(['lawn_care_monthly']);
+    expect(detectServiceKeys({ service_type: 'Pest Control', service_key: 'pest_general_bimonthly' })).toEqual(['pest_control_bimonthly']);
+    expect(detectServiceKeys({ service_type: 'Tree & Shrub', service_name: 'Tree & Shrub Every 6 Weeks' })).toEqual(['tree_shrub_6week']);
+  });
+
   test('does not treat one-time termite or rodent work as WaveGuard portal services', () => {
     expect(detectServiceKeys({ service_type: 'Termite Inspection' })).toEqual([]);
     expect(detectServiceKeys({ service_type: 'Rodent Exclusion' })).toEqual([]);

@@ -351,11 +351,25 @@ async function candidateCustomers(customerColumns) {
 }
 
 async function scheduledRowsForCustomer(customerId) {
-  return db('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereNotIn('status', TERMINAL_STATUSES)
-    .orderBy('scheduled_date', 'asc')
-    .select('*');
+  // Mirror syncCustomerWaveGuardPlanFromScheduledServices(): join the services
+  // catalog so detectServiceKeys() sees svc.service_key / svc.name for rows whose
+  // cadence lives in service_id while service_type is generic (e.g. a
+  // lawn_care_monthly service recorded as "Lawn Care"). Falls back to the plain
+  // select where the catalog is absent (older environments).
+  try {
+    return await db('scheduled_services as s')
+      .leftJoin('services as svc', 's.service_id', 'svc.id')
+      .where({ 's.customer_id': customerId })
+      .whereNotIn('s.status', TERMINAL_STATUSES)
+      .orderBy('s.scheduled_date', 'asc')
+      .select('s.*', 'svc.service_key', 'svc.name as service_name');
+  } catch (_err) {
+    return db('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereNotIn('status', TERMINAL_STATUSES)
+      .orderBy('scheduled_date', 'asc')
+      .select('*');
+  }
 }
 
 async function analyzeCustomer(customer, serviceColumns, customerColumns, serviceIds, today) {
