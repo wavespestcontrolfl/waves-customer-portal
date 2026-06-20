@@ -13,6 +13,7 @@ const {
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
+  isSelfBookedRow,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,
@@ -312,17 +313,27 @@ describe('self-booking plan sync helpers', () => {
     })).toBe(true);
   });
 
-  test('keeps non-activated self-booking visits invoice-on-complete, plan-covered visits not', () => {
+  test('only sets create_invoice_on_complete for plan-covered visits, never for pending self-bookings', () => {
     const plan = SELF_BOOKING_RECURRING_PLANS.pest_control_quarterly || resolveSelfBookedRecurringPlan('Pest Control');
     const serviceColumns = { service_type: {}, is_recurring: {}, recurring_pattern: {}, recurring_ongoing: {}, service_id: {}, create_invoice_on_complete: {}, recurring_parent_id: {} };
 
     // Plan activated -> billed via the plan, not per visit.
     expect(buildScheduledServiceUpdates(plan, serviceColumns, null, true).create_invoice_on_complete).toBe(false);
-    // Plan NOT activated (public self-booking) -> must still invoice on complete.
-    expect(buildScheduledServiceUpdates(plan, serviceColumns, null, false).create_invoice_on_complete).toBe(true);
+    // Plan NOT activated (public self-booking) -> flag left unset so the column default
+    // (operator-driven billing) applies; it carries no per-visit price to invoice.
+    expect(buildScheduledServiceUpdates(plan, serviceColumns, null, false)).not.toHaveProperty('create_invoice_on_complete');
 
     const childArgs = { plan, serviceColumns, serviceId: null, parentService: { id: 1, customer_id: 7 }, scheduledDate: '2026-09-18' };
     expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: true }).create_invoice_on_complete).toBe(false);
-    expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: false }).create_invoice_on_complete).toBe(true);
+    expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: false })).not.toHaveProperty('create_invoice_on_complete');
+  });
+
+  test('identifies self-booked rows so pending bookings do not bootstrap membership', () => {
+    expect(isSelfBookedRow({ source: 'self_booked' })).toBe(true);
+    expect(isSelfBookedRow({ source: 'SELF_BOOKED' })).toBe(true);
+    expect(isSelfBookedRow({ self_booking_id: 42 })).toBe(true);
+    expect(isSelfBookedRow({ source: 'admin' })).toBe(false);
+    expect(isSelfBookedRow({ source: 'direct' })).toBe(false);
+    expect(isSelfBookedRow({})).toBe(false);
   });
 });

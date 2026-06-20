@@ -532,6 +532,11 @@ function inferTierFromServiceCount(serviceCount) {
   return null;
 }
 
+function isSelfBookedRow(row = {}) {
+  return String(row.source || '').toLowerCase() === 'self_booked'
+    || row.self_booking_id != null;
+}
+
 function serviceRowCountsTowardWaveGuard(row = {}) {
   if (isOneTimeBookingSource(row.source)) return false;
   if (TERMINAL_STATUSES.includes(String(row.status || '').toLowerCase())) return false;
@@ -652,8 +657,19 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   const customer = await database('customers').where({ id: customerId }).first();
   if (!customer) return { synced: false, reason: 'customer_not_found' };
 
+  // Public self-booking creates recurring rows WITHOUT activating a plan
+  // (activateCustomerPlan:false → no tier/monthly_rate). Those rows are "pending
+  // plan activation" and must not bootstrap membership on their own — otherwise a
+  // single self-booked visit would promote the customer to active_customer and set a
+  // tier/monthly_rate they never agreed to. Once the customer actually has a plan
+  // (admin/estimate/payment activation set a tier or positive monthly_rate), their
+  // self-booked rows count normally.
+  const hasExistingPlan = !!normalizeTierName(customer.waveguard_tier) || Number(customer.monthly_rate || 0) > 0;
+
   const rows = await scheduledServiceRowsForCustomer(database, customerId);
-  const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
+  const recurringRows = rows
+    .filter(serviceRowCountsTowardWaveGuard)
+    .filter((row) => hasExistingPlan || !isSelfBookedRow(row));
   const detectedPlanKeys = [];
   let earliestServiceDate = null;
 
@@ -737,11 +753,15 @@ function buildScheduledServiceUpdates(plan, serviceColumns, serviceId, planCover
   }
   assignIfColumn(updates, serviceColumns, 'recurring_ongoing', true);
   assignIfColumn(updates, serviceColumns, 'service_id', serviceId || null);
-  // Plan-covered visits (plan activated, monthly_rate set) bill via the plan, not per
-  // visit, so they should not invoice on completion. When the plan is NOT activated
-  // (e.g. public self-booking), keep invoice-on-complete so the visit bills per visit
-  // instead of completing free with no plan billing and no per-visit invoice.
-  assignIfColumn(updates, serviceColumns, 'create_invoice_on_complete', planCovered ? false : true);
+  // Only plan-covered (activated, monthly_rate set) visits bill via the plan and skip
+  // the per-visit invoice. Do NOT set this flag for pending/non-activated self-booking
+  // rows: they carry no explicit per-visit price, so forcing it true would invoice the
+  // wrong amount (the customer's monthly_rate, or $0) and forcing it false would suppress
+  // billing. Leaving it unset keeps the column default and the established operator-driven
+  // completion billing (estimated_price → monthly_rate → $0) until a plan is activated.
+  if (planCovered) {
+    assignIfColumn(updates, serviceColumns, 'create_invoice_on_complete', false);
+  }
   return updates;
 }
 
@@ -785,8 +805,11 @@ function buildChildScheduledServiceRow({
   assignIfColumn(row, serviceColumns, 'recurring_ongoing', true);
   assignIfColumn(row, serviceColumns, 'service_id', serviceId || null);
   // See buildScheduledServiceUpdates: only plan-covered (activated) visits skip the
-  // per-visit invoice; non-activated self-booking visits must keep invoice-on-complete.
-  assignIfColumn(row, serviceColumns, 'create_invoice_on_complete', planCovered ? false : true);
+  // per-visit invoice. Pending self-booking children carry no per-visit price, so the
+  // flag is left at the column default (operator-driven billing) until plan activation.
+  if (planCovered) {
+    assignIfColumn(row, serviceColumns, 'create_invoice_on_complete', false);
+  }
 
   return row;
 }
@@ -1001,6 +1024,7 @@ module.exports = {
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
+  isSelfBookedRow,
   normalizeTierName,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
