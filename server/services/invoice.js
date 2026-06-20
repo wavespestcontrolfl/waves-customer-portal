@@ -733,7 +733,14 @@ const InvoiceService = {
         });
         accruedStatementId = stmt.id;
       } catch (err) {
-        logger.error(`[invoice] payer-statement accrual failed for payer ${resolvedPayerId}; routing as an individual payer invoice: ${err.message}`);
+        // Fail CLOSED: never create an unguarded individual invoice for a
+        // NET-terms payer when accrual fails — it would be individually
+        // sendable/collectible and bypass the consolidated-statement contract.
+        // getOrCreateOpenStatement is robust (advisory lock + partial-unique
+        // backstop + race re-select), so this is a genuine error worth surfacing
+        // to the caller rather than silently degrading.
+        logger.error(`[invoice] payer-statement accrual failed for payer ${resolvedPayerId}: ${err.message}`);
+        throw err;
       }
     }
     // A tax-exempt payer (builder/HOA with a resale/exemption cert on file)
@@ -2524,6 +2531,16 @@ const InvoiceService = {
         "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
       );
     }
+    // Phase 2: an edited accrued invoice changes the statement total — reroll the
+    // open statement so its total / PDF / payment amount stay correct. No-op once
+    // the statement is frozen (rollupStatement only touches `open`).
+    if (invoice.payer_statement_id) {
+      try {
+        await require("./payer-statements").rollupStatement(invoice.payer_statement_id);
+      } catch (err) {
+        logger.warn(`[invoice] statement reroll after edit failed for ${invoice.payer_statement_id}: ${err.message}`);
+      }
+    }
     return invoice;
   },
 
@@ -2558,6 +2575,13 @@ const InvoiceService = {
       }
       const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
       await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });
+      // Phase 2: drop a voided accrued invoice from its statement total in the
+      // SAME transaction (rollupStatement excludes status='void'), so the void
+      // and the statement total commit together. No-op once the statement is
+      // frozen.
+      if (updated.payer_statement_id) {
+        await require("./payer-statements").rollupStatement(updated.payer_statement_id, trx);
+      }
       invoice = updated;
     });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
