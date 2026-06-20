@@ -489,10 +489,40 @@ router.post('/:id/send', async (req, res, next) => {
       return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
     }
 
-    // Send immediately
+    // Send immediately. Claim the row as `sending` first so a concurrent
+    // proposal save (PUT /:id/proposal rejects `sending`) can't slip new
+    // totals/PDF between this send's render and its sent-write — the
+    // immediate-send save/send race the prior fresh-read could not fully close.
+    // The scheduled-send cron and lead-auto-send already pre-claim before
+    // calling sendEstimateNow, so the claim happens here only for immediate
+    // sends. A crashed immediate send is recovered by the stale-claim sweep.
     const quietHoursOverride = req.body?.quietHoursOverride === true;
-    const result = await sendEstimateNow(estimate, sendMethod, { idempotencyKey, quietHoursOverride });
+    const claimed = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNull('price_locked_at')
+      .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+      .update({ status: 'sending', updated_at: db.fn.now() });
+    if (!claimed) {
+      return res.status(409).json({
+        error: 'This estimate is being sent or is locked right now. Wait a moment and retry.',
+      });
+    }
+    const releaseSendClaim = () => db('estimates')
+      .where({ id: estimate.id, status: 'sending' })
+      .update({ status: estimate.status, updated_at: db.fn.now() })
+      .catch((e) => logger.warn(`[admin-estimates] failed to release send claim for estimate ${estimate.id}: ${e.message}`));
+
+    let result;
+    try {
+      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey, quietHoursOverride });
+    } catch (e) {
+      await releaseSendClaim();
+      throw e;
+    }
     if (!result.sent) {
+      // A successful send already flipped `sending` → `sent`; nothing was sent
+      // here, so hand the claim back to the prior status (still editable).
+      await releaseSendClaim();
       return res.status(422).json({
         success: false,
         error: 'Estimate was not sent on any requested channel',
@@ -540,6 +570,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // row — is reflected in the attachment rather than a stale pre-send copy.
 
   const channels = {};
+  // Tracks whether the formal proposal PDF actually went out as an email
+  // attachment, so the public link can be channel-aware and never promise an
+  // emailed PDF after an SMS-only (or email-failed) proposal send.
+  let proposalPdfEmailed = false;
 
   // Send SMS
   if (sendMethod === 'sms' || sendMethod === 'both') {
@@ -646,6 +680,9 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           channels.email = result.ok
             ? { ok: true, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
+          if (proposalMode && result.ok && proposalAttachments.length > 0) {
+            proposalPdfEmailed = true;
+          }
         }
       } catch (e) {
         logger.error(`Estimate email failed: ${e.message}`);
@@ -684,11 +721,24 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // saved top-level keys (proposal/etc.), so the send can't clobber it. Totals
   // live in columns and are intentionally left untouched here.
   const freshForSnapshot = await db('estimates').where({ id: estimate.id }).first() || estimate;
+  const proposalEnabledForDelivery = normalizeProposal(freshForSnapshot).enabled;
   try {
     const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now);
+    // Merge only the keys we own (sendSnapshot, and proposalDelivery for an
+    // authored proposal) so a proposal save committing mid-send isn't clobbered
+    // by a full estimate_data write. proposalDelivery is a sibling of proposal,
+    // never a nested write, so the `||` merge can't drop the proposal itself.
+    const mergePatch = { sendSnapshot: snapshot.sendSnapshot || {} };
+    if (proposalEnabledForDelivery) {
+      mergePatch.proposalDelivery = {
+        stampedAt: now().toISOString(),
+        pdfEmailed: proposalPdfEmailed,
+        channels: sentChannels,
+      };
+    }
     updatePayload.estimate_data = db.raw(
-      "COALESCE(estimate_data, '{}'::jsonb) || jsonb_build_object('sendSnapshot', ?::jsonb)",
-      [JSON.stringify(snapshot.sendSnapshot || {})],
+      "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify(mergePatch)],
     );
   } catch (e) {
     logger.warn(`[admin-estimates] estimate_data snapshot update failed for estimate ${estimate.id}: ${e.message}`);

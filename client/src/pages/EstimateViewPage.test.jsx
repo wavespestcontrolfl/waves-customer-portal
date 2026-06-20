@@ -224,6 +224,43 @@ describe('TerminalStateCard', () => {
     expect(screen.getByText('This treatment needs an inspection.')).toBeInTheDocument();
     expect(screen.getByText('Severe infestation')).toBeInTheDocument();
   });
+
+  it('renders formal-proposal copy (PDF emailed) instead of the inspection state', () => {
+    render(
+      <TerminalStateCard
+        state="quote_required"
+        customerFirstName="Pat"
+        address="123 Main St"
+        quoteReason="commercial_proposal"
+        isProposal
+        proposalPdfEmailed
+      />,
+    );
+
+    expect(screen.getByText('Your formal proposal is ready.')).toBeInTheDocument();
+    expect(screen.queryByText('This treatment needs an inspection.')).not.toBeInTheDocument();
+    // proposal copy describes the emailed PDF + account-manager follow-up...
+    expect(screen.getByText(/attached as a PDF to the email/i)).toBeInTheDocument();
+    // ...and never surfaces the raw "commercial_proposal" token as a reason badge
+    expect(screen.queryByText('Commercial proposal')).not.toBeInTheDocument();
+  });
+
+  it('does not promise an emailed PDF for an SMS-only proposal send', () => {
+    render(
+      <TerminalStateCard
+        state="quote_required"
+        customerFirstName="Pat"
+        address="123 Main St"
+        quoteReason="commercial_proposal"
+        isProposal
+        proposalPdfEmailed={false}
+      />,
+    );
+
+    expect(screen.getByText('Your formal proposal is ready.')).toBeInTheDocument();
+    expect(screen.queryByText(/attached as a PDF to the email/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/account manager has your formal proposal/i)).toBeInTheDocument();
+  });
 });
 
 describe('getServiceLabel', () => {

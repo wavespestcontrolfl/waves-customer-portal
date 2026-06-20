@@ -197,6 +197,28 @@ async function recoverStaleScheduledEstimateClaims(now) {
     const failedCount = recovered.filter(row => row.status === 'send_failed').length;
     logger.warn(`[scheduled-estimates] Recovered ${recovered.length} stale claim(s): ${retryCount} retried, ${failedCount} failed`);
   }
+
+  // Immediate sends (POST /:id/send) claim the row as `sending` for the
+  // duration of the send and release it in the route, but a hard crash between
+  // the claim and the release would strand the estimate as `sending` — with no
+  // scheduled_at, the sweep above never touches it. An immediate send completes
+  // in seconds, so any `sending` row with no scheduled_at older than the stale
+  // window is a crashed send; surface it as `send_failed` so it stays editable
+  // and re-sendable rather than permanently locked.
+  const immediate = await db.raw(`
+    UPDATE estimates
+    SET status = 'send_failed',
+        last_send_error = COALESCE(last_send_error, 'Immediate estimate send was interrupted'),
+        updated_at = ?
+    WHERE status = 'sending'
+      AND scheduled_at IS NULL
+      AND updated_at <= ?
+    RETURNING id
+  `, [now, staleBefore]);
+  const immediateRows = immediate.rows || [];
+  if (immediateRows.length > 0) {
+    logger.warn(`[scheduled-estimates] Recovered ${immediateRows.length} stale immediate send claim(s) to send_failed`);
+  }
 }
 
 async function claimDueScheduledEstimates(now) {

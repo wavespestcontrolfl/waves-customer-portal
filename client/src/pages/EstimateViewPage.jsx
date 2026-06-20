@@ -2343,6 +2343,8 @@ export default function EstimateViewPage() {
   const combinedTierEligible = services.some((s) => s?.waveGuardTierEligible === true);
   const combinedFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
+  const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
+  const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
 
   if (!canAccept) {
     return (
@@ -2364,6 +2366,8 @@ export default function EstimateViewPage() {
           customerFirstName={estimate.customerFirstName}
           address={estimate.address}
           quoteReason={quoteRequiredReason}
+          isProposal={isCommercialProposal}
+          proposalPdfEmailed={proposalPdfEmailed}
         />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
