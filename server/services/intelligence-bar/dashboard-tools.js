@@ -8,7 +8,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { whereLiveCustomer } = require('../customer-stages');
+const { whereLiveCustomer, CUSTOMER_STAGES } = require('../customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // Internal/test customers excluded from sales-funnel analytics. Names are
@@ -363,6 +363,7 @@ async function comparePeriods(input) {
         db({ c: 'customers' })
           .where('c.active', true)
           .whereNull('c.deleted_at')
+          .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
           .whereBetween('c.created_at', [fromTs, toTs])
       ).count('* as count').first();
       m.new_customers = parseInt(nc?.count || 0);

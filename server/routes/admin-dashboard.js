@@ -467,49 +467,56 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
-    // Retention — of the customers who were live at the START of the window,
-    // how many are STILL live now. "Retained" is read from current state
-    // (active + not-deleted + a customer stage), so every loss type — churn
-    // (stage→churned), soft-delete (deleted_at), and deactivation (active=false)
-    // — is counted as a loss uniformly, and reactivation is handled because the
-    // live state is the source of truth (not the sticky churned_at).
-    let retentionPct = null, churned = 0;
+    // Retention — of the customers who were LIVE at the START of the window, how
+    // many are STILL live now. "Retained" is read from current state (active +
+    // not-deleted + a customer stage), so churn (stage→churned), going dormant,
+    // and soft-delete are all counted as losses; reactivation is handled because
+    // the live state is the source of truth, not the sticky churned_at.
+    let retentionPct = null, lost = 0;
     try {
       const enteredInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
       const enteredBeforeWindow = `(pipeline_stage_changed_at < ${ET_MIDNIGHT_TS} OR pipeline_stage_changed_at IS NULL)`;
       // Cohort = "was a live customer at the window start": existed before the
-      // window, not deleted before it, and either in a customer stage entered
-      // before the window, OR churned on/after the window start (so it was still
-      // a customer at the start). No per-stage history, so entry time is a proxy
-      // — a customer→customer move mid-window is excluded from the base, and a
-      // pre-window deactivation (no timestamp) can leak in as a loss; both
-      // bounded by, and pending, a persisted customer_since signal. ET-anchored.
+      // window, not deleted before it, and either an ACTIVE customer-stage row
+      // entered before the window, OR one that left the customer base on/after
+      // the window start (churned or went dormant — so it was still a customer at
+      // the start). Limits, both pending a customer_since / deactivated_at signal:
+      //  - no per-stage history → a customer→customer move mid-window is excluded
+      //    from the base (its stage-entry falls inside the window);
+      //  - deactivation (active=false) has no timestamp, so it can't be placed in
+      //    a window — such rows are excluded entirely rather than mislabeled as a
+      //    loss. ET-anchored throughout.
       const cohort = () => db('customers')
         .whereRaw(`created_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
         .where(function notDeletedBeforeStart() {
           this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
         })
         .where(function wasCustomerAtStart() {
-          this.where(function customerStageBeforeStart() {
-            this.whereIn('pipeline_stage', CUSTOMER_STAGES)
+          this.where(function activeCustomerBeforeStart() {
+            this.where('active', true)
+              .whereIn('pipeline_stage', CUSTOMER_STAGES)
               .whereRaw(enteredBeforeWindow, [etDayStart(start)]);
           })
-            .orWhere(function churnedInWindow() {
-              this.where('pipeline_stage', 'churned').whereRaw(enteredInWindow, [etDayStart(start)]);
+            .orWhere(function departedInWindow() {
+              // Left the customer base on/after the window start. 'lost' is
+              // excluded — it's predominantly a lead stage, so a now-'lost' row
+              // can't be assumed to have been a customer.
+              this.whereIn('pipeline_stage', ['churned', 'dormant']).whereRaw(enteredInWindow, [etDayStart(start)]);
             });
         });
 
       const baseRow = await cohort().count('* as c').first();
       const base = parseInt(baseRow?.c || 0);
 
-      // Retained = the cohort members still live now (active, not deleted, still
-      // a customer stage). Everyone else who was a customer at the start —
-      // churned, deleted, or deactivated since — is a loss for the period.
+      // Retained = cohort members still live now (active, not deleted, still a
+      // customer stage). Everyone else who was a customer at the start — churned,
+      // gone dormant, or deleted since — is a LOSS for the period (not all
+      // "churn", so the field is reported as `lost`).
       const retainedRow = await cohort()
         .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
         .count('* as c').first();
       const retained = parseInt(retainedRow?.c || 0);
-      churned = Math.max(0, base - retained);
+      lost = Math.max(0, base - retained);
 
       retentionPct = base > 0 ? Math.max(0, Math.round((retained / base) * 1000) / 10) : null;
     } catch (err) {
@@ -587,7 +594,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       },
       sales: leadMetrics,
       ar: { days: arDays, open: arOpen, overdueCount: arOverdue },
-      retention: { pct: retentionPct, churned },
+      retention: { pct: retentionPct, lost },
       leaderboard,
     });
   } catch (err) { next(err); }
