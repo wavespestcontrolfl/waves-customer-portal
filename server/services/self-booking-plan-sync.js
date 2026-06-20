@@ -727,7 +727,7 @@ function buildCustomerActivationUpdates(customer, plan, customerColumns, memberS
   return updates;
 }
 
-function buildScheduledServiceUpdates(plan, serviceColumns, serviceId) {
+function buildScheduledServiceUpdates(plan, serviceColumns, serviceId, planCovered = true) {
   const updates = {};
   assignIfColumn(updates, serviceColumns, 'service_type', plan.serviceType);
   assignIfColumn(updates, serviceColumns, 'is_recurring', true);
@@ -737,7 +737,11 @@ function buildScheduledServiceUpdates(plan, serviceColumns, serviceId) {
   }
   assignIfColumn(updates, serviceColumns, 'recurring_ongoing', true);
   assignIfColumn(updates, serviceColumns, 'service_id', serviceId || null);
-  assignIfColumn(updates, serviceColumns, 'create_invoice_on_complete', false);
+  // Plan-covered visits (plan activated, monthly_rate set) bill via the plan, not per
+  // visit, so they should not invoice on completion. When the plan is NOT activated
+  // (e.g. public self-booking), keep invoice-on-complete so the visit bills per visit
+  // instead of completing free with no plan billing and no per-visit invoice.
+  assignIfColumn(updates, serviceColumns, 'create_invoice_on_complete', planCovered ? false : true);
   return updates;
 }
 
@@ -754,6 +758,7 @@ function buildChildScheduledServiceRow({
   zone,
   source,
   selfBookingId,
+  planCovered = true,
 }) {
   const row = {
     customer_id: parentService.customer_id,
@@ -779,7 +784,9 @@ function buildChildScheduledServiceRow({
   assignIfColumn(row, serviceColumns, 'recurring_parent_id', parentService.id);
   assignIfColumn(row, serviceColumns, 'recurring_ongoing', true);
   assignIfColumn(row, serviceColumns, 'service_id', serviceId || null);
-  assignIfColumn(row, serviceColumns, 'create_invoice_on_complete', false);
+  // See buildScheduledServiceUpdates: only plan-covered (activated) visits skip the
+  // per-visit invoice; non-activated self-booking visits must keep invoice-on-complete.
+  assignIfColumn(row, serviceColumns, 'create_invoice_on_complete', planCovered ? false : true);
 
   return row;
 }
@@ -847,7 +854,7 @@ async function syncSelfBookedRecurringPlan(options = {}) {
       await trx('customers').where({ id: customerId }).update(customerUpdates);
     }
 
-    const parentUpdates = buildScheduledServiceUpdates(plan, serviceColumns, serviceId);
+    const parentUpdates = buildScheduledServiceUpdates(plan, serviceColumns, serviceId, activateCustomerPlan);
     if (Object.keys(parentUpdates).length) {
       await trx('scheduled_services').where({ id: serviceRow.id }).update(parentUpdates);
     }
@@ -906,6 +913,7 @@ async function syncSelfBookedRecurringPlan(options = {}) {
         zone,
         source,
         selfBookingId,
+        planCovered: activateCustomerPlan,
       });
       const [created] = await trx('scheduled_services').insert(childRow).returning('*');
       if (created?.id) {
@@ -985,9 +993,11 @@ module.exports = {
   SELF_BOOKING_RECURRING_PLANS,
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
+  buildChildScheduledServiceRow,
   buildCustomerActivationUpdates,
   buildCustomerWaveGuardAlignmentUpdates,
   buildRecurringOccurrenceDates,
+  buildScheduledServiceUpdates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,

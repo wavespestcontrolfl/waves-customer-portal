@@ -5,9 +5,11 @@ const {
   SELF_BOOKING_RECURRING_PLANS,
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
+  buildChildScheduledServiceRow,
   buildCustomerActivationUpdates,
   buildCustomerWaveGuardAlignmentUpdates,
   buildRecurringOccurrenceDates,
+  buildScheduledServiceUpdates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
@@ -308,5 +310,19 @@ describe('self-booking plan sync helpers', () => {
       is_recurring: true,
       recurring_pattern: 'quarterly',
     })).toBe(true);
+  });
+
+  test('keeps non-activated self-booking visits invoice-on-complete, plan-covered visits not', () => {
+    const plan = SELF_BOOKING_RECURRING_PLANS.pest_control_quarterly || resolveSelfBookedRecurringPlan('Pest Control');
+    const serviceColumns = { service_type: {}, is_recurring: {}, recurring_pattern: {}, recurring_ongoing: {}, service_id: {}, create_invoice_on_complete: {}, recurring_parent_id: {} };
+
+    // Plan activated -> billed via the plan, not per visit.
+    expect(buildScheduledServiceUpdates(plan, serviceColumns, null, true).create_invoice_on_complete).toBe(false);
+    // Plan NOT activated (public self-booking) -> must still invoice on complete.
+    expect(buildScheduledServiceUpdates(plan, serviceColumns, null, false).create_invoice_on_complete).toBe(true);
+
+    const childArgs = { plan, serviceColumns, serviceId: null, parentService: { id: 1, customer_id: 7 }, scheduledDate: '2026-09-18' };
+    expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: true }).create_invoice_on_complete).toBe(false);
+    expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: false }).create_invoice_on_complete).toBe(true);
   });
 });
