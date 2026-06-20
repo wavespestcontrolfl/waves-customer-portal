@@ -195,6 +195,10 @@ function makeAdapter(config) {
       quantity,
       source_url: page.url(), // the PROOF link — exactly where the price was read
       text: snapshot.bodyText || null,
+      // True when the page had multiple same-size JSON-LD offers and the winner was
+      // chosen by price — verifyMatch then won't let a page-body EPA alone verify it
+      // (the EPA might belong to a different product on the page).
+      competing_same_size: !!offer.competingSameSize,
       price_type: config.priceType || 'public',
       // The real vendors.id (UUID) the /report worker keys on — a DB vendor row
       // provides `.id`. This is NOT the adapter slug (selectAdapterKey decides

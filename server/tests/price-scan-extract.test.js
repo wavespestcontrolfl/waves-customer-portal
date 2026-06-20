@@ -142,6 +142,17 @@ describe('price-scan extract', () => {
       });
       expect(extractJsonLdOffer([ld], { targetOz: 78 }).price).toBe(95); // matches the nested 78 oz variant
     });
+    test('competingSameSize flagged when TWO distinct same-size products are on the page', () => {
+      const main = JSON.stringify({ '@type': 'Product', name: 'Taurus SC Termiticide 78 oz', offers: { '@type': 'Offer', name: 'Taurus SC Termiticide 78 oz', price: '95', priceCurrency: 'USD', availability: 'InStock' } });
+      const related = JSON.stringify({ '@type': 'Product', name: 'Related Termiticide 78 oz', offers: { '@type': 'Offer', name: 'Related Termiticide 78 oz', price: '70', priceCurrency: 'USD', availability: 'InStock' } });
+      const got = extractJsonLdOffer([main, related], { targetOz: 78 });
+      expect(got.price).toBe(70); // cheapest same-size wins...
+      expect(got.competingSameSize).toBe(true); // ...so the body-EPA gate must tighten
+    });
+    test('competingSameSize is false for a single same-size offer', () => {
+      const ld = JSON.stringify({ '@type': 'Product', name: 'Taurus SC 78 oz', offers: { '@type': 'Offer', name: 'Taurus SC 78 oz', price: '95', priceCurrency: 'USD', availability: 'InStock' } });
+      expect(extractJsonLdOffer([ld], { targetOz: 78 }).competingSameSize).toBe(false);
+    });
     test('nested AggregateOffer children inherit the parent currency (not USD)', () => {
       const ld = JSON.stringify({
         '@type': 'Product', name: 'X',
@@ -511,6 +522,32 @@ describe('price-scan extract', () => {
     test('epa reg in text rescues a weak name', () => {
       const r = verifyMatch({ name: 'Generic Fipronil 78oz', text: 'EPA Reg No 53883-279', quantity: '78 oz' }, expected);
       expect(r.signals.epa).toBe(true);
+      expect(r.matched).toBe(true);
+    });
+    test('body-only EPA does NOT verify a weak name when the page had competing same-size offers', () => {
+      // Multi-offer page: a cheaper RELATED 78 oz product was selected, but the
+      // body EPA belongs to the main product. competingOffers makes the body-only
+      // EPA untrustworthy on its own, so the name must corroborate (it doesn't).
+      const r = verifyMatch(
+        { name: 'Generic Fipronil 78oz', text: 'EPA Reg No 53883-279', quantity: '78 oz', competingOffers: true },
+        expected,
+      );
+      expect(r.signals.epa).toBe(true); // the EPA token IS present on the page
+      expect(r.matched).toBe(false); // ...but not trusted to verify a different-named offer
+    });
+    test('competingOffers still matches when the EPA is in the offer OWN name', () => {
+      // EPA tied to the selected offer's own name is strong even amid competing offers.
+      const r = verifyMatch(
+        { name: 'Fipronil 9.1% 53883-279 78oz', quantity: '78 oz', competingOffers: true },
+        expected,
+      );
+      expect(r.matched).toBe(true);
+    });
+    test('competingOffers still matches when the name independently corroborates', () => {
+      const r = verifyMatch(
+        { name: 'Taurus SC Termiticide 78 oz', text: 'EPA Reg No 53883-279', quantity: '78 oz', competingOffers: true },
+        expected,
+      );
       expect(r.matched).toBe(true);
     });
     test('epa matches the distributor-suffixed reg by company-product key', () => {

@@ -238,7 +238,12 @@ function extractJsonLdOffer(jsonLdStrings, opts = {}) {
       const only = offers[0];
       if (!only.aggregate && matchesTarget(only.name)) pool = offers;
     }
-    return pool.length ? pickBestOffer(pool) : null;
+    if (!pool.length) return null;
+    const best = pickBestOffer(pool);
+    // Flag when the page had MORE THAN ONE same-size offer: the winner was chosen
+    // by price among them, so a page-body EPA can't be assumed to belong to it
+    // (verifyMatch then requires the name to corroborate a body-only EPA).
+    return best && { ...best, competingSameSize: pool.length > 1 };
   }
 
   return pickBestOffer(offers);
@@ -500,15 +505,29 @@ function verifyMatch(scraped = {}, expected = {}, opts = {}) {
     }
   }
 
+  // EPA evidence: distinguish the offer's OWN name (strongly tied to the selected
+  // offer) from the page body (which on a multi-product page may belong to a
+  // DIFFERENT offer than the one selected).
+  let epaInName = false;
   if (epaKey(expected.epaReg)) {
-    signals.epa = epaInText(`${scraped.name || ''} ${scraped.text || ''}`, expected.epaReg);
+    epaInName = epaInText(scraped.name || '', expected.epaReg);
+    signals.epa = epaInName || epaInText(scraped.text || '', expected.epaReg);
   }
 
-  // With a known pack size: size must match AND (name OR epa).
+  // Body-only EPA can stand in for the name signal — a vendor's generic-equivalent
+  // listing carrying the same EPA reg IS the same registered product. But when the
+  // page had OTHER same-size offers (scraped.competingOffers), pickBestOffer may
+  // have selected a cheaper RELATED product while the body EPA belongs to the main
+  // product — so a body-only EPA is no longer trustworthy on its own; require the
+  // name to corroborate. epaInName (EPA in the offer's own name) is always strong.
+  // Default (flag unset) keeps prior behavior: a single-product page is unambiguous.
+  const epaTrusted = signals.epa && (epaInName || !scraped.competingOffers);
+
+  // With a known pack size: size must match AND (name OR a TRUSTED epa).
   // Without a size to check: require BOTH name AND epa (stronger), so we never
   // trust a bare name-overlap that could be a different formulation/size.
   const matched = sizeKnown
-    ? signals.packSize && (signals.name || signals.epa)
+    ? signals.packSize && (signals.name || epaTrusted)
     : signals.name && signals.epa;
 
   return { matched, signals, sizeKnown };

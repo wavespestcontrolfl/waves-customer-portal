@@ -110,7 +110,13 @@ async function scanProduct(product, vendors, deps = {}) {
       continue;
     }
     const verdict = verifyMatch(
-      { name: candidate.name, text: candidate.text, quantity: candidate.quantity },
+      {
+        name: candidate.name,
+        text: candidate.text,
+        quantity: candidate.quantity,
+        // Page had competing same-size offers -> a body-only EPA can't verify alone.
+        competingOffers: candidate.competing_same_size,
+      },
       product,
     );
     if (!verdict.matched) {
