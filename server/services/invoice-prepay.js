@@ -118,14 +118,19 @@ function buildPrepayCoverageSummary(prepay) {
   const visitNoun = count === 1 ? 'visit' : 'visits';
   const countPhrase = word ? `${count} ${word} ${visitNoun}` : `${count} ${visitNoun}`;
   const serviceLabel = cleanServiceLabel(prepay.coverageServiceType);
-  const startMY = monthYearLabel(prepay.termStart);
-  const endMY = monthYearLabel(prepay.termEnd);
-  const window = startMY && endMY ? `, ${startMY} through ${endMY}` : '';
-  const months = prepay.coverageMonths;
-  const fullYear = months != null && months >= 11 && months <= 13;
+  // Coverage span is expressed as a duration, never as start/end month names:
+  // the outbound SMS stale-month guard (services/sms-guard.js) blocks 'invoice'
+  // sends whose body names a month >1 month from today, which a real partial-
+  // term or future-dated renewal window legitimately does. The exact covered
+  // dates still appear on the pay page + PDF coverage panel, which aren't
+  // subject to the guard.
+  const months = Number(prepay.coverageMonths);
+  const fullYear = Number.isFinite(months) && months >= 11 && months <= 13;
+  const spanPhrase =
+    !fullYear && Number.isInteger(months) && months > 0 ? ` across ${months} months` : '';
   const coverageSummary = fullYear
-    ? `your full year of ${serviceLabel}: ${countPhrase}${window}`
-    : `${countPhrase} of ${serviceLabel}${window}`;
+    ? `your full year of ${serviceLabel}: ${countPhrase}`
+    : `${countPhrase} of ${serviceLabel}${spanPhrase}`;
   return { serviceLabel, countPhrase, coverageSummary, coverageCount: count };
 }
 

@@ -78,7 +78,7 @@ describe('invoice-prepay helpers', () => {
         serviceLabel: 'pest control',
         countPhrase: '4 quarterly visits',
         coverageCount: 4,
-        coverageSummary: 'your full year of pest control: 4 quarterly visits, June 2026 through June 2027',
+        coverageSummary: 'your full year of pest control: 4 quarterly visits',
       });
     });
 
@@ -107,7 +107,21 @@ describe('invoice-prepay helpers', () => {
         termStart: '2026-06-20',
         termEnd: '2026-12-20',
       });
-      expect(summary.coverageSummary).toBe('2 quarterly visits of pest control, June 2026 through December 2026');
+      expect(summary.coverageSummary).toBe('2 quarterly visits of pest control across 6 months');
+    });
+
+    it('omits month names so the SMS stale-month guard cannot block the send', () => {
+      // Future-dated renewal window: term a full year out from "now". The body
+      // must not name a month (services/sms-guard.js would treat it as a stale
+      // template render and block the 'invoice' send).
+      const summary = buildPrepayCoverageSummary({
+        ...quarterly,
+        termStart: '2027-01-15',
+        termEnd: '2028-01-15',
+      });
+      expect(summary.coverageSummary).not.toMatch(
+        /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/i,
+      );
     });
 
     it('returns null when no visit count is configured (display-only flag)', () => {
