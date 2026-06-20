@@ -467,6 +467,47 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
+    // Collection rate — of invoices ISSUED in the window (paid vs issued),
+    // excluding void/cancelled (never owed) and draft (not issued yet). created_at
+    // is ET-anchored so the window can't drift at the UTC-midnight boundary.
+    let collectionRate = null, collectedCount = 0, issuedCount = 0, collectedTotal = 0, billedTotal = 0;
+    try {
+      const cAgg = await db('invoices')
+        .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date >= ?", [start])
+        .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date <= ?", [todayStr])
+        .whereNotIn('status', ['void', 'cancelled', 'draft'])
+        .select(
+          db.raw("COUNT(*) as issued"),
+          db.raw("COUNT(*) FILTER (WHERE paid_at IS NOT NULL) as paid"),
+          db.raw("SUM(total) as billed"),
+          db.raw("SUM(total) FILTER (WHERE paid_at IS NOT NULL) as collected")
+        ).first();
+      issuedCount = parseInt(cAgg?.issued || 0);
+      collectedCount = parseInt(cAgg?.paid || 0);
+      billedTotal = parseFloat(cAgg?.billed || 0);
+      collectedTotal = parseFloat(cAgg?.collected || 0);
+      collectionRate = issuedCount > 0 ? Math.round((collectedCount / issuedCount) * 1000) / 10 : null;
+    } catch (err) {
+      logger.error(`[admin-dashboard] collection rate failed: ${err.message}`);
+    }
+
+    // Autopay coverage — share of LIVE customers (CUSTOMER_STAGES, the real-
+    // customer set, not leads) currently on autopay. Point-in-time, not windowed.
+    let autopayPct = null, autopayCount = 0, customerBase = 0;
+    try {
+      const apAgg = await db('customers')
+        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
+        .select(
+          db.raw("COUNT(*) as base"),
+          db.raw("COUNT(*) FILTER (WHERE autopay_enabled = true) as autopay")
+        ).first();
+      customerBase = parseInt(apAgg?.base || 0);
+      autopayCount = parseInt(apAgg?.autopay || 0);
+      autopayPct = customerBase > 0 ? Math.round((autopayCount / customerBase) * 1000) / 10 : null;
+    } catch (err) {
+      logger.error(`[admin-dashboard] autopay coverage failed: ${err.message}`);
+    }
+
     // Retention — of the customers who were LIVE at the START of the window, how
     // many are STILL live now. "Retained" is read from current state (active +
     // not-deleted + a customer stage), so churn (stage→churned), going dormant,
@@ -596,6 +637,16 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       },
       sales: leadMetrics,
       ar: { days: arDays, open: arOpen, overdueCount: arOverdue },
+      billing: {
+        collectionRate,
+        collected: collectedTotal,
+        billed: billedTotal,
+        collectedCount,
+        issuedCount,
+        autopayPct,
+        autopayCount,
+        customerBase,
+      },
       retention: { pct: retentionPct, lost },
       leaderboard,
     });
