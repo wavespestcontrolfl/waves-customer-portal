@@ -15,4 +15,13 @@ function whereLiveCustomer(qb) {
   return qb.where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES);
 }
 
-module.exports = { CUSTOMER_STAGES, whereLiveCustomer };
+// Conversion date for KPI windows (an ET DATE): member_since (the "became a
+// customer" date) when set, else created_at as an ET date. The fallback is
+// defensive — most customer-creation paths stamp member_since (book route,
+// estimate-converter, stage routes, IB tools), but new/other paths (e.g.
+// quick-add, imports) may not, and for a directly-created customer created_at IS
+// the conversion date. So a row is never silently dropped from new-customer /
+// retention / acquisition windows. created_at is timestamptz → AT TIME ZONE once.
+const CONVERSION_DATE_SQL = "COALESCE(member_since, (created_at AT TIME ZONE 'America/New_York')::date)";
+
+module.exports = { CUSTOMER_STAGES, whereLiveCustomer, CONVERSION_DATE_SQL };

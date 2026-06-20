@@ -8,7 +8,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { whereLiveCustomer, CUSTOMER_STAGES } = require('../customer-stages');
+const { whereLiveCustomer, CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // Internal/test customers excluded from sales-funnel analytics. Names are
@@ -238,7 +238,7 @@ async function getKpiSnapshot() {
     // New customers this month = conversion date (member_since, an ET DATE) in
     // the window — matches the dashboard tile.
     db('customers').modify(whereLiveCustomer)
-      .where('member_since', '>=', r.month_start)
+      .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [r.month_start])
       .count('* as c').first(),
     db('estimates').whereIn('status', ['sent', 'viewed']).count('* as c').first(),
     db('scheduled_services').whereBetween('scheduled_date', [r.week_start, r.week_end]).select(
@@ -366,9 +366,8 @@ async function comparePeriods(input) {
           .where('c.active', true)
           .whereNull('c.deleted_at')
           .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-          // Conversion date (member_since, an ET DATE), same source of truth as
-          // the KPI snapshot — not created_at (lead intake).
-          .whereBetween('c.member_since', [from, to])
+          // Conversion date, same source of truth as the KPI snapshot.
+          .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [from]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [to])
       ).count('* as count').first();
       m.new_customers = parseInt(nc?.count || 0);
     }
@@ -704,15 +703,15 @@ async function getCustomerAcquisition(input) {
   // an ET DATE) — consistent with the dashboard new-customer source of truth.
   const bySource = await db('customers')
     .modify(whereLiveCustomer)
-    .whereBetween('member_since', [from, to])
+    .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [from]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [to])
     .select('lead_source', db.raw('COUNT(*) as count'), db.raw('SUM(monthly_rate) as total_mrr'))
     .groupBy('lead_source').orderByRaw('COUNT(*) DESC');
 
   const byMonth = await db('customers')
     .modify(whereLiveCustomer)
-    .whereBetween('member_since', [from, to])
-    .select(db.raw("TO_CHAR(member_since, 'YYYY-MM') as month"), db.raw('COUNT(*) as count'))
-    .groupByRaw("TO_CHAR(member_since, 'YYYY-MM')").orderByRaw("TO_CHAR(member_since, 'YYYY-MM')");
+    .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [from]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [to])
+    .select(db.raw(`TO_CHAR(${CONVERSION_DATE_SQL}, 'YYYY-MM') as month`), db.raw('COUNT(*) as count'))
+    .groupByRaw(`TO_CHAR(${CONVERSION_DATE_SQL}, 'YYYY-MM')`).orderByRaw(`TO_CHAR(${CONVERSION_DATE_SQL}, 'YYYY-MM')`);
 
   return {
     period: { from, to },

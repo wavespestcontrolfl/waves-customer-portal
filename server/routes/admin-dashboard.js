@@ -10,7 +10,7 @@ const {
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
-const { CUSTOMER_STAGES } = require('../services/customer-stages');
+const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -178,7 +178,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
       // intake) missed — and is keyed alongside whereRealCustomer so a lead that
       // merely carries an intake member_since isn't counted.
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
-        .where('member_since', '>=', som).where('member_since', '<=', today)
+        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [som]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [today])
         .count('* as count').first(),
       db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
@@ -491,7 +491,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       //   - a deactivation (active=false, no timestamp) is excluded entirely
       //     rather than placed in a window (pending a deactivated_at).
       const cohort = () => db('customers')
-        .where('member_since', '<', start)
+        .whereRaw(`${CONVERSION_DATE_SQL} < ?`, [start])
         .where(function notDeletedBeforeStart() {
           this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
         })
@@ -709,7 +709,7 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
         // Match the main KPI's new-customer definition: real customers whose
         // conversion date (member_since) is in the window.
         db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
-          .where('member_since', '>=', from).where('member_since', '<=', to)
+          .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [from]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [to])
           .count('* as c').first(),
       ]);
       return {

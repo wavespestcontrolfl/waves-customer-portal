@@ -5,7 +5,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { whereLiveCustomer } = require('./customer-stages');
+const { whereLiveCustomer, CONVERSION_DATE_SQL } = require('./customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etWeekStart, addETDays } = require('../utils/datetime-et');
 
 function som() { return etMonthStart(); }
@@ -65,7 +65,7 @@ async function executeBITool(toolName, input) {
         db('customers').modify(whereLiveCustomer).count('* as count').first(),
         // New customers this month = conversion date (member_since) in the window.
         db('customers').modify(whereLiveCustomer)
-          .where('member_since', '>=', somDate)
+          .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [somDate])
           .count('* as count').first(),
         db('customers').where('pipeline_stage', 'churned').where('pipeline_stage_changed_at', '>=', somDate).count('* as count').first(),
         db('leads').where('first_contact_at', '>=', somDate).select('status').count('* as count').groupBy('status'),
