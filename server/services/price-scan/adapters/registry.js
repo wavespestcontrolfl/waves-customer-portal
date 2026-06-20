@@ -1,6 +1,6 @@
-// Pure adapter selection by vendor host / name. The concrete adapter modules
-// (base, domyown, solutions, keystone, veseris) are wired in PR2 via getAdapter();
-// selectAdapterKey is pure so it can be unit-tested without the browser code.
+// Adapter selection by vendor host / name. selectAdapterKey is PURE and has no
+// dependency on the browser adapter modules, so it stays unit-testable on its
+// own; getAdapter lazy-requires the concrete module only when actually scanning.
 
 const HOST_MAP = [
   { test: /domyown\.com|domyown/i, key: 'domyown' },
@@ -17,4 +17,19 @@ function selectAdapterKey(vendor = {}) {
   return 'generic';
 }
 
-module.exports = { selectAdapterKey, HOST_MAP };
+// Lazy so requiring the registry (and selectAdapterKey) never pulls in the
+// Playwright-shaped adapter modules. veseris arrives in PR2b; until then it
+// falls through to the generic adapter (which needs a direct vendor.url).
+const ADAPTER_LOADERS = {
+  domyown: () => require('./domyown'),
+  solutions: () => require('./solutions'),
+  keystone: () => require('./keystone'),
+  generic: () => require('./generic'),
+};
+
+function getAdapter(key) {
+  const load = ADAPTER_LOADERS[key] || ADAPTER_LOADERS.generic;
+  return load();
+}
+
+module.exports = { selectAdapterKey, getAdapter, HOST_MAP };
