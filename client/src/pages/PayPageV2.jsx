@@ -1415,7 +1415,7 @@ export default function PayPageV2() {
             <div>
               <div style={eyebrow}>Amount due</div>
               <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
-                {fmtCurrency(invoice.total)}
+                {fmtCurrency(invoice.amountDue ?? invoice.total)}
               </div>
               <div style={{ marginTop: 8, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
                 Pay securely online. Credit card surcharge, if any, is shown before payment.
@@ -1619,7 +1619,10 @@ export default function PayPageV2() {
               {depositCreditTotal > 0 && (
                 <SummaryRow label="Deposit paid at acceptance" value={`− ${fmtCurrency(depositCreditTotal)}`} />
               )}
-              <SummaryRow label="Total due" value={fmtCurrency(invoice.total)} strong />
+              {Number(invoice.creditApplied) > 0 && (
+                <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
+              )}
+              <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
             </div>
 
             {invoice.notes && (
@@ -1642,7 +1645,7 @@ export default function PayPageV2() {
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
                 <div style={{ fontSize: 26, fontWeight: 900, color: 'var(--text)', lineHeight: 1 }}>
-                  {fmtCurrency(invoice.total)}
+                  {fmtCurrency(invoice.amountDue ?? invoice.total)}
                 </div>
                 <div style={{ marginTop: 6, fontSize: 14, color: 'var(--text-muted)' }}>
                   {invoiceStatusLabel}

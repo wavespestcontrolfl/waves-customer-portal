@@ -165,9 +165,20 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
   const remainingDue = round2(t - applied);
   if (remainingDue <= 0) return { applyAmt: 0, fullyCovered: true, newCreditApplied: applied, skipReason: 'already_covered' };
   if (bal <= 0) return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'no_balance' };
-  const applyAmt = round2(Math.min(bal, remainingDue));
+  let applyAmt = round2(Math.min(bal, remainingDue));
   if (fullCoverageOnly && applyAmt < remainingDue) {
     return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'partial_suppressed' };
+  }
+  // Never leave an UNCOLLECTIBLE sub-minimum residual: Stripe/Terminal reject a
+  // charge under $0.50. If a partial would leave 0 < residual < min, apply less so
+  // the remaining balance is at least the minimum (still collectible); if even
+  // that is impossible (a sub-$0.50 invoice the balance can't fully cover), skip.
+  const MIN_COLLECTIBLE = 0.5;
+  if (round2(remainingDue - applyAmt) > 0 && round2(remainingDue - applyAmt) < MIN_COLLECTIBLE) {
+    applyAmt = round2(remainingDue - MIN_COLLECTIBLE);
+  }
+  if (applyAmt <= 0) {
+    return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'residual_below_minimum' };
   }
   const newCreditApplied = round2(applied + applyAmt);
   return { applyAmt, fullyCovered: round2(t - newCreditApplied) <= 0, newCreditApplied, skipReason: null };
@@ -182,7 +193,7 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system' }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false }, trx = null) {
   const run = async (t) => {
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
@@ -205,16 +216,16 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system' }, 
     // Lock the customer row (also locked by postCreditMovement) so the balance
     // we price against can't move under us.
     const customer = await t('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'account_credits');
-    // FAIL CLOSED to full coverage only: a partial application would leave the
-    // invoice collectible with credit_applied set, but the Stripe/Terminal/autopay
-    // charge paths still price from invoice.total (not total − credit_applied), so
-    // a later payment would over-collect. The follow-up PR teaches those paths to
-    // bill amount due and re-enables partial here.
+    // Partial application is now safe: every charge path (Stripe PI / autopay /
+    // Terminal) and the webhook amount-verification price from amount due
+    // (total − credit_applied) via invoiceAmountDue, so a collectible invoice
+    // with credit_applied set is charged the reduced amount, not the full total.
+    // Callers may still force full coverage via fullCoverageOnly.
     const { applyAmt, fullyCovered, newCreditApplied, skipReason } = computeApplication({
       total: invoice.total,
       creditApplied: invoice.credit_applied,
       balance: customer?.account_credits || 0,
-      fullCoverageOnly: true,
+      fullCoverageOnly,
     });
     if (applyAmt <= 0) return { applied: 0, skipped: skipReason || 'nothing_to_apply' };
 
@@ -279,6 +290,31 @@ async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'syst
   return { restored: restore };
 }
 
+/**
+ * Return an invoice's applied account credit to the customer's balance on a FULL
+ * refund (the cash went back, so the credit they used must too). Unlike the void
+ * path this leaves the paid/prepaid stamps alone (the invoice was genuinely paid,
+ * now refunded). Race-safe + idempotent: the row is locked and credit_applied is
+ * re-read under the lock, so the admin-refund and the charge.refunded webhook
+ * firing for the same refund can't double-restore. Runs inside the caller's trx.
+ */
+async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, trx) {
+  const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()
+    .first('id', 'customer_id', 'invoice_number', 'credit_applied');
+  const restore = round2(inv && inv.credit_applied);
+  if (!inv || restore <= 0) return { restored: 0 };
+  await trx('invoices').where({ id: invoiceId }).update({ credit_applied: 0, updated_at: trx.fn.now() });
+  await postCreditMovement({
+    customerId: inv.customer_id,
+    delta: restore,
+    source: 'adjustment',
+    invoiceId,
+    note: `Account credit returned — invoice ${inv.invoice_number || invoiceId} fully refunded`,
+    createdBy,
+  }, trx);
+  return { restored: restore };
+}
+
 module.exports = {
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
@@ -290,4 +326,5 @@ module.exports = {
   computeApplication,
   applyAccountCreditToInvoice,
   restoreAccountCreditForVoidedInvoice,
+  returnAppliedCreditOnRefund,
 };

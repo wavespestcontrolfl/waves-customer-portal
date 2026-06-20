@@ -30,6 +30,20 @@ function invoiceStatusKey(status) {
   return String(status || '').trim().toLowerCase();
 }
 
+/**
+ * The amount a customer must actually pay for an invoice: its total minus any
+ * account credit already applied (credit_applied). Computed in integer cents to
+ * avoid float drift, clamped at 0. This is the canonical "charge base" — every
+ * Stripe/Terminal/autopay charge path and the webhook amount-verification must
+ * price from THIS, not raw invoice.total, or a credit-applied invoice
+ * over-collects (admin apply-credit forbids partials for exactly this reason).
+ */
+function invoiceAmountDue(invoice) {
+  const totalCents = Math.round((Number(invoice && invoice.total) || 0) * 100);
+  const creditCents = Math.round((Number(invoice && invoice.credit_applied) || 0) * 100);
+  return Math.max(0, totalCents - creditCents) / 100;
+}
+
 function isInvoiceCollectibleStatus(status) {
   return !INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoiceStatusKey(status));
 }
@@ -76,4 +90,5 @@ module.exports = {
   assertInvoiceCollectible,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
+  invoiceAmountDue,
 };

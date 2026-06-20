@@ -147,6 +147,11 @@ router.get('/:token', async (req, res, next) => {
         taxRate: parseFloat(data.tax_rate),
         taxAmount: parseFloat(data.tax_amount),
         total: parseFloat(data.total),
+        // Amount the customer actually pays = total − applied account credit, so
+        // the displayed amount matches what Stripe/Terminal charge to the cent.
+        // creditApplied drives the "Account credit applied" line.
+        amountDue: parseFloat(data.amount_due != null ? data.amount_due : data.total),
+        creditApplied: parseFloat(data.credit_applied || 0),
         dueDate: data.due_date,
         paidAt: data.paid_at,
         cardBrand: data.card_brand,

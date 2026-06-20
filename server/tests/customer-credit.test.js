@@ -128,4 +128,26 @@ describe('customer-credit computeApplication', () => {
     expect(CustomerCredit.computeApplication({ total: 25, creditApplied: 0, balance: 25.005 }))
       .toMatchObject({ applyAmt: 25, fullyCovered: true });
   });
+
+  test('never leaves an uncollectible sub-$0.50 residual — applies less to leave the minimum', () => {
+    // $59.75 credit on a $60 invoice would leave $0.25 (uncollectible) → apply
+    // $59.50 instead, leaving a collectible $0.50.
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 0, balance: 59.75 }))
+      .toMatchObject({ applyAmt: 59.5, fullyCovered: false });
+  });
+
+  test('exactly-minimum residual is left as-is', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 0, balance: 59.5 }))
+      .toMatchObject({ applyAmt: 59.5, fullyCovered: false });
+  });
+
+  test('sub-$0.50 invoice the balance cannot fully cover → skip (no sub-min residual)', () => {
+    expect(CustomerCredit.computeApplication({ total: 0.3, creditApplied: 0, balance: 0.2 }))
+      .toMatchObject({ applyAmt: 0, skipReason: 'residual_below_minimum' });
+  });
+
+  test('full coverage still wins over the residual guard', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 0, balance: 60 }))
+      .toMatchObject({ applyAmt: 60, fullyCovered: true });
+  });
 });

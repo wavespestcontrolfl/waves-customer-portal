@@ -11,6 +11,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const config = require('../config/invoice-followups');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
@@ -139,7 +140,7 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
     first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
     invoice_title: ctx.invoiceTitle || latestInvoice.title || latestInvoice.service_type || 'your service',
     invoice_number: latestInvoice.invoice_number || row.invoice_number || '',
-    amount_due: currency(latestInvoice.total || row.total || 0),
+    amount_due: currency(latestInvoice ? invoiceAmountDue(latestInvoice) : invoiceAmountDue(row)),
     due_date: formatDateOnly(latestInvoice.due_date, { fallback: '' }),
     service_date: formatDateOnly(latestInvoice.service_date, { fallback: '' }),
     service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
@@ -312,7 +313,7 @@ async function runPending() {
     .whereNull('i.payer_id')
     .select(
       's.*',
-      'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.status as invoice_status',
+      'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
       'i.payer_id as invoice_payer_id',
       'i.service_date', 'i.due_date', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
@@ -380,7 +381,8 @@ async function fireStep(row) {
     logger.info(`[invoice-followups] paused sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
     return;
   }
-  const amount = parseFloat(row.total || 0).toFixed(2);
+  // Dun for amount DUE (total − applied account credit), not the pre-credit total.
+  const amount = invoiceAmountDue(row).toFixed(2);
   const serviceDate = row.service_date
     ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
     : '';
@@ -628,7 +630,7 @@ async function sendNextTouchNow(invoiceId) {
     .where('s.id', seq.id)
     .select(
       's.*',
-      'i.id as invoice_id', 'i.token', 'i.title', 'i.total',
+      'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied',
       'i.service_date', 'i.due_date', 'i.invoice_number',
     )
     .first();

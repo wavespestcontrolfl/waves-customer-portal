@@ -462,7 +462,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
         .whereNull('paid_at').whereNotIn('status', ['void', 'cancelled', 'draft'])
         .select(
           db.raw("COUNT(*) as open_count"),
-          db.raw("SUM(total) as open_total"),
+          db.raw("SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as open_total"),
           db.raw("AVG(EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'America/New_York') - (created_at AT TIME ZONE 'America/New_York'))) / 86400) as avg_days_open"),
           db.raw("COUNT(*) FILTER (WHERE due_date < (NOW() AT TIME ZONE 'America/New_York')::date) as overdue_count")
         ).first();
