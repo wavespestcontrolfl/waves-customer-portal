@@ -128,11 +128,13 @@ router.post('/:id/statements/:statementId/close', async (req, res, next) => {
       // First-delivery-only: send ONLY when this request actually freshly closed
       // the statement (finalized, never sent). finalizeStatement is idempotent —
       // a double-click / retry returns an already-sent/viewed row, and re-sending
-      // it here would mail AP a duplicate (the email idempotency key has already
-      // lapsed once status flipped to 'sent'). Intentional resends go via /send.
+      // it here would mail AP a duplicate. Intentional resends go via /send.
+      // `firstDelivery: true` pins the base idempotency key so the concurrent
+      // race (a sibling stamps `sent` between this check and the send's re-read)
+      // dedupes on the base key instead of going keyless.
       const freshClose = frozen?.status === 'finalized' && !frozen?.sent_at;
       delivery = freshClose
-        ? await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun })
+        ? await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun, firstDelivery: true })
         : { ok: true, skipped: 'already_delivered', status: frozen?.status };
     }
     // Log the ACTUAL send outcome — a failed AP delivery must not read as sent.

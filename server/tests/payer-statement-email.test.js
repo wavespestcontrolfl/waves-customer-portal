@@ -146,6 +146,15 @@ test('forceResend WITHOUT a blocked prior stays on the base key — force cannot
   expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7');
 });
 
+test('firstDelivery pins the base key even if the row is already stamped sent (close-chain race)', async () => {
+  // Concurrent close-and-send: a sibling stamped the row 'sent' between this
+  // request's freshness check and the send's re-read. firstDelivery must still
+  // use the base key so the two dedupe instead of the late one going keyless.
+  mockDbHandler = () => ({ where() { return this; }, first: async () => finalized({ status: 'sent', sent_at: '2026-06-03T00:00:00Z' }), update: async () => 1 });
+  await sendStatementEmail(7, { firstDelivery: true });
+  expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7');
+});
+
 test('refuses to send an OPEN (not-yet-finalized) statement', async () => {
   mockDbHandler = () => ({ where() { return this; }, first: async () => finalized({ status: 'open' }), update: async () => 1 });
   const res = await sendStatementEmail(7);

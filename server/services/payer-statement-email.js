@@ -132,11 +132,15 @@ async function resolveApRecipient(statement, database) {
  * Pass `dryRun: true` to build the PDF + resolve the recipient WITHOUT sending
  * or stamping (used by the cron's dry-run-first rollout and the admin preview).
  * Pass `forceResend: true` ONLY to retry a known blocked/suppressed attempt — it
- * makes a FRESH delivery attempt (no first-delivery dedupe key) so the terminal
- * blocked row can't dedupe it forever. A normal first send (default) stays under
- * the stable key so a double-click / client retry can't email AP two copies.
+ * makes a FRESH delivery attempt (generation-scoped, never keyless) so the
+ * terminal blocked row can't dedupe it forever.
+ * Pass `firstDelivery: true` for /close's chained send: it pins the stable
+ * first-delivery key regardless of the row's status at send time, so two
+ * concurrent close-and-send requests (one stamps `sent` between the other's
+ * freshness check and this read) still dedupe on the base key instead of the
+ * later one going keyless and double-mailing AP.
  */
-async function sendStatementEmail(statementId, { dryRun = false, forceResend = false, database = db } = {}) {
+async function sendStatementEmail(statementId, { dryRun = false, forceResend = false, firstDelivery = false, database = db } = {}) {
   if (!isEnabled('payerStatements')) return { ok: false, skipped: 'gate_off' };
 
   const statement = await database('payer_statements').where({ id: statementId }).first();
@@ -177,14 +181,17 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
   //    within it, so the retry's own double-clicks / concurrent requests dedupe.
   //    A force with nothing to retry resolves to the base key, which dedupes
   //    against the existing delivered row (no blind resend).
-  //  - A normal first delivery (finalized, never sent) uses the stable base key,
-  //    so /close's chained send and a plain /send can't email AP two copies.
+  //  - A first delivery uses the stable base key so double-clicks dedupe. The
+  //    /close chained send passes `firstDelivery` to PIN the base key even if a
+  //    concurrent request stamped the row `sent` between the freshness check and
+  //    this read (otherwise the late one would fall through to keyless). A plain
+  //    /send of a finalized, never-sent row is a first delivery too.
   //  - An intentional re-delivery of an already-sent statement is keyless.
   const baseKey = `payer_statement_sent:${statement.id}`;
   let idempotencyKey;
   if (forceResend) {
     idempotencyKey = await forcedRetryKey(baseKey, database);
-  } else if (statement.status === 'finalized' && !statement.sent_at) {
+  } else if (firstDelivery || (statement.status === 'finalized' && !statement.sent_at)) {
     idempotencyKey = baseKey;
   }
 

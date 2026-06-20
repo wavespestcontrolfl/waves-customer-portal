@@ -140,7 +140,9 @@ function statementTable(doc, lines, startY) {
   let y = tableHeader(doc, startY);
   doc.fontSize(9).font('Helvetica');
   for (const line of lines) {
-    const property = line.customer_name || line.service_address || '—';
+    // Name AND service address — a consolidated statement to a property manager /
+    // HOA spans many homes, so AP needs the serviced location, not just the name.
+    const property = [line.customer_name, line.service_address].filter(Boolean).join('\n') || '—';
     const rowH = Math.max(
       doc.heightOfString(line.service_type || 'Service', { width: COL_W.service }),
       doc.heightOfString(property, { width: COL_W.property }),
