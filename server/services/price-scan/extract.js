@@ -52,9 +52,13 @@ function parsePriceText(text) {
   // $50", "Was $99") — these carry a dollar amount that isn't the package price
   // and can appear before it in a DOM priceTexts list.
   if (/\b(?:save|off|discount|rebate|coupon|clearance|shipping|free|was|starting|from)\b/i.test(s)) return null;
-  // Reject bare pack-size labels ("78 oz", "2.5 gal", "18 lb") — a DOM list can
-  // show a size/variant label before the real price; the size is not a price.
-  if (/\d\s*(?:fl\.?\s*oz|ounce|oz|gallon|gal|quart|qt|pint|pt|pound|lb|liter|litre|ml|kg|gram|g)\b/i.test(s)) return null;
+  // Reject any bare pack-size label ("78 oz", "78 ounces", "18 lbs",
+  // "2 gallons", "1,000 mL", "4 x 30 g") — a DOM list can show a size/variant
+  // label before the real price, and a size is not a price. parsePackSize covers
+  // every singular/plural/multipack/fraction form a hand regex would miss; a true
+  // price ("$95.00") has no unit, so it parses to null and passes through. Commas
+  // are stripped first so "1,000 mL" is seen as 1000 mL, not 0.
+  if (parsePackSize(s.replace(/,/g, ''))) return null;
   // Numbers, allowing thousands separators: "1,234.50" is one token.
   const numbers = s.match(/\d[\d,]*(?:\.\d+)?/g);
   if (!numbers || numbers.length !== 1) return null; // 0 = no price, >1 = range/ambiguous

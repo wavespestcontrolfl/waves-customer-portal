@@ -49,11 +49,18 @@ describe('price-scan extract', () => {
       expect(parsePriceText('From $48.48')).toBeNull();
       expect(parsePriceText('$95.00')).toBe(95);
     });
-    test('rejects bare pack-size labels', () => {
+    test('rejects bare pack-size labels (singular, plural, multipack)', () => {
       expect(parsePriceText('78 oz')).toBeNull();
       expect(parsePriceText('2.5 gal')).toBeNull();
       expect(parsePriceText('18 lb')).toBeNull();
+      // plurals + multipack the old regex missed
+      expect(parsePriceText('78 ounces')).toBeNull();
+      expect(parsePriceText('18 lbs')).toBeNull();
+      expect(parsePriceText('2 gallons')).toBeNull();
+      expect(parsePriceText('1,000 mL')).toBeNull();
+      expect(parsePriceText('4 x 30 g')).toBeNull();
       expect(parsePriceText('$95.00')).toBe(95); // a real price has no size unit
+      expect(parsePriceText('95')).toBe(95);
     });
   });
 
