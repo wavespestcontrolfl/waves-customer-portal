@@ -201,12 +201,13 @@ function extractJsonLdOffer(jsonLdStrings, opts = {}) {
     // Trustworthy variant matches: the offer's OWN name parses to the size.
     let pool = offers.filter((o) => o.ownName && matchesTarget(o.ownName));
     if (!pool.length && offers.length === 1) {
-      // Single CONCRETE offer = the whole product; its display name is the size
-      // evidence. Accept if it matches the target, or carries no size at all (let
-      // the downstream title/quantity check verify). An AggregateOffer lowPrice is
-      // never accepted this way — it's a cheapest-variant price, not this size.
+      // Single CONCRETE offer = the whole product; accept it only when its
+      // display name actually substantiates the target size. A name with NO size
+      // can't be tied to the requested pack (the page may expose only a
+      // default/starting-variant price), so don't guess — return null. An
+      // AggregateOffer lowPrice is never accepted this way either.
       const only = offers[0];
-      if (!only.aggregate && (!extractSizeToken(only.name) || matchesTarget(only.name))) pool = offers;
+      if (!only.aggregate && matchesTarget(only.name)) pool = offers;
     }
     return pool.length ? pickBestOffer(pool) : null;
   }
@@ -226,23 +227,26 @@ const SIZE_UNITS = 'fl\\.?\\s*oz|ounce|oz|gallon|gal|quart|qt|pint|pt|pound|lb|l
 // is 312 oz, NOT a single 78 oz — critical so a case can't match a single-size
 // scan). Bare g/l are allowed HERE because the "N x M unit" shape disambiguates
 // them from formulation codes ("Dominion 2L", "2G").
-const MULTIPACK_RE = new RegExp(`(\\d+)\\s*x\\s*(\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?)\\s*(${SIZE_UNITS}|gram|g|l)s?\\b`, 'i');
+// Numeric tokens allow a thousands comma ("1,000 mL") — stripped on the way out
+// so parsePackSize sees "1000 mL", not a regex match starting at "000 mL".
+const MULTIPACK_RE = new RegExp(`(\\d[\\d,]*)\\s*x\\s*(\\d[\\d,]*(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?)\\s*(${SIZE_UNITS}|gram|g|l)s?\\b`, 'i');
 // Mixed number: "2 1/2 gal" -> 2.5 gal. Matched whole before the fraction
 // fallback, which would otherwise read just the "1/2 gal" tail (0.5 gal).
 const MIXED_RE = new RegExp(`(\\d+)\\s+(\\d+\\s*\\/\\s*\\d+)\\s*(${SIZE_UNITS})s?\\b`, 'i');
-const SIZE_UNIT_RE = new RegExp(`(\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?)\\s*(${SIZE_UNITS})s?\\b`, 'i');
+const SIZE_UNIT_RE = new RegExp(`(\\d[\\d,]*(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+)?)\\s*(${SIZE_UNITS})s?\\b`, 'i');
 // Normalize a captured unit: drop the dot in "fl. oz" and collapse spaces, so
 // parsePackSize (which only knows alpha/space units) can resolve it.
 const cleanUnit = (u) => String(u).replace(/\./g, '').replace(/\s+/g, ' ').trim();
+const cleanNum = (n) => String(n).replace(/[\s,]/g, '');
 function extractSizeToken(text) {
   const s = String(text || '');
   const mp = s.match(MULTIPACK_RE);
-  if (mp) return `${mp[1]} x ${mp[2].replace(/\s+/g, '')} ${cleanUnit(mp[3])}`.trim();
+  if (mp) return `${cleanNum(mp[1])} x ${cleanNum(mp[2])} ${cleanUnit(mp[3])}`.trim();
   const mx = s.match(MIXED_RE);
   if (mx) return `${mx[1]} ${mx[2].replace(/\s+/g, '')} ${cleanUnit(mx[3])}`.trim();
   const m = s.match(SIZE_UNIT_RE);
   if (!m) return null;
-  return `${m[1].replace(/\s+/g, '')} ${cleanUnit(m[2])}`.trim();
+  return `${cleanNum(m[1])} ${cleanUnit(m[2])}`.trim();
 }
 
 // A non-USD currency marker: a non-$ symbol, a 3-letter ISO code (not USD), or a

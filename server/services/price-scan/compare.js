@@ -14,9 +14,12 @@ const DEFAULTS = {
 // proven unavailable).
 const UNAVAILABLE = new Set(['out_of_stock', 'backorder']);
 
-// Attach perOz to each candidate, drop unparseable / out-of-stock, sort cheapest first.
+// Attach perOz to each candidate, drop unparseable / out-of-stock / non-USD,
+// sort cheapest first. A raw extractor offer can carry a non-USD currency; its
+// amount must NOT be ranked as USD against the USD SiteOne baseline.
 function rankCandidates(candidates, { excludeUnavailable = true } = {}) {
   return (candidates || [])
+    .filter((c) => !c.currency || String(c.currency).toUpperCase() === 'USD')
     .map((c) => ({ ...c, perOz: deriveNormalizedUnitPrice(c.price, c.quantity) }))
     .filter((c) => c.perOz != null && c.perOz > 0)
     .filter((c) => !(excludeUnavailable && isUnavailable(c)))

@@ -5,6 +5,7 @@ const {
   extractJsonLdOffer,
   extractDomPrice,
   offerFromSnapshot,
+  extractSizeToken,
   quantityToOz,
   deriveNormalizedUnitPrice,
   tokenOverlap,
@@ -227,6 +228,12 @@ describe('price-scan extract', () => {
       // 12 oz isn't offered; returning the 20 oz price as the 12 oz would be a lie.
       expect(extractJsonLdOffer([multiSize], { targetOz: 12 })).toBeNull();
     });
+    test('a single offer with no size token is NOT accepted for a size-specific scan', () => {
+      // Only a default/starting-variant price, no size to tie to 78 oz.
+      const ld = JSON.stringify({ '@type': 'Product', name: 'Taurus SC Termiticide', offers: { price: 48.48, priceCurrency: 'USD', availability: 'InStock' } });
+      expect(extractJsonLdOffer([ld], { targetOz: 78 })).toBeNull();
+      expect(extractJsonLdOffer([ld]).price).toBe(48.48); // without a target it's fine
+    });
     test('a CASE/multipack offer does not match a single-size scan', () => {
       const withCase = JSON.stringify({
         '@type': 'Product', name: 'Taurus SC Termiticide',
@@ -330,6 +337,13 @@ describe('price-scan extract', () => {
     });
     test('skips a discount badge to find the real price', () => {
       expect(extractDomPrice({ priceTexts: ['Save 20%', '$95.00'], title: 'X', availabilityText: 'In Stock' }).price).toBe(95);
+    });
+  });
+
+  describe('extractSizeToken comma sizes', () => {
+    test('thousands separator ("1,000 mL") is parsed, not split at the comma', () => {
+      expect(extractSizeToken('Concentrate 1,000 mL')).toBe('1000 mL');
+      expect(quantityToOz(extractSizeToken('Concentrate 1,000 mL'))).toBeCloseTo(33.814, 2);
     });
   });
 

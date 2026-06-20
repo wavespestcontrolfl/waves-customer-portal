@@ -31,6 +31,14 @@ describe('price-scan compare', () => {
     expect(r.estSavingsOnBaseline).toBeCloseTo(21.87, 1);
   });
 
+  test('non-USD candidates are dropped from ranking (USD baseline)', () => {
+    const ranked = rankCandidates([
+      { price: 50, quantity: '78 oz', vendor: 'CA', currency: 'CAD' },
+      { price: 89, quantity: '78 oz', vendor: 'US', currency: 'USD' },
+    ]);
+    expect(ranked.map((c) => c.vendor)).toEqual(['US']); // CAD dropped despite lower number
+  });
+
   test('out-of-stock is excluded from the winner by default', () => {
     const r = findOpportunity(baseline, [
       { price: 70, quantity: '78 oz', vendor: 'Cheap', availability_status: 'out_of_stock' },
