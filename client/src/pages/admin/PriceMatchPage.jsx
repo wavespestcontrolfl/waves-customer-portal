@@ -86,17 +86,23 @@ export default function PriceMatchPage() {
   const selectedIdRef = useRef(null);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
+  // Monotonic load id — a slow earlier request (e.g. operator switched tabs) must
+  // not overwrite the list with the wrong filter's results when it lands last.
+  const loadSeqRef = useRef(0);
+
   const loadDrafts = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setError(null);
     try {
       const data = await adminFetch(`/admin/price-match/drafts?status=${filter}`);
+      if (seq !== loadSeqRef.current) return; // superseded by a newer load
       setDrafts((data && data.drafts) || []);
       setRecipient((data && data.recipient) || null);
     } catch (err) {
-      setError(err.message || "Failed to load drafts");
+      if (seq === loadSeqRef.current) setError(err.message || "Failed to load drafts");
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   }, [filter]);
 
@@ -146,15 +152,25 @@ export default function PriceMatchPage() {
       await loadDrafts();
       await refreshDetail(id);
     } catch (err) {
-      // 409 = the draft changed state under us (already sent/sending, or not stale
-      // enough to reset/dismiss). Don't alarm — just resync to the truth.
-      if (err.status === 409) {
+      // ACTIONABLE send failures (config/recipient) — the email did NOT go out and
+      // the draft is still actionable; show the real problem instead of hiding it as
+      // a stale race, or the operator just keeps clicking Send into the same failure.
+      const actionable = action === "send" && (err.code === "not_configured" || err.code === "rejected" || err.code === "send_attempt_unrecorded");
+      if (actionable) {
+        setError(err.message || "The email could not be sent.");
+      } else if (err.status === 409) {
+        // Benign state race (already sent/sending, claim lost, or not stale enough
+        // to reset/dismiss) — just resync to the truth.
         setNotice("That draft already changed state — showing the latest.");
-        await loadDrafts();
-        await refreshDetail(id);
       } else {
+        // Ambiguous failure (e.g. a transport error left the backend holding the
+        // draft in 'sending'); surface it AND resync so the pane reflects that.
         setError(err.message || `Could not ${action} the draft`);
       }
+      // Always resync — the backend may have advanced the draft (e.g. pending -> sending)
+      // even when the request reported a failure.
+      await loadDrafts();
+      await refreshDetail(id);
     } finally {
       setBusy(false);
       setConfirmSend(false);
@@ -163,6 +179,15 @@ export default function PriceMatchPage() {
 
   const matches = detail ? parseMatches(detail.matches) : [];
   const proofRows = matches.filter((m) => m && m.competitor && m.competitor.source_url);
+
+  // The backend protects a fresh claim: reset/dismiss only act once claimed_at is
+  // older than the stale window (server STALE_CLAIM_MS). Gate the recovery controls
+  // on the same window so a fresh 'sending' row shows a wait state instead of a
+  // button that just 409s. (Recomputed each render; Refresh re-evaluates.)
+  const STALE_CLAIM_MS = 10 * 60 * 1000;
+  const claimedAtMs = detail && detail.claimed_at ? new Date(detail.claimed_at).getTime() : null;
+  const staleElapsed = !claimedAtMs || Number.isNaN(claimedAtMs) ? true : (Date.now() - claimedAtMs) >= STALE_CLAIM_MS;
+  const staleInMin = !claimedAtMs || Number.isNaN(claimedAtMs) ? 0 : Math.max(1, Math.ceil((STALE_CLAIM_MS - (Date.now() - claimedAtMs)) / 60000));
 
   return (
     <div style={{ background: D.bg, minHeight: "100%", padding: 16 }}>
@@ -289,17 +314,21 @@ export default function PriceMatchPage() {
                 {detail.status === "sending" && !detail.send_attempted_at && (
                   <>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.amber, fontSize: 13, fontWeight: 600 }}>
-                      <AlertTriangle size={15} /> Claimed but the send wasn't attempted — if it's stuck, reset to re-review.
+                      <AlertTriangle size={15} /> Claimed but the send wasn't attempted{staleElapsed ? " — if it's stuck, reset to re-review." : ` — a send may be in progress. Reset becomes available in ~${staleInMin}m.`}
                     </span>
-                    <ActionButton tone="ghost" icon={RotateCcw} disabled={busy} onClick={() => act(detail.id, "reset")}>Reset</ActionButton>
+                    {staleElapsed && (
+                      <ActionButton tone="ghost" icon={RotateCcw} disabled={busy} onClick={() => act(detail.id, "reset")}>Reset</ActionButton>
+                    )}
                   </>
                 )}
                 {detail.status === "sending" && detail.send_attempted_at && (
                   <>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: D.red, fontSize: 13, fontWeight: 600 }}>
-                      <AlertTriangle size={15} /> A send was attempted — it may already have reached {detail.recipient}. Verify in SendGrid before acting; if it went out, dismiss it (never resend).
+                      <AlertTriangle size={15} /> A send was attempted — it may already have reached {detail.recipient}. Verify in SendGrid before acting; if it went out, dismiss it (never resend).{staleElapsed ? "" : ` Dismiss becomes available in ~${staleInMin}m.`}
                     </span>
-                    <ActionButton tone="ghost" icon={XCircle} disabled={busy} onClick={() => act(detail.id, "dismiss")}>Dismiss</ActionButton>
+                    {staleElapsed && (
+                      <ActionButton tone="ghost" icon={XCircle} disabled={busy} onClick={() => act(detail.id, "dismiss")}>Dismiss</ActionButton>
+                    )}
                   </>
                 )}
                 {detail.status === "sent" && (

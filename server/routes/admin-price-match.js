@@ -33,11 +33,31 @@ router.get('/drafts/:id', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// Human-readable copy for a non-ok send result. The machine `reason` is echoed as
+// `code` so the client can tell an ACTIONABLE failure (config/recipient — the email
+// did NOT go out, fix and retry) from a benign state race. `already_*` reasons fall
+// through to the generic state-changed message.
+const SEND_FAIL_COPY = {
+  not_configured: 'Email sending is not configured (SENDGRID_API_KEY missing) — the draft was not sent.',
+  rejected: 'SendGrid rejected the email — check the sender and recipient, then retry.',
+  claim_lost: 'This draft changed state before it could send — showing the latest.',
+  send_attempt_unrecorded: 'Could not record the send attempt, so nothing was sent — try again.',
+  not_found: 'Draft not found.',
+};
+const sendFailMessage = (result) => {
+  const reason = result.reason || 'unknown';
+  if (reason === 'rejected' && result.status) return `SendGrid rejected the email (HTTP ${result.status}) — check the sender and recipient, then retry.`;
+  return SEND_FAIL_COPY[reason]
+    || (reason.startsWith('already_') ? 'This draft already changed state — showing the latest.' : `Send failed (${reason}).`);
+};
+
 // POST /api/admin/price-match/drafts/:id/send — owner approves; emails Mark
 router.post('/drafts/:id/send', async (req, res, next) => {
   try {
     const result = await draftSvc.sendDraft(db, Number(req.params.id), { actor: actorOf(req) });
-    if (!result.ok) return res.status(409).json(result);
+    // Echo `code` (machine reason) + `error` (human) so the client surfaces an
+    // actionable config/recipient failure instead of hiding it as a stale race.
+    if (!result.ok) return res.status(409).json({ ...result, code: result.reason || 'unknown', error: sendFailMessage(result) });
     // IDs only — no recipient email / admin name in logs (PII).
     const logFields = { draftId: Number(req.params.id), technicianId: req.technicianId, messageId: result.messageId || null };
     if (result.reconcile) logger.error('price-match draft sent but not finalized — reconcile', logFields);
@@ -50,7 +70,7 @@ router.post('/drafts/:id/send', async (req, res, next) => {
 router.post('/drafts/:id/dismiss', async (req, res, next) => {
   try {
     const row = await draftSvc.dismissDraft(db, Number(req.params.id), { actor: actorOf(req) });
-    if (!row) return res.status(409).json({ error: 'not_pending' });
+    if (!row) return res.status(409).json({ code: 'not_pending', error: 'Draft can no longer be dismissed (a fresh in-flight send is protected until its claim goes stale).' });
     return res.json({ draft: row });
   } catch (err) { return next(err); }
 });
@@ -60,7 +80,7 @@ router.post('/drafts/:id/dismiss', async (req, res, next) => {
 router.post('/drafts/:id/reset', async (req, res, next) => {
   try {
     const row = await draftSvc.resetStuckDraft(db, Number(req.params.id));
-    if (!row) return res.status(409).json({ error: 'not_sending' });
+    if (!row) return res.status(409).json({ code: 'not_sending', error: 'Draft is not resettable (only a stale claim whose send was never attempted can be reset).' });
     logger.info('price-match draft reset from sending', { draftId: Number(req.params.id), technicianId: req.technicianId });
     return res.json({ draft: row });
   } catch (err) { return next(err); }
