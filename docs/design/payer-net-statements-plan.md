@@ -188,8 +188,10 @@ statement-payment phase.
 the charge-now mint lock:
 1. `pg_advisory_xact_lock(hashtext('payer.statement.open'), hashtext(payerId||period))`
 2. `SELECT ... WHERE payer_id=? AND period_start=? AND status='open'` → reuse, else
-   **first check for a non-`open` (finalized/sent/paid) statement in that same
-   period**; if one exists the month already closed, so do NOT insert a second
+   **first check for ANY `status <> 'open'` statement in that same period**
+   (finalized / sent / viewed / processing / paid / void — not just an allowlist;
+   a late invoice can arrive after the AP viewed it or while ACH is processing);
+   if one exists the month already closed, so do NOT insert a second
    open row for a closed period (it would carry a stale window/due-date and miss
    the monthly close) — **advance to the next open period** and accrue there. A
    late completion after close therefore lands on the *current* open statement,
