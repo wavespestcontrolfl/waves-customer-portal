@@ -122,6 +122,21 @@ test('forceResend on a BLOCKED first delivery advances to a retry-scoped key (fr
   expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7:r1');
 });
 
+test('forceResend after an async bounce (status already "sent") is still generation-scoped, not keyless', async () => {
+  // SendGrid accepted the first send (statement stamped sent), then the webhook
+  // marked that row bounced. A force retry must STILL go through forcedRetryKey
+  // (base blocked → :r1), never the keyless already-sent branch.
+  mockDbHandler = (t) => {
+    if (t === 'email_messages') {
+      let k = null;
+      return { where(c) { k = c.idempotency_key; return this; }, whereIn() { return this; }, first: async () => (k === 'payer_statement_sent:7' ? { id: 77 } : undefined) };
+    }
+    return { where() { return this; }, first: async () => finalized({ status: 'sent', sent_at: '2026-06-02T00:00:00Z' }), update: async () => 1 };
+  };
+  await sendStatementEmail(7, { forceResend: true });
+  expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7:r1');
+});
+
 test('forceResend WITHOUT a blocked prior stays on the base key — force cannot bypass dedupe', async () => {
   mockDbHandler = (t) => {
     if (t === 'email_messages') return { where() { return this; }, whereIn() { return this; }, first: async () => undefined };

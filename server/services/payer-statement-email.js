@@ -167,19 +167,25 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
   const termsLabel = TERM_LABEL[statement.terms_snapshot] || statement.terms_snapshot || '';
   const subject = `Waves statement S-${statement.id} — ${currency(statement.total)} due ${dueLabel}`.trim();
 
-  // First delivery (finalized, never sent) sends under a stable idempotency key
-  // so a double-click / client retry / concurrent close-and-send can't email AP
-  // two copies — sendTemplate only dedupes on idempotencyKey (triggerEventId is
-  // metadata). This holds for BOTH /close's chained send and a normal /send.
-  // `forceResend` advances to the next retry generation's key (still stable, so
-  // its own double-clicks dedupe) only past a genuinely blocked attempt — never
-  // keyless. Re-delivering an already-sent/viewed statement is keyless
-  // (intentional re-send).
-  const isFirstDelivery = statement.status === 'finalized' && !statement.sent_at;
+  // Idempotency key (sendTemplate only dedupes on idempotencyKey; triggerEventId
+  // is metadata):
+  //  - `forceResend` (a retry of a failed delivery) is ALWAYS generation-scoped
+  //    via forcedRetryKey — NEVER keyless — regardless of status. This covers the
+  //    statement still `finalized` AND the case where SendGrid accepted the first
+  //    send (stamped `sent`) but the webhook later marked that row bounced/blocked
+  //    (status stays `sent`). The key is fresh for a new generation yet stable
+  //    within it, so the retry's own double-clicks / concurrent requests dedupe.
+  //    A force with nothing to retry resolves to the base key, which dedupes
+  //    against the existing delivered row (no blind resend).
+  //  - A normal first delivery (finalized, never sent) uses the stable base key,
+  //    so /close's chained send and a plain /send can't email AP two copies.
+  //  - An intentional re-delivery of an already-sent statement is keyless.
+  const baseKey = `payer_statement_sent:${statement.id}`;
   let idempotencyKey;
-  if (isFirstDelivery) {
-    const baseKey = `payer_statement_sent:${statement.id}`;
-    idempotencyKey = forceResend ? await forcedRetryKey(baseKey, database) : baseKey;
+  if (forceResend) {
+    idempotencyKey = await forcedRetryKey(baseKey, database);
+  } else if (statement.status === 'finalized' && !statement.sent_at) {
+    idempotencyKey = baseKey;
   }
 
   let sent = false;
