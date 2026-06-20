@@ -92,12 +92,22 @@ async function sendDraft(db, id, { actor } = {}, deps = {}) {
   // email when the finalize write later fails). If THIS write fails we have not sent
   // yet, so bail without sending — the row is still attempt-unstamped and a later
   // stale reset can safely recover it.
+  let stamped;
   try {
-    await db('price_match_drafts')
+    stamped = await db('price_match_drafts')
       .where({ id, status: 'sending', claim_token: token })
-      .update({ send_attempted_at: db.fn.now() });
+      .update({ send_attempted_at: db.fn.now() })
+      .returning('*');
   } catch (markErr) {
     return { ok: false, reason: 'send_attempt_unrecorded' };
+  }
+  // This is also a RE-CHECK that we still own the claim immediately before the
+  // external send: if the worker paused and the row was reset/dismissed/re-claimed
+  // in the meantime, the WHERE (claim_token) matches 0 rows. We no longer own this
+  // send — abort BEFORE sendOne, or we'd email a dismissed draft or duplicate a
+  // re-claimed one. (The current owner, if any, will send under its own claim.)
+  if (!stamped.length) {
+    return { ok: false, reason: 'claim_lost' };
   }
 
   let res;

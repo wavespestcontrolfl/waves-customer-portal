@@ -253,6 +253,29 @@ describe('price-match-draft service', () => {
     expect(await resetStuckDraft(db, draft.id, { nowMs: now })).toBeNull(); // not sending anymore
   });
 
+  test('aborts BEFORE emailing if the claim was lost (reset/dismissed/re-claimed) before the stamp', async () => {
+    // Worker claims, then pauses; the row is reset/dismissed/re-claimed during the
+    // pause, so the send-attempt stamp matches 0 rows. Must NOT call SendGrid.
+    const base = makeFakeDb();
+    const db = (...a) => {
+      const b = base(...a);
+      const orig = b.update.bind(b);
+      b.update = (data) => {
+        // the stamp update (send_attempted_at, no status change) — simulate the
+        // claim being lost just before it runs by flipping the row's claim_token.
+        if (data && data.send_attempted_at && !data.status) base._rows[0].claim_token = 'SOMEONE_ELSE';
+        return orig(data);
+      };
+      return b;
+    };
+    db.fn = base.fn; db._rows = base._rows;
+    const draft = await createDraft(db, [proofMatch]);
+    const sendOne = jest.fn(async () => ({ messageId: 'should-not-happen' }));
+    const result = await sendDraft(db, draft.id, {}, { sendgrid: { sendOne }, token: 'A' });
+    expect(sendOne).not.toHaveBeenCalled(); // never emailed a claim we lost
+    expect(result).toEqual({ ok: false, reason: 'claim_lost' });
+  });
+
   test('send_attempted_at is stamped BEFORE SendGrid is called (durable resend guard)', async () => {
     const db = makeFakeDb();
     const draft = await createDraft(db, [proofMatch]);
