@@ -90,6 +90,21 @@ test('sends via SendGrid + stamps finalized→sent', async () => {
   expect(updates[0]).toMatchObject({ status: 'sent' });
 });
 
+test('first delivery passes a stable idempotency key (no double-send on retry)', async () => {
+  mockDbHandler = () => ({ where() { return this; }, first: async () => finalized(), update: async () => 1 });
+  await sendStatementEmail(7);
+  expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+    idempotencyKey: 'payer_statement_sent:7',
+  }));
+});
+
+test('an explicit resend (already sent) is keyless — intentional re-delivery', async () => {
+  mockDbHandler = () => ({ where() { return this; }, first: async () => finalized({ status: 'sent', sent_at: '2026-06-01T00:00:00Z' }), update: async () => 1 });
+  await sendStatementEmail(7);
+  expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+  expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBeUndefined();
+});
+
 test('refuses to send an OPEN (not-yet-finalized) statement', async () => {
   mockDbHandler = () => ({ where() { return this; }, first: async () => finalized({ status: 'open' }), update: async () => 1 });
   const res = await sendStatementEmail(7);

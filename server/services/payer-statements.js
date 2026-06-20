@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etMonthStart, etMonthEnd, etDateString, addETDays } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 
 // NET term → days the statement is due after its close date.
 const STATEMENT_TERM_DAYS = { net15: 15, net30: 30 };
@@ -149,9 +150,15 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
   }
 
   // Advisory lock first (matches getOrCreateOpenStatement's order), then row lock.
+  // The key MUST be byte-identical to accrual's `${pid}|${etMonthStart()}` —
+  // `period_start` comes back from a DATE column as a JS Date, so normalize it to
+  // the same 'YYYY-MM-DD' string accrual locks on. Interpolating the raw Date
+  // (`Fri May 01 2026 …`) would key a DIFFERENT lock and silently defeat the
+  // serialization, letting a late invoice attach after the freeze.
+  const periodKey = dateOnlyString(head.period_start);
   await database.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [
     'payer.statement.open',
-    `${head.payer_id}|${head.period_start}`,
+    `${Number(head.payer_id)}|${periodKey}`,
   ]);
   const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first();
   if (!stmt || stmt.status !== 'open') {

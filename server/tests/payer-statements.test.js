@@ -181,6 +181,33 @@ describe('finalizeStatement', () => {
     expect(updates.some((p) => p.status === 'finalized')).toBe(true);
   });
 
+  test('locks the SAME key as accrual even when period_start is a Date (P0)', async () => {
+    // pg returns a DATE column as a JS Date; the lock key must still normalize to
+    // accrual's `${pid}|YYYY-MM-DD`, never the verbose `Wed Jan 01 2026 …` string,
+    // or finalize and accrual would take different locks.
+    const stmt = {
+      id: 30, payer_id: 7, period_start: new Date(Date.UTC(2026, 0, 1)), status: 'open',
+      terms_snapshot: 'net30', payer_snapshot: null,
+      subtotal: '0', tax_amount: '0', total: '0', invoice_count: 0,
+    };
+    mockDbHandler = (t) => {
+      if (t === 'invoices') {
+        return { where() { return this; }, whereNot() { return this; }, first: async () => ({ subtotal: '0', tax_amount: '0', total: '0', invoice_count: 0 }) };
+      }
+      return {
+        where() { return this; },
+        forUpdate() { return this; },
+        first: async () => ({ ...stmt }),
+        update(p) { Object.assign(stmt, p); return this; },
+        returning: async () => [{ ...stmt }],
+      };
+    };
+    await finalizeStatement(30);
+    const lockBindings = db.raw.mock.calls.find((c) => /pg_advisory_xact_lock/.test(c[0]))[1];
+    expect(lockBindings[1]).toBe('7|2026-01-01');
+    expect(lockBindings[1]).toMatch(/^\d+\|\d{4}-\d{2}-\d{2}$/); // normalized, not a verbose Date
+  });
+
   test('is idempotent — a non-open statement is returned unchanged', async () => {
     let touched = false;
     mockDbHandler = () => ({

@@ -119,6 +119,13 @@ async function sendStatementEmail(statementId, { dryRun = false, database = db }
   const termsLabel = TERM_LABEL[statement.terms_snapshot] || statement.terms_snapshot || '';
   const subject = `Waves statement S-${statement.id} — ${currency(statement.total)} due ${dueLabel}`.trim();
 
+  // First delivery (never sent) gets a stable idempotency key so a double-click,
+  // retry, or concurrent close-and-send can't email AP two copies — sendTemplate
+  // only dedupes on idempotencyKey (triggerEventId is metadata). An explicit
+  // resend (already `sent`/`viewed`) is intentional and deliberately left keyless.
+  const isFirstDelivery = statement.status === 'finalized' && !statement.sent_at;
+  const idempotencyKey = isFirstDelivery ? `payer_statement_sent:${statement.id}` : undefined;
+
   let sent = false;
   if (sendgrid.isConfigured()) {
     try {
@@ -138,6 +145,7 @@ async function sendStatementEmail(statementId, { dryRun = false, database = db }
         recipientType: 'payer',
         recipientId: statement.payer_id || null,
         triggerEventId: `payer_statement_sent:${statement.id}`,
+        idempotencyKey,
         categories: ['payer_statement'],
         attachments: [pdfAttachment(fileName, pdfBuffer)],
       });
