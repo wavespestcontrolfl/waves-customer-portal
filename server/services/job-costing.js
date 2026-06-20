@@ -320,8 +320,21 @@ async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = fal
   const { record, ambiguous } = await resolveServiceRecord(db, svc, srCols);
   const customer = await db('customers').where({ id: svc.customer_id }).first();
 
+  // An operator can dispose a completed visit as intentionally_free in the
+  // Billing Recovery workbench (visit_billing_dispositions). That decision is
+  // authoritative — never let a derived estimated_price/monthly_rate put revenue
+  // on a visit a human marked no-cost. (disposition='billed' keeps the derived
+  // value, which approximates the invoice the operator cut.)
+  let intentionallyFree = false;
+  try {
+    const disposition = await db('visit_billing_dispositions')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first();
+    intentionallyFree = disposition?.disposition === 'intentionally_free';
+  } catch { /* table may be absent before 20260619000001 */ }
+
   const { laborRate, driveCostPerStop } = await getFinancials(db);
-  const revenue = deriveRevenue({
+  const revenue = intentionallyFree ? 0 : deriveRevenue({
     serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue,
   });
   const { laborCost, laborHours } = await calcLaborCost(
@@ -369,8 +382,13 @@ async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = fal
   //    missing the 20260401000027 financial columns is a no-op, not a crash.
   //    Skipped for ambiguous legacy soft-join matches (multiple same-day visits
   //    collapsing onto one record) — writing would clobber it and blank the rest.
+  //    Also skipped when the record itself isn't completed: office-handoff visits
+  //    are stored status='incomplete' while their scheduled_service stays
+  //    'completed', and the dashboard counts any non-null revenue — an incomplete
+  //    visit must not surface revenue/margin.
+  const recordCompleted = !srCols.status || record?.status === 'completed';
   let wroteThrough = false;
-  if (record?.id && !ambiguous) {
+  if (record?.id && !ambiguous && recordCompleted) {
     const upd = {};
     const set = (col, val) => { if (srCols[col]) upd[col] = val; };
     set('revenue', fin.revenue);
