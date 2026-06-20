@@ -30,6 +30,12 @@ const CANCELLED_SERVICE_VOIDABLE_STATUSES = [
   "sent",
   "viewed",
   "overdue",
+  // 'prepaid' by ACCOUNT CREDIT (no cash) must be voidable here so a cancelled
+  // service returns the customer's applied credit (restoreAccountCreditForVoidedInvoice).
+  // The sweep's payment_recorded_at / paid-payment guard still skips cash-backed
+  // prepayments (they book a payment row at issuance), so this only catches
+  // credit-covered invoices.
+  "prepaid",
 ];
 
 // Stripe PaymentIntent states where money is in flight or already captured /
@@ -2620,6 +2626,10 @@ const InvoiceService = {
       }
       const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
       await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });
+      // Return any auto-applied/prepaid account credit to the customer's balance
+      // so voiding a credit-covered invoice never strands the credit.
+      const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
+      await restoreAccountCreditForVoidedInvoice({ invoice: updated, createdBy: "system:void" }, trx);
       // Phase 2: drop a voided accrued invoice from its statement total in the
       // SAME transaction (rollupStatement excludes status='void'), so the void
       // and the statement total commit together. No-op once the statement is
@@ -2772,6 +2782,10 @@ const InvoiceService = {
             // billing.
             const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
             await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice, trx });
+            // Return any auto-applied account credit too (a partially credit-
+            // covered collectible invoice for a cancelled service).
+            const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
+            await restoreAccountCreditForVoidedInvoice({ invoice: voidedInvoice, createdBy: "system:service_cancel" }, trx);
             return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
           });
 

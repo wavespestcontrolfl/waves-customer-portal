@@ -235,6 +235,14 @@ const gates = {
   // dry_run mode until AUTO_DISPATCH_MODE=apply is set. The admin API + manual
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
+
+  // Auto-Apply Account Credit — when an invoice is created, automatically draw
+  // down the customer's account_credits (e.g. the $25 referral reward) against
+  // its amount due via credit_applied, so the reward silently lowers the next
+  // bill. Money movement on real invoices, so off by default in prod until
+  // verified; the Stripe/Terminal charge paths bill total − credit_applied and
+  // the void paths restore the credit, so partial application is safe.
+  autoApplyAccountCredit: isProd ? process.env.GATE_AUTO_APPLY_ACCOUNT_CREDIT === 'true' : true,
 };
 
 function isEnabled(gate) {

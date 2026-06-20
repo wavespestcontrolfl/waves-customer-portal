@@ -84,3 +84,48 @@ describe('customer-credit portalCreditsFromLedger', () => {
     expect(CustomerCredit.portalCreditsFromLedger('nope')).toEqual([]);
   });
 });
+
+describe('customer-credit computeApplication', () => {
+  test('full coverage: balance >= due → apply the whole due, fullyCovered', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 0, balance: 100 }))
+      .toMatchObject({ applyAmt: 60, fullyCovered: true, newCreditApplied: 60, skipReason: null });
+  });
+
+  test('exact coverage: balance == due → fully covered', () => {
+    expect(CustomerCredit.computeApplication({ total: 25, creditApplied: 0, balance: 25 }))
+      .toMatchObject({ applyAmt: 25, fullyCovered: true, skipReason: null });
+  });
+
+  test('partial allowed (fullCoverageOnly=false): apply min(balance, due), not fully covered', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 0, balance: 25 }))
+      .toMatchObject({ applyAmt: 25, fullyCovered: false, newCreditApplied: 25, skipReason: null });
+  });
+
+  test('partial suppressed (fullCoverageOnly=true): balance < due → no-op', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 0, balance: 25, fullCoverageOnly: true }))
+      .toMatchObject({ applyAmt: 0, fullyCovered: false, skipReason: 'partial_suppressed' });
+  });
+
+  test('respects credit already applied (remaining due only)', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 50, balance: 100 }))
+      .toMatchObject({ applyAmt: 10, fullyCovered: true, newCreditApplied: 60 });
+  });
+
+  test('already fully covered → idempotent no-op', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 60, balance: 100 }))
+      .toMatchObject({ applyAmt: 0, fullyCovered: true, skipReason: 'already_covered' });
+  });
+
+  test('zero balance / zero total → skip', () => {
+    expect(CustomerCredit.computeApplication({ total: 60, creditApplied: 0, balance: 0 }))
+      .toMatchObject({ applyAmt: 0, skipReason: 'no_balance' });
+    expect(CustomerCredit.computeApplication({ total: 0, creditApplied: 0, balance: 50 }))
+      .toMatchObject({ applyAmt: 0, skipReason: 'zero_total' });
+  });
+
+  test('never over-applies past the due with a fractional balance (rounding)', () => {
+    // $25.00 due, $25.005 balance → apply exactly 25.00, fully covered.
+    expect(CustomerCredit.computeApplication({ total: 25, creditApplied: 0, balance: 25.005 }))
+      .toMatchObject({ applyAmt: 25, fullyCovered: true });
+  });
+});

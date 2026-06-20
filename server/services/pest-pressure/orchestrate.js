@@ -31,6 +31,10 @@ const { extractTechnicianRating } = require('./components/technician-rating');
 const { extractReServiceImpact } = require('./components/re-service-impact');
 const { extractRecurringIssue } = require('./components/recurring-issue');
 const { extractRiskFactorRating } = require('./components/risk-factor');
+const {
+  applyCustomerVisibleServiceRecordFilter,
+  serviceRecordSuppressesCustomerArtifacts,
+} = require('./history-filter');
 
 function pickValue(extractorResult) {
   if (!extractorResult || !extractorResult.present) return null;
@@ -47,7 +51,7 @@ function isoDate(date) {
 async function gatherInputs(knex, serviceRecord, config) {
   const serviceLine = serviceRecord.service_line || detectServiceLine(serviceRecord.service_type);
 
-  const lastCompletedRow = await knex('service_records')
+  const lastCompletedQuery = knex('service_records')
     .where('customer_id', serviceRecord.customer_id)
     .where('status', 'completed')
     .whereNot('id', serviceRecord.id)
@@ -56,8 +60,9 @@ async function gatherInputs(knex, serviceRecord, config) {
         this.where('service_line', serviceLine).orWhereNull('service_line');
       }
     })
-    .orderBy('service_date', 'desc')
-    .first('service_date');
+    .orderBy('service_date', 'desc');
+  applyCustomerVisibleServiceRecordFilter(lastCompletedQuery);
+  const lastCompletedRow = await lastCompletedQuery.first('service_date');
 
   const window = resolveReviewWindow({
     serviceFrequency: serviceRecord.service_type,
@@ -131,8 +136,11 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
   }
   const serviceRecord = await knex('service_records')
     .where({ id: serviceRecordId })
-    .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status');
+    .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'structured_notes');
   if (!serviceRecord) {
+    return null;
+  }
+  if (serviceRecordSuppressesCustomerArtifacts(serviceRecord)) {
     return null;
   }
 

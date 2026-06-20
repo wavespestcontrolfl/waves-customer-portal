@@ -23,6 +23,7 @@
  * caller that wants to count only a specific service_line passes it in
  * via `serviceLine`.
  */
+const { applyCustomerVisibleServiceRecordFilter } = require('../history-filter');
 
 function mapCountToRating(count) {
   if (count <= 0) return 0;
@@ -41,6 +42,7 @@ async function extractReServiceImpact({ knex, customerId, serviceRecordId, revie
     .where('status', 'completed')
     .where('is_callback', true)
     .whereBetween('service_date', [reviewPeriodStart, reviewPeriodEnd]);
+  applyCustomerVisibleServiceRecordFilter(query);
 
   if (serviceRecordId) {
     query.whereNot('id', serviceRecordId);

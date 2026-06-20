@@ -151,6 +151,134 @@ function portalCreditsFromLedger(rows = []) {
     });
 }
 
+/**
+ * Pure decision math for auto-applying account credit to an invoice. No DB —
+ * unit-testable. Given the invoice total, credit already applied, and the
+ * customer's available balance, returns how much to apply now and whether the
+ * invoice ends fully covered. `fullCoverageOnly` suppresses partial application.
+ */
+function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverageOnly = false }) {
+  const t = round2(total);
+  const applied = round2(creditApplied);
+  const bal = round2(balance);
+  if (!(t > 0)) return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'zero_total' };
+  const remainingDue = round2(t - applied);
+  if (remainingDue <= 0) return { applyAmt: 0, fullyCovered: true, newCreditApplied: applied, skipReason: 'already_covered' };
+  if (bal <= 0) return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'no_balance' };
+  const applyAmt = round2(Math.min(bal, remainingDue));
+  if (fullCoverageOnly && applyAmt < remainingDue) {
+    return { applyAmt: 0, fullyCovered: false, newCreditApplied: applied, skipReason: 'partial_suppressed' };
+  }
+  const newCreditApplied = round2(applied + applyAmt);
+  return { applyAmt, fullyCovered: round2(t - newCreditApplied) <= 0, newCreditApplied, skipReason: null };
+}
+
+/**
+ * Draw the customer's account credit down against an invoice's amount due,
+ * recording it as `credit_applied` (and flipping to 'prepaid' when fully
+ * covered). Reuses the same money invariants as the admin prepay flow. Skips
+ * payer-billed (third-party) invoices, non-collectible statuses, $0 totals, and
+ * already-covered invoices. Idempotent: re-running applies only the remaining
+ * due, up to the remaining balance. Best-effort caller contract — callers must
+ * not let a credit hiccup roll back invoice creation.
+ */
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system' }, trx = null) {
+  const run = async (t) => {
+    const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // Homeowner credit must never touch a third-party (payer-billed) invoice.
+    if (invoice.payer_id) return { applied: 0, skipped: 'payer_billed' };
+    try {
+      // eslint-disable-next-line global-require
+      require('./invoice-helpers').assertInvoiceCollectible(invoice.status);
+    } catch {
+      return { applied: 0, skipped: 'uncollectible' };
+    }
+    // Money-agreement (PI ↔ invoice ↔ webhook): never mark an invoice prepaid
+    // while a Stripe PaymentIntent exists — its client secret could still charge
+    // the card, leaving the webhook to reconcile against a terminal prepaid
+    // invoice and diverge. Fail CLOSED: skip (don't apply) when a PI is attached.
+    // The invoice is locked, so this re-checks the PI id under the lock. (A fresh
+    // completion invoice has no PI; the admin apply-credit route, by contrast,
+    // explicitly triages/cancels the PI — auto-apply simply declines.)
+    if (invoice.stripe_payment_intent_id) return { applied: 0, skipped: 'has_payment_intent' };
+    // Lock the customer row (also locked by postCreditMovement) so the balance
+    // we price against can't move under us.
+    const customer = await t('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'account_credits');
+    // FAIL CLOSED to full coverage only: a partial application would leave the
+    // invoice collectible with credit_applied set, but the Stripe/Terminal/autopay
+    // charge paths still price from invoice.total (not total − credit_applied), so
+    // a later payment would over-collect. The follow-up PR teaches those paths to
+    // bill amount due and re-enables partial here.
+    const { applyAmt, fullyCovered, newCreditApplied, skipReason } = computeApplication({
+      total: invoice.total,
+      creditApplied: invoice.credit_applied,
+      balance: customer?.account_credits || 0,
+      fullCoverageOnly: true,
+    });
+    if (applyAmt <= 0) return { applied: 0, skipped: skipReason || 'nothing_to_apply' };
+
+    const { balanceAfter } = await postCreditMovement({
+      customerId: invoice.customer_id,
+      delta: -applyAmt,
+      source: 'invoice_application',
+      invoiceId,
+      note: 'Account credit applied to invoice',
+      createdBy,
+    }, t);
+
+    const updates = { credit_applied: newCreditApplied, updated_at: t.fn.now() };
+    if (fullyCovered) {
+      // Mirror the admin prepay close-out so paid_at-keyed paths treat it as
+      // closed; status stays 'prepaid' (not 'paid') so collected-revenue stats
+      // don't double-count a credit (no cash) against the payments ledger.
+      updates.status = 'prepaid';
+      updates.prepaid_prev_status = invoice.status;
+      updates.prepaid_at = t.fn.now();
+      updates.prepaid_by = createdBy;
+      updates.paid_at = t.fn.now();
+    }
+    await t('invoices').where({ id: invoiceId }).update(updates);
+    return {
+      applied: applyAmt,
+      creditApplied: newCreditApplied,
+      fullyCovered,
+      balanceAfter,
+      status: fullyCovered ? 'prepaid' : invoice.status,
+    };
+  };
+  return trx ? run(trx) : db.transaction(run);
+}
+
+/**
+ * Return an invoice's applied account credit to the customer's balance when the
+ * invoice is voided, and zero out credit_applied + prepaid stamps. Runs inside
+ * the void transaction (mirrors restoreDepositCreditForVoidedInvoice). No-op
+ * when nothing was applied. credit_applied is purely account-credit (estimate
+ * deposits are tracked separately), so this never touches deposit credit.
+ */
+async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'system' }, trx) {
+  const restore = round2(invoice?.credit_applied || 0);
+  if (restore <= 0) return { restored: 0 };
+  await postCreditMovement({
+    customerId: invoice.customer_id,
+    delta: restore,
+    source: 'adjustment',
+    invoiceId: invoice.id,
+    note: `Account credit returned — invoice ${invoice.invoice_number || invoice.id} voided`,
+    createdBy,
+  }, trx);
+  await trx('invoices').where({ id: invoice.id }).update({
+    credit_applied: 0,
+    prepaid_at: null,
+    prepaid_by: null,
+    prepaid_prev_status: null,
+    paid_at: null,
+    updated_at: trx.fn.now(),
+  });
+  return { restored: restore };
+}
+
 module.exports = {
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
@@ -159,4 +287,7 @@ module.exports = {
   getLedger,
   postCreditMovement,
   portalCreditsFromLedger,
+  computeApplication,
+  applyAccountCreditToInvoice,
+  restoreAccountCreditForVoidedInvoice,
 };

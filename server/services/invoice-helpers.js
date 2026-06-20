@@ -60,9 +60,11 @@ function assertInvoiceVoidable(currentStatus) {
   if (currentStatus === 'paid') {
     throw new Error('Cannot void a paid invoice — issue a refund instead');
   }
-  if (currentStatus === 'prepaid') {
-    throw new Error('Cannot void a prepaid invoice — the applied account credit would be stranded; reverse the credit instead');
-  }
+  // 'prepaid' IS voidable: the void path returns the applied account credit to
+  // the customer's balance (restoreAccountCreditForVoidedInvoice), so it is no
+  // longer stranded. (Cash-backed prepayments book a payment row at issuance and
+  // are caught by the in-flight/paid guards above and the void path's own
+  // payment_recorded_at check.)
   if (currentStatus === 'processing') {
     throw new Error('Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed');
   }
