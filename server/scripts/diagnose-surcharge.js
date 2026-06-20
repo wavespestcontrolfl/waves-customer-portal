@@ -13,6 +13,14 @@
  * Debit / prepaid / ACH / unknown funding all fail closed to base-only.
  * The invoice total stores base only; the surcharge lives on the payment row.
  */
+// Canonical surcharge math — the diagnostic must verify against the same
+// engine production charges with, not re-derive the rate. Pure module, no
+// db/env side effects, safe to require from a CLI script.
+const {
+  computeSurchargeCents,
+  CONFIGURED_COST_BPS,
+} = require('../services/stripe-pricing');
+
 const invoiceNumber = process.argv[2] || 'WPC-2026-0178';
 const connectionString = process.env.PROD_RO_URL;
 
@@ -74,6 +82,7 @@ const knex = require('knex')({
         'surcharge_amount_cents',
         'surcharge_rate_bps',
         'surcharge_policy_version',
+        'stripe_surcharge_maximum_amount_cents',
         'stripe_payment_intent_id',
         'created_at',
       );
@@ -110,10 +119,32 @@ const knex = require('knex')({
         }
       }
 
+      // Verify the STORED surcharge against the canonical engine. Compare in
+      // integer cents at the rate this row recorded (so a charge from before a
+      // rate change still verifies as arithmetically correct), then separately
+      // note if that recorded rate differs from the current configured policy.
+      const storedSurchargeCents = p.surcharge_amount_cents || 0;
+      const recordedRateBps = p.surcharge_rate_bps || CONFIGURED_COST_BPS;
+      let expectedCents = null;
+      if (p.base_amount_cents != null) {
+        expectedCents = computeSurchargeCents(p.base_amount_cents, {
+          costBps: recordedRateBps,
+          stripeMaxCents: p.stripe_surcharge_maximum_amount_cents ?? undefined,
+        });
+      }
+      const matchesCanonical = expectedCents != null && storedSurchargeCents === expectedCents;
+      const rateNote = recordedRateBps === CONFIGURED_COST_BPS
+        ? ''
+        : `  (recorded ${recordedRateBps} bps vs current ${CONFIGURED_COST_BPS} bps — expected for a charge before a rate change)`;
+
       if (p.status === 'refunded' || p.status === 'disputed') {
         console.log(`Payment ${p.id}: ℹ️  status=${p.status} — check refunded_surcharge_cents separately.${reconcile}`);
-      } else if (p.card_funding === 'credit' && surcharge > 0) {
-        console.log(`Payment ${p.id}: ✅ credit card, $${surcharge.toFixed(2)} surcharge applied — correct.${reconcile}`);
+      } else if (p.card_funding === 'credit' && surcharge > 0 && expectedCents == null) {
+        console.log(`Payment ${p.id}: ℹ️  credit card, $${surcharge.toFixed(2)} surcharge, but base_amount_cents is null — cannot verify against canonical math.${reconcile}`);
+      } else if (p.card_funding === 'credit' && matchesCanonical) {
+        console.log(`Payment ${p.id}: ✅ credit card, $${surcharge.toFixed(2)} surcharge matches canonical ${recordedRateBps} bps on $${base.toFixed(2)} base — correct.${rateNote}${reconcile}`);
+      } else if (p.card_funding === 'credit' && expectedCents != null && !matchesCanonical) {
+        console.log(`Payment ${p.id}: ⚠️  CREDIT card MISCALCULATED — stored $${surcharge.toFixed(2)} but ${recordedRateBps} bps on $${base.toFixed(2)} base = $${(expectedCents / 100).toFixed(2)} expected. BUG.${reconcile}`);
       } else if (p.card_funding === 'credit' && policyRan) {
         console.log(`Payment ${p.id}: ⚠️  CREDIT card, policy ${p.surcharge_policy_version} ran but $0 surcharge — BUG (surcharge bypassed).${reconcile}`);
       } else if (p.card_funding === 'credit') {
