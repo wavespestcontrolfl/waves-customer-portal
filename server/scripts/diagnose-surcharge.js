@@ -7,6 +7,11 @@
  *
  * Reads PROD_RO_URL explicitly (never DATABASE_URL) so stray tooling that
  * defaults to DATABASE_URL cannot target prod. SELECT-only — no writes.
+ *
+ * Surcharge model (server/services/stripe-pricing.js): a flat 2.90% applies
+ * ONLY to positively-confirmed credit cards (card_funding === 'credit').
+ * Debit / prepaid / ACH / unknown funding all fail closed to base-only.
+ * The invoice total stores base only; the surcharge lives on the payment row.
  */
 const invoiceNumber = process.argv[2] || 'WPC-2026-0178';
 const connectionString = process.env.PROD_RO_URL;
@@ -26,7 +31,16 @@ const knex = require('knex')({
   try {
     const invoice = await knex('invoices')
       .where({ invoice_number: invoiceNumber })
-      .first('id', 'invoice_number', 'subtotal', 'discount_amount', 'tax_amount', 'total', 'status');
+      .first(
+        'id',
+        'invoice_number',
+        'subtotal',
+        'discount_amount',
+        'tax_amount',
+        'total',
+        'status',
+        'stripe_payment_intent_id',
+      );
 
     if (!invoice) {
       console.log(`No invoice found for ${invoiceNumber}`);
@@ -36,8 +50,19 @@ const knex = require('knex')({
     console.log('\n=== INVOICE ===');
     console.table([invoice]);
 
+    // The payments table has NO invoice_id column. Linkage mirrors
+    // findInvoiceForPayment() in routes/stripe-webhook.js, reversed:
+    //   1) payments.stripe_payment_intent_id === invoices.stripe_payment_intent_id
+    //   2) payments.metadata->>'invoice_id' (or waves_/dispute_ variants) === invoice.id
     const payments = await knex('payments')
-      .where({ invoice_id: invoice.id })
+      .where(function linkToInvoice() {
+        if (invoice.stripe_payment_intent_id) {
+          this.where('stripe_payment_intent_id', invoice.stripe_payment_intent_id);
+        }
+        this.orWhereRaw("metadata->>'invoice_id' = ?", [invoice.id]);
+        this.orWhereRaw("metadata->>'waves_invoice_id' = ?", [invoice.id]);
+        this.orWhereRaw("metadata->>'dispute_invoice_id' = ?", [invoice.id]);
+      })
       .orderBy('created_at', 'asc')
       .select(
         'id',
@@ -49,24 +74,54 @@ const knex = require('knex')({
         'surcharge_amount_cents',
         'surcharge_rate_bps',
         'surcharge_policy_version',
-        'stripe_surcharge_status',
+        'stripe_payment_intent_id',
         'created_at',
       );
 
     console.log('\n=== PAYMENTS ===');
     console.table(payments);
 
+    if (!payments.length) {
+      console.log(
+        '\nNo payment rows link to this invoice — unpaid, a cash/check reconcile '
+        + 'with no payment row, or the PI/metadata linkage is missing.',
+      );
+      return;
+    }
+
     console.log('\n=== VERDICT ===');
     for (const p of payments) {
       const surcharge = (p.surcharge_amount_cents || 0) / 100;
-      if (p.card_funding === 'credit' && surcharge === 0) {
-        console.log(`Payment ${p.id}: ⚠️  CREDIT card with $0 surcharge — BUG (surcharge bypassed).`);
+      const base = p.base_amount_cents != null ? p.base_amount_cents / 100 : null;
+      // surcharge_policy_version is stamped only when the surcharge engine
+      // actually ran at charge time. Null means the charge predated or
+      // bypassed that path (e.g. funding backfilled AFTER the charge by
+      // scripts/backfill-card-funding.js) — so card_funding='credit' with
+      // $0 surcharge is NOT a live bug unless the policy version is set.
+      const policyRan = !!p.surcharge_policy_version;
+
+      // Money reconciliation: amount should equal base + surcharge.
+      let reconcile = '';
+      if (base != null) {
+        const expected = base + surcharge;
+        const drift = Math.abs(expected - Number(p.amount));
+        if (drift > 0.005) {
+          reconcile = `  (⚠️ amount $${Number(p.amount).toFixed(2)} ≠ base $${base.toFixed(2)} + surcharge $${surcharge.toFixed(2)})`;
+        }
+      }
+
+      if (p.status === 'refunded' || p.status === 'disputed') {
+        console.log(`Payment ${p.id}: ℹ️  status=${p.status} — check refunded_surcharge_cents separately.${reconcile}`);
+      } else if (p.card_funding === 'credit' && surcharge > 0) {
+        console.log(`Payment ${p.id}: ✅ credit card, $${surcharge.toFixed(2)} surcharge applied — correct.${reconcile}`);
+      } else if (p.card_funding === 'credit' && policyRan) {
+        console.log(`Payment ${p.id}: ⚠️  CREDIT card, policy ${p.surcharge_policy_version} ran but $0 surcharge — BUG (surcharge bypassed).${reconcile}`);
       } else if (p.card_funding === 'credit') {
-        console.log(`Payment ${p.id}: ✅ credit card, $${surcharge.toFixed(2)} surcharge applied — correct.`);
+        console.log(`Payment ${p.id}: ℹ️  funding now reads 'credit' but no surcharge policy was stamped — charged on a non-surcharge path or funding backfilled after the charge (not a live bug; verify charge path).${reconcile}`);
       } else if (!p.card_funding) {
-        console.log(`Payment ${p.id}: ℹ️  funding UNKNOWN/null — failed closed to no surcharge (by design).`);
+        console.log(`Payment ${p.id}: ℹ️  funding UNKNOWN/null — failed closed to no surcharge (by design).${reconcile}`);
       } else {
-        console.log(`Payment ${p.id}: ✅ ${p.card_funding} card — no surcharge by policy — correct.`);
+        console.log(`Payment ${p.id}: ✅ ${p.card_funding} card — no surcharge by policy — correct.${reconcile}`);
       }
     }
   } catch (err) {
