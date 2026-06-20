@@ -77,7 +77,8 @@ One open statement per `(payer_id, period)`. Accrued invoices attach to it.
 | `id` | bigserial PK | |
 | `payer_id` | int FK→payers | **RESTRICT** (payers never hard-deleted, mirror invoices.payer_id) |
 | `period_start` / `period_end` | date | the accrual window (see cadence decision) |
-| `status` | varchar(20) | `open` → `finalized` → `sent` → `viewed` → `paid` → `void` (`overdue` is derived from `due_date`, not stored) |
+| `status` | varchar(20) | `open` → `finalized` → `sent` → `viewed` → `processing` → `paid`, or → `void`. `processing` = a payment PI is in flight (esp. ACH, which sits in `processing` for days); it blocks any second collection. (`overdue` is derived from `due_date`, not stored.) |
+| `stripe_payment_intent_id` | varchar | the active/last PI — set when a charge is initiated, used to gate concurrent collection + reconcile the webhook idempotently |
 | `terms_snapshot` | varchar(24) | the payer's `payment_terms` frozen at statement open |
 | `subtotal` / `tax_amount` / `total` | numeric(10,2) | rolled up from accrued invoices; recomputed on attach/detach until `finalized`, frozen after |
 | `invoice_count` | int | |
@@ -92,7 +93,13 @@ Partial unique index `(payer_id, period_start) WHERE status = 'open'` — at mos
 one open statement per payer per period (the get-or-create target).
 
 ### Changed: `invoices`
-- `+ payer_statement_id` bigint FK→payer_statements, `ON DELETE SET NULL`, indexed.
+- `+ payer_statement_id` bigint FK→payer_statements, **`ON DELETE RESTRICT`**,
+  indexed. (NOT `SET NULL`: this column is the accrual marker AND the send/pay
+  fail-closed guard — a hard delete of a statement that nulled it would turn
+  accrued draft invoices back into ungrouped, individually-collectible payer
+  invoices and lose the AR link. Statements are never hard-deleted; they are
+  `void`ed, or a child is explicitly detached in a transaction. Mirrors Phase-1
+  `invoices.payer_id` RESTRICT + payers-never-deleted.)
   - `payer_statement_id IS NOT NULL` ⇒ accrued (held from individual AP send,
     aged on the statement, not its own `due_date`).
   - Status stays `draft` while accrued — we do **not** add an `accrued` status
@@ -248,12 +255,22 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
   path — today `services/stripe.js` only charges `customer.stripe_customer_id`
   and explicitly rejects `invoice.payer_id`. We add a payer-scoped charge that is
   only ever reachable via a statement token, never a homeowner surface.
-  - **Pay only a FROZEN statement — fail closed otherwise.** A PaymentIntent may
-    be created ONLY for a statement in a payable frozen *stored* status
-    (`finalized` / `sent` / `viewed`); `open` (still accruing), `void`, and
-    already-`paid` must be refused. (`overdue` is **not** a stored status — it is
-    derived from `due_date` for aging/dunning only; a past-due statement is still
-    one of the stored frozen statuses and remains payable.) Paying an `open` statement lets AP
+  - **Pay only a FROZEN, not-in-flight statement — fail closed otherwise.** A
+    PaymentIntent may be created ONLY for a statement in a payable frozen *stored*
+    status (`finalized` / `sent` / `viewed`); `open` (still accruing), `void`,
+    already-`paid`, and **`processing`** (a payment in flight) must be refused.
+    (`overdue` is **not** a stored status — derived from `due_date` for
+    aging/dunning only; a past-due statement is still one of the payable frozen
+    statuses.)
+  - **In-flight payments block double collection (esp. ACH).** Online ACH emits
+    `payment_intent.processing` for *days* before `succeeded`. The moment a PI is
+    created (card OR ACH), stamp `stripe_payment_intent_id` and move the statement
+    to `processing` so a second `/pay` PI **and** an admin reconcile are both
+    refused while money is in flight — otherwise the same statement double-collects.
+    The webhook resolves it idempotently, mirroring invoice handling:
+    `succeeded` → `paid` + cascade; `payment_failed` / `canceled` → back to the
+    prior payable status (collectible again); duplicate/late events are no-ops
+    keyed on the PI id. Admin reconcile likewise refuses while `processing`/`paid`. Paying an `open` statement lets AP
     settle a mutable total while later visits keep accruing into it — leaving
     those visits unpaid or the total changed after collection. The accrual branch
     and the pay branch are mutually exclusive on status: nothing attaches to a
@@ -282,10 +299,13 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
 - **Admin reconcile (`admin-payments-reconcile.js`):** keep the existing payer
   rejection for *individual* payer invoices; add a statement reconcile that marks
   the statement paid and **cascades** (see below). Off-platform check/ACH/wire is
-  the common AP path.
+  the common AP path. Reconcile must **refuse while `processing`/`paid`** (an
+  online PI is in flight or already settled) so an operator can't double-collect.
 - **Webhook (`stripe-webhook.js`):** PaymentIntent metadata carries
-  `statement_id`; on success → mark statement `paid` + cascade. Legacy
-  `invoice_id`-only intents are unchanged.
+  `statement_id`; resolve the full PI lifecycle **idempotently** (keyed on the PI
+  id): `processing` → keep `processing`; `succeeded` → `paid` + cascade;
+  `payment_failed` / `canceled` → revert to the prior payable status; duplicate /
+  late events are no-ops. Legacy `invoice_id`-only intents are unchanged.
 - **Cascade-on-settle:** paying a statement settles every accrued invoice on it
   atomically — mark the statement `paid`, the child invoices `paid`
   (`paid_at = statement.paid_at`, a settlement marker, not N card charges), write
@@ -424,6 +444,11 @@ Each PR ships behind a gate and is independently revertable; nothing changes for
 12. **Pay only frozen statements**: the statement `/pay` path must refuse `open`
     (still accruing), `void`, and `paid` — paying a mutable open statement lets AP
     settle a total that later visits still change.
+13. **In-flight ACH double-collection**: ACH sits in `payment_intent.processing`
+    for days; without an in-flight `processing` state + active-PI stamp, a second
+    `/pay` PI or an admin reconcile double-collects the statement. Mirror invoice
+    handling: block collection while `processing`/`paid`, resolve the PI lifecycle
+    idempotently in the webhook.
 
 ## Out of scope (later)
 
