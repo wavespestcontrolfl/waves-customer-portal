@@ -491,18 +491,37 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] collection rate failed: ${err.message}`);
     }
 
-    // Autopay coverage — share of LIVE customers (CUSTOMER_STAGES, the real-
-    // customer set, not leads) currently on autopay. Point-in-time, not windowed.
+    // Autopay coverage — share of LIVE customers (CUSTOMER_STAGES, real customers
+    // not leads) actually on CHARGEABLE autopay. Mirrors the SQL equivalent of
+    // customerOnAutopay() (services/autopay-eligibility.js), NOT the raw
+    // autopay_enabled flag: not disabled, not paused, and has a default Stripe
+    // autopay payment method with a stripe id — and when ACH isn't active, only a
+    // card qualifies. (Per-customer customerOnAutopay() would be one query per
+    // row; this is the set form for an aggregate.) Point-in-time, not windowed.
     let autopayPct = null, autopayCount = 0, customerBase = 0;
     try {
-      const apAgg = await db('customers')
-        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
-        .select(
-          db.raw("COUNT(*) as base"),
-          db.raw("COUNT(*) FILTER (WHERE autopay_enabled = true) as autopay")
-        ).first();
-      customerBase = parseInt(apAgg?.base || 0);
-      autopayCount = parseInt(apAgg?.autopay || 0);
+      const liveBase = (qb) => qb
+        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES);
+      const baseRow = await liveBase(db('customers')).count({ c: '*' }).first();
+      customerBase = parseInt(baseRow?.c || 0);
+
+      const coveredRow = await liveBase(db('customers as c'))
+        .whereRaw('c.autopay_enabled IS DISTINCT FROM false')
+        .where(function notPaused() {
+          this.whereNull('c.autopay_paused_until')
+            .orWhereRaw('c.autopay_paused_until::date < ?', [todayStr]);
+        })
+        .whereExists(function chargeableMethod() {
+          this.select(db.raw('1')).from('payment_methods as pm')
+            .whereRaw('pm.customer_id = c.id')
+            .where('pm.processor', 'stripe')
+            .where('pm.is_default', true)
+            .where('pm.autopay_enabled', true)
+            .whereNotNull('pm.stripe_payment_method_id')
+            .whereRaw("(c.ach_status IS NULL OR c.ach_status = 'active' OR pm.method_type = 'card')");
+        })
+        .count({ c: '*' }).first();
+      autopayCount = parseInt(coveredRow?.c || 0);
       autopayPct = customerBase > 0 ? Math.round((autopayCount / customerBase) * 1000) / 10 : null;
     } catch (err) {
       logger.error(`[admin-dashboard] autopay coverage failed: ${err.message}`);
