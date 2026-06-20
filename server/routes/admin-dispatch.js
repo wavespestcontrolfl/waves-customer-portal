@@ -4013,6 +4013,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       else invoiceCreated = true;
     }
 
+    // Auto-apply available account credit (e.g. the referral reward) to the
+    // residual collectible bill — runs for BOTH the freshly-created (shouldInvoice)
+    // and pre-minted completion-invoice paths, AFTER annual-prepay allocation, and
+    // only when the customer still owes a collectible invoice (not paid/prepaid,
+    // not payer-billed). The helper also fail-closes on a live PaymentIntent and
+    // applies full-coverage-only. Gated + best-effort; never blocks completion.
+    if (invoice?.id && !alreadyPaid && !invoice.payer_id
+      && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
+      && require('../config/feature-gates').gates.autoApplyAccountCredit) {
+      try {
+        const { applyAccountCreditToInvoice } = require('../services/customer-credit');
+        const creditResult = await applyAccountCreditToInvoice({ invoiceId: invoice.id });
+        if (creditResult?.applied > 0) {
+          const fresh = await db('invoices').where({ id: invoice.id })
+            .first('status', 'credit_applied', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
+          if (fresh) invoice = { ...invoice, ...fresh };
+          if (invoice.status === 'prepaid') { alreadyPaid = true; invoiceCreated = false; }
+        }
+      } catch (creditErr) {
+        logger.warn(`[referral] account-credit auto-apply failed for invoice=${invoice?.id}: ${creditErr.message}`);
+      }
+    }
+
     // Immediate/legacy review requests can be bundled into the completion SMS.
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
