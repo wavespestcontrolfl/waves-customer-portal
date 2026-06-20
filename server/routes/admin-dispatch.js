@@ -51,6 +51,7 @@ const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance } = require(
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
+  resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const CompanionCompletions = require('../services/service-report/companion-completions');
@@ -959,6 +960,63 @@ function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 
   return { body: best, truncated: true };
 }
 
+function completionAllowsTechnicianPestRating({ typedFindingsType = null, isInternalOnlyCompletion = false } = {}) {
+  return !typedFindingsType && !isInternalOnlyCompletion;
+}
+
+function pestPressureConfigAllowsTechnicianRating({ pestPressureConfig = null, serviceLine = null } = {}) {
+  const techEntryAllowed = !!(pestPressureConfig
+    && pestPressureConfig.allowTechnicianClientRatingEntry === true);
+  const enabledLines = Array.isArray(pestPressureConfig && pestPressureConfig.enabledServiceLines)
+    ? pestPressureConfig.enabledServiceLines
+    : [];
+  const serviceLineAllowed = enabledLines.length === 0
+    || (serviceLine && enabledLines.includes(serviceLine));
+  return techEntryAllowed && serviceLineAllowed;
+}
+
+function technicianPestRatingAllowedForService({ completionProfile = null, pestPressureConfig = null, serviceLine = null } = {}) {
+  const deliveryPosture = resolveCompletionDeliveryPosture({
+    typedFindingsType: completionProfile?.findingsType || null,
+    completionMode: completionProfile?.completionMode || null,
+    profileDeliveryMode: completionProfile?.deliveryMode || null,
+  });
+  return completionAllowsTechnicianPestRating({
+    typedFindingsType: completionProfile?.findingsType || null,
+    isInternalOnlyCompletion: deliveryPosture.isInternalOnly,
+  }) && pestPressureConfigAllowsTechnicianRating({ pestPressureConfig, serviceLine });
+}
+
+function photoCaptionBannedCopyPayload(captionBannedViolations = new Set()) {
+  const violations = [...captionBannedViolations];
+  return {
+    error: `Photo captions contain wording we can't put on a customer report (${violations.join(', ')}).`,
+    code: 'photo_caption_banned_copy',
+    violations,
+  };
+}
+
+function shouldRejectPhotoCaptionBannedCopy({
+  captionBannedViolations = new Set(),
+  isInternalOnlyCompletion = false,
+  resumingCommittedCompletion = false,
+  typedDeliveryMode = null,
+} = {}) {
+  if (!captionBannedViolations.size) return false;
+  if (resumingCommittedCompletion) return typedDeliveryMode === 'auto_send';
+  return !isInternalOnlyCompletion;
+}
+
+function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, products = [] } = {}) {
+  if (!isInternalOnlyCompletion || !Array.isArray(products)) return null;
+  const hasAppliedProduct = products.some((product) => product && product.productId);
+  if (!hasAppliedProduct) return null;
+  return {
+    error: 'Waves Assessment is an internal-only consultation; no treatment products can be recorded for this visit.',
+    code: 'internal_only_products_not_allowed',
+  };
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/dispatch/:serviceId/tech-rating-allowed
@@ -982,20 +1040,22 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'service_type');
+      .first('id', 'service_id', 'service_type');
     if (!svc) {
       return res.status(404).json({ error: 'Service not found' });
     }
-    const config = await loadPestPressureConfig(db);
-    const techEntryAllowed = !!(config
-      && config.allowTechnicianClientRatingEntry === true);
-    const enabledLines = Array.isArray(config && config.enabledServiceLines)
-      ? config.enabledServiceLines
-      : [];
+    const [config, completionProfile] = await Promise.all([
+      loadPestPressureConfig(db),
+      resolveCompletionProfileForScheduledService(svc),
+    ]);
     const serviceLine = detectServiceLine(svc.service_type);
-    const serviceLineAllowed = enabledLines.length === 0
-      || (serviceLine && enabledLines.includes(serviceLine));
-    res.json({ allowed: techEntryAllowed && serviceLineAllowed });
+    res.json({
+      allowed: technicianPestRatingAllowedForService({
+        completionProfile,
+        pestPressureConfig: config,
+        serviceLine,
+      }),
+    });
   } catch (err) { next(err); }
 });
 
@@ -1827,27 +1887,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
     // Photo captions land on the customer report for EVERY completion
     // (caption || stateBadge under each photo), typed or not — sanitize to
-    // the column budget and banned-copy validate them HERE, not just in the
-    // typed customerCopySources block, or a legacy completion could carry
-    // banned wording onto a report.
+    // the column budget HERE. The banned-copy REJECTION is deferred until the
+    // completion's delivery posture is known: internal-only consultations mint
+    // no customer report, so customer-copy bans must not block an internal
+    // assessment photo (the check is re-applied below for any other path).
+    const captionBannedViolations = new Set();
     if (Array.isArray(completionPhotos)) {
-      const captionViolations = new Set();
       for (const photo of completionPhotos) {
         if (photo && photo.caption != null) {
           photo.caption = String(photo.caption).trim().slice(0, 200) || null;
           if (photo.caption) {
             for (const v of ActivityIndicators.findBannedCustomerCopy(photo.caption)) {
-              captionViolations.add(v);
+              captionBannedViolations.add(v);
             }
           }
         }
-      }
-      if (captionViolations.size) {
-        return res.status(422).json({
-          error: `Photo captions contain wording we can't put on a customer report (${[...captionViolations].join(', ')}).`,
-          code: 'photo_caption_banned_copy',
-          violations: [...captionViolations],
-        });
       }
     }
     // The summary renders inside the Field Photos section — without photos
@@ -2170,21 +2224,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true' ? 'internal_only' : c.delivery,
       ]),
     );
-    // Delivery control for typed completions: profile delivery_mode
-    // (auto_send | internal_only | disabled) + a global kill env.
+    // Delivery control. For typed completions: profile delivery_mode
+    // (auto_send | internal_only | disabled) + a global kill env;
     // internal_only renders + stores the report (token/PDF) without customer
-    // SMS/email — the Phase-1b shadow mode. Recurring completions
-    // (findingsType null) are never affected.
+    // SMS/email — the Phase-1b shadow mode. For non-typed completions the
+    // routine Service Report auto-sends, EXCEPT internal-only consultations
+    // (completion_mode 'internal_only', e.g. Waves Assessment): an advisory
+    // walkthrough with no customer-facing report — delivery is forced
+    // 'disabled' (no public token minted) and customer comms are suppressed,
+    // while the service_records audit row is still written.
     // let, not const: re-derived from the record's FROZEN delivery posture
     // once the record is final, so a crash-resumed completion can't pick up
     // a later profile graduation (see the re-derivation before token mint).
-    let typedDeliveryMode = typedFindingsType
-      ? (process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true'
-        ? 'disabled'
-        : (completionProfile?.deliveryMode || 'auto_send'))
-      : 'auto_send';
-    let suppressTypedCustomerComms = !!typedFindingsType && typedDeliveryMode !== 'auto_send';
+    const deliveryPosture = resolveCompletionDeliveryPosture({
+      typedFindingsType,
+      completionMode: completionProfile?.completionMode,
+      profileDeliveryMode: completionProfile?.deliveryMode,
+      specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+    });
+    let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
+    let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
     let effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
+    // Internal-only consultation (e.g. Waves Assessment): advisory walkthrough,
+    // not a treatment. Beyond suppressing delivery, it must NOT feed the
+    // customer-report findings / Pest Pressure pipeline, and its suppression
+    // posture is frozen on the record so resumed side effects and downstream
+    // customer-facing gates (documents, paid-invoice review) honor it.
+    const isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
@@ -2276,6 +2342,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    // Deferred photo-caption banned-copy gate (captions were sanitized above).
+    // Run only after replay/conflict handling so idempotent retries of an
+    // already-final response do not start failing due to a later profile/copy
+    // policy change. Fresh internal-only consultations skip this because they
+    // produce no customer-facing report.
+    if (claim.action === 'proceed' && shouldRejectPhotoCaptionBannedCopy({
+      captionBannedViolations,
+      isInternalOnlyCompletion,
+      resumingCommittedCompletion,
+      typedDeliveryMode,
+    })) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('photo_caption_banned_copy'),
+      );
+      return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
+    }
+    if (claim.action === 'proceed') {
+      const internalOnlyProductsBlock = internalOnlyProductsBlockPayload({
+        isInternalOnlyCompletion,
+        products,
+      });
+      if (internalOnlyProductsBlock) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error(internalOnlyProductsBlock.code),
+        );
+        return res.status(422).json(internalOnlyProductsBlock);
+      }
+    }
 
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
@@ -2706,7 +2803,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
           const structuredNotes = {
             visitOutcome,
-            requestReview: isIncompleteVisit ? false : requestReview !== false,
+            // Internal-only consultations never request a customer review —
+            // freeze the opt-out so the Stripe paid-invoice webhook
+            // (stripe-webhook.js) also suppresses it for a billed assessment.
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion) ? false : requestReview !== false,
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             reviewTiming: reviewTiming || null,
@@ -2741,10 +2841,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               ? { completionTelemetry }
               : {}),
             // Delivery posture at completion time, frozen on the record:
-            // /api/services suppresses report links for internal_only rows
-            // (Phase-1b shadow) — a later graduation to auto_send must not
-            // retroactively expose reports that were never sent.
-            ...(typedFindingsType ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // /api/services + documents.js suppress report links/downloads for
+            // non-auto_send rows — a later graduation to auto_send must not
+            // retroactively expose reports that were never sent. Frozen for
+            // typed completions AND internal-only consultations (typedDeliveryMode
+            // 'disabled') so the no-customer-artifact posture survives resume.
+            ...((typedFindingsType || isInternalOnlyCompletion) ? { typedReportDelivery: typedDeliveryMode } : {}),
             // Companion delivery postures frozen alongside (same rule):
             // graduation flips on the profile never retro-publish stored
             // companion sections.
@@ -2936,8 +3038,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
           // Tech-side Pest Pressure rating capture — write iff (a) the
           // request supplied a valid integer 0-5 (validated near top of
-          // handler), (b) the active config has
-          // `allowTechnicianClientRatingEntry` enabled, AND (c) this
+          // handler), (b) the completion is neither typed nor internal-only,
+          // (c) the active config has
+          // `allowTechnicianClientRatingEntry` enabled, AND (d) this
           // record's `service_line` is in the config's
           // `enabledServiceLines` allow-list. The engine's score calc
           // skips lines outside the allow-list anyway, so writing the
@@ -2946,18 +3049,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // config inside the txn so we read a consistent snapshot with
           // the score calc that runs a few lines below.
           if (clientPestRating != null
-            && !typedFindingsType
+            && completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion })
             && serviceRecordCols.client_pest_rating
             && serviceRecordCols.client_pest_rating_source) {
             const pestPressureConfig = await loadPestPressureConfig(trx);
-            const techEntryAllowed = !!(pestPressureConfig
-              && pestPressureConfig.allowTechnicianClientRatingEntry === true);
-            const enabledLines = Array.isArray(pestPressureConfig && pestPressureConfig.enabledServiceLines)
-              ? pestPressureConfig.enabledServiceLines
-              : [];
-            const serviceLineAllowed = enabledLines.length === 0
-              || (reportServiceLine && enabledLines.includes(reportServiceLine));
-            if (techEntryAllowed && serviceLineAllowed) {
+            if (pestPressureConfigAllowsTechnicianRating({
+              pestPressureConfig,
+              serviceLine: reportServiceLine,
+            })) {
               recordInsert.client_pest_rating = clientPestRating;
               recordInsert.client_pest_rating_source = 'technician';
               if (serviceRecordCols.client_pest_rating_at) {
@@ -3052,7 +3151,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             .ignore();
         }
 
-        if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length) {
+        // Internal-only consultations skip service_findings entirely: the
+        // observations are still retained in structured_notes, but a findings
+        // row would make the consult readable as prior pest history (Pest
+        // Pressure recurring-issue component matches completed records'
+        // service_findings by service_line) and surface on customer-facing
+        // findings reads — neither is wanted for an advisory walkthrough.
+        if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length && !isInternalOnlyCompletion) {
           const findingRows = reportObservations.map((title) => ({
             service_record_id: record.id,
             category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
@@ -3070,6 +3175,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           useServiceReportV1
           && serviceFindingsAvailable
           && !typedFindingsType
+          && !isInternalOnlyCompletion
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
@@ -3086,7 +3192,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // service_type can detect to the 'pest' line and slip past the
         // one-time-label gate, which would pollute recurring pressure
         // history. The activity score above is their indicator instead.
-        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType) {
+        // Internal-only consultations are excluded for the same reason: an
+        // advisory walkthrough must not write Pest Pressure history.
+        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion) {
           const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
           if (pestPressure && pestPressure.result.displayedScore != null) {
             record.pressure_index = pestPressure.result.displayedScore;
@@ -3817,17 +3925,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // PUBLIC_PORTAL_URL first which is the canonical public origin.
     // Resume safety: a crash-resumed completion re-enters here with the
     // record already committed — and the profile may have graduated since
-    // (e.g. Phase-1b internal_only → auto_send). The record's FROZEN
-    // typedReportDelivery is the truth for this completion's delivery
-    // gates; the live profile only decides for brand-new records (the
-    // freeze itself is written from the profile at insert time).
-    if (typedFindingsType && record?.structured_notes) {
+    // (e.g. Phase-1b internal_only → auto_send, or a Waves Assessment flipped
+    // off internal-only). The record's FROZEN typedReportDelivery is the truth
+    // for this completion's delivery gates; the live profile only decides for
+    // brand-new records (the freeze itself is written from the profile at
+    // insert time). Applies to typed completions AND internal-only
+    // consultations — both freeze typedReportDelivery; routine completions
+    // never persist it, so frozenDelivery is undefined and nothing changes.
+    if (record?.structured_notes) {
       const frozenDelivery = parseJsonObject(record.structured_notes)?.typedReportDelivery;
       if (frozenDelivery && frozenDelivery !== typedDeliveryMode) {
         typedDeliveryMode = frozenDelivery;
         suppressTypedCustomerComms = typedDeliveryMode !== 'auto_send';
         effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;
       }
+    }
+    if (resumingCommittedCompletion && shouldRejectPhotoCaptionBannedCopy({
+      captionBannedViolations,
+      isInternalOnlyCompletion,
+      resumingCommittedCompletion,
+      typedDeliveryMode,
+    })) {
+      return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
     }
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
@@ -6392,6 +6511,11 @@ module.exports = router;
 module.exports._test = {
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
+  completionAllowsTechnicianPestRating,
+  pestPressureConfigAllowsTechnicianRating,
+  technicianPestRatingAllowedForService,
+  shouldRejectPhotoCaptionBannedCopy,
+  internalOnlyProductsBlockPayload,
   serviceReportEmailEligible,
   shouldAutoInvoiceCompletion,
 };

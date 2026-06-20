@@ -22,6 +22,7 @@
  */
 
 const MAX_LOOKBACK_REPORTS = 6;
+const { applyCustomerVisibleServiceRecordFilter } = require('../history-filter');
 
 function buildSignatureSet(findings) {
   const out = new Set();
@@ -74,6 +75,7 @@ async function extractRecurringIssue({ knex, customerId, serviceRecordId, servic
     .orderBy('service_date', 'desc')
     .limit(MAX_LOOKBACK_REPORTS)
     .select('id', 'service_date');
+  applyCustomerVisibleServiceRecordFilter(priorRecordsQuery);
   if (serviceLine) priorRecordsQuery.where('service_line', serviceLine);
   if (cutoffDate) priorRecordsQuery.where('service_date', '<', cutoffDate);
   const priorRecords = await priorRecordsQuery;

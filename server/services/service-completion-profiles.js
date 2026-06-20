@@ -306,10 +306,46 @@ async function appointmentManagedProjectTypes(knex = db) {
   }
 }
 
+/**
+ * Decide the customer-facing delivery posture for a completion, BEFORE the
+ * service report token is minted.
+ *
+ *  - Typed specialty completions (findingsType set) keep their existing
+ *    behavior: the profile's delivery_mode (auto_send | internal_only |
+ *    disabled) drives delivery, with a global kill env.
+ *  - Non-typed completions normally auto_send the routine Service Report.
+ *    EXCEPT internal-only consultations (completion_mode 'internal_only',
+ *    e.g. the Waves Assessment): an advisory walkthrough, not a treatment —
+ *    there is no customer-facing report. We force delivery to 'disabled'
+ *    (so no public report token is minted) and suppress customer comms (no
+ *    completion SMS/email, no review request). The service_records audit row
+ *    is still written by the completion path.
+ *
+ * Pure function (env read at the call site) so the gate is unit-testable.
+ */
+function resolveCompletionDeliveryPosture({
+  typedFindingsType = null,
+  completionMode = null,
+  profileDeliveryMode = null,
+  specialtyDeliveryDisabled = false,
+} = {}) {
+  const isInternalOnly = !typedFindingsType && completionMode === 'internal_only';
+  let typedDeliveryMode;
+  if (typedFindingsType) {
+    typedDeliveryMode = specialtyDeliveryDisabled ? 'disabled' : (profileDeliveryMode || 'auto_send');
+  } else {
+    typedDeliveryMode = isInternalOnly ? 'disabled' : 'auto_send';
+  }
+  const suppressCustomerComms = isInternalOnly
+    || (!!typedFindingsType && typedDeliveryMode !== 'auto_send');
+  return { typedDeliveryMode, suppressCustomerComms, isInternalOnly };
+}
+
 module.exports = {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
   serializeProfile,
+  resolveCompletionDeliveryPosture,
   appointmentManagedProjectTypes,
   DEFAULT_SERVICE_REPORT_PROFILE,
   V1_EXCLUDED_PROJECT_TYPES,

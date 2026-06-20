@@ -201,23 +201,28 @@ async function buildSummary(service) {
   // the same row even when a customer has two same-day visits.
   let serviceReportToken = null;
   let photos = [];
+  let suppressCustomerArtifacts = false;
   try {
     const record = await db('service_records')
       .where({ scheduled_service_id: service.id })
       .orderBy('created_at', 'desc')
       .first('id', 'report_view_token', 'structured_notes');
-    // internal_only typed completions (Phase-1b shadow) never hand the
-    // customer a report link — not even on the token-scoped tracking page.
+    // Non-auto_send delivery postures (typed shadow/internal-only and
+    // disabled consultations) never hand the customer report artifacts — not
+    // even on the token-scoped tracking page.
     let trackNotes = {};
     try {
       trackNotes = typeof record?.structured_notes === 'string'
         ? JSON.parse(record.structured_notes)
         : (record?.structured_notes || {});
     } catch { trackNotes = {}; }
-    serviceReportToken = trackNotes.typedReportDelivery && trackNotes.typedReportDelivery !== 'auto_send'
+    suppressCustomerArtifacts = !!(
+      trackNotes.typedReportDelivery && trackNotes.typedReportDelivery !== 'auto_send'
+    );
+    serviceReportToken = suppressCustomerArtifacts
       ? null
       : (record?.report_view_token || null);
-    if (record?.id) {
+    if (record?.id && !suppressCustomerArtifacts) {
       const photoRows = await db('service_photos')
         .where({ service_record_id: record.id })
         .orderBy('sort_order', 'asc')
@@ -244,13 +249,17 @@ async function buildSummary(service) {
 
   // Review request — most recent for this customer; TrackPage uses the
   // /rate/:token link, which routes to the closest-office GBP itself.
+  // Suppressed completion summaries (internal-only consultations / disabled
+  // delivery) must not surface a review CTA from an older request either.
   let reviewUrl = null;
   try {
-    const rr = await db('review_requests')
-      .where({ customer_id: service.customer_id })
-      .orderBy('created_at', 'desc')
-      .first('token');
-    if (rr?.token) reviewUrl = `/rate/${rr.token}`;
+    if (!suppressCustomerArtifacts) {
+      const rr = await db('review_requests')
+        .where({ customer_id: service.customer_id })
+        .orderBy('created_at', 'desc')
+        .first('token');
+      if (rr?.token) reviewUrl = `/rate/${rr.token}`;
+    }
   } catch (err) {
     logger.warn(`[track-public] review_request lookup failed: ${err.message}`);
   }
@@ -404,6 +413,7 @@ router._test = {
   isTrackTokenLive,
   isFreshVehicleTimestamp,
   ensureEnRouteDestinationGeocoded,
+  buildSummary,
 };
 
 module.exports = router;
