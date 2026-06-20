@@ -1624,6 +1624,11 @@ const InvoiceService = {
     const serviceType = invoice.service_type || invoice.title || "your service";
 
     let formattedDate = "";
+    // Whether the invoice's service date is *today* in ET. The annual-prepay
+    // "Today's visit is the first of N" clause is gated on this: a resend from
+    // sent/viewed/overdue or a delayed/scheduled send can run on a day other
+    // than service_date, where a same-day claim would be false.
+    let serviceDateIsTodayET = false;
     if (invoice.service_date) {
       try {
         // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
@@ -1640,6 +1645,7 @@ const InvoiceService = {
             year: "numeric",
             timeZone: "America/New_York",
           });
+          serviceDateIsTodayET = etDateString(d) === etDateString(new Date());
         }
       } catch {
         formattedDate = "";
@@ -1673,7 +1679,10 @@ const InvoiceService = {
         // display-only prepay flag (no count) still gets the prepay framing via
         // a generic phrase instead of the misleading "completed on" copy.
         const coverageSummary = coverage?.coverageSummary || "your annual service plan";
-        const firstVisitClause = coverage && formattedDate
+        // Only claim "today" when the service date actually is today in ET —
+        // resends and delayed sends run on other days. Off-day sends drop the
+        // clause; the coverage summary still conveys the full-term framing.
+        const firstVisitClause = coverage && serviceDateIsTodayET
           ? ` Today's visit is the first of ${coverage.coverageCount}.`
           : "";
         body = await templates.getTemplate("invoice_sent_annual_prepay", {
