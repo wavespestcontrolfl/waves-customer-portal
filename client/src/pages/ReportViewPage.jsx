@@ -804,6 +804,23 @@ function applicationReentrySummary(app = {}) {
   return app.product?.reentry_summary || '';
 }
 
+function applicationManufacturer(app = {}) {
+  return app.product?.manufacturer || '';
+}
+
+// Product-specific watering guidance for the lawn report, sourced ONLY from the
+// approved per-product irrigation note (label-derived `irrigation_notes`). We do
+// not synthesize watering intervals from product category/name — that would
+// invent label-like guidance, which the product-safety convention forbids
+// (see server report-copy-context.js: "do not invent numbers"). When a product
+// has no approved watering note, returns null and the report shows the neutral,
+// service-note-deferring guidance carried once in the section explainer.
+export function lawnWateringGuidance(app = {}) {
+  const note = String(app.product?.irrigation_notes || '').trim();
+  if (!note) return null;
+  return { headline: 'Watering note for this product', detail: note };
+}
+
 function isRenderableTreatmentApplication(app = {}) {
   return String(app.method || '').toLowerCase() !== 'station_check';
 }
@@ -2476,6 +2493,7 @@ function WhatHappenedWhere({ data, token, mode = 'live' }) {
 function AppliedProductsSection({ data, mode = 'live' }) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   if (!applications.length) return null;
+  const isLawn = data.serviceLine === 'lawn';
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
   const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
     ? data.dynamicContext.lawnProtocol.application.substitutions
@@ -2494,6 +2512,14 @@ function AppliedProductsSection({ data, mode = 'live' }) {
           <p>Why these products were selected for today&apos;s service.</p>
         </div>
       </div>
+      {isLawn && (
+        <div className="manufacturer-guideline-note">
+          <strong>Following the manufacturer&apos;s directions.</strong> Every product below is
+          applied to its manufacturer&apos;s label directions, and each card shows who makes it.
+          Open &ldquo;More information&rdquo; on any product for its watering note, and follow your
+          technician&apos;s service notes for what to do after today&apos;s visit.
+        </div>
+      )}
       {applications.length > 0 && (
         <div className="applied-products-grid">
           {applications.map((app, index) => {
@@ -2506,6 +2532,8 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const productSummary = applicationProductSummary(app);
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);
+            const manufacturer = applicationManufacturer(app);
+            const watering = isLawn ? lawnWateringGuidance(app) : null;
             const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
               epa ? `EPA reg. ${epa}` : null,
@@ -2517,6 +2545,9 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             return (
               <article className="applied-product-card product-group-card" key={app.id || `${productName}-${index}`}>
                 <h3>{productName}</h3>
+                {isLawn && manufacturer && (
+                  <div className="applied-product-maker">by {manufacturer}</div>
+                )}
                 <div className="product-purpose-grid">
                   <div>
                     <div className="sr-cell-label">Purpose</div>
@@ -2563,6 +2594,18 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     ))}
                     {precautionSummary && <p>{precautionSummary}</p>}
                     {reentrySummary && <p>{reentrySummary}</p>}
+                    {watering && (
+                      <div className="product-watering-guidance">
+                        <div className="sr-cell-label">Watering after this application</div>
+                        <p className="watering-headline">{watering.headline}</p>
+                        <p>{watering.detail}</p>
+                      </div>
+                    )}
+                    {isLawn && manufacturer && (
+                      <p className="product-manufacturer-line">
+                        Manufacturer: {manufacturer}. Applied to the manufacturer&apos;s label directions.
+                      </p>
+                    )}
                   </div>
                 </div>
               </details>
@@ -6429,6 +6472,44 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 12px;
           line-height: 1.45;
           font-weight: 700;
+        }
+        .manufacturer-guideline-note {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 12px 14px;
+          margin-bottom: 14px;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .manufacturer-guideline-note strong {
+          color: var(--text);
+          font-weight: 750;
+        }
+        .applied-product-maker {
+          margin: -2px 0 8px;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.3;
+          font-weight: 600;
+        }
+        .product-watering-guidance {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 10px;
+        }
+        .product-watering-guidance .watering-headline {
+          margin-top: 4px;
+          color: var(--text);
+          font-weight: 700;
+        }
+        .product-watering-guidance p + p {
+          margin-top: 4px;
+        }
+        .product-manufacturer-line {
+          font-size: 13px;
         }
         .applied-product-card p {
           margin: 0;
