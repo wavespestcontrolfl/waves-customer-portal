@@ -11,7 +11,12 @@
 
 const crypto = require('crypto');
 const db = require('../models/db');
-const { etMonthStart, etMonthEnd } = require('../utils/datetime-et');
+const logger = require('./logger');
+const { etMonthStart, etMonthEnd, etDateString, addETDays } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
+
+// NET term → days the statement is due after its close date.
+const STATEMENT_TERM_DAYS = { net15: 15, net30: 30 };
 
 function generateStatementToken() {
   return crypto.randomBytes(32).toString('hex');
@@ -124,9 +129,108 @@ async function rollupStatement(statementId, database = db) {
     });
 }
 
+/**
+ * P2 — Finalize (close) an OPEN statement: freeze totals + the payer bill-to
+ * snapshot + the due date, and flip `open → finalized`. After this, the statement
+ * is a billed document; getOrCreateOpenStatement opens the NEXT period for any
+ * late visit. Idempotent — a non-open statement is returned unchanged.
+ *
+ * MUST run inside a transaction. Takes the SAME per-(payer, period) advisory lock
+ * as accrual FIRST (so a concurrent visit either attaches before we freeze, or
+ * finds the statement non-open and advances), then row-locks the statement
+ * (`FOR UPDATE`) before freezing — no stale total, no invoice landing after close.
+ */
+async function finalizeStatement(statementId, { database = db, date = new Date() } = {}) {
+  const head = await database('payer_statements')
+    .where({ id: statementId })
+    .first('id', 'payer_id', 'period_start', 'status');
+  if (!head) throw new Error('finalizeStatement: statement not found');
+  if (head.status !== 'open') {
+    return database('payer_statements').where({ id: statementId }).first();
+  }
+
+  // Advisory lock first (matches getOrCreateOpenStatement's order), then row lock.
+  // The key MUST be byte-identical to accrual's `${pid}|${etMonthStart()}` —
+  // `period_start` comes back from a DATE column as a JS Date, so normalize it to
+  // the same 'YYYY-MM-DD' string accrual locks on. Interpolating the raw Date
+  // (`Fri May 01 2026 …`) would key a DIFFERENT lock and silently defeat the
+  // serialization, letting a late invoice attach after the freeze.
+  const periodKey = dateOnlyString(head.period_start);
+  await database.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [
+    'payer.statement.open',
+    `${Number(head.payer_id)}|${periodKey}`,
+  ]);
+  const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first();
+  if (!stmt || stmt.status !== 'open') {
+    // Raced a concurrent finalize — return the now-frozen row.
+    return database('payer_statements').where({ id: statementId }).first();
+  }
+
+  // Final rollup from attached non-void invoices while still open.
+  await rollupStatement(statementId, database);
+  const fresh = await database('payer_statements').where({ id: statementId }).first();
+
+  // Freeze the payer bill-to from the CURRENT live payer (mirrors
+  // invoices.payer_snapshot). Never block the close on a payer read — fall back
+  // to the statement's existing snapshot.
+  let snapshot = fresh.payer_snapshot || null;
+  try {
+    const PayerService = require('./payer');
+    const payer = await PayerService.getPayer(fresh.payer_id, database);
+    if (payer) snapshot = PayerService.payerSnapshot(payer);
+  } catch (err) {
+    logger.warn(`[payer-statements] finalize: payer snapshot refresh failed for statement ${statementId}: ${err.message}`);
+  }
+
+  const termDays = STATEMENT_TERM_DAYS[fresh.terms_snapshot] || 30;
+  const dueDate = etDateString(addETDays(date, termDays)); // statement-dated NET (ET)
+
+  const patch = {
+    status: 'finalized',
+    finalized_at: database.fn.now(),
+    due_date: dueDate,
+    updated_at: database.fn.now(),
+  };
+  if (snapshot) patch.payer_snapshot = JSON.stringify(snapshot);
+
+  const [updated] = await database('payer_statements')
+    .where({ id: statementId, status: 'open' })
+    .update(patch)
+    .returning('*');
+  return updated;
+}
+
+/**
+ * The attached, non-void invoices for a statement — one row per billed visit,
+ * with the homeowner (service address) for the consolidated PDF / email.
+ * Ordered by service date so the statement reads as a chronological ledger.
+ */
+async function loadStatementLines(statementId, database = db) {
+  return database('invoices as i')
+    .leftJoin('customers as c', 'c.id', 'i.customer_id')
+    .where('i.payer_statement_id', statementId)
+    .whereNot('i.status', 'void')
+    .orderBy([{ column: 'i.service_date', order: 'asc' }, { column: 'i.id', order: 'asc' }])
+    .select(
+      'i.invoice_number',
+      'i.service_date',
+      'i.service_type',
+      'i.subtotal',
+      'i.tax_amount',
+      'i.total',
+      database.raw(
+        "COALESCE(NULLIF(TRIM(CONCAT(COALESCE(c.first_name,''),' ',COALESCE(c.last_name,''))),''), c.company_name) AS customer_name",
+      ),
+      database.raw("COALESCE(c.address_line1, '') AS service_address"),
+    );
+}
+
 module.exports = {
   getOrCreateOpenStatement,
   rollupStatement,
+  finalizeStatement,
+  loadStatementLines,
   periodFor,
   generateStatementToken,
+  STATEMENT_TERM_DAYS,
 };
