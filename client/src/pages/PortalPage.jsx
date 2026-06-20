@@ -1803,9 +1803,9 @@ function ServicesTab() {
   const thisYearServices = services.filter(s => parseDate(s.date).getFullYear() === currentYear);
   const totalProducts = thisYearServices.reduce((sum, s) => sum + (s.products?.length || 0), 0);
   const uniqueTechs = new Set(thisYearServices.map(s => s.technician).filter(Boolean)).size;
-  const avgMinutes = thisYearServices.length
-    ? Math.round(thisYearServices.reduce((sum, s) => sum + (s.serviceTimeMinutes || 0), 0) / thisYearServices.filter(s => s.serviceTimeMinutes).length) || 0
-    : 0;
+  // WaveGuard memberships don't account for an hourly/per-visit time figure in the
+  // customer portal — the average visit duration is intentionally not tallied (reads as zero).
+  const avgMinutes = 0;
 
   // --- Monthly grouping ---
   const grouped = {};
@@ -2033,7 +2033,8 @@ function ServicesTab() {
                           {[
                             { label: 'Date', value: parseDate(s.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) },
                             { label: 'Technician', value: s.technician },
-                            { label: 'Duration', value: s.serviceTimeMinutes ? `${s.serviceTimeMinutes} min` : '—' },
+                            // WaveGuard memberships don't account for an hourly/per-visit time figure — duration reads as zero.
+                            { label: 'Duration', value: '—' },
                             { label: 'Status', value: status },
                           ].map((item, i) => (
                             <div key={i} style={{ padding: 12, borderRadius: 8, border: '1px solid #E7E2D7', background: '#fff' }}>

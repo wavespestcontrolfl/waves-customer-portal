@@ -2299,6 +2299,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     zones: publicZones,
   }, serviceCoverageConfig || {});
 
+  // WaveGuard membership tier for THIS visit (null for non-members). Prefer the tier
+  // frozen at completion (service_records.service_tier — admin-dispatch snapshots the
+  // customer's tier at the time of the visit) so a later membership change doesn't
+  // rewrite the membership shown on past reports; fall back to the customer's current
+  // waveguard_tier only for older records completed before the snapshot existed. Only
+  // true membership tiers count: 'One-Time' is an allowed tier for one-off customers
+  // (migration 20260414000003) but is NOT a membership, so it must not trigger the
+  // member-only display rules (e.g. hiding the per-visit duration).
+  const reportWaveGuardTier = service.service_tier || service.waveguard_tier;
+  const waveGuardTier = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(reportWaveGuardTier)
+    ? reportWaveGuardTier
+    : null;
+
   return {
     reportVersion: 'service_report_v1',
     token,
@@ -2319,6 +2332,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
+    // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
+    // report viewer to suppress the per-visit "Time on site" duration for members while
+    // non-member reports honor the admin showDuration setting.
+    waveGuardTier,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,
