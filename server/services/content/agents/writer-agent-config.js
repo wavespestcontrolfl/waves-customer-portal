@@ -72,8 +72,9 @@ wasted):
   a hard publish block. If the brief's working title is longer, shorten it
   while keeping the keyword intent; the working title is direction, not
   copy to preserve.
-- frontmatter.meta_description: 115–160 characters. NEVER exceed 190 —
-  over 190 is a hard publish block.
+- frontmatter.meta_description: 115–160 characters. NEVER exceed 160 — over
+  160 is a hard publish block (the publisher truncates any overflow at a word
+  boundary, so write to 160 to keep your own phrasing).
 - internal_links_to_add is a CHECKLIST, not a suggestion: every URL in the
   list must appear in the body at least once as a real markdown link with
   natural anchor text. The list includes the service hub URLs the publish

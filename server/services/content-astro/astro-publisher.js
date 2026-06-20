@@ -382,6 +382,25 @@ function normalizeAutonomousCategory(frontmatter = {}, brief = {}) {
   ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ')) || 'pest-control';
 }
 
+// The binding blog schema caps meta_description at 160 chars
+// (packages/blog-schema/schema.json). The writer LLM overshoots despite its
+// prompt, which previously hard-failed the WHOLE publish (publish_validation_
+// failed) and wasted the generation. The publisher already owns fields the agent
+// drifts on (hero); clamp meta the same way — truncate at a word boundary to the
+// cap (stays ≥115 for any real sentence, so the schema min still holds) instead
+// of rejecting.
+const META_DESCRIPTION_MAX = 160;
+function clampMetaDescription(meta) {
+  const s = String(meta || '').trim();
+  if (s.length <= META_DESCRIPTION_MAX) return s;
+  const cut = s.slice(0, META_DESCRIPTION_MAX);
+  const lastSpace = cut.lastIndexOf(' ');
+  const trimmed = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut)
+    .replace(/[\s.,;:–—-]+$/u, '')
+    .trim();
+  return trimmed || cut.trim();
+}
+
 function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body = '', { slug, canonical } = {}) {
   const published = dateOnly(frontmatter.published)
     || dateOnly(frontmatter.publish_date)
@@ -402,7 +421,7 @@ function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body =
   const data = {
     title: String(frontmatter.title || brief.title || brief.target_keyword || '').trim(),
     slug: `/${slug}/`,
-    meta_description: String(frontmatter.meta_description || '').trim(),
+    meta_description: clampMetaDescription(frontmatter.meta_description),
     primary_keyword: String(frontmatter.primary_keyword || brief.target_keyword || '').trim(),
     secondary_keywords: normalizeArray(frontmatter.secondary_keywords),
     category: normalizeAutonomousCategory(frontmatter, brief),
@@ -2081,24 +2100,30 @@ function normalizeCanonicalPath(pathname) {
 function assertCanonicalMatchesSlug(frontmatter, slug, origin = HUB_ORIGIN) {
   const expected = canonicalUrlForSlug(slug, origin);
   const supplied = String(frontmatter?.canonical || '').trim();
-  const expectedUrl = new URL(expected);
-  if (!supplied) {
-    frontmatter.canonical = expected;
-    return expected;
-  }
-  let suppliedUrl;
-  try {
-    suppliedUrl = supplied.startsWith('/')
-      ? new URL(supplied, expectedUrl.origin)
-      : new URL(supplied);
-  } catch {
-    throw new Error('autonomous draft canonical is not a valid URL');
-  }
-  if (
-    suppliedUrl.origin !== expectedUrl.origin
-    || normalizeCanonicalPath(suppliedUrl.pathname) !== normalizeCanonicalPath(expectedUrl.pathname)
-  ) {
-    throw new Error(`autonomous draft canonical must match slug ${frontmatter.slug}`);
+  // The writer's canonical is ADVISORY — the binding canonical is derived from
+  // the (category-route) slug by the caller regardless. Reject ONLY a canonical
+  // that VALIDLY points to a DIFFERENT post (different leaf slug): that's a
+  // genuinely confused draft worth parking for review. An absent, malformed,
+  // different-origin, or mere category-prefix variant ("/foo/" vs
+  // "/pest-control/foo/", which the publisher resolves via categoryRouteSlug) is
+  // normalized to the slug — those mismatches were wasting whole generations on
+  // a field we overwrite anyway.
+  if (supplied) {
+    let suppliedUrl = null;
+    try {
+      suppliedUrl = supplied.startsWith('/')
+        ? new URL(supplied, new URL(expected).origin)
+        : new URL(supplied);
+    } catch {
+      suppliedUrl = null; // malformed → derive from slug below
+    }
+    if (suppliedUrl) {
+      const suppliedLeaf = slugLeafOf(suppliedUrl.pathname);
+      const expectedLeaf = slugLeafOf(slug);
+      if (suppliedLeaf && expectedLeaf && suppliedLeaf !== expectedLeaf) {
+        throw new Error(`autonomous draft canonical must match slug ${frontmatter.slug}`);
+      }
+    }
   }
   frontmatter.canonical = expected;
   return expected;
@@ -2352,6 +2377,7 @@ module.exports = {
     slugLeafOf,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
+    clampMetaDescription,
     buildDraftPrBody,
     buildMetadataPrBody,
     buildSeoReviewSection,
