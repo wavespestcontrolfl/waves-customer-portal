@@ -423,8 +423,10 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
     if (churnReason) stamps.churn_reason = churnReason;
   } else {
     // Reactivation / any non-churned target: clear a stale churn stamp so a
-    // reactivated customer never carries a leftover churned_at.
-    if (oldStage === 'churned') {
+    // reactivated customer never carries a leftover churned_at. Keyed on the
+    // STAMP's presence, not just oldStage, since churned_at can exist on a
+    // non-churned row (e.g. a deactivation backfill).
+    if (oldStage === 'churned' || customer.churned_at) {
       stamps.churned_at = null;
       stamps.churn_reason = null;
     }

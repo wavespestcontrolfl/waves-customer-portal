@@ -47,6 +47,12 @@ describe('stageLifecycleStamps', () => {
     expect(s.churn_reason).toBeNull();
   });
 
+  test('clears a stale churned_at even when the old stage was not churned', () => {
+    const s = stageLifecycleStamps('at_risk', 'active_customer', { member_since: '2025-01-01', churned_at: '2025-06-01' }, { today: TODAY });
+    expect(s.churned_at).toBeNull();
+    expect(s.churn_reason).toBeNull();
+  });
+
   test('a lead→lead move only touches pipeline_stage_changed_at', () => {
     const s = stageLifecycleStamps('new_lead', 'contacted', { member_since: null }, { today: TODAY });
     expect(Object.keys(s)).toEqual(['pipeline_stage_changed_at']);
