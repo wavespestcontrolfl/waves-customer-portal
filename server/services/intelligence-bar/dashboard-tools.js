@@ -366,7 +366,9 @@ async function comparePeriods(input) {
           .where('c.active', true)
           .whereNull('c.deleted_at')
           .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-          .whereBetween('c.created_at', [fromTs, toTs])
+          // Conversion date (member_since, an ET DATE), same source of truth as
+          // the KPI snapshot — not created_at (lead intake).
+          .whereBetween('c.member_since', [from, to])
       ).count('* as count').first();
       m.new_customers = parseInt(nc?.count || 0);
     }
@@ -698,17 +700,19 @@ async function getCustomerAcquisition(input) {
   const from = input.date_from || r.year_start;
   const to = input.date_to || r.today;
 
+  // Real customers only (not leads), acquired by CONVERSION date (member_since,
+  // an ET DATE) — consistent with the dashboard new-customer source of truth.
   const bySource = await db('customers')
-    .where({ active: true })
-    .whereBetween('created_at', [from, to + 'T23:59:59'])
+    .modify(whereLiveCustomer)
+    .whereBetween('member_since', [from, to])
     .select('lead_source', db.raw('COUNT(*) as count'), db.raw('SUM(monthly_rate) as total_mrr'))
     .groupBy('lead_source').orderByRaw('COUNT(*) DESC');
 
   const byMonth = await db('customers')
-    .where({ active: true })
-    .whereBetween('created_at', [from, to + 'T23:59:59'])
-    .select(db.raw("TO_CHAR(created_at, 'YYYY-MM') as month"), db.raw('COUNT(*) as count'))
-    .groupByRaw("TO_CHAR(created_at, 'YYYY-MM')").orderByRaw("TO_CHAR(created_at, 'YYYY-MM')");
+    .modify(whereLiveCustomer)
+    .whereBetween('member_since', [from, to])
+    .select(db.raw("TO_CHAR(member_since, 'YYYY-MM') as month"), db.raw('COUNT(*) as count'))
+    .groupByRaw("TO_CHAR(member_since, 'YYYY-MM')").orderByRaw("TO_CHAR(member_since, 'YYYY-MM')");
 
   return {
     period: { from, to },
