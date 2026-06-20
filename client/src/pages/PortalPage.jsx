@@ -3336,7 +3336,7 @@ function BillingTab({ customer }) {
     : 'Not scheduled';
   const defaultCard = cards.find(c => c.isDefault) || cards[0];
   const lastPaymentFailed = balance?.lastPaymentFailed || false;
-  const activeTierName = customer?.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
   const tier = activeTierName ? TIER[tierName] : null;
   const monthlyRate = customer?.monthlyRate || 0;
@@ -5513,7 +5513,7 @@ function LearnTab({ customer }) {
   const latestContent = allContent[0];
   const totalFaqQuestions = faq.reduce((sum, cat) => sum + (cat.questions?.length || 0), 0);
 
-  const activeTierName = customer?.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
   const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   const customerServiceNames = SERVICE_CATALOG
@@ -5984,6 +5984,19 @@ const SERVICE_CATALOG = [
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const TIER_SERVICES = { Bronze: 1, Silver: 2, Gold: 3, Platinum: 4 };
 const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
+
+// Shared WaveGuard membership check. A customer is an active member if they carry a
+// recognized tier, or — for legacy/active members whose tier was never backfilled —
+// a positive monthly rate (mirrors server membership logic). Genuine non-members
+// (no tier and no billing) resolve to null so the portal does not fabricate a Bronze
+// plan for leads. Bronze is the conservative floor used until the alignment script
+// backfills the real tier.
+function resolveActiveTierName(customer = {}) {
+  if (customer && customer.tier && TIER_SERVICES[customer.tier]) return customer.tier;
+  const rate = Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0);
+  if (Number.isFinite(rate) && rate > 0) return 'Bronze';
+  return null;
+}
 
 const TIER_SERVICE_NAMES = {
   Bronze: ['Quarterly Pest Control'],
@@ -6721,7 +6734,7 @@ function MyPlanTab({ customer }) {
     );
   };
 
-  const activeTierName = customer.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const activeTierName = resolveActiveTierName(customer);
   const tier = activeTierName ? TIER[activeTierName] : null;
   const tierName = activeTierName || 'No Plan';
   const tierIdx = activeTierName ? TIER_ORDER.indexOf(activeTierName) : -1;
@@ -9598,7 +9611,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
 
   // Callback recognition: pest/lawn issue within 30 days of last service
-  const activeTierName = customer?.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
   const isCallbackEligible = isProblemCategory && lastService && (() => {
     const svcDate = parseDate(lastService.date);
