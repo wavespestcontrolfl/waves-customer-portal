@@ -654,28 +654,60 @@ const InvoiceService = {
    * Create an invoice — optionally linked to a service record.
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
-  async create({
-    database = db,
-    customerId,
-    serviceRecordId,
-    scheduledServiceId,
-    title,
-    lineItems,
-    notes,
-    dueDate,
-    taxRate,
-    discountIds,
-    serviceDate,
-    trustedStoredDiscountSources = [],
-    // Deposit credit REQUEST: create() caps it against its own
-    // post-discount, after-tax total and appends the line item itself —
-    // callers that compute the cap from raw line items get it wrong as soon
-    // as discounts or commercial tax are in play (the cap must see the same
-    // math that produces `total`). The amount actually applied is returned
-    // on the invoice as `applied_deposit_credit`; consume exactly that from
-    // the ledger, never the requested amount.
-    depositCredit = null,
-  }) {
+  async create(createArgs) {
+    // `let` (not const): create() reassigns some of these below (e.g. taxRate for
+    // a tax-exempt payer), matching the original mutable function-parameter shape.
+    let {
+      database = db,
+      customerId,
+      serviceRecordId,
+      scheduledServiceId,
+      title,
+      lineItems,
+      notes,
+      dueDate,
+      taxRate,
+      discountIds,
+      serviceDate,
+      trustedStoredDiscountSources = [],
+      // Deposit credit REQUEST: create() caps it against its own
+      // post-discount, after-tax total and appends the line item itself —
+      // callers that compute the cap from raw line items get it wrong as soon
+      // as discounts or commercial tax are in play (the cap must see the same
+      // math that produces `total`). The amount actually applied is returned
+      // on the invoice as `applied_deposit_credit`; consume exactly that from
+      // the ledger, never the requested amount.
+      depositCredit = null,
+      // skipAccrual: this invoice must NOT accrue to a payer statement even for a
+      // NET-terms payer — set by callers that immediately settle the invoice
+      // (annual-prepay, paid in the same flow) or create a throwaway preview
+      // (project send dry-run). Accruing those would double-bill (already paid) or
+      // leave a phantom statement line (cancelled preview).
+      skipAccrual = false,
+    } = createArgs;
+
+    // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
+    // insert + rollup) must be atomic, so run the whole create in one transaction
+    // when no caller transaction was supplied. But ONLY for an actual accrual —
+    // wrapping EVERY create would break create()'s best-effort tax/discount
+    // catches (a caught error inside a Postgres transaction still aborts it,
+    // rolling back the insert). So resolve the payer terms up front to decide;
+    // resolution THROWS under the gate (fail closed — a NET-terms job must not
+    // silently fall back to an individually-collectible invoice). insertInvoiceRow
+    // savepoints each insert, so the collision retry still works inside the txn.
+    if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
+      const PayerSvc = require("./payer");
+      let preSsId = scheduledServiceId;
+      if (!preSsId && serviceRecordId) {
+        const srLink = await db("service_records").where({ id: serviceRecordId, customer_id: customerId }).first("scheduled_service_id").catch(() => null);
+        if (srLink?.scheduled_service_id) preSsId = srLink.scheduled_service_id;
+      }
+      const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: preSsId, throwOnError: true });
+      if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
+        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+      }
+    }
+
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
@@ -687,6 +719,8 @@ const InvoiceService = {
     // a payer lookup can never block invoicing — and the inserted row is
     // unchanged for the (overwhelmingly common) self-pay case.
     const PayerService = require("./payer");
+    const PayerStatements = require("./payer-statements");
+    const { isEnabled } = require("../config/feature-gates");
     // When the caller passes only a serviceRecordId (e.g. completion-time
     // invoicing), derive that visit's scheduled_service_id so a per-job payer
     // override on the appointment is honored — resolveForInvoice keys per-job
@@ -707,12 +741,60 @@ const InvoiceService = {
       poNumber: resolvedPoNumber,
       taxExempt: resolvedTaxExempt,
       snapshot: resolvedPayerSnapshot,
+      paymentTerms: resolvedPaymentTerms,
     } = await PayerService.resolveForInvoice({
       database,
       customerId,
       customer,
       scheduledServiceId: payerScheduledServiceId,
+      // Fail closed under the statements gate: if payer resolution is uncertain,
+      // a NET-terms job must NOT silently fall back to self-pay and create an
+      // individually-collectible invoice instead of accruing. (Default fail-soft
+      // when the gate is off — unchanged for everyone today.)
+      throwOnError: isEnabled("payerStatements"),
     });
+
+    // Phase 2 (gated by GATE_PAYER_STATEMENTS): a NET-terms payer invoice is held
+    // from individual AP delivery and ACCRUED to the payer's OPEN monthly
+    // statement. We resolve/attach the statement here and stamp
+    // `payer_statement_id` on the insert below; the rollup runs after insert. The
+    // statement get-or-create is concurrency-safe via the partial unique index
+    // and rides the caller's transaction when one was passed. due_on_receipt
+    // payers (everyone today) and the gate-off path are byte-identical to before.
+    // Fail soft: a statement-resolution error never blocks invoicing — it falls
+    // back to a normal payer invoice (the Phase-1 guards still protect the
+    // homeowner; the AP just gets an individual invoice instead of a line).
+    let accruedStatementId = null;
+    if (!skipAccrual
+      && resolvedPayerId
+      && ['net15', 'net30'].includes(resolvedPaymentTerms)
+      && isEnabled('payerStatements')) {
+      // TOCTOU guard: the transaction wrap at the top was decided from a preflight
+      // resolve. If the payer/terms flipped to NET between that preflight and this
+      // definitive resolution, we can reach here with database === db (no
+      // transaction) — re-enter create() in one so accrual stays atomic. (The
+      // re-entry's database is the trx, so its own preflight won't re-wrap.)
+      if (database === db) {
+        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+      }
+      try {
+        const stmt = await PayerStatements.getOrCreateOpenStatement({
+          payerId: resolvedPayerId,
+          termsSnapshot: resolvedPaymentTerms,
+          database,
+        });
+        accruedStatementId = stmt.id;
+      } catch (err) {
+        // Fail CLOSED: never create an unguarded individual invoice for a
+        // NET-terms payer when accrual fails — it would be individually
+        // sendable/collectible and bypass the consolidated-statement contract.
+        // getOrCreateOpenStatement is robust (advisory lock + partial-unique
+        // backstop + race re-select), so this is a genuine error worth surfacing
+        // to the caller rather than silently degrading.
+        logger.error(`[invoice] payer-statement accrual failed for payer ${resolvedPayerId}: ${err.message}`);
+        throw err;
+      }
+    }
     // A tax-exempt payer (builder/HOA with a resale/exemption cert on file)
     // zeroes tax on its invoices — even commercial jobs that would otherwise
     // carry the +7%. Force the rate to 0 so the tax block below resolves to 0.
@@ -1120,6 +1202,7 @@ const InvoiceService = {
           ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
+          ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,
         });
         break;
@@ -1134,6 +1217,14 @@ const InvoiceService = {
       }
     }
     if (!invoice) throw new Error("Could not allocate invoice number");
+
+    // Recompute the statement rollup now this accrued invoice is attached. This
+    // runs inside the create transaction (the caller's, or the one opened above),
+    // so a rollup failure ABORTS the create — we never commit an accrued invoice
+    // beside a drifted statement total.
+    if (accruedStatementId) {
+      await PayerStatements.rollupStatement(accruedStatementId, database);
+    }
 
     // Record applied discounts in invoice_discounts table
     try {
@@ -1157,9 +1248,17 @@ const InvoiceService = {
         });
       }
       if (auditRows.length > 0) {
-        const recordArgs = [invoice.id, auditRows, "system"];
-        if (database !== db) recordArgs.push(database);
-        await DiscountEngine.recordInvoiceDiscounts(...recordArgs);
+        // This is best-effort (the catch below swallows errors), but for a
+        // NET-terms accrual create() runs inside a transaction — and a SQL error
+        // inside a Postgres txn leaves it ABORTED, so a swallowed error here would
+        // still roll back the invoice + statement rollup on commit. Run the audit
+        // in a SAVEPOINT (nested transaction) when inside a txn so its failure
+        // rolls back only the savepoint and the catch can keep it best-effort.
+        if (database !== db) {
+          await database.transaction((sp) => DiscountEngine.recordInvoiceDiscounts(invoice.id, auditRows, "system", sp));
+        } else {
+          await DiscountEngine.recordInvoiceDiscounts(invoice.id, auditRows, "system");
+        }
       }
     } catch (err) {
       logger.warn(
@@ -1432,6 +1531,10 @@ const InvoiceService = {
   async getByToken(token) {
     const invoice = await db("invoices").where({ token }).first();
     if (!invoice) return null;
+    // NOTE: do NOT block payer_statement_id here — getByToken also backs the
+    // PERMANENT receipt endpoints (receipt-v2), which must never 404 (AGENTS.md).
+    // The accrued-invoice "statement-only" block lives in the PAY + invoice-PDF
+    // routes instead (the collection surfaces), not this shared loader.
 
     // Record view
     const updates = { view_count: (invoice.view_count || 0) + 1 };
@@ -1673,6 +1776,13 @@ const InvoiceService = {
       payUrlParams = null,
     } = {},
   ) {
+    // Phase 2: an accrued invoice (on a payer statement) is never delivered
+    // individually. Refuse BEFORE claiming so we don't flip its status to
+    // 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id");
+    if (accrualPre?.payer_statement_id) {
+      return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
+    }
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { previousStatus, claimed } = claim;
     const { sendInvoiceEmail } = require("./invoice-email");
@@ -2340,6 +2450,16 @@ const InvoiceService = {
     // (line-item path) for their own ledger reasons.
     const existing = await db("invoices").where({ id }).first();
     if (!existing) return null;
+    // Phase 2: a draft invoice ACCRUED to a payer statement may be edited only
+    // while that statement is still OPEN. Once it is finalized/sent the invoice is
+    // a billed line — editing it would change the document under the frozen total.
+    // (The post-edit reroll below no-ops on a frozen statement, so block here.)
+    if (existing.payer_statement_id) {
+      const stmt = await db("payer_statements").where({ id: existing.payer_statement_id }).first("status");
+      if (stmt && stmt.status !== "open") {
+        throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by editing a billed line");
+      }
+    }
     const currentStatus = String(existing.status || "").toLowerCase();
     if (currentStatus !== "draft" && currentStatus !== "scheduled") {
       throw new Error(
@@ -2464,25 +2584,48 @@ const InvoiceService = {
     // transactions. Left as-is on purpose: it needs two admins on the SAME
     // draft within a sub-second window, the already-exists cases are blocked
     // above, and any resulting total mismatch is visible and recoverable.
-    const [invoice] = await db("invoices")
-      .where({ id })
-      .whereIn("status", ["draft", "scheduled"])
-      .whereNull("stripe_payment_intent_id")
-      .whereNull("annual_prepay_term_id")
-      .whereNotExists(function () {
-        this.select(db.raw("1"))
-          .from("payment_plans")
-          .whereRaw("payment_plans.invoice_id = invoices.id")
-          .where("payment_plans.status", "active");
-      })
-      .update(data)
-      .returning("*");
-    if (!invoice) {
-      throw new Error(
-        "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
-      );
-    }
-    return invoice;
+    const runEdit = async (client) => {
+      // Accrued: lock the parent statement and re-verify it's still OPEN inside
+      // this transaction, so a concurrent close can't finalize between the
+      // pre-check above and this write.
+      if (existing.payer_statement_id) {
+        const locked = await client("payer_statements")
+          .where({ id: existing.payer_statement_id })
+          .forUpdate()
+          .first("status");
+        if (locked && locked.status !== "open") {
+          throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by editing a billed line");
+        }
+      }
+      const [edited] = await client("invoices")
+        .where({ id })
+        .whereIn("status", ["draft", "scheduled"])
+        .whereNull("stripe_payment_intent_id")
+        .whereNull("annual_prepay_term_id")
+        .whereNotExists(function () {
+          this.select(db.raw("1"))
+            .from("payment_plans")
+            .whereRaw("payment_plans.invoice_id = invoices.id")
+            .where("payment_plans.status", "active");
+        })
+        .update(data)
+        .returning("*");
+      if (!edited) {
+        throw new Error(
+          "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      // Phase 2: an edited accrued invoice changes the statement total — reroll in
+      // the SAME transaction so a reroll failure ABORTS the edit; we never commit
+      // a changed invoice beside a stale statement subtotal/tax/total.
+      if (edited.payer_statement_id) {
+        await require("./payer-statements").rollupStatement(edited.payer_statement_id, client);
+      }
+      return edited;
+    };
+    // An accrued invoice's edit + statement reroll must commit atomically; other
+    // invoices keep the existing single-statement write (no transaction).
+    return existing.payer_statement_id ? db.transaction(runEdit) : runEdit(db);
   },
 
   async voidInvoice(id) {
@@ -2495,6 +2638,16 @@ const InvoiceService = {
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
     assertInvoiceVoidable(current.status);
+    // Phase 2: an accrued invoice on a FINALIZED/sent statement is a billed line —
+    // refuse to void it (which would change the document under the frozen total);
+    // the correction is a credit on the next statement. Voiding while the
+    // statement is still OPEN is fine (the reroll below drops it from the total).
+    if (current.payer_statement_id) {
+      const stmt = await db("payer_statements").where({ id: current.payer_statement_id }).first("status");
+      if (stmt && stmt.status !== "open") {
+        throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
+      }
+    }
     if (current.status === "void") {
       await stopInvoiceFollowupSequence(id, "invoice_voided");
       return current;
@@ -2507,6 +2660,19 @@ const InvoiceService = {
     // can never run twice for one invoice.
     let invoice = null;
     await db.transaction(async (trx) => {
+      // Phase 2: lock + re-verify the parent statement is still OPEN inside the
+      // transaction (the pre-check above is a fast fail, but a concurrent close
+      // could finalize the statement between it and this write — that would let
+      // the void commit while rollupStatement no-ops against a frozen total).
+      if (current.payer_statement_id) {
+        const locked = await trx("payer_statements")
+          .where({ id: current.payer_statement_id })
+          .forUpdate()
+          .first("status");
+        if (locked && locked.status !== "open") {
+          throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
+        }
+      }
       const [updated] = await trx("invoices")
         .where({ id, status: current.status })
         .update({ status: "void", updated_at: new Date() })
@@ -2520,6 +2686,13 @@ const InvoiceService = {
       // so voiding a credit-covered invoice never strands the credit.
       const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
       await restoreAccountCreditForVoidedInvoice({ invoice: updated, createdBy: "system:void" }, trx);
+      // Phase 2: drop a voided accrued invoice from its statement total in the
+      // SAME transaction (rollupStatement excludes status='void'), so the void
+      // and the statement total commit together. No-op once the statement is
+      // frozen.
+      if (updated.payer_statement_id) {
+        await require("./payer-statements").rollupStatement(updated.payer_statement_id, trx);
+      }
       invoice = updated;
     });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
@@ -2573,7 +2746,7 @@ const InvoiceService = {
       const candidates = await db("invoices")
         .where({ scheduled_service_id: scheduledServiceId })
         .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
-        .select("id", "invoice_number", "stripe_payment_intent_id");
+        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
@@ -2624,6 +2797,18 @@ const InvoiceService = {
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
           const result = await db.transaction(async (trx) => {
+            // Phase 2: parent-before-child lock order (matches the edit/void
+            // paths) so a concurrent accrued edit/void + this cancellation can't
+            // AB-BA deadlock. Lock the statement FIRST (using the
+            // payer_statement_id carried from the candidate scan — it never
+            // changes after creation), skip a finalized one, then lock the
+            // invoice.
+            if (candidate.payer_statement_id) {
+              const stmt = await trx("payer_statements").where({ id: candidate.payer_statement_id }).forUpdate().first("status");
+              if (stmt && stmt.status !== "open") {
+                return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: candidate };
+              }
+            }
             const locked = await trx("invoices")
               .where({ id: candidate.id })
               .forUpdate()
@@ -2669,6 +2854,11 @@ const InvoiceService = {
             // covered collectible invoice for a cancelled service).
             const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
             await restoreAccountCreditForVoidedInvoice({ invoice: voidedInvoice, createdBy: "system:service_cancel" }, trx);
+            // Phase 2: drop the voided accrued child from its OPEN statement total
+            // in the same transaction (rollupStatement excludes status='void').
+            if (voidedInvoice.payer_statement_id) {
+              await require("./payer-statements").rollupStatement(voidedInvoice.payer_statement_id, trx);
+            }
             return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
           });
 

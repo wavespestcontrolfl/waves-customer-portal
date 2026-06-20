@@ -32,6 +32,14 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Payer Phase 2 — NET-terms consolidated statements (accrual core).
+  // OFF unless explicitly enabled, in dev AND prod (unlike the dev-open gates
+  // below): flipping it on changes invoice behaviour for net15/net30 payers
+  // (accrue each visit to one monthly statement instead of instant-invoicing the
+  // AP), so it must never turn on silently in tests/dev. due_on_receipt payers
+  // — i.e. everyone today — are unaffected at any setting.
+  payerStatements: process.env.GATE_PAYER_STATEMENTS === 'true',
+
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
 

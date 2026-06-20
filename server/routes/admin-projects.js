@@ -3105,7 +3105,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       ? require('../services/payer').payerRecipient(invoice.payer)
       : null;
     const payerBilled = !!payerBilling?.email;
-    if (payerBilled) {
+    // Phase 2: an accrued invoice (attached to a payer statement) is delivered as
+    // a line on the consolidated monthly statement — NEVER individually here (with
+    // its child payUrl) and never finalized via markDeliverySent below. The
+    // project REPORT still sends; only the per-invoice delivery is suppressed.
+    const accruedOnStatement = !!invoice.payer_statement_id;
+    if (accruedOnStatement) {
+      // Intentionally no individual invoice delivery — billed on the statement.
+    } else if (payerBilled) {
       billingCopyEmail = String(payerBilling.email).trim().toLowerCase();
       try {
         const result = await ProjectEmail.sendProjectReportWithInvoice({
@@ -3246,9 +3253,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // invoice go out. A missing/failed AP recipient makes it partial/failed even
     // when the homeowner report succeeded, so the UI never claims delivered while
     // the bill-to party never received the invoice.
-    const payerLegOk = !isPayerInvoice || !!channels.payer_email?.ok;
+    // Phase 2: an accrued invoice has NO individual AP leg (it ships on the
+    // consolidated statement), so its payer leg is satisfied for REPORT-delivery
+    // status — otherwise a successfully-sent homeowner report would be marked
+    // failed, the claim restored, and retries duplicate the report.
+    // invoiceDelivered (below) is still gated on !accruedOnStatement, so the
+    // accrued invoice itself is never finalized here.
+    const payerLegOk = !isPayerInvoice || accruedOnStatement || !!channels.payer_email?.ok;
     const delivered = delivered_report && payerLegOk;
-    const anySuccess = successfulChannelCount > 0 || (isPayerInvoice && !!channels.payer_email?.ok);
+    const anySuccess = successfulChannelCount > 0
+      || (isPayerInvoice && (accruedOnStatement || !!channels.payer_email?.ok));
     const deliveryStatus = !delivered
       ? (anySuccess ? 'partial' : 'failed')
       : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
@@ -3264,7 +3278,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // (so it can't be marked sent off the back of the customer/report email),
     // and conversely the payer send standing alone is enough even if the
     // homeowner report email failed. Self-pay keeps the report-delivery rule.
-    const invoiceDelivered = isPayerInvoice ? !!channels.payer_email?.ok : delivered;
+    // Phase 2: an accrued invoice is finalized by its statement, not here.
+    const invoiceDelivered = !accruedOnStatement
+      && (isPayerInvoice ? !!channels.payer_email?.ok : delivered);
     if (invoiceDelivered) {
       await InvoiceService.markDeliverySent(invoice.id, {
         sms: !!channels.sms?.ok,

@@ -109,6 +109,12 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
+  // Phase 2: an accrued invoice (attached to a payer statement) is NEVER sent
+  // individually — it is delivered as one line on the consolidated monthly
+  // statement. This is the email chokepoint; fail closed.
+  if (invoice.payer_statement_id) {
+    return { ok: false, error: 'Invoice is billed on the payer’s monthly statement; not sent individually.' };
+  }
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();

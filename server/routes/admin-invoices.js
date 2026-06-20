@@ -958,9 +958,18 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
     if (when.getTime() <= Date.now()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
     const reviewDelayMinutes = parseScheduledReviewDelayMinutes(req.body || {}, when);
 
+    // Phase 2: never queue an accrued invoice into the individual send scheduler —
+    // it is delivered on the consolidated statement (processScheduledSends would
+    // churn failed sends against the statement-only send guard).
+    const target = await db('invoices').where({ id: req.params.id }).first('payer_statement_id');
+    if (target?.payer_statement_id) {
+      return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement; it cannot be scheduled for individual send.' });
+    }
+
     const [invoice] = await db('invoices')
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
+      .whereNull('payer_statement_id')
       .update({
         status: 'scheduled',
         scheduled_send_at: when,
@@ -1403,6 +1412,12 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
 
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is collected ONLY via its consolidated
+    // statement — never mark an individual accrued invoice paid here (it would
+    // settle once manually and again when the statement settles).
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement — record the payment against the statement, not the individual invoice' });
+    }
     // Terminal or in-flight invoices can never be manually marked paid.
     // This shares the same transition guard as Stripe collection paths.
     try {

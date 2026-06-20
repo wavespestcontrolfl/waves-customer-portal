@@ -108,6 +108,10 @@ router.get('/:token', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is not individually viewable/payable — it
+    // renders on the consolidated statement. Fail closed on the pay surface
+    // (receipts stay permanent; the block is here, not in getByToken).
+    if (data.payer_statement_id) return res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
 
     // Third-party Bill-To: an AP contact opening the emailed pay link must see
     // the payer as "Billed to" (not the homeowner) and must not be offered
@@ -219,8 +223,11 @@ router.get('/:token', async (req, res, next) => {
 // =========================================================================
 router.get('/:token/attachments/:attachmentId', async (req, res, next) => {
   try {
-    const invoice = await db('invoices').where({ token: req.params.token }).first('id');
+    const invoice = await db('invoices').where({ token: req.params.token }).first('id', 'payer_statement_id');
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice's attachments are not individually viewable —
+    // it belongs to the consolidated statement. Fail closed.
+    if (invoice.payer_statement_id) return res.status(404).json({ error: 'Invoice not found' });
     const attachment = await InvoiceAttachments.getForInvoice(invoice.id, req.params.attachmentId);
     if (!attachment) return res.status(404).json({ error: 'Attachment not found' });
     const url = await InvoiceAttachments.signedViewUrl(attachment);
@@ -239,6 +246,10 @@ router.post('/:token/setup', async (req, res, next) => {
     const { saveCard, cardOnly } = req.body || {};
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -285,6 +296,10 @@ router.post('/:token/update-amount', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -336,6 +351,10 @@ router.post('/:token/quote', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -369,6 +388,10 @@ router.post('/:token/finalize', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is payable only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -404,6 +427,10 @@ router.post('/:token/confirm', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice is collected only via its consolidated statement.
+    if (invoice.payer_statement_id) {
+      return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       try {
         assertInvoiceCollectible(invoice.status);
@@ -671,6 +698,9 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice's individual PDF is not served — it renders on
+    // the consolidated statement (the receipt PDF stays permanent, unaffected).
+    if (data.payer_statement_id) return res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
     // Downloaded/printed PDF must show the same Bill-To = payer block as the
     // emailed copy (getByToken doesn't attach the payer on its own).
     await require('../services/payer').attachToInvoice(data);
