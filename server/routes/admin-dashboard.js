@@ -171,14 +171,14 @@ router.get('/', dashboardCache, async (req, res, next) => {
       // Active customers = real customers (CUSTOMER_STAGES), not the whole
       // customers table — `active=true` defaults true for new_lead/prospect rows.
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer).count('* as count').first(),
-      // New customers this month = real customers (not leads) whose row was
-      // created this month, ET-anchored so the month boundary doesn't drift.
-      // NOTE: created_at is the row-creation (≈ lead-intake) time, a proxy for
-      // conversion — a lead created earlier and converted in-place this month is
-      // missed. Accurate acquisition-by-conversion-date needs a persisted
-      // customer_since (currently unpopulated); tracked as a follow-up.
+      // New customers this month = real customers whose CONVERSION date
+      // (member_since, the became-a-customer date) is this month. member_since is
+      // a reliably-populated ET DATE (#1925), so this counts a lead created
+      // earlier and converted in-place this month — which created_at (lead
+      // intake) missed — and is keyed alongside whereRealCustomer so a lead that
+      // merely carries an intake member_since isn't counted.
       db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
-        .modify((qb) => applyETTimestampWindow(qb, 'created_at', som, today))
+        .where('member_since', '>=', som).where('member_since', '<=', today)
         .count('* as count').first(),
       db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
@@ -474,34 +474,31 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     // the live state is the source of truth, not the sticky churned_at.
     let retentionPct = null, lost = 0;
     try {
-      const enteredInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
-      const enteredBeforeWindow = `(pipeline_stage_changed_at < ${ET_MIDNIGHT_TS} OR pipeline_stage_changed_at IS NULL)`;
-      // Cohort = "was a live customer at the window start": existed before the
-      // window, not deleted before it, and either an ACTIVE customer-stage row
-      // entered before the window, OR one that left the customer base on/after
-      // the window start (churned or went dormant — so it was still a customer at
-      // the start). Limits, both pending a customer_since / deactivated_at signal:
-      //  - no per-stage history → a customer→customer move mid-window is excluded
-      //    from the base (its stage-entry falls inside the window);
-      //  - deactivation (active=false) has no timestamp, so it can't be placed in
-      //    a window — such rows are excluded entirely rather than mislabeled as a
-      //    loss. ET-anchored throughout.
+      const departedInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
+      // Cohort = "was a live customer at the window start": became a customer
+      // before the window (member_since — the reliable conversion date, #1925),
+      // wasn't deleted before it, and hadn't already left — either still in a
+      // customer stage, OR churned/dormant only ON/AFTER the window start (so it
+      // was still a customer at the start). member_since is stable across
+      // customer→customer stage moves, so an active_customer→at_risk move
+      // mid-window no longer drops the row from the base (the old stage-change
+      // proxy did). Remaining gap (pending deactivated_at): an active=false
+      // non-churned deactivation has no timestamp, so it's excluded entirely
+      // rather than mislabeled as an in-window loss.
       const cohort = () => db('customers')
-        .whereRaw(`created_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
+        .where('member_since', '<', start)
         .where(function notDeletedBeforeStart() {
           this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
         })
-        .where(function wasCustomerAtStart() {
-          this.where(function activeCustomerBeforeStart() {
-            this.where('active', true)
-              .whereIn('pipeline_stage', CUSTOMER_STAGES)
-              .whereRaw(enteredBeforeWindow, [etDayStart(start)]);
+        .where(function wasLiveAtStart() {
+          this.where(function stillAnActiveCustomer() {
+            this.where('active', true).whereIn('pipeline_stage', CUSTOMER_STAGES);
           })
-            .orWhere(function departedInWindow() {
-              // Left the customer base on/after the window start. 'lost' is
+            .orWhere(function leftDuringWindow() {
+              // Churned or went dormant on/after the window start. 'lost' is
               // excluded — it's predominantly a lead stage, so a now-'lost' row
               // can't be assumed to have been a customer.
-              this.whereIn('pipeline_stage', ['churned', 'dormant']).whereRaw(enteredInWindow, [etDayStart(start)]);
+              this.whereIn('pipeline_stage', ['churned', 'dormant']).whereRaw(departedInWindow, [etDayStart(start)]);
             });
         });
 
@@ -704,10 +701,10 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
         paidRevenueTotal(from, to),
         db('scheduled_services').whereBetween('scheduled_date', [from, to])
           .select(db.raw("COUNT(*) as total"), db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")).first(),
-        // Match the main KPI's new-customer definition: real customers (not
-        // leads) whose row was created in the window, ET-anchored.
+        // Match the main KPI's new-customer definition: real customers whose
+        // conversion date (member_since) is in the window.
         db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
-          .modify((qb) => applyETTimestampWindow(qb, 'created_at', from, to))
+          .where('member_since', '>=', from).where('member_since', '<=', to)
           .count('* as c').first(),
       ]);
       return {

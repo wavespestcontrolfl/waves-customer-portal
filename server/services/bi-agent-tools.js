@@ -63,8 +63,9 @@ async function executeBITool(toolName, input) {
         // Real customers only (pipeline_stage), not leads — active=true defaults
         // true for new_lead rows. Consistent with the dashboard customer KPIs.
         db('customers').modify(whereLiveCustomer).count('* as count').first(),
+        // New customers this month = conversion date (member_since) in the window.
         db('customers').modify(whereLiveCustomer)
-          .whereRaw("created_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${somDate}T00:00:00`])
+          .where('member_since', '>=', somDate)
           .count('* as count').first(),
         db('customers').where('pipeline_stage', 'churned').where('pipeline_stage_changed_at', '>=', somDate).count('* as count').first(),
         db('leads').where('first_contact_at', '>=', somDate).select('status').count('* as count').groupBy('status'),

@@ -235,8 +235,10 @@ async function getKpiSnapshot() {
     // dashboard tile's pipeline_stage filter (whereLiveCustomer) instead of
     // counting prospects. Keeps the IB answer consistent with the tile.
     db('customers').modify(whereLiveCustomer).count('* as c').first(),
+    // New customers this month = conversion date (member_since, an ET DATE) in
+    // the window — matches the dashboard tile.
     db('customers').modify(whereLiveCustomer)
-      .whereRaw("created_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${r.month_start}T00:00:00`])
+      .where('member_since', '>=', r.month_start)
       .count('* as c').first(),
     db('estimates').whereIn('status', ['sent', 'viewed']).count('* as c').first(),
     db('scheduled_services').whereBetween('scheduled_date', [r.week_start, r.week_end]).select(
