@@ -44,7 +44,7 @@ exports.up = async function up(knex) {
     FROM (
       SELECT cc.id,
         LEAST(
-          (SELECT MIN((i.paid_at AT TIME ZONE 'America/New_York')::date) FROM invoices i WHERE i.customer_id = cc.id AND i.paid_at IS NOT NULL),
+          (SELECT MIN((COALESCE(i.paid_at, i.created_at) AT TIME ZONE 'America/New_York')::date) FROM invoices i WHERE i.customer_id = cc.id AND (i.paid_at IS NOT NULL OR i.status = 'paid')),
           (SELECT MIN(s.scheduled_date) FROM scheduled_services s WHERE s.customer_id = cc.id AND s.status = 'completed'),
           (SELECT MIN(r.service_date) FROM service_records r WHERE r.customer_id = cc.id AND r.status = 'completed')
         ) AS first_txn
