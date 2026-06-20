@@ -122,11 +122,25 @@ async function sendDraft(db, id, { actor } = {}, deps = {}) {
       categories: ['price-match'],
     });
   } catch (err) {
-    // Do NOT reopen the claim here: a network error/timeout is not proof SendGrid
-    // rejected the email, so an immediate retry could send the price-match request
-    // to the external rep twice. Leave it 'sending' (claimed_at set) — stale-claim
-    // recovery (or an admin reset, once enough time has passed to be sure it
-    // didn't go out) handles a genuinely-failed send.
+    // A 4xx from SendGrid means the request was RECEIVED and REJECTED (bad
+    // sender/recipient, auth, validation) — the email was definitively NOT
+    // accepted, so it's safe to RELEASE the claim back to pending and clear the
+    // attempt stamp so the draft stays retryable (otherwise the send_attempted_at
+    // guard would strand a clearly-failed send forever, recoverable only by DB
+    // surgery). The release is claim-scoped, so it never touches a row we no
+    // longer own.
+    const status = err && err.status;
+    if (Number.isInteger(status) && status >= 400 && status < 500) {
+      await db('price_match_drafts')
+        .where({ id, status: 'sending', claim_token: token })
+        .update({ status: 'pending', claimed_at: null, claim_token: null, send_attempted_at: null });
+      return { ok: false, reason: 'rejected', status };
+    }
+    // Any other failure (5xx, or a network error/timeout with no status) is
+    // AMBIGUOUS — SendGrid may have accepted the email — so do NOT reopen the
+    // claim: an immediate retry could email the external rep twice. Leave it
+    // 'sending' with send_attempted_at set; resetStuckDraft won't auto-resend it,
+    // and an admin reconciles against SendGrid (then dismisses) if it's stuck.
     throw err;
   }
 

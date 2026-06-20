@@ -165,6 +165,29 @@ describe('price-match-draft service', () => {
     expect((await getDraft(db, draft.id)).status).toBe('pending'); // not stranded in 'sending'
   });
 
+  test('a DEFINITE SendGrid rejection (4xx) releases the claim so the draft stays retryable', async () => {
+    const db = makeFakeDb();
+    const draft = await createDraft(db, [proofMatch]);
+    const sendOne = jest.fn(async () => { const e = new Error('SendGrid 400: bad request'); e.status = 400; throw e; });
+    const result = await sendDraft(db, draft.id, {}, { sendgrid: { sendOne } });
+    expect(result).toEqual({ ok: false, reason: 'rejected', status: 400 });
+    // released: back to pending, attempt stamp cleared -> a later send can retry
+    expect(db._rows[0].status).toBe('pending');
+    expect(db._rows[0].send_attempted_at).toBeNull();
+    expect(db._rows[0].claim_token).toBeNull();
+    const retry = await sendDraft(db, draft.id, {}, { sendgrid: { sendOne: jest.fn(async () => ({ messageId: 'ok' })) } });
+    expect(retry.ok).toBe(true); // retryable, not stranded
+  });
+
+  test('a 5xx / network failure stays claimed+attempted (ambiguous, no auto-resend)', async () => {
+    const db = makeFakeDb();
+    const draft = await createDraft(db, [proofMatch]);
+    const e = new Error('SendGrid 502'); e.status = 502;
+    await expect(sendDraft(db, draft.id, {}, { sendgrid: { sendOne: jest.fn(async () => { throw e; }) } })).rejects.toThrow('502');
+    expect(db._rows[0].status).toBe('sending'); // still claimed
+    expect(db._rows[0].send_attempted_at).not.toBeNull(); // attempt recorded -> reset won't auto-resend
+  });
+
   test('a failed/ambiguous send stays claimed (no immediate-retry double-send)', async () => {
     const db = makeFakeDb();
     const draft = await createDraft(db, [proofMatch]);
