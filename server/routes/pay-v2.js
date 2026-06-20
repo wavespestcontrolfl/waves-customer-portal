@@ -219,8 +219,11 @@ router.get('/:token', async (req, res, next) => {
 // =========================================================================
 router.get('/:token/attachments/:attachmentId', async (req, res, next) => {
   try {
-    const invoice = await db('invoices').where({ token: req.params.token }).first('id');
+    const invoice = await db('invoices').where({ token: req.params.token }).first('id', 'payer_statement_id');
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Phase 2: an accrued invoice's attachments are not individually viewable —
+    // it belongs to the consolidated statement. Fail closed.
+    if (invoice.payer_statement_id) return res.status(404).json({ error: 'Invoice not found' });
     const attachment = await InvoiceAttachments.getForInvoice(invoice.id, req.params.attachmentId);
     if (!attachment) return res.status(404).json({ error: 'Attachment not found' });
     const url = await InvoiceAttachments.signedViewUrl(attachment);
