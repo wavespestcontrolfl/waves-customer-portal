@@ -68,11 +68,18 @@ async function getFinancials(db) {
  * the completion handler's shouldInvoice gate skips (admin-dispatch.js) — their
  * revenue was already booked on the originating visit, so attributing a full
  * monthly_rate here would double-count. A revenue already written on the record
- * short-circuits so recompute stays idempotent. Pure (no I/O), unit-testable.
+ * short-circuits so the live recompute stays idempotent — EXCEPT under
+ * ignoreExistingRevenue (the backfill mode): historical records were never
+ * written by completion, so any existing positive revenue on them is a stale
+ * synthetic seed (migration 20260401000027 seeded random revenue), and the
+ * backfill must re-derive from the scheduled-service/customer truth rather than
+ * compute cost/margin around a fake number. Pure (no I/O), unit-testable.
  */
-function deriveRevenue({ serviceRecord, scheduledService, customer } = {}) {
-  const recordRevenue = Number(serviceRecord?.revenue);
-  if (Number.isFinite(recordRevenue) && recordRevenue > 0) return round2(recordRevenue);
+function deriveRevenue({ serviceRecord, scheduledService, customer, ignoreExistingRevenue = false } = {}) {
+  if (!ignoreExistingRevenue) {
+    const recordRevenue = Number(serviceRecord?.revenue);
+    if (Number.isFinite(recordRevenue) && recordRevenue > 0) return round2(recordRevenue);
+  }
 
   const visitPrice = Number(scheduledService?.estimated_price);
   if (Number.isFinite(visitPrice) && visitPrice > 0) return round2(visitPrice);
@@ -263,12 +270,14 @@ async function resolveServiceRecord(db, svc, srCols) {
 }
 
 /**
- * calculateJobCost(scheduledServiceId, db?)
+ * calculateJobCost(scheduledServiceId, db?, opts?)
  * Upserts a job_costs row AND writes the financials through to service_records.
  * Returns the computed cost object. Pass `db` to run on a specific knex handle
- * (e.g. a migration's); omit it to use the app db singleton.
+ * (e.g. a migration's); omit it to use the app db singleton. opts.recomputeRevenue
+ * (backfill-only) re-derives revenue from source instead of preserving any
+ * existing — possibly stale-seeded — service_records.revenue.
  */
-async function calculateJobCost(scheduledServiceId, db) {
+async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = false } = {}) {
   db = resolveDb(db);
   if (!scheduledServiceId) throw new Error('scheduledServiceId required');
 
@@ -280,7 +289,9 @@ async function calculateJobCost(scheduledServiceId, db) {
   const customer = await db('customers').where({ id: svc.customer_id }).first();
 
   const { laborRate, driveCostPerStop } = await getFinancials(db);
-  const revenue = deriveRevenue({ serviceRecord: record, scheduledService: svc, customer });
+  const revenue = deriveRevenue({
+    serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue,
+  });
   const { laborCost, laborHours } = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
   );
@@ -388,7 +399,9 @@ async function backfillServiceRecordFinancials(db, { onError } = {}) {
   let skipped = 0;
   for (const id of ids) {
     try {
-      const res = await calculateJobCost(id, db);
+      // recomputeRevenue: re-derive instead of trusting any existing (possibly
+      // synthetic-seeded) service_records.revenue — see deriveRevenue.
+      const res = await calculateJobCost(id, db, { recomputeRevenue: true });
       processed += 1;
       if (res.serviceRecordId) updated += 1;
     } catch (err) {

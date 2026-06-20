@@ -46,6 +46,18 @@ describe('deriveRevenue — mirrors the completion handler invoiceAmount', () =>
     expect(rev).toBe(120);
   });
 
+  test('ignoreExistingRevenue (backfill) re-derives, bypassing a stale seeded revenue', () => {
+    // 20260401000027 seeded synthetic revenue; the backfill must recompute from
+    // source rather than preserve it and build margin around a fake number.
+    const rev = deriveRevenue({
+      serviceRecord: { revenue: 87.34 }, // synthetic seed
+      scheduledService: { estimated_price: 149, is_callback: false },
+      customer: { monthly_rate: 99 },
+      ignoreExistingRevenue: true,
+    });
+    expect(rev).toBe(149);
+  });
+
   test('an included follow-up is free ($0), never monthly_rate (no double-count)', () => {
     // Scheduler creates included follow-ups with estimated_price=0 +
     // followup_included=true; the originating visit already booked the revenue.
