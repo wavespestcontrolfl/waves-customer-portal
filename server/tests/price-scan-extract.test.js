@@ -87,6 +87,7 @@ describe('price-scan extract', () => {
       expect(mapAvailability('Not currently in stock')).toBe('out_of_stock');
       expect(mapAvailability('Not available')).toBe('out_of_stock');
       expect(mapAvailability('No longer available')).toBe('out_of_stock');
+      expect(mapAvailability('No longer in stock')).toBe('out_of_stock');
       expect(mapAvailability('Temporarily out of stock')).toBe('out_of_stock');
     });
   });
