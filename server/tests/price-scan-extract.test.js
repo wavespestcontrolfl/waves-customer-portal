@@ -59,6 +59,7 @@ describe('price-scan extract', () => {
       expect(parsePriceText('2 gallons')).toBeNull();
       expect(parsePriceText('1,000 mL')).toBeNull();
       expect(parsePriceText('4 x 30 g')).toBeNull();
+      expect(parsePriceText('30 fl. oz.')).toBeNull(); // dotted abbreviation
       expect(parsePriceText('$95.00')).toBe(95); // a real price has no size unit
       expect(parsePriceText('95')).toBe(95);
     });
@@ -75,6 +76,8 @@ describe('price-scan extract', () => {
       expect(mapAvailability('In Stock. Ships in 1 business day')).toBe('in_stock');
       expect(mapAvailability('Only 3 left')).toBe('limited');
       expect(mapAvailability('Sold out')).toBe('out_of_stock');
+      expect(mapAvailability('No stock')).toBe('out_of_stock');
+      expect(mapAvailability('No stock available')).toBe('out_of_stock');
       expect(mapAvailability('whatever')).toBe('unknown');
       expect(mapAvailability('')).toBe('unknown');
     });
@@ -124,6 +127,19 @@ describe('price-scan extract', () => {
     test('AggregateOffer', () => {
       const ld = JSON.stringify({ '@type': 'Product', name: 'Y', offers: { '@type': 'AggregateOffer', lowPrice: '79.99', priceCurrency: 'USD' } });
       expect(extractJsonLdOffer([ld]).price).toBe(79.99);
+    });
+    test('AggregateOffer wrapping nested concrete variant offers is expanded', () => {
+      const ld = JSON.stringify({
+        '@type': 'Product', name: 'Taurus SC',
+        offers: {
+          '@type': 'AggregateOffer',
+          offers: [
+            { '@type': 'Offer', name: 'Taurus SC 78 oz.', price: '95', priceCurrency: 'USD', availability: 'InStock' },
+            { '@type': 'Offer', name: 'Taurus SC 20 oz.', price: '48.48', priceCurrency: 'USD' },
+          ],
+        },
+      });
+      expect(extractJsonLdOffer([ld], { targetOz: 78 }).price).toBe(95); // matches the nested 78 oz variant
     });
     test('prefers in-stock offer over out-of-stock', () => {
       const oos = JSON.stringify({ '@type': 'Product', name: 'A', offers: { price: 80, availability: 'OutOfStock' } });
@@ -359,6 +375,8 @@ describe('price-scan extract', () => {
     test('container multipack with a fractional unit size ("2 bottles / 1/2 gal")', () => {
       expect(extractSizeToken('Concentrate 2 bottles / 1/2 gal')).toBe('1 gal'); // 2 x 0.5 gal, NOT 0.5 or 4 gal
       expect(quantityToOz(extractSizeToken('Concentrate 2 bottles / 1/2 gal'))).toBe(128);
+      // parsePackSize handles the raw form directly too (1 gal, not 4 gal)
+      expect(quantityToOz('2 bottles / 1/2 gal')).toBe(128);
     });
   });
 

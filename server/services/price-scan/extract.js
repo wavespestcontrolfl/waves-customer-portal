@@ -27,7 +27,7 @@ function mapAvailability(value) {
   // Out-of-stock first — including negated "in stock"/"available" phrasing
   // ("not in stock", "not currently available") that would otherwise fall
   // through to the positive in-stock match below and be read as available.
-  if (/out[\s_-]?of[\s_-]?stock|outofstock|sold[\s_-]?out|unavailable|discontinued|not[\s_-]+(currently[\s_-]+)?(in[\s_-]?stock|available)|no[\s_-]+longer[\s_-]+available|temporarily[\s_-]+out/.test(s)) return 'out_of_stock';
+  if (/out[\s_-]?of[\s_-]?stock|outofstock|sold[\s_-]?out|unavailable|discontinued|not[\s_-]+(currently[\s_-]+)?(in[\s_-]?stock|available)|no[\s_-]+(longer[\s_-]+available|stock)|temporarily[\s_-]+out/.test(s)) return 'out_of_stock';
   if (/back[\s_-]?order|backorder|pre[\s_-]?order|preorder/.test(s)) return 'backorder';
   if (/limited[\s_-]?availability|limitedavailability|low[\s_-]?stock|only\s+\d+\s+left/.test(s)) return 'limited';
   if (/in[\s_-]?stock|instock/.test(s)) return 'in_stock';
@@ -58,7 +58,7 @@ function parsePriceText(text) {
   // every singular/plural/multipack/fraction form a hand regex would miss; a true
   // price ("$95.00") has no unit, so it parses to null and passes through. Commas
   // are stripped first so "1,000 mL" is seen as 1000 mL, not 0.
-  if (parsePackSize(s.replace(/,/g, ''))) return null;
+  if (parsePackSize(s.replace(/,/g, '').replace(/\./g, ' '))) return null;
   // Numbers, allowing thousands separators: "1,234.50" is one token.
   const numbers = s.match(/\d[\d,]*(?:\.\d+)?/g);
   if (!numbers || numbers.length !== 1) return null; // 0 = no price, >1 = range/ambiguous
@@ -131,7 +131,20 @@ function collectJsonLdOffers(jsonLdStrings) {
       }
       const nodeName = typeof node.name === 'string' ? node.name
         : (typeof node.title === 'string' ? node.title : null);
+      // Expand an AggregateOffer that wraps concrete variant offers in a nested
+      // `offers` array — those carry the per-variant name/size/price. Keep the
+      // aggregate's own lowPrice only if none of its nested offers are priced.
+      const flat = [];
       for (const o of list) {
+        if (o && o['@type'] === 'AggregateOffer' && o.offers) {
+          const nested = Array.isArray(o.offers) ? o.offers : [o.offers];
+          flat.push(...nested);
+          if (offerPrice(o) != null && !nested.some((n) => offerPrice(n) != null)) flat.push(o);
+        } else {
+          flat.push(o);
+        }
+      }
+      for (const o of flat) {
         const price = offerPrice(o);
         if (price == null) continue;
         // Prefer the offer's own name (variant size), then its itemOffered.name
