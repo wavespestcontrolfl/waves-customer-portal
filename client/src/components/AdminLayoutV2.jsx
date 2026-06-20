@@ -39,6 +39,7 @@ import {
   FileText,
   Landmark,
   Receipt,
+  Banknote,
   Calculator,
   Activity,
   Settings,
@@ -137,6 +138,7 @@ const NAV_SECTIONS = [
     section: "Finance",
     items: [
       { path: "/admin/invoices", icon: FileText, label: "Invoices" },
+      { path: "/admin/billing-recovery", icon: Banknote, label: "Recovery" },
       { path: "/admin/payers", icon: Building2, label: "Payers" },
       { path: "/admin/banking", icon: Landmark, label: "Banking" },
       { path: "/admin/tax", icon: Receipt, label: "Taxes" },

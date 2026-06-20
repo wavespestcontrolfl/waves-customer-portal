@@ -172,6 +172,7 @@ const AdminLawnProtocolPage = lazyWithRetry(() => import('./pages/admin/LawnProt
 const AdminTurfHeightReviewPage = lazyWithRetry(() => import('./pages/admin/TurfHeightReviewPage'));
 const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
+const BillingRecoveryPage = lazyWithRetry(() => import('./pages/admin/BillingRecoveryPage'));
 const PayersPage = lazyWithRetry(() => import('./pages/admin/PayersPage'));
 const AdminContractsPage = lazyWithRetry(() => import('./pages/admin/ContractsPage'));
 const PayPage = lazyWithRetry(() => import('./pages/PayPageV2'));
@@ -342,6 +343,7 @@ export default function App() {
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
             <Route path="kb" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgeBasePage /></Suspense>} />
             <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
+            <Route path="billing-recovery" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading billing recovery...</div>}><BillingRecoveryPage /></Suspense>} />
             <Route path="payers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading payers...</div>}><PayersPage /></Suspense>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
