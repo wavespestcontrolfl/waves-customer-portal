@@ -1683,7 +1683,15 @@ const InvoiceService = {
         entity_type: "invoice",
         entity_id: invoiceId,
       };
-      if (prepayActive) {
+      // The annual-prepay variant is its own template row, so it would render
+      // even when ops disabled the base invoice_sent kill switch — and the
+      // provider (messageType 'invoice' → invoice_sent) would then swallow the
+      // send as a fake success and mark the invoice sent without delivery,
+      // blocking retries. Honor the base kill switch here so a disabled
+      // invoice_sent skips the variant too and the invoice stays retryable
+      // (falls through to the null-body skip + restoreSendClaim path below).
+      const invoiceSmsActive = await templates.isTemplateActive("invoice");
+      if (prepayActive && invoiceSmsActive) {
         // Coverage summary is built when a visit count is configured; a
         // display-only prepay flag (no count) still gets the prepay framing via
         // a generic phrase instead of the misleading "completed on" copy.
