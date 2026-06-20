@@ -62,6 +62,12 @@ const knex = require('knex')({
     // findInvoiceForPayment() in routes/stripe-webhook.js, reversed:
     //   1) payments.stripe_payment_intent_id === invoices.stripe_payment_intent_id
     //   2) payments.metadata->>'invoice_id' (or waves_/dispute_ variants) === invoice.id
+    //   3) description fallback for manual self-pay rows: admin-invoices.js
+    //      record-payment omits metadata.invoice_id for self-pay cash/check/zelle
+    //      (receipt-total fallback), leaving "Invoice <num> — <method>" as the
+    //      only link. Trailing space disambiguates from a longer number; the
+    //      invoice_number carries no LIKE wildcards. Manual rows never surcharge,
+    //      so this only completes coverage — it cannot create a false bug.
     const payments = await knex('payments')
       .where(function linkToInvoice() {
         if (invoice.stripe_payment_intent_id) {
@@ -70,6 +76,7 @@ const knex = require('knex')({
         this.orWhereRaw("metadata->>'invoice_id' = ?", [invoice.id]);
         this.orWhereRaw("metadata->>'waves_invoice_id' = ?", [invoice.id]);
         this.orWhereRaw("metadata->>'dispute_invoice_id' = ?", [invoice.id]);
+        this.orWhereRaw('description LIKE ?', [`Invoice ${invoice.invoice_number} %`]);
       })
       .orderBy('created_at', 'asc')
       .select(
@@ -84,6 +91,7 @@ const knex = require('knex')({
         'surcharge_policy_version',
         'stripe_surcharge_maximum_amount_cents',
         'stripe_payment_intent_id',
+        'processor',
         'created_at',
       );
 
@@ -153,6 +161,11 @@ const knex = require('knex')({
         // Only positively-confirmed credit cards may be surcharged. A positive
         // surcharge on debit / prepaid / unknown funding is a policy violation.
         console.log(`Payment ${p.id}: ⚠️  ${p.card_funding || 'UNKNOWN/null'} funding charged $${surcharge.toFixed(2)} surcharge — BUG (only confirmed credit cards may be surcharged; expected $0).${reconcile}`);
+      } else if (!p.card_brand && !p.stripe_payment_intent_id && p.processor == null) {
+        // Manual off-gateway collection (cash / check / zelle / other): no card,
+        // no processor, no PI — surcharge never applies. Matched here via the
+        // description fallback above.
+        console.log(`Payment ${p.id}: ℹ️  manual non-card collection (cash/check/zelle) — no surcharge applies.${reconcile}`);
       } else if (!p.card_funding) {
         console.log(`Payment ${p.id}: ℹ️  funding UNKNOWN/null — failed closed to no surcharge (by design).${reconcile}`);
       } else {
