@@ -7,6 +7,19 @@ describe('generate-report output guard (reportCopyRejection)', () => {
     )).toBeNull();
   });
 
+  // Legitimate completed-work descriptions (sweeping cobwebs, removing debris)
+  // must pass — they describe work performed, not an overpromise. The prompt
+  // examples are kept in alignment with the validator so generation does not
+  // self-reject on its own modeled copy and return a needless 502.
+  test('accepts completed-work copy that mirrors the prompt examples', () => {
+    expect(reportCopyRejection(
+      'Cobwebs were swept from eaves and overhangs to reduce activity along the foundation line.',
+    )).toBeNull();
+    expect(reportCopyRejection(
+      'Debris was removed from the bait stations during inspection.',
+    )).toBeNull();
+  });
+
   test('rejects empty / whitespace-only / nullish copy as "empty"', () => {
     expect(reportCopyRejection('')).toBe('empty');
     expect(reportCopyRejection('   \n  ')).toBe('empty');

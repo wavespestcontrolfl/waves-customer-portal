@@ -4643,7 +4643,7 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 ## USING THE GROUNDING CONTEXT (when present)
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
-- **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (improvement, a recurring pest, a resolved issue). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
+- **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (an improvement, a recurring pest, a previously-noted concern that has eased). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
 - **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
 - **Product safety / re-entry**: when label REI / rainfast data is given, ground re-entry and rainfast guidance in it. Never invent a number that isn't there.
@@ -4712,7 +4712,7 @@ The examples below show STRUCTURE, LENGTH, and PROVENANCE handling ONLY. Their e
 
 WHAT WE DID
 
-Today's service focused on exterior perimeter management and entry-point treatment around the home's foundation. A fipronil-based residual was applied along structural transitions, door frames, and common harborage areas. Cobwebs were cleared from eaves and overhangs to reduce established pest activity and improve visibility along the foundation line.
+Today's service focused on exterior perimeter management and entry-point treatment around the home's foundation. A fipronil-based residual was applied along structural transitions, door frames, and common harborage areas. Cobwebs were swept from eaves and overhangs to reduce established pest activity and improve visibility along the foundation line.
 
 WHAT WE FOUND
 
