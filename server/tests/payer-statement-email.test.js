@@ -106,19 +106,23 @@ test('a normal (non-forced) send of a finalized statement stays keyed (no double
   expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7');
 });
 
-test('forceResend retries a genuinely BLOCKED first delivery (keyless fresh attempt)', async () => {
-  // Still finalized + never sent because the first attempt was blocked. A force
-  // retry then drops the key so sendTemplate can't dedupe to the terminal row.
+test('forceResend on a BLOCKED first delivery advances to a retry-scoped key (fresh but still deduped)', async () => {
+  // Base key (gen 0) blocked; gen 1 (:r1) has no row → that becomes the key. It
+  // is fresh (so the retry sends) but STABLE, so a double-click of the retry
+  // dedupes on :r1 rather than each inserting a keyless row.
   mockDbHandler = (t) => {
-    if (t === 'email_messages') return { where() { return this; }, whereIn() { return this; }, first: async () => ({ id: 99 }) };
+    if (t === 'email_messages') {
+      let k = null;
+      return { where(c) { k = c.idempotency_key; return this; }, whereIn() { return this; }, first: async () => (k === 'payer_statement_sent:7' ? { id: 99 } : undefined) };
+    }
     return { where() { return this; }, first: async () => finalized(), update: async () => 1 };
   };
   await sendStatementEmail(7, { forceResend: true });
   expect(mockSendTemplate).toHaveBeenCalledTimes(1);
-  expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBeUndefined();
+  expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7:r1');
 });
 
-test('forceResend WITHOUT a blocked prior stays keyed — force cannot bypass dedupe', async () => {
+test('forceResend WITHOUT a blocked prior stays on the base key — force cannot bypass dedupe', async () => {
   mockDbHandler = (t) => {
     if (t === 'email_messages') return { where() { return this; }, whereIn() { return this; }, first: async () => undefined };
     return { where() { return this; }, first: async () => finalized(), update: async () => 1 };

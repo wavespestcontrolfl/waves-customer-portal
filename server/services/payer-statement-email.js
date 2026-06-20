@@ -39,22 +39,39 @@ const SENDABLE_STATUSES = new Set(['finalized', 'sent', 'viewed']);
 // the first delivery actually landed in one of these.
 const BLOCKED_DELIVERY_STATUSES = ['blocked', 'bounced', 'bounce', 'dropped', 'spam_report', 'spamreport', 'unsubscribed', 'complained'];
 
+// True if a delivery recorded under EXACTLY this key terminally blocked.
+async function deliveryBlocked(idempotencyKey, database) {
+  const row = await database('email_messages')
+    .where({ idempotency_key: idempotencyKey })
+    .whereIn('status', BLOCKED_DELIVERY_STATUSES)
+    .first('id');
+  return !!row;
+}
+
 /**
- * True only if the first delivery under `idempotencyKey` terminally failed
- * (blocked/suppressed). Used to gate `forceResend`: a stray/double-clicked force
- * must NOT bypass the stable key unless there is a real blocked attempt to retry.
- * Fails safe (returns false) so a lookup error never grants a keyless bypass.
+ * The idempotency key a `forceResend` should send under: walk past each
+ * generation whose attempt terminally blocked (base → `<base>:r1` → `:r2` …) to
+ * the first generation that has NOT blocked. The result is a FRESH key for a new
+ * generation (so a genuinely blocked statement can be retried) yet STABLE within
+ * that generation — so a double-click or two concurrent forced requests dedupe
+ * on it (the `email_messages` unique key resolves the race) instead of each
+ * inserting a keyless row and double-sending. A stray force with no prior block
+ * returns the base key unchanged. Fails safe to the base key (never keyless) so a
+ * lookup error can't drop dedupe.
  */
-async function firstDeliveryBlocked(idempotencyKey, database) {
+async function forcedRetryKey(baseKey, database) {
   try {
-    const row = await database('email_messages')
-      .where({ idempotency_key: idempotencyKey })
-      .whereIn('status', BLOCKED_DELIVERY_STATUSES)
-      .first('id');
-    return !!row;
+    let gen = 0;
+    let key = baseKey;
+    while (await deliveryBlocked(key, database)) {
+      gen += 1;
+      key = `${baseKey}:r${gen}`;
+      if (gen > 50) break; // sanity bound — never loop unbounded
+    }
+    return key;
   } catch (err) {
-    logger.warn(`[payer-statement-email] blocked-delivery lookup failed for ${idempotencyKey}: ${err.message}`);
-    return false;
+    logger.warn(`[payer-statement-email] forced-retry key lookup failed for ${baseKey}: ${err.message}`);
+    return baseKey;
   }
 }
 
@@ -150,18 +167,19 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
   const termsLabel = TERM_LABEL[statement.terms_snapshot] || statement.terms_snapshot || '';
   const subject = `Waves statement S-${statement.id} — ${currency(statement.total)} due ${dueLabel}`.trim();
 
-  // First delivery (finalized, never sent) gets a stable idempotency key so a
-  // double-click / client retry / concurrent close-and-send can't email AP two
-  // copies — sendTemplate only dedupes on idempotencyKey (triggerEventId is
+  // First delivery (finalized, never sent) sends under a stable idempotency key
+  // so a double-click / client retry / concurrent close-and-send can't email AP
+  // two copies — sendTemplate only dedupes on idempotencyKey (triggerEventId is
   // metadata). This holds for BOTH /close's chained send and a normal /send.
-  // `forceResend` drops the key to make a fresh attempt, but ONLY when the first
-  // delivery genuinely blocked (else a stray/double-clicked force would bypass
-  // dedupe and double-send). Re-delivering an already-sent/viewed statement is
-  // keyless too (intentional re-send).
+  // `forceResend` advances to the next retry generation's key (still stable, so
+  // its own double-clicks dedupe) only past a genuinely blocked attempt — never
+  // keyless. Re-delivering an already-sent/viewed statement is keyless
+  // (intentional re-send).
   const isFirstDelivery = statement.status === 'finalized' && !statement.sent_at;
-  let idempotencyKey = isFirstDelivery ? `payer_statement_sent:${statement.id}` : undefined;
-  if (isFirstDelivery && forceResend && (await firstDeliveryBlocked(idempotencyKey, database))) {
-    idempotencyKey = undefined; // genuine retry of a blocked first delivery → fresh attempt
+  let idempotencyKey;
+  if (isFirstDelivery) {
+    const baseKey = `payer_statement_sent:${statement.id}`;
+    idempotencyKey = forceResend ? await forcedRetryKey(baseKey, database) : baseKey;
   }
 
   let sent = false;
