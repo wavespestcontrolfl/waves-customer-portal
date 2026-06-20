@@ -12,12 +12,76 @@ const {
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
 } = adminCustomersRoute._private;
+
+describe('stageLifecycleStamps', () => {
+  const TODAY = '2026-06-19';
+
+  test('stamps member_since when first entering a customer stage', () => {
+    const s = stageLifecycleStamps('new_lead', 'won', { member_since: null }, { today: TODAY });
+    expect(s.member_since).toBe(TODAY);
+    expect(s.churned_at).toBeUndefined();
+    expect(s.pipeline_stage_changed_at).toBeInstanceOf(Date);
+  });
+
+  test('keeps a former customer\'s real member_since (customer→customer move)', () => {
+    const s = stageLifecycleStamps('won', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.member_since).toBeUndefined();
+  });
+
+  test('overwrites a lead\'s intake member_since with the conversion date', () => {
+    const s = stageLifecycleStamps('new_lead', 'won', { member_since: '2026-01-01' }, { today: TODAY });
+    expect(s.member_since).toBe(TODAY);
+  });
+
+  test('reactivating a former customer (churned) keeps its member_since', () => {
+    const s = stageLifecycleStamps('churned', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.member_since).toBeUndefined();
+  });
+
+  test('always stamps churned_at (ET date) on churn; reason set to value or null', () => {
+    const withReason = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'moved' });
+    expect(withReason.churned_at).toBe(TODAY);
+    expect(withReason.churn_reason).toBe('moved');
+    // No reason given → churn_reason cleared (don't carry a prior reason).
+    const noReason = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(noReason.churned_at).toBe(TODAY);
+    expect(noReason.churn_reason).toBeNull();
+  });
+
+  test('clears the churn stamp on reactivation out of churned', () => {
+    const s = stageLifecycleStamps('churned', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.churned_at).toBeNull();
+    expect(s.churn_reason).toBeNull();
+  });
+
+  test('clears a stale churned_at even when the old stage was not churned', () => {
+    const s = stageLifecycleStamps('at_risk', 'active_customer', { member_since: '2025-01-01', churned_at: '2025-06-01' }, { today: TODAY });
+    expect(s.churned_at).toBeNull();
+    expect(s.churn_reason).toBeNull();
+  });
+
+  test('a lead→lead move only touches pipeline_stage_changed_at', () => {
+    const s = stageLifecycleStamps('new_lead', 'contacted', { member_since: null }, { today: TODAY });
+    expect(Object.keys(s)).toEqual(['pipeline_stage_changed_at']);
+  });
+
+  test('a no-op same-stage save returns no stamps (preserves churned_at)', () => {
+    expect(stageLifecycleStamps('churned', 'churned', { member_since: '2025-01-01' }, { today: TODAY })).toEqual({});
+    expect(stageLifecycleStamps('active_customer', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY })).toEqual({});
+  });
+
+  test('a churned→churned re-save still applies a new churn reason', () => {
+    expect(stageLifecycleStamps('churned', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'price' }))
+      .toEqual({ churn_reason: 'price' });
+  });
+});
 
 describe('admin customers route helpers', () => {
   test('validates known customer pipeline stages', () => {

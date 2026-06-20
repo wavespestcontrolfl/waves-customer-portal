@@ -898,10 +898,22 @@ const EstimateConverter = {
       : {
           pipeline_stage: 'active_customer',
           pipeline_stage_changed_at: new Date(),
+          // member_since = the conversion date. If the row was already a
+          // customer (or a former one), keep its real start; if it was a lead,
+          // overwrite the lead-intake date with today. Uses the already-loaded
+          // row, not database.raw, to stay mock-friendly.
+          member_since: ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(customer.pipeline_stage)
+            ? (customer.member_since || etDateString())
+            : etDateString(),
           waveguard_tier: tier,
           monthly_rate: monthlyRate,
           active: true,
           deleted_at: null,
+          // Reactivating to active_customer — clear any churn stamp so a former
+          // (churned/dormant) customer who accepts a recurring estimate isn't
+          // still counted as churned by churned_at-based queries (e.g. MRR trend).
+          churned_at: null,
+          churn_reason: null,
         };
     await database('customers').where({ id: customerId }).update(customerUpdates);
 

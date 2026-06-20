@@ -403,6 +403,58 @@ function isValidStage(stage) {
   return !stage || CUSTOMER_STAGE_SET.has(stage);
 }
 
+// Post-conversion ("real customer") stages — entering one stamps member_since.
+// Mirrors the dashboard's whereRealCustomer definition.
+const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+// Stages indicating the row WAS (or is) a customer — so an existing member_since
+// is their real start and must be preserved. Anything else (new_lead, contacted,
+// estimate_*, follow_up, negotiating, lost) is a pre-sale lead: a member_since
+// there is just a lead-intake date and should be overwritten on conversion.
+const FORMER_OR_CURRENT_CUSTOMER_STAGES = new Set([...REAL_CUSTOMER_STAGES, 'churned', 'dormant']);
+
+// Lifecycle field stamps to apply when a customer's pipeline_stage CHANGES,
+// shared by PUT /:id/stage and the general PUT /:id edit so both keep
+// member_since / churned_at consistent (otherwise editing the stage from
+// Customers 360 would skip them). `today` is the ET calendar date — member_since
+// and churned_at are DATE columns, so a JS Date would land on the wrong day
+// after ET midnight. Returns {} for a no-op (same-stage) save so it never resets
+// pipeline_stage_changed_at or restamps churned_at on a churned→churned re-save.
+function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason } = {}) {
+  if (newStage === oldStage) {
+    // No-op (same-stage) save: never restamp churned_at / pipeline_stage_changed_at,
+    // but still let an admin correct/add a churn reason on an already-churned row.
+    return (newStage === 'churned' && churnReason) ? { churn_reason: churnReason } : {};
+  }
+  const stamps = { pipeline_stage_changed_at: new Date() };
+  if (newStage === 'churned') {
+    // Always timestamp the churn so retention can see it; reason optional. Set
+    // the reason explicitly (to the new value or null) so a stale reason from a
+    // prior churn never carries over to a fresh one.
+    stamps.churned_at = today;
+    stamps.churn_reason = churnReason || null;
+  } else {
+    // Reactivation / any non-churned target: clear a stale churn stamp so a
+    // reactivated customer never carries a leftover churned_at. Keyed on the
+    // STAMP's presence, not just oldStage, since churned_at can exist on a
+    // non-churned row (e.g. a deactivation backfill).
+    if (oldStage === 'churned' || customer.churned_at) {
+      stamps.churned_at = null;
+      stamps.churn_reason = null;
+    }
+    if (REAL_CUSTOMER_STAGES.has(newStage)) {
+      if (!FORMER_OR_CURRENT_CUSTOMER_STAGES.has(oldStage)) {
+        // Converting from a lead stage → member_since is the conversion date,
+        // overwriting any lead-intake date a capture path stamped earlier.
+        stamps.member_since = today;
+      } else if (!customer.member_since) {
+        // Re-activating a former customer with no recorded start — best effort.
+        stamps.member_since = today;
+      }
+    }
+  }
+  return stamps;
+}
+
 function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   return {
     id: c.id,
@@ -2048,7 +2100,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
     }
     if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
-      updates.pipeline_stage_changed_at = new Date();
+      // Same lifecycle stamps as PUT /:id/stage — Customers 360 saves stage
+      // edits through this endpoint, so member_since/churned_at must be kept here
+      // too. (member_since/churned_at aren't editable fields, so no clobber.)
+      Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
     compactServiceContactSlots(updates, before);
     if (Object.keys(updates).length) {
@@ -2205,10 +2260,11 @@ router.put('/:id/stage', async (req, res, next) => {
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const oldStage = customer.pipeline_stage;
-    await db('customers').where({ id: req.params.id }).update({ pipeline_stage: stage, pipeline_stage_changed_at: new Date() });
-    if (stage === 'churned' && req.body.churnReason) {
-      await db('customers').where({ id: req.params.id }).update({ churned_at: new Date(), churn_reason: req.body.churnReason });
-    }
+    const stageUpdates = {
+      pipeline_stage: stage,
+      ...stageLifecycleStamps(oldStage, stage, customer, { today: etDateString(), churnReason: req.body.churnReason }),
+    };
+    await db('customers').where({ id: req.params.id }).update(stageUpdates);
     await db('customer_interactions').insert({
       customer_id: req.params.id, interaction_type: 'note',
       subject: `Stage changed: ${oldStage} → ${stage}`,
@@ -2845,6 +2901,7 @@ router._private = {
   indexServicesForSchedule,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
+  stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
