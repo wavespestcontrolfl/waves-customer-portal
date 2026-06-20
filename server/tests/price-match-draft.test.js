@@ -198,6 +198,30 @@ describe('price-match-draft service', () => {
     expect(result).toEqual({ ok: true, reconcile: true, messageId: 'm9' });
   });
 
+  test('a finalize DB failure AFTER the email sent reconciles, never a resendable error', async () => {
+    const base = makeFakeDb();
+    // Wrap the builder so ONLY the finalize update (status -> sent) throws,
+    // simulating a DB blip between SendGrid accepting and the row being recorded.
+    // The claim update (status -> sending) still works.
+    const db = (...a) => {
+      const b = base(...a);
+      const orig = b.update.bind(b);
+      b.update = (data) => (data && data.status === 'sent'
+        ? { returning: () => Promise.reject(new Error('db finalize blip')), then: (r, j) => Promise.reject(new Error('db finalize blip')).then(r, j) }
+        : orig(data));
+      return b;
+    };
+    db.fn = base.fn; db._rows = base._rows;
+    const draft = await createDraft(db, [proofMatch]);
+    const sendOne = jest.fn(async () => ({ messageId: 'sent_then_blip' }));
+    const result = await sendDraft(db, draft.id, { actor: 'Waves' }, { sendgrid: { sendOne } });
+    expect(sendOne).toHaveBeenCalledTimes(1); // the email DID go out
+    // Must surface reconcile (not throw) so the route returns 200+reconcile and
+    // the row is NOT treated as a clean retry — otherwise stale-reset double-sends.
+    expect(result).toEqual({ ok: true, reconcile: true, messageId: 'sent_then_blip' });
+    expect(db._rows[0].status).toBe('sending'); // left claimed for human reconcile
+  });
+
   test('resetStuckDraft recovers a STALE sending claim but refuses a fresh one', async () => {
     const db = makeFakeDb();
     const draft = await createDraft(db, [proofMatch]);

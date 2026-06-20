@@ -102,19 +102,30 @@ async function sendDraft(db, id, { actor } = {}, deps = {}) {
     throw err;
   }
 
-  const updated = await db('price_match_drafts')
-    .where({ id, status: 'sending', claim_token: token })
-    .update({
-      status: 'sent',
-      sent_at: db.fn.now(),
-      sent_by: actor || null,
-      message_id: (res && res.messageId) || null,
-    })
-    .returning('*');
-  // The email WAS sent. If the finalizing update touched zero rows (our claim was
-  // reset/superseded by a newer claim, or a crash), surface a reconcile flag
-  // rather than silently reporting success OR overwriting the newer claim — a
-  // human must verify status vs. SendGrid.
+  // The email WAS sent. From here on a DB problem must NEVER surface as a normal
+  // error: the route would 500, the draft would sit in 'sending', and after the
+  // stale window an admin could reset + RE-SEND — a second identical price-match
+  // email to the external rep. So a finalize that THROWS collapses to the same
+  // reconcile result as a finalize that touches zero rows: report the send
+  // happened, leave the row as-is, and let a human verify status vs. SendGrid
+  // before any retry (the route logs reconcile as an error).
+  let updated;
+  try {
+    updated = await db('price_match_drafts')
+      .where({ id, status: 'sending', claim_token: token })
+      .update({
+        status: 'sent',
+        sent_at: db.fn.now(),
+        sent_by: actor || null,
+        message_id: (res && res.messageId) || null,
+      })
+      .returning('*');
+  } catch (finalizeErr) {
+    return { ok: true, reconcile: true, messageId: res && res.messageId };
+  }
+  // Zero rows: our claim was reset/superseded by a newer claim, or a crash —
+  // surface reconcile rather than silently reporting success OR overwriting the
+  // newer claim.
   if (!updated.length) {
     return { ok: true, reconcile: true, messageId: res && res.messageId };
   }
