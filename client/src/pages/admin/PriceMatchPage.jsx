@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw, Send, XCircle, RotateCcw, ChevronRight, ExternalLink, AlertTriangle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -81,6 +81,11 @@ export default function PriceMatchPage() {
   const [busy, setBusy] = useState(false); // an action (send/dismiss/reset) is in flight
   const [confirmSend, setConfirmSend] = useState(false);
 
+  // Always-current selection, so an in-flight refresh can't clobber the pane after
+  // the operator has moved on to a different draft.
+  const selectedIdRef = useRef(null);
+  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+
   const loadDrafts = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -113,7 +118,10 @@ export default function PriceMatchPage() {
   const refreshDetail = useCallback(async (id) => {
     try {
       const d = await adminFetch(`/admin/price-match/drafts/${id}`);
-      setDetail((d && d.draft) || null);
+      // Only apply if this draft is STILL selected — the operator may have clicked
+      // another draft while the action/refresh was in flight (would otherwise show
+      // and let them act on the wrong draft).
+      if (selectedIdRef.current === id) setDetail((d && d.draft) || null);
     } catch { /* leave existing detail */ }
   }, []);
 
