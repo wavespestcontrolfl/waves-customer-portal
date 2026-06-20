@@ -79,6 +79,16 @@ describe('WaveGuard portal alignment script helpers', () => {
     expect(detectServiceKeys({ service_type: 'Rodent Exclusion' })).toEqual([]);
   });
 
+  test('does not treat re-service callbacks as plan coverage for any family', () => {
+    // A free re-treatment whose catalog service_key encodes the callback must not
+    // be read as recurring plan coverage even though it carries a family token.
+    expect(detectServiceKeys({ service_type: 'Lawn Care', service_key: 'lawn_re_service' })).toEqual([]);
+    expect(detectServiceKeys({ service_type: 'Mosquito Control', service_key: 'mosquito_re_service' })).toEqual([]);
+    expect(detectServiceKeys({ service_type: 'Tree & Shrub', service_name: 'Tree & Shrub Re-Service' })).toEqual([]);
+    expect(detectServiceKeys({ service_type: 'Termite Bait Station Re-Service' })).toEqual([]);
+    expect(detectServiceKeys({ service_type: 'Lawn Care Callback Visit' })).toEqual([]);
+  });
+
   test('fills missing customer portal fields without overwriting positive monthly rates', () => {
     expect(buildCustomerUpdates(
       {

@@ -252,6 +252,17 @@ function normalizeServiceText(value) {
     .trim();
 }
 
+// Re-service callbacks are free re-treatments under an existing plan and are never
+// recurring plan coverage for any family. detectServiceKeys() now feeds the catalog
+// service_key/name into the family resolvers, so a callback key (e.g. lawn_re_service)
+// must be rejected here or a lawn/mosquito/tree-shrub/termite resolver would read it
+// as plan coverage and (mis)set tier/monthly_rate. The pest resolver already inlines
+// this exclusion.
+const NON_PLAN_RECURRING_SERVICE_RE = /\b(re[-\s]?service|callback)\b/;
+function isNonPlanRecurringServiceText(value) {
+  return NON_PLAN_RECURRING_SERVICE_RE.test(normalizeServiceText(value));
+}
+
 function resolvePestControlRecurringPlan(serviceType) {
   const raw = String(serviceType || '').toLowerCase();
   const text = normalizeServiceText(serviceType);
@@ -297,6 +308,7 @@ function resolveLawnCareRecurringPlan(serviceType) {
   const raw = String(serviceType || '').toLowerCase();
   const text = normalizeServiceText(serviceType);
   if (!/\b(lawn|turf|fertiliz|weed|grass)\b/.test(text) && !raw.includes('lawn_care')) return null;
+  if (isNonPlanRecurringServiceText(serviceType)) return null;
 
   if (
     raw.includes('lawn_care_6week')
@@ -337,6 +349,7 @@ function resolveTreeShrubRecurringPlan(serviceType) {
   const text = normalizeServiceText(serviceType);
   if (!/\b(tree|shrub|ornamental)\b/.test(text) && !raw.includes('tree_shrub')) return null;
   if (/\b(palm|injection|one[-\s]?time)\b/.test(text)) return null;
+  if (isNonPlanRecurringServiceText(serviceType)) return null;
 
   if (
     raw.includes('tree_shrub_6week')
@@ -354,6 +367,7 @@ function resolveMosquitoRecurringPlan(serviceType) {
   const text = normalizeServiceText(serviceType);
   if (!text.includes('mosquito') && !raw.includes('mosquito_')) return null;
   if (/\b(event|one[-\s]?time|single)\b/.test(text) || raw.includes('mosquito_one_time') || raw.includes('mosquito_event')) return null;
+  if (isNonPlanRecurringServiceText(serviceType)) return null;
 
   if (
     raw.includes('mosquito_seasonal')
@@ -372,6 +386,7 @@ function resolveTermiteBaitRecurringPlan(serviceType) {
   if (!text.includes('termite') && !raw.includes('termite_')) return null;
   if (/\b(inspection|liquid|trench|trenching|pretreat|pre[-\s]?treat|spot|foam)\b/.test(text)) return null;
   if (!/\b(bait|monitor|monitoring|station|stations|sentricon|trelona|warranty|protection|bond|active)\b/.test(text)) return null;
+  if (isNonPlanRecurringServiceText(serviceType)) return null;
 
   if (
     raw.includes('termite_active_annual')
@@ -520,6 +535,9 @@ function inferTierFromServiceCount(serviceCount) {
 function serviceRowCountsTowardWaveGuard(row = {}) {
   if (isOneTimeBookingSource(row.source)) return false;
   if (TERMINAL_STATUSES.includes(String(row.status || '').toLowerCase())) return false;
+  // Re-service callbacks are free re-treatments under an existing plan, never plan
+  // coverage themselves — exclude them even when the row is flagged is_recurring.
+  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
   return row.is_recurring === true || row.is_recurring === 1 || row.is_recurring === '1' || row.is_recurring === 'true';
 }
 

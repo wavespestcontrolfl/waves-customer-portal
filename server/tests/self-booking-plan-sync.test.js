@@ -284,6 +284,7 @@ describe('self-booking plan sync helpers', () => {
     expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', recurring_parent_id: 123 })).toBe(false);
     expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 123 })).toBe(false);
     expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: true, status: 'completed' })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: true, is_callback: true })).toBe(false);
     expect(serviceRowCountsTowardWaveGuard({
       service_type: 'Pest Control',
       source: 'quote-wizard-onetime',
