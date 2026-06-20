@@ -138,7 +138,12 @@ function collectJsonLdOffers(jsonLdStrings) {
       for (const o of list) {
         if (o && o['@type'] === 'AggregateOffer' && o.offers) {
           const nested = Array.isArray(o.offers) ? o.offers : [o.offers];
-          flat.push(...nested);
+          // Children that omit priceCurrency inherit the aggregate's, so a CAD
+          // parent isn't read as USD past the non-USD filter.
+          const parentCur = o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency) || null;
+          for (const n of nested) {
+            flat.push(parentCur && n && !n.priceCurrency ? { ...n, priceCurrency: parentCur } : n);
+          }
           if (offerPrice(o) != null && !nested.some((n) => offerPrice(n) != null)) flat.push(o);
         } else {
           flat.push(o);
