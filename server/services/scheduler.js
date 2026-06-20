@@ -205,6 +205,12 @@ async function recoverStaleScheduledEstimateClaims(now) {
   // in seconds, so any `sending` row with no scheduled_at older than the stale
   // window is a crashed send; surface it as `send_failed` so it stays editable
   // and re-sendable rather than permanently locked.
+  //
+  // EXCLUDE lead-auto-send claims: they reuse the same row shape
+  // (source='lead_webhook', status='sending', no scheduled_at) but have their
+  // OWN recovery that returns an unattempted claim to `draft` for retry. Leave
+  // a row that still has an unattempted autoSend claim to that recovery so a
+  // crashed auto-send isn't downgraded to a manual `send_failed`.
   const immediate = await db.raw(`
     UPDATE estimates
     SET status = 'send_failed',
@@ -213,6 +219,17 @@ async function recoverStaleScheduledEstimateClaims(now) {
     WHERE status = 'sending'
       AND scheduled_at IS NULL
       AND updated_at <= ?
+      AND NOT (
+        source = 'lead_webhook'
+        AND COALESCE(
+          estimate_data->'automation'->'autoSend'->>'claimedAt',
+          estimate_data->'automation'->'autoSend'->>'claimed_at'
+        ) IS NOT NULL
+        AND estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL
+        AND estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL
+      )
     RETURNING id
   `, [now, staleBefore]);
   const immediateRows = immediate.rows || [];

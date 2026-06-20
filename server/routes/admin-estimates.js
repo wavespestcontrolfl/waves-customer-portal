@@ -673,9 +673,25 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           // Render the email from the fresh row when it's a proposal, so the
           // SendGrid price summary / details match the attached PDF if totals
           // changed mid-send. The PDF was built from freshEstimate above.
-          const fm = parseFloat(freshEstimate.monthly_total || 0);
-          const fa = parseFloat(freshEstimate.annual_total || 0);
-          const freshPriceLine = fm > 0 ? `$${fm.toFixed(0)}/mo · $${fa.toLocaleString()}/yr` : priceLine;
+          let freshPriceLine;
+          if (proposalMode) {
+            // A proposal can carry one-time + taxable lines, and the PDF
+            // headlines the first-year total (recurring + one-time + tax). A
+            // monthly/annual-only summary would disagree with the PDF — or be
+            // blank for a one-time-only proposal — so summarize from the same
+            // totals the PDF prints.
+            const pt = computeProposalTotals(normalizeProposal(freshEstimate));
+            const parts = [];
+            if (pt.monthlyEquivalent > 0) parts.push(`$${Math.round(pt.monthlyEquivalent).toLocaleString()}/mo`);
+            if (pt.annualRecurring > 0) parts.push(`$${Math.round(pt.annualRecurring).toLocaleString()}/yr recurring`);
+            if (pt.oneTime > 0) parts.push(`$${Math.round(pt.oneTime).toLocaleString()} one-time`);
+            if (pt.firstYearTotal > 0) parts.push(`first-year total $${Math.round(pt.firstYearTotal).toLocaleString()}`);
+            freshPriceLine = parts.join(' · ');
+          } else {
+            const fm = parseFloat(freshEstimate.monthly_total || 0);
+            const fa = parseFloat(freshEstimate.annual_total || 0);
+            freshPriceLine = fm > 0 ? `$${fm.toFixed(0)}/mo · $${fa.toLocaleString()}/yr` : priceLine;
+          }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
