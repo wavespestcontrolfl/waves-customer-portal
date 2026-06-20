@@ -729,7 +729,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   }
 
   const updatePayload = {
-    status: 'sent',
+    // Promote the claim to `sent`, but never regress a row the customer already
+    // advanced to `viewed` during the send window — only stamp `sent` when the
+    // row is still our `sending` claim; otherwise keep its current status while
+    // still persisting the send fields below.
+    status: db.raw("CASE WHEN status = 'sending' THEN 'sent' ELSE status END"),
     sent_at: db.fn.now(),
     scheduled_at: null,
     send_method: null,
@@ -766,19 +770,22 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   } catch (e) {
     logger.warn(`[admin-estimates] estimate_data snapshot update failed for estimate ${estimate.id}: ${e.message}`);
   }
-  // Scope the final `sent` write to the row we still hold as `sending` and that
-  // has NOT been price-locked. A customer can accept while the SMS/email/PDF
-  // work is in flight (the public accept path treats `sending` as active and
-  // price-locks + creates invoice/conversion); an unconditional update would
-  // then overwrite that accepted, money-bearing state back to `sent`. If the
-  // flip is lost, acceptance won — leave it, and skip the `sent` downstream
-  // effects (which would regress the linked lead from won back to sent).
+  // Persist the send fields to the row UNLESS it has reached a terminal/locked
+  // state. A customer can accept while the SMS/email/PDF work is in flight (the
+  // public accept path price-locks + creates invoice/conversion); an
+  // unconditional update would overwrite that accepted, money-bearing state, so
+  // exclude accepted/declined/expired and any price-locked row. A first view
+  // (sending → viewed) is NOT excluded — the send fields still persist and the
+  // CASE above keeps the row `viewed` rather than regressing it to `sent`. When
+  // the write is lost to a terminal/locked state, that state won — leave it and
+  // skip the `sent` downstream effects (which would regress a won lead to sent).
   const sentCount = await db('estimates')
-    .where({ id: estimate.id, status: 'sending' })
+    .where({ id: estimate.id })
     .whereNull('price_locked_at')
+    .whereNotIn('status', ['accepted', 'declined', 'expired'])
     .update(updatePayload);
   if (!sentCount) {
-    logger.warn(`[admin-estimates] estimate ${estimate.id} left 'sending' during send (likely accepted concurrently); preserving its current state.`);
+    logger.warn(`[admin-estimates] estimate ${estimate.id} reached a terminal/locked state during send (likely accepted concurrently); preserving its current state.`);
     return {
       sent: true,
       superseded: true,
