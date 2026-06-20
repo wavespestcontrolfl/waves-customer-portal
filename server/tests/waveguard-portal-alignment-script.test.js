@@ -90,12 +90,14 @@ describe('WaveGuard portal alignment script helpers', () => {
     expect(detectServiceKeys({ service_type: 'Lawn Care Callback Visit' })).toEqual([]);
   });
 
-  test('fills missing customer portal fields without overwriting positive monthly rates', () => {
+  test('re-aligns enrolled members and fills missing fields without overwriting positive rates', () => {
+    // Enrolled member (has a tier) missing portal fields -> filled.
     expect(buildCustomerUpdates(
       {
         active: false,
         pipeline_stage: 'new_lead',
-        monthly_rate: null,
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
         member_since: null,
         earliest_service_date: '2026-06-19',
       },
@@ -106,7 +108,6 @@ describe('WaveGuard portal alignment script helpers', () => {
       active: true,
       pipeline_stage: 'active_customer',
       pipeline_stage_changed_at: expect.any(Date),
-      waveguard_tier: 'Bronze',
       monthly_rate: 45,
       member_since: '2026-06-19',
     }));
@@ -115,6 +116,7 @@ describe('WaveGuard portal alignment script helpers', () => {
       {
         active: true,
         pipeline_stage: 'active_customer',
+        waveguard_tier: 'Silver',
         monthly_rate: 129,
         member_since: '2025-01-01',
       },
@@ -125,6 +127,37 @@ describe('WaveGuard portal alignment script helpers', () => {
 
     expect(existingRateUpdates).not.toHaveProperty('monthly_rate');
     expect(existingRateUpdates).not.toHaveProperty('member_since');
+  });
+
+  test('re-aligns enrolled members only; never enrolls a non-member from recurring services', () => {
+    // No tier and no monthly_rate -> not WaveGuard-enrolled -> no mutations even with
+    // detected recurring services (per-visit recurring customers must not be enrolled).
+    expect(buildCustomerUpdates(
+      {
+        active: false,
+        pipeline_stage: 'new_lead',
+        monthly_rate: null,
+        member_since: null,
+        earliest_service_date: '2026-06-19',
+      },
+      ['mosquito', 'pest_control', 'lawn_care'],
+      customerColumns,
+      '2026-06-20',
+    )).toEqual({});
+
+    // A legacy member with a positive monthly_rate but no tier IS enrolled -> re-aligned.
+    expect(buildCustomerUpdates(
+      {
+        active: true,
+        pipeline_stage: 'active_customer',
+        waveguard_tier: null,
+        monthly_rate: 89,
+        member_since: '2025-01-01',
+      },
+      ['pest_control', 'lawn_care'],
+      customerColumns,
+      '2026-06-20',
+    )).toEqual(expect.objectContaining({ waveguard_tier: 'Silver' }));
   });
 
   test('makes no customer-state mutations without recurring-service evidence', () => {

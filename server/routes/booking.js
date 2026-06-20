@@ -10,7 +10,6 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
-  syncSelfBookedRecurringPlan,
 } = require('../services/self-booking-plan-sync');
 
 function cleanBookingServiceLabel(value) {
@@ -989,33 +988,15 @@ router.post('/confirm', async (req, res, next) => {
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
     let followUpRows = [];
-    let planSync = null;
-    if (!isOneTimeEstimateBooking && requestedRecurringPattern) {
-      try {
-        planSync = await syncSelfBookedRecurringPlan({
-          customerId: custId,
-          serviceRow,
-          serviceType: resolvedServiceType,
-          slotDate: slotDateStr,
-          slotStart: slot_start,
-          slotEnd: endTime,
-          technicianId: technician_id || null,
-          zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
-          durationMinutes: duration,
-          source: source || 'self_booked',
-          selfBookingId: booking.id,
-          activateCustomerPlan: false,
-          registerReminders: false,
-        });
-        followUpRows = planSync?.createdAppointments || [];
-      } catch (err) {
-        logger.error(`[booking:confirm] self-booking plan sync failed for customer ${custId}: ${err.message}`);
-      }
-    }
 
+    // Public self-booking books only the single requested visit. It does NOT create a
+    // recurring WaveGuard series or activate a plan (owner policy: a WaveGuard plan is
+    // set up explicitly via admin/estimate/payment, not from a public booking — so we
+    // never seed future visits that would have no plan and no per-visit price to bill).
+    // The quarterly-pest follow-up seeder below is the pre-existing exception and runs
+    // independently of WaveGuard plan state.
     const shouldSeedQuarterlyPestFollowUps =
-      !planSync?.activated
-      && !isOneTimeEstimateBooking
+      !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
       && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
     if (shouldSeedQuarterlyPestFollowUps) {
@@ -1109,7 +1090,7 @@ router.post('/confirm', async (req, res, next) => {
       logger.error(`[booking:confirm] SMS failed: ${err.message}`);
     }
 
-    res.json({ booking, confirmationCode: confCode, planSync });
+    res.json({ booking, confirmationCode: confCode });
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
     next(err);

@@ -5,15 +5,11 @@ const {
   SELF_BOOKING_RECURRING_PLANS,
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
-  buildChildScheduledServiceRow,
-  buildCustomerActivationUpdates,
   buildCustomerWaveGuardAlignmentUpdates,
   buildRecurringOccurrenceDates,
-  buildScheduledServiceUpdates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
-  isSelfBookedRow,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,
@@ -169,55 +165,6 @@ describe('self-booking plan sync helpers', () => {
     ]);
   });
 
-  test('activates missing plan fields without downgrading existing members', () => {
-    const customerColumns = {
-      active: {},
-      pipeline_stage: {},
-      pipeline_stage_changed_at: {},
-      waveguard_tier: {},
-      monthly_rate: {},
-      member_since: {},
-    };
-
-    expect(buildCustomerActivationUpdates(
-      { waveguard_tier: null, monthly_rate: null, member_since: null },
-      SELF_BOOKING_RECURRING_PLANS.pest_control,
-      customerColumns,
-      '2026-06-19',
-    )).toEqual(expect.objectContaining({
-      active: true,
-      pipeline_stage: 'active_customer',
-      pipeline_stage_changed_at: expect.any(Date),
-      waveguard_tier: 'Bronze',
-      monthly_rate: 55,
-      member_since: '2026-06-19',
-    }));
-
-    const existingMemberUpdates = buildCustomerActivationUpdates(
-      { waveguard_tier: 'Gold', monthly_rate: 149, member_since: '2025-02-01' },
-      SELF_BOOKING_RECURRING_PLANS.pest_control,
-      customerColumns,
-      '2026-06-19',
-    );
-
-    expect(existingMemberUpdates).toEqual(expect.objectContaining({
-      active: true,
-      pipeline_stage: 'active_customer',
-      pipeline_stage_changed_at: expect.any(Date),
-    }));
-    expect(existingMemberUpdates).not.toHaveProperty('waveguard_tier');
-    expect(existingMemberUpdates).not.toHaveProperty('monthly_rate');
-    expect(existingMemberUpdates).not.toHaveProperty('member_since');
-
-    const lowercaseTierUpdates = buildCustomerActivationUpdates(
-      { waveguard_tier: 'silver', monthly_rate: 129, member_since: '2025-02-01' },
-      SELF_BOOKING_RECURRING_PLANS.pest_control,
-      customerColumns,
-      '2026-06-19',
-    );
-    expect(lowercaseTierUpdates.waveguard_tier).toBe('Silver');
-  });
-
   test('aligns customer tier from unique recurring service families', () => {
     const customerColumns = {
       active: {},
@@ -313,21 +260,6 @@ describe('self-booking plan sync helpers', () => {
     })).toBe(true);
   });
 
-  test('only sets create_invoice_on_complete for plan-covered visits, never for pending self-bookings', () => {
-    const plan = SELF_BOOKING_RECURRING_PLANS.pest_control_quarterly || resolveSelfBookedRecurringPlan('Pest Control');
-    const serviceColumns = { service_type: {}, is_recurring: {}, recurring_pattern: {}, recurring_ongoing: {}, service_id: {}, create_invoice_on_complete: {}, recurring_parent_id: {} };
-
-    // Plan activated -> billed via the plan, not per visit.
-    expect(buildScheduledServiceUpdates(plan, serviceColumns, null, true).create_invoice_on_complete).toBe(false);
-    // Plan NOT activated (public self-booking) -> flag left unset so the column default
-    // (operator-driven billing) applies; it carries no per-visit price to invoice.
-    expect(buildScheduledServiceUpdates(plan, serviceColumns, null, false)).not.toHaveProperty('create_invoice_on_complete');
-
-    const childArgs = { plan, serviceColumns, serviceId: null, parentService: { id: 1, customer_id: 7 }, scheduledDate: '2026-09-18' };
-    expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: true }).create_invoice_on_complete).toBe(false);
-    expect(buildChildScheduledServiceRow({ ...childArgs, planCovered: false })).not.toHaveProperty('create_invoice_on_complete');
-  });
-
   test('normalizes pg DATE base dates without an ET day shift', () => {
     // buildRecurringOccurrenceDates runs the base through normalizeDateString; a pg DATE
     // column arrives as a midnight Date and must not be converted as an ET instant
@@ -336,12 +268,4 @@ describe('self-booking plan sync helpers', () => {
     expect(buildRecurringOccurrenceDates('2026-06-19', 'quarterly', 1)[0]).toBe('2026-06-19');
   });
 
-  test('identifies self-booked rows so pending bookings do not bootstrap membership', () => {
-    expect(isSelfBookedRow({ source: 'self_booked' })).toBe(true);
-    expect(isSelfBookedRow({ source: 'SELF_BOOKED' })).toBe(true);
-    expect(isSelfBookedRow({ self_booking_id: 42 })).toBe(true);
-    expect(isSelfBookedRow({ source: 'admin' })).toBe(false);
-    expect(isSelfBookedRow({ source: 'direct' })).toBe(false);
-    expect(isSelfBookedRow({})).toBe(false);
-  });
 });

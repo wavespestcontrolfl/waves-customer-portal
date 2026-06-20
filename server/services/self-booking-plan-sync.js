@@ -536,11 +536,6 @@ function inferTierFromServiceCount(serviceCount) {
   return null;
 }
 
-function isSelfBookedRow(row = {}) {
-  return String(row.source || '').toLowerCase() === 'self_booked'
-    || row.self_booking_id != null;
-}
-
 function serviceRowCountsTowardWaveGuard(row = {}) {
   if (isOneTimeBookingSource(row.source)) return false;
   if (TERMINAL_STATUSES.includes(String(row.status || '').toLowerCase())) return false;
@@ -661,19 +656,19 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   const customer = await database('customers').where({ id: customerId }).first();
   if (!customer) return { synced: false, reason: 'customer_not_found' };
 
-  // Public self-booking creates recurring rows WITHOUT activating a plan
-  // (activateCustomerPlan:false → no tier/monthly_rate). Those rows are "pending
-  // plan activation" and must not bootstrap membership on their own — otherwise a
-  // single self-booked visit would promote the customer to active_customer and set a
-  // tier/monthly_rate they never agreed to. Once the customer actually has a plan
-  // (admin/estimate/payment activation set a tier or positive monthly_rate), their
-  // self-booked rows count normally.
-  const hasExistingPlan = !!normalizeTierName(customer.waveguard_tier) || Number(customer.monthly_rate || 0) > 0;
+  // Owner policy: this sync RE-ALIGNS already-enrolled WaveGuard members only — it must
+  // never enroll a customer from recurring services alone. The repo has per-visit
+  // recurring customers; auto-enrolling them would wrongly make them monthly/autopay
+  // billable. Enrollment is established explicitly (admin/estimate/payment) and shows up
+  // as a waveguard_tier or a positive monthly_rate. Non-enrolled customers are left
+  // untouched here.
+  const isWaveGuardEnrolled = !!normalizeTierName(customer.waveguard_tier) || Number(customer.monthly_rate || 0) > 0;
+  if (!isWaveGuardEnrolled) {
+    return { synced: false, reason: 'not_waveguard_enrolled' };
+  }
 
   const rows = await scheduledServiceRowsForCustomer(database, customerId);
-  const recurringRows = rows
-    .filter(serviceRowCountsTowardWaveGuard)
-    .filter((row) => hasExistingPlan || !isSelfBookedRow(row));
+  const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
   const detectedPlanKeys = [];
   let earliestServiceDate = null;
 
@@ -720,298 +715,6 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   };
 }
 
-function buildCustomerActivationUpdates(customer, plan, customerColumns, memberSince) {
-  const updates = {};
-  const currentMonthlyRate = Number(customer?.monthly_rate || 0);
-  const normalizedCurrentTier = normalizeTierName(customer?.waveguard_tier);
-  const currentTierRank = normalizedCurrentTier ? activeTierRank(normalizedCurrentTier) : -1;
-
-  assignIfColumn(updates, customerColumns, 'active', true);
-  assignIfColumn(updates, customerColumns, 'pipeline_stage', 'active_customer');
-  assignIfColumn(updates, customerColumns, 'pipeline_stage_changed_at', new Date());
-
-  if (customerColumns.waveguard_tier) {
-    if (normalizedCurrentTier && customer?.waveguard_tier !== normalizedCurrentTier) {
-      updates.waveguard_tier = normalizedCurrentTier;
-    } else if (currentTierRank < 0) {
-      updates.waveguard_tier = plan.tier;
-    }
-  }
-  if (customerColumns.monthly_rate && (!Number.isFinite(currentMonthlyRate) || currentMonthlyRate <= 0)) {
-    updates.monthly_rate = plan.monthlyRate;
-  }
-  if (customerColumns.member_since && !customer?.member_since) {
-    updates.member_since = memberSince;
-  }
-
-  return updates;
-}
-
-function buildScheduledServiceUpdates(plan, serviceColumns, serviceId, planCovered = true) {
-  const updates = {};
-  assignIfColumn(updates, serviceColumns, 'service_type', plan.serviceType);
-  assignIfColumn(updates, serviceColumns, 'is_recurring', true);
-  assignIfColumn(updates, serviceColumns, 'recurring_pattern', plan.recurringPattern);
-  if (plan.recurringIntervalDays) {
-    assignIfColumn(updates, serviceColumns, 'recurring_interval_days', plan.recurringIntervalDays);
-  }
-  assignIfColumn(updates, serviceColumns, 'recurring_ongoing', true);
-  assignIfColumn(updates, serviceColumns, 'service_id', serviceId || null);
-  // Only plan-covered (activated, monthly_rate set) visits bill via the plan and skip
-  // the per-visit invoice. Do NOT set this flag for pending/non-activated self-booking
-  // rows: they carry no explicit per-visit price, so forcing it true would invoice the
-  // wrong amount (the customer's monthly_rate, or $0) and forcing it false would suppress
-  // billing. Leaving it unset keeps the column default and the established operator-driven
-  // completion billing (estimated_price → monthly_rate → $0) until a plan is activated.
-  if (planCovered) {
-    assignIfColumn(updates, serviceColumns, 'create_invoice_on_complete', false);
-  }
-  return updates;
-}
-
-function buildChildScheduledServiceRow({
-  plan,
-  serviceColumns,
-  serviceId,
-  parentService,
-  scheduledDate,
-  slotStart,
-  slotEnd,
-  durationMinutes,
-  technicianId,
-  zone,
-  source,
-  selfBookingId,
-  planCovered = true,
-}) {
-  const row = {
-    customer_id: parentService.customer_id,
-    scheduled_date: scheduledDate,
-    service_type: plan.serviceType,
-    status: 'pending',
-    customer_confirmed: false,
-    notes: `Auto-scheduled from ${plan.label} self-booking.`,
-  };
-
-  assignIfColumn(row, serviceColumns, 'technician_id', technicianId || parentService.technician_id || null);
-  assignIfColumn(row, serviceColumns, 'window_start', slotStart || parentService.window_start || null);
-  assignIfColumn(row, serviceColumns, 'window_end', slotEnd || parentService.window_end || null);
-  assignIfColumn(row, serviceColumns, 'source', source || parentService.source || 'self_booked');
-  assignIfColumn(row, serviceColumns, 'self_booking_id', selfBookingId || parentService.self_booking_id || null);
-  assignIfColumn(row, serviceColumns, 'estimated_duration_minutes', durationMinutes || parentService.estimated_duration_minutes || null);
-  assignIfColumn(row, serviceColumns, 'zone', zone || parentService.zone || null);
-  assignIfColumn(row, serviceColumns, 'is_recurring', true);
-  assignIfColumn(row, serviceColumns, 'recurring_pattern', plan.recurringPattern);
-  if (plan.recurringIntervalDays) {
-    assignIfColumn(row, serviceColumns, 'recurring_interval_days', plan.recurringIntervalDays);
-  }
-  assignIfColumn(row, serviceColumns, 'recurring_parent_id', parentService.id);
-  assignIfColumn(row, serviceColumns, 'recurring_ongoing', true);
-  assignIfColumn(row, serviceColumns, 'service_id', serviceId || null);
-  // See buildScheduledServiceUpdates: only plan-covered (activated) visits skip the
-  // per-visit invoice. Pending self-booking children carry no per-visit price, so the
-  // flag is left at the column default (operator-driven billing) until plan activation.
-  if (planCovered) {
-    assignIfColumn(row, serviceColumns, 'create_invoice_on_complete', false);
-  }
-
-  return row;
-}
-
-async function registerAppointmentReminders(appointments, customerId, plan, log = logger) {
-  try {
-    const AppointmentReminders = require('./appointment-reminders');
-    for (const appointment of appointments) {
-      try {
-        await AppointmentReminders.registerAppointment(
-          appointment.id,
-          customerId,
-          `${appointment.date}T${appointment.windowStart || '08:00'}`,
-          plan.serviceType,
-          'booking_new',
-          { sendConfirmation: false }
-        );
-      } catch (err) {
-        log.error(`[self-booking-plan-sync] appointment reminder registration failed for ${appointment.id}: ${err.message}`);
-      }
-    }
-  } catch (err) {
-    log.error(`[self-booking-plan-sync] appointment reminder service unavailable: ${err.message}`);
-  }
-}
-
-async function syncSelfBookedRecurringPlan(options = {}) {
-  const {
-    database = db,
-    log = logger,
-    customerId,
-    serviceRow,
-    serviceType,
-    slotDate,
-    slotStart,
-    slotEnd,
-    technicianId,
-    zone,
-    durationMinutes,
-    source,
-    selfBookingId,
-    activateCustomerPlan = true,
-    registerReminders = true,
-  } = options;
-
-  const plan = resolveSelfBookedRecurringPlan(serviceType || serviceRow?.service_type);
-  if (!plan) return { activated: false, reason: 'not_recurring_waveguard_service' };
-  if (!customerId || !serviceRow?.id) return { activated: false, reason: 'missing_customer_or_service' };
-
-  const baseDate = normalizeDateString(slotDate || serviceRow.scheduled_date) || etDateString();
-  const customerColumns = await columnInfo(database, 'customers');
-  const serviceColumns = await columnInfo(database, 'scheduled_services');
-  const serviceId = await resolveServiceId(database, plan.serviceKey);
-  const parentAppointments = [];
-  const createdAppointments = [];
-
-  const result = await database.transaction(async (trx) => {
-    const customer = await trx('customers').where({ id: customerId }).first();
-    if (!customer) throw new Error(`Customer not found for self-booking plan sync: ${customerId}`);
-
-    const customerUpdates = activateCustomerPlan
-      ? buildCustomerActivationUpdates(customer, plan, customerColumns, baseDate)
-      : {};
-    if (Object.keys(customerUpdates).length) {
-      await trx('customers').where({ id: customerId }).update(customerUpdates);
-    }
-
-    const parentUpdates = buildScheduledServiceUpdates(plan, serviceColumns, serviceId, activateCustomerPlan);
-    if (Object.keys(parentUpdates).length) {
-      await trx('scheduled_services').where({ id: serviceRow.id }).update(parentUpdates);
-    }
-
-    const parentService = {
-      ...serviceRow,
-      ...parentUpdates,
-      customer_id: customerId,
-      scheduled_date: baseDate,
-      window_start: slotStart || serviceRow.window_start,
-      window_end: slotEnd || serviceRow.window_end,
-      source: source || serviceRow.source || 'self_booked',
-      self_booking_id: selfBookingId || serviceRow.self_booking_id,
-      estimated_duration_minutes: durationMinutes || serviceRow.estimated_duration_minutes,
-      zone: zone || serviceRow.zone,
-    };
-
-    parentAppointments.push({
-      id: serviceRow.id,
-      date: baseDate,
-      windowStart: parentService.window_start || slotStart || '08:00',
-    });
-
-    const matchingRows = await trx('scheduled_services')
-      .where({ customer_id: customerId })
-      .whereNotIn('status', TERMINAL_STATUSES)
-      .where('scheduled_date', '>=', baseDate)
-      .andWhere(function () {
-        this.where('recurring_parent_id', serviceRow.id)
-          .orWhere(function () {
-            this.where('id', serviceRow.id);
-          });
-      })
-      .select('id', 'scheduled_date');
-
-    const knownDates = new Set(matchingRows.map(row => normalizeDateString(row.scheduled_date)).filter(Boolean));
-    let knownCount = matchingRows.length;
-    const occurrenceDates = buildRecurringOccurrenceDates(baseDate, plan.recurringPattern, plan.targetAppointmentCount, {
-      intervalDays: plan.recurringIntervalDays,
-    });
-
-    for (const scheduledDate of occurrenceDates.slice(1)) {
-      if (knownCount >= plan.targetAppointmentCount) break;
-      if (knownDates.has(scheduledDate)) continue;
-
-      const childRow = buildChildScheduledServiceRow({
-        plan,
-        serviceColumns,
-        serviceId,
-        parentService,
-        scheduledDate,
-        slotStart,
-        slotEnd,
-        durationMinutes,
-        technicianId,
-        zone,
-        source,
-        selfBookingId,
-        planCovered: activateCustomerPlan,
-      });
-      const [created] = await trx('scheduled_services').insert(childRow).returning('*');
-      if (created?.id) {
-        createdAppointments.push({
-          id: created.id,
-          date: normalizeDateString(created.scheduled_date) || scheduledDate,
-          scheduled_date: normalizeDateString(created.scheduled_date) || scheduledDate,
-          window_start: created.window_start || childRow.window_start || '08:00',
-          service_type: created.service_type || childRow.service_type || plan.serviceType,
-          windowStart: created.window_start || childRow.window_start || '08:00',
-        });
-      }
-      knownDates.add(scheduledDate);
-      knownCount += 1;
-    }
-
-    return {
-      activated: true,
-      plan: {
-        serviceKey: plan.serviceKey,
-        serviceType: plan.serviceType,
-        tier: plan.tier,
-        monthlyRate: plan.monthlyRate,
-        recurringPattern: plan.recurringPattern,
-        recurringIntervalDays: plan.recurringIntervalDays || null,
-        visitsPerYear: plan.visitsPerYear || null,
-      },
-      customerUpdated: Object.keys(customerUpdates).length > 0,
-      customerPlanActivationSkipped: !activateCustomerPlan,
-      scheduledServiceUpdated: Object.keys(parentUpdates).length > 0,
-      createdChildIds: createdAppointments.map(appt => appt.id),
-      createdAppointments,
-      existingAppointmentCount: matchingRows.length,
-    };
-  });
-
-  if (activateCustomerPlan) {
-    try {
-      result.customerPlanSync = await syncCustomerWaveGuardPlanFromScheduledServices({
-        database,
-        log,
-        customerId,
-        today: baseDate,
-      });
-    } catch (err) {
-      log.error(`[self-booking-plan-sync] customer WaveGuard tier alignment failed for ${customerId}: ${err.message}`);
-    }
-  }
-
-  if (registerReminders) {
-    await registerAppointmentReminders([...parentAppointments, ...createdAppointments], customerId, plan, log);
-  }
-
-  database('activity_log').insert({
-    customer_id: customerId,
-    action: activateCustomerPlan ? 'self_booking_plan_activated' : 'self_booking_recurring_plan_scheduled',
-    description: activateCustomerPlan
-      ? `Activated WaveGuard ${plan.tier} from ${plan.label} self-booking`
-      : `Scheduled ${plan.label} self-booking pending WaveGuard plan activation`,
-    metadata: {
-      service_id: serviceRow.id,
-      self_booking_id: selfBookingId || serviceRow.self_booking_id || null,
-      plan: result.plan,
-      created_child_ids: result.createdChildIds,
-      customer_plan_activation_skipped: !activateCustomerPlan,
-    },
-  }).catch((err) => log.warn(`[self-booking-plan-sync] activity_log insert failed: ${err.message}`));
-
-  return result;
-}
-
 module.exports = {
   LAWN_CARE_RECURRING_PLANS,
   MOSQUITO_RECURRING_PLANS,
@@ -1020,15 +723,11 @@ module.exports = {
   SELF_BOOKING_RECURRING_PLANS,
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
-  buildChildScheduledServiceRow,
-  buildCustomerActivationUpdates,
   buildCustomerWaveGuardAlignmentUpdates,
   buildRecurringOccurrenceDates,
-  buildScheduledServiceUpdates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
-  isSelfBookedRow,
   normalizeTierName,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
@@ -1040,6 +739,5 @@ module.exports = {
   serviceFamilyKey,
   serviceRowCountsTowardWaveGuard,
   syncCustomerWaveGuardPlanFromScheduledServices,
-  syncSelfBookedRecurringPlan,
   uniqueServiceFamilies,
 };
