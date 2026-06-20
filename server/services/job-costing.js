@@ -30,6 +30,7 @@
  */
 
 const logger = require('./logger');
+const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
 const DEFAULT_LABOR_RATE = 35; // fallback if company_financials empty
 const DEFAULT_DRIVE_COST_PER_STOP = 6;
@@ -84,8 +85,17 @@ function deriveRevenue({ serviceRecord, scheduledService, customer, ignoreExisti
   const visitPrice = Number(scheduledService?.estimated_price);
   if (Number.isFinite(visitPrice) && visitPrice > 0) return round2(visitPrice);
 
+  // A free visit never falls back to monthly_rate. Detect it from EITHER side:
+  // the callback backfill (20260618000002) flags completed re-services on
+  // service_records.is_callback but leaves the terminal scheduled_services row
+  // false, so checking only the scheduled_service would book a full monthly rate
+  // for historical free re-services. The shared no-cost classifier also catches
+  // re-service/follow-up/appointment/estimate visit types by name.
+  const serviceType = scheduledService?.service_type || serviceRecord?.service_type;
   const isFreeVisit = !!scheduledService?.is_callback
-    || scheduledService?.followup_included === true;
+    || serviceRecord?.is_callback === true
+    || scheduledService?.followup_included === true
+    || isAlwaysFreeServiceType(serviceType);
   const monthly = Number(customer?.monthly_rate);
   if (!isFreeVisit && Number.isFinite(monthly) && monthly > 0) return round2(monthly);
 
@@ -251,9 +261,16 @@ async function calcExpenses(db, scheduledServiceId) {
 
 /**
  * Resolve the canonical service_record for a scheduled_service. Prefers the
- * direct scheduled_service_id FK (added in 20260427000007) over the legacy
- * (customer_id, service_date, service_type) soft-join, which collided on
- * same-day same-customer double visits.
+ * direct scheduled_service_id FK (added in 20260427000007) — an unambiguous
+ * 1:1 link — over the legacy (customer_id, service_date, service_type) soft-join.
+ *
+ * Returns { record, viaFk, ambiguous }. The soft-join is `ambiguous` when the
+ * tuple maps to more than one service_record OR more than one completed
+ * scheduled_service: every such visit would collapse onto the single newest
+ * record and clobber each other's financials, leaving the rest blank. The
+ * write-through is skipped (logged) for ambiguous matches rather than corrupt
+ * them — completion-created records carry the FK, so this only affects pre-FK
+ * legacy history during the backfill.
  */
 async function resolveServiceRecord(db, svc, srCols) {
   if (srCols.scheduled_service_id) {
@@ -261,12 +278,27 @@ async function resolveServiceRecord(db, svc, srCols) {
       .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'desc')
       .first();
-    if (byFk) return byFk;
+    if (byFk) return { record: byFk, viaFk: true, ambiguous: false };
   }
-  return db('service_records')
+  const records = await db('service_records')
     .where({ customer_id: svc.customer_id, service_date: svc.scheduled_date, service_type: svc.service_type })
     .orderBy('created_at', 'desc')
-    .first();
+    .limit(2);
+  const record = records[0] || null;
+  let ambiguous = records.length > 1;
+  if (record && !ambiguous) {
+    const dupServices = await db('scheduled_services')
+      .where({
+        customer_id: svc.customer_id,
+        scheduled_date: svc.scheduled_date,
+        service_type: svc.service_type,
+        status: 'completed',
+      })
+      .count({ c: '*' })
+      .first();
+    if (Number(dupServices?.c) > 1) ambiguous = true;
+  }
+  return { record, viaFk: false, ambiguous };
 }
 
 /**
@@ -285,7 +317,7 @@ async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = fal
   if (!svc) throw new Error(`scheduled_service ${scheduledServiceId} not found`);
 
   const srCols = await db('service_records').columnInfo().catch(() => ({}));
-  const record = await resolveServiceRecord(db, svc, srCols);
+  const { record, ambiguous } = await resolveServiceRecord(db, svc, srCols);
   const customer = await db('customers').where({ id: svc.customer_id }).first();
 
   const { laborRate, driveCostPerStop } = await getFinancials(db);
@@ -335,7 +367,10 @@ async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = fal
   // 2. Write-through to service_records — the table the Dashboard + /admin/revenue
   //    actually read. Each column is guarded by columnInfo so an environment
   //    missing the 20260401000027 financial columns is a no-op, not a crash.
-  if (record?.id) {
+  //    Skipped for ambiguous legacy soft-join matches (multiple same-day visits
+  //    collapsing onto one record) — writing would clobber it and blank the rest.
+  let wroteThrough = false;
+  if (record?.id && !ambiguous) {
     const upd = {};
     const set = (col, val) => { if (srCols[col]) upd[col] = val; };
     set('revenue', fin.revenue);
@@ -349,14 +384,20 @@ async function calculateJobCost(scheduledServiceId, db, { recomputeRevenue = fal
     set('revenue_per_man_hour', fin.revenue_per_man_hour);
     if (Object.keys(upd).length) {
       await db('service_records').where({ id: record.id }).update(upd);
+      wroteThrough = true;
     }
+  } else if (record?.id && ambiguous) {
+    logger.warn(
+      `[job-costing] ${scheduledServiceId} — ambiguous legacy service_record match `
+      + '(same customer/date/type duplicates); skipped service_records write-through',
+    );
   }
 
   logger.info(
     `[job-costing] ${scheduledServiceId} — revenue $${fin.revenue} cost $${fin.total_job_cost} `
     + `profit $${fin.gross_profit} (${fin.gross_margin_pct ?? '—'}%)`,
   );
-  return { ...row, laborHours: fin.labor_hours, serviceRecordId: record?.id || null };
+  return { ...row, laborHours: fin.labor_hours, serviceRecordId: wroteThrough ? record.id : null };
 }
 
 /**

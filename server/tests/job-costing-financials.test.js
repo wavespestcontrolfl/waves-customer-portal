@@ -69,6 +69,32 @@ describe('deriveRevenue — mirrors the completion handler invoiceAmount', () =>
     expect(rev).toBe(0);
   });
 
+  test('a completed free re-service flagged on the RECORD is $0, not monthly', () => {
+    // 20260618000002 backfills service_records.is_callback but leaves the terminal
+    // scheduled_services row is_callback=false — so the record flag must be honored.
+    const rev = deriveRevenue({
+      serviceRecord: { is_callback: true },
+      scheduledService: { is_callback: false, estimated_price: null },
+      customer: { monthly_rate: 99 },
+    });
+    expect(rev).toBe(0);
+  });
+
+  test('an always-free service type (re-service / follow-up) is $0, not monthly', () => {
+    const reService = deriveRevenue({
+      serviceRecord: {},
+      scheduledService: { service_type: 'Free Re-Service', estimated_price: null },
+      customer: { monthly_rate: 99 },
+    });
+    expect(reService).toBe(0);
+    const followUp = deriveRevenue({
+      serviceRecord: { service_type: 'Follow-up Visit' },
+      scheduledService: { estimated_price: null },
+      customer: { monthly_rate: 99 },
+    });
+    expect(followUp).toBe(0);
+  });
+
   test('no price anywhere yields $0', () => {
     expect(deriveRevenue({ serviceRecord: {}, scheduledService: {}, customer: {} })).toBe(0);
   });
