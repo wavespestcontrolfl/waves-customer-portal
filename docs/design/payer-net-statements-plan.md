@@ -262,15 +262,21 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
     (`overdue` is **not** a stored status — derived from `due_date` for
     aging/dunning only; a past-due statement is still one of the payable frozen
     statuses.)
-  - **In-flight payments block double collection (esp. ACH).** Online ACH emits
-    `payment_intent.processing` for *days* before `succeeded`. The moment a PI is
-    created (card OR ACH), stamp `stripe_payment_intent_id` and move the statement
-    to `processing` so a second `/pay` PI **and** an admin reconcile are both
-    refused while money is in flight — otherwise the same statement double-collects.
-    The webhook resolves it idempotently, mirroring invoice handling:
-    `succeeded` → `paid` + cascade; `payment_failed` / `canceled` → back to the
-    prior payable status (collectible again); duplicate/late events are no-ops
-    keyed on the PI id. Admin reconcile likewise refuses while `processing`/`paid`. Paying an `open` statement lets AP
+  - **In-flight payments block double collection (esp. ACH) — but only CONFIRMED
+    money-in-flight, not a freshly-created PI.** A PI is created at pay-page setup
+    *before* the AP confirms, so moving to `processing` on PI creation would let
+    merely opening (or abandoning) the pay page lock the statement against all
+    retries + admin reconcile with no money actually moving and maybe no failure
+    webhook ever arriving. So: an unconfirmed/`requires_*` PI stays **replaceable**
+    (cancel the stale one + mint a fresh PI on retry, exactly like the invoice
+    `/pay` open-PI triage). The statement enters `processing` only on the
+    **confirmed** money-in-flight webhook — `payment_intent.processing` (ACH, which
+    then sits there for *days*) or the near-instant card `succeeded`. Once
+    `processing`, a second `/pay` confirm **and** admin reconcile are both refused.
+    Webhook resolves the PI lifecycle idempotently (keyed on PI id):
+    `processing` → `processing`; `succeeded` → `paid` + cascade; `payment_failed` /
+    `canceled` → revert to the prior payable status (collectible again); duplicate /
+    late events are no-ops. Admin reconcile refuses while `processing`/`paid`. Paying an `open` statement lets AP
     settle a mutable total while later visits keep accruing into it — leaving
     those visits unpaid or the total changed after collection. The accrual branch
     and the pay branch are mutually exclusive on status: nothing attaches to a
@@ -445,10 +451,12 @@ Each PR ships behind a gate and is independently revertable; nothing changes for
     (still accruing), `void`, and `paid` — paying a mutable open statement lets AP
     settle a total that later visits still change.
 13. **In-flight ACH double-collection**: ACH sits in `payment_intent.processing`
-    for days; without an in-flight `processing` state + active-PI stamp, a second
-    `/pay` PI or an admin reconcile double-collects the statement. Mirror invoice
-    handling: block collection while `processing`/`paid`, resolve the PI lifecycle
-    idempotently in the webhook.
+    for days; without an in-flight `processing` state a second `/pay` confirm or
+    admin reconcile double-collects. But enter `processing` only on the *confirmed*
+    money-in-flight webhook — NOT on PI creation (PIs are minted at pay-page setup;
+    locking then would strand the statement on an abandoned page). Unconfirmed PIs
+    stay replaceable (stale-cancel + retry, like the invoice open-PI triage);
+    resolve the PI lifecycle idempotently in the webhook.
 
 ## Out of scope (later)
 
