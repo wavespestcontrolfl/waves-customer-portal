@@ -489,6 +489,19 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
         .where(function issued() {
           this.whereNotNull('sent_at').orWhereNotNull('paid_at');
         })
+        // A Stripe refund updates payments.refund_status but leaves the invoice
+        // status='paid'/paid_at set (stripe-webhook handleChargeRefunded), so a
+        // fully-refunded invoice would still read as collected. Exclude any
+        // invoice whose linked payment (by charge, else PI) is fully refunded —
+        // terminal/uncollectible, the same as status='refunded'.
+        .whereRaw(`NOT EXISTS (
+          SELECT 1 FROM payments p
+          WHERE p.refund_status = 'full'
+            AND (
+              (invoices.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = invoices.stripe_charge_id)
+              OR (invoices.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = invoices.stripe_payment_intent_id)
+            )
+        )`)
         .whereRaw(`${issueDateET} >= ?`, [start])
         .whereRaw(`${issueDateET} <= ?`, [todayStr])
         .select(
