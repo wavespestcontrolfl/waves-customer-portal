@@ -249,9 +249,11 @@ New sibling to `invoice-email.js`, e.g. `payer-statement-email.js`:
   and explicitly rejects `invoice.payer_id`. We add a payer-scoped charge that is
   only ever reachable via a statement token, never a homeowner surface.
   - **Pay only a FROZEN statement — fail closed otherwise.** A PaymentIntent may
-    be created ONLY for a statement in a payable frozen status
-    (`finalized` / `sent` / `viewed` / `overdue`); `open` (still accruing),
-    `void`, and already-`paid` must be refused. Paying an `open` statement lets AP
+    be created ONLY for a statement in a payable frozen *stored* status
+    (`finalized` / `sent` / `viewed`); `open` (still accruing), `void`, and
+    already-`paid` must be refused. (`overdue` is **not** a stored status — it is
+    derived from `due_date` for aging/dunning only; a past-due statement is still
+    one of the stored frozen statuses and remains payable.) Paying an `open` statement lets AP
     settle a mutable total while later visits keep accruing into it — leaving
     those visits unpaid or the total changed after collection. The accrual branch
     and the pay branch are mutually exclusive on status: nothing attaches to a
