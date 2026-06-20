@@ -87,8 +87,11 @@ async function resolveApRecipient(statement, database) {
  * Build + send the statement email. Gated — `payerStatements` off ⇒ no-op.
  * Pass `dryRun: true` to build the PDF + resolve the recipient WITHOUT sending
  * or stamping (used by the cron's dry-run-first rollout and the admin preview).
+ * Pass `resend: true` for an explicit operator (re)send — it makes a FRESH
+ * delivery attempt (no first-delivery dedupe key), so a blocked/suppressed first
+ * attempt can be retried after AP/suppression is fixed.
  */
-async function sendStatementEmail(statementId, { dryRun = false, database = db } = {}) {
+async function sendStatementEmail(statementId, { dryRun = false, resend = false, database = db } = {}) {
   if (!isEnabled('payerStatements')) return { ok: false, skipped: 'gate_off' };
 
   const statement = await database('payer_statements').where({ id: statementId }).first();
@@ -122,8 +125,10 @@ async function sendStatementEmail(statementId, { dryRun = false, database = db }
   // First delivery (never sent) gets a stable idempotency key so a double-click,
   // retry, or concurrent close-and-send can't email AP two copies — sendTemplate
   // only dedupes on idempotencyKey (triggerEventId is metadata). An explicit
-  // resend (already `sent`/`viewed`) is intentional and deliberately left keyless.
-  const isFirstDelivery = statement.status === 'finalized' && !statement.sent_at;
+  // resend is keyless: it makes a fresh attempt so a BLOCKED/suppressed first
+  // delivery (terminal under the stable key) can be retried once AP is fixed —
+  // and intentional re-delivery of an already-sent statement still works.
+  const isFirstDelivery = !resend && statement.status === 'finalized' && !statement.sent_at;
   const idempotencyKey = isFirstDelivery ? `payer_statement_sent:${statement.id}` : undefined;
 
   let sent = false;
