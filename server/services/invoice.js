@@ -1645,7 +1645,16 @@ const InvoiceService = {
             year: "numeric",
             timeZone: "America/New_York",
           });
-          serviceDateIsTodayET = etDateString(d) === etDateString(new Date());
+          // Compare date-only values, not the midnight Date through ET: Knex
+          // returns DATE as a Date at UTC midnight, which etDateString() would
+          // format as the previous ET calendar day and wrongly drop the clause
+          // on the real service date. The raw YYYY-MM-DD already is the calendar
+          // date (UTC-midnight Date → toISOString slice; string → leading slice).
+          const serviceYmd =
+            invoice.service_date instanceof Date
+              ? invoice.service_date.toISOString().slice(0, 10)
+              : String(invoice.service_date).slice(0, 10);
+          serviceDateIsTodayET = serviceYmd === etDateString(new Date());
         }
       } catch {
         formattedDate = "";
