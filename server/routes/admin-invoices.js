@@ -958,9 +958,18 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
     if (when.getTime() <= Date.now()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
     const reviewDelayMinutes = parseScheduledReviewDelayMinutes(req.body || {}, when);
 
+    // Phase 2: never queue an accrued invoice into the individual send scheduler —
+    // it is delivered on the consolidated statement (processScheduledSends would
+    // churn failed sends against the statement-only send guard).
+    const target = await db('invoices').where({ id: req.params.id }).first('payer_statement_id');
+    if (target?.payer_statement_id) {
+      return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement; it cannot be scheduled for individual send.' });
+    }
+
     const [invoice] = await db('invoices')
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
+      .whereNull('payer_statement_id')
       .update({
         status: 'scheduled',
         scheduled_send_at: when,
