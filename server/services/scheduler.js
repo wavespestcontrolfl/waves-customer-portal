@@ -334,6 +334,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:05AM — Point-in-time MRR snapshot (upsert the current ET month).
+  // Keeps the MRR Trend honest: past months read their real recorded MRR
+  // instead of being recomputed at today's prices. Each month's row freezes at
+  // its last value when the month rolls over.
+  // =========================================================================
+  cron.schedule('5 6 * * *', async () => {
+    try {
+      // runExclusive: a deploy overlap must not double-write the same month.
+      await runExclusive('mrr-monthly-snapshot', async () => {
+        const { recordMrrSnapshot } = require('./mrr-snapshot');
+        await recordMrrSnapshot();
+      });
+    } catch (err) {
+      logger.error(`[mrr-snapshot] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:10AM — Auto-Dispatch: optimize FUTURE recurring visits more than
   // 14 days out (route proximity + customer scheduling preferences). Double-
   // gated (cronJobs AND autoDispatch). Runs in the configured mode — dry_run
