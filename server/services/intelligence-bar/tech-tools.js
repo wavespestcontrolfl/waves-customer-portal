@@ -235,7 +235,7 @@ async function getStopDetails(input) {
       lawn_type: customer.lawn_type,
       property_sqft: customer.property_sqft,
       lot_sqft: customer.lot_sqft,
-      notes: customer.notes,
+      notes: customer.crm_notes,
     },
     property: prefs ? {
       gate_code: prefs.gate_code,
@@ -383,7 +383,7 @@ async function checkCustomerStatus(input) {
     churn_risk: health?.churn_risk || null,
     last_service: lastService ? { date: lastService.service_date, type: lastService.service_type } : null,
     member_since: customer.member_since,
-    notes: customer.notes,
+    notes: customer.crm_notes,
   };
 }
 

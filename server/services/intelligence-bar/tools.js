@@ -526,7 +526,7 @@ async function getCustomerDetail(customerId) {
       property_sqft: customer.property_sqft,
       lot_sqft: customer.lot_sqft,
       lawn_type: customer.lawn_type,
-      notes: customer.notes,
+      notes: customer.crm_notes,
     },
     tags: tags.map(t => t.tag),
     health_score: health ? {
@@ -767,7 +767,7 @@ const UPDATABLE_FIELDS = {
   phone: 'phone', city: 'city', state: 'state', zip: 'zip',
   address_line1: 'address_line1', waveguard_tier: 'waveguard_tier',
   pipeline_stage: 'pipeline_stage', lead_source: 'lead_source',
-  monthly_rate: 'monthly_rate', active: 'active', notes: 'notes',
+  monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
 };
 
 function sanitizeUpdates(updates) {
