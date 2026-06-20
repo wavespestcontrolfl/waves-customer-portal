@@ -997,6 +997,16 @@ function shouldRejectPhotoCaptionBannedCopy({
   return !isInternalOnlyCompletion;
 }
 
+function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, products = [] } = {}) {
+  if (!isInternalOnlyCompletion || !Array.isArray(products)) return null;
+  const hasAppliedProduct = products.some((product) => product && product.productId);
+  if (!hasAppliedProduct) return null;
+  return {
+    error: 'Waves Assessment is an internal-only consultation; no treatment products can be recorded for this visit.',
+    code: 'internal_only_products_not_allowed',
+  };
+}
+
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/dispatch/:serviceId/tech-rating-allowed
@@ -2339,6 +2349,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         new Error('photo_caption_banned_copy'),
       );
       return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
+    }
+    if (claim.action === 'proceed') {
+      const internalOnlyProductsBlock = internalOnlyProductsBlockPayload({
+        isInternalOnlyCompletion,
+        products,
+      });
+      if (internalOnlyProductsBlock) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error(internalOnlyProductsBlock.code),
+        );
+        return res.status(422).json(internalOnlyProductsBlock);
+      }
     }
 
     // Fresh executions validate typed rules; replays returned above with the
@@ -6400,4 +6423,5 @@ module.exports._test = {
   pestPressureConfigAllowsTechnicianRating,
   technicianPestRatingAllowedForService,
   shouldRejectPhotoCaptionBannedCopy,
+  internalOnlyProductsBlockPayload,
 };

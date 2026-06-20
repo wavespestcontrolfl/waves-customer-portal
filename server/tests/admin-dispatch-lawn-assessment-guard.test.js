@@ -6,6 +6,7 @@ const {
   completionAllowsTechnicianPestRating,
   technicianPestRatingAllowedForService,
   shouldRejectPhotoCaptionBannedCopy,
+  internalOnlyProductsBlockPayload,
 } = adminDispatchRouter._test;
 
 function fakeAssessmentKnex(firstResult) {
@@ -199,5 +200,21 @@ describe('admin dispatch lawn assessment completion guard', () => {
       resumingCommittedCompletion: true,
       typedDeliveryMode: 'auto_send',
     })).toBe(true);
+  });
+
+  test('blocks applied products for internal-only consultations', () => {
+    expect(internalOnlyProductsBlockPayload({
+      isInternalOnlyCompletion: true,
+      products: [{ productId: 'prod-1', name: 'Treatment' }],
+    })).toMatchObject({ code: 'internal_only_products_not_allowed' });
+
+    expect(internalOnlyProductsBlockPayload({
+      isInternalOnlyCompletion: true,
+      products: [{}],
+    })).toBeNull();
+    expect(internalOnlyProductsBlockPayload({
+      isInternalOnlyCompletion: false,
+      products: [{ productId: 'prod-1' }],
+    })).toBeNull();
   });
 });
