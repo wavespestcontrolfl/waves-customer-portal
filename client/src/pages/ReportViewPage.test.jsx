@@ -10,6 +10,7 @@ import {
   getReportArrivalTime,
   getReportCompletionTime,
   latestPendingReentryTarget,
+  lawnWateringGuidance,
   normalizeServiceCoverage,
   normalizeVisitTimeline,
   quickNavigationLinks,
@@ -250,6 +251,37 @@ describe('ReportViewPage report chrome helpers', () => {
     expect(top.title).not.toBe(bottom.title);
     expect(top.cta).toBe('Share feedback');
     expect(bottom.cta).toBe('Share feedback');
+  });
+});
+
+describe('ReportViewPage lawn watering guidance', () => {
+  it('prefers the recorded per-product irrigation note when present', () => {
+    const guidance = lawnWateringGuidance({
+      product: { category: 'fertilizer', irrigation_notes: 'Water in only when the service report says so.' },
+    });
+    expect(guidance.detail).toBe('Water in only when the service report says so.');
+    expect(guidance.headline).toMatch(/follow the watering note/i);
+  });
+
+  it('tells customers to water in nutrient applications', () => {
+    expect(lawnWateringGuidance({ product: { category: 'fertilizer', product_type: 'fertilizer' } }).headline)
+      .toMatch(/water it in/i);
+    expect(lawnWateringGuidance({ product: { name: 'High Manganese Combo', category: 'micronutrient' } }).headline)
+      .toMatch(/water it in/i);
+  });
+
+  it('tells customers to keep weed treatments dry', () => {
+    const guidance = lawnWateringGuidance({ product: { category: 'herbicide', name: 'Drive XLR8' } });
+    expect(guidance.headline).toMatch(/keep the lawn dry/i);
+    expect(guidance.detail).toMatch(/24 to 48 hours/i);
+  });
+
+  it('tells customers to let fungicides dry before watering', () => {
+    expect(lawnWateringGuidance({ product: { category: 'fungicide' } }).headline).toMatch(/let it dry/i);
+  });
+
+  it('falls back to normal-watering guidance for unrecognized products', () => {
+    expect(lawnWateringGuidance({ product: { category: 'unknown' } }).headline).toMatch(/normal watering/i);
   });
 });
 

@@ -804,6 +804,64 @@ function applicationReentrySummary(app = {}) {
   return app.product?.reentry_summary || '';
 }
 
+function applicationManufacturer(app = {}) {
+  return app.product?.manufacturer || '';
+}
+
+// Watering guidance shown on the lawn report so each product answers the
+// customer's "do I water after this, or not?" question. Prefer the per-product
+// irrigation note recorded from the label (DB override); otherwise fall back to
+// conservative, label-aligned defaults keyed off the product type. All copy
+// defers to the technician's service notes. Agronomy defaults pending Adam's
+// sign-off.
+export function lawnWateringGuidance(app = {}) {
+  const note = String(app.product?.irrigation_notes || '').trim();
+  if (note) return { headline: 'Follow the watering note from your technician', detail: note };
+  const category = String(app.product?.category || '').toLowerCase();
+  const type = String(app.product?.product_type || '').toLowerCase();
+  const name = String(app.product?.name || '').toLowerCase();
+  if (category.includes('herb') || name.includes('weed') || name.includes('herbicide')) {
+    return {
+      headline: 'Keep the lawn dry for about 24–48 hours',
+      detail: 'Hold off on watering and mowing for roughly 24 to 48 hours so the treatment can fully absorb into the weeds. Rainfall after the product has dried will not reduce the results.',
+    };
+  }
+  if (category.includes('fung')) {
+    return {
+      headline: 'Let it dry — hold watering for the rest of the day',
+      detail: 'Avoid watering for the remainder of the day so the fungicide can dry onto the leaf surface and protect the turf.',
+    };
+  }
+  if (type === 'fertilizer' || category.includes('fert') || category.includes('micronutrient') || name.includes('manganese')) {
+    return {
+      headline: 'Water it in within 24 hours',
+      detail: 'About a quarter inch of water within 24 hours helps move the nutrients down to the root zone where your turf can use them.',
+    };
+  }
+  if (type === 'wetting_agent' || category.includes('surfactant') || category.includes('adjuvant')) {
+    return {
+      headline: 'Water in lightly to activate',
+      detail: 'A short watering after the application activates the product so it can move moisture evenly through the soil.',
+    };
+  }
+  if (type === 'biostimulant' || category.includes('soil')) {
+    return {
+      headline: 'A light watering helps',
+      detail: 'A brief watering after the application moves the product into the soil where it supports the roots.',
+    };
+  }
+  if (category.includes('insectic')) {
+    return {
+      headline: 'Water it in after application',
+      detail: 'A light watering moves the product down into the soil and thatch where it stays active.',
+    };
+  }
+  return {
+    headline: 'Normal watering is fine once it dries',
+    detail: 'Once the application has dried, your usual watering schedule is fine unless the service notes above say otherwise.',
+  };
+}
+
 function isRenderableTreatmentApplication(app = {}) {
   return String(app.method || '').toLowerCase() !== 'station_check';
 }
@@ -2476,6 +2534,7 @@ function WhatHappenedWhere({ data, token, mode = 'live' }) {
 function AppliedProductsSection({ data, mode = 'live' }) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   if (!applications.length) return null;
+  const isLawn = data.serviceLine === 'lawn';
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
   const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
     ? data.dynamicContext.lawnProtocol.application.substitutions
@@ -2494,6 +2553,14 @@ function AppliedProductsSection({ data, mode = 'live' }) {
           <p>Why these products were selected for today&apos;s service.</p>
         </div>
       </div>
+      {isLawn && (
+        <div className="manufacturer-guideline-note">
+          <strong>Following the manufacturer&apos;s directions.</strong> Every product below is
+          applied to its manufacturer&apos;s label directions. Each card lists who makes the
+          product and the manufacturer&apos;s guidance for watering afterward, so you know
+          exactly how to care for your lawn between visits.
+        </div>
+      )}
       {applications.length > 0 && (
         <div className="applied-products-grid">
           {applications.map((app, index) => {
@@ -2506,6 +2573,8 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const productSummary = applicationProductSummary(app);
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);
+            const manufacturer = applicationManufacturer(app);
+            const watering = isLawn ? lawnWateringGuidance(app) : null;
             const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
               epa ? `EPA reg. ${epa}` : null,
@@ -2517,6 +2586,9 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             return (
               <article className="applied-product-card product-group-card" key={app.id || `${productName}-${index}`}>
                 <h3>{productName}</h3>
+                {isLawn && manufacturer && (
+                  <div className="applied-product-maker">by {manufacturer}</div>
+                )}
                 <div className="product-purpose-grid">
                   <div>
                     <div className="sr-cell-label">Purpose</div>
@@ -2563,6 +2635,18 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     ))}
                     {precautionSummary && <p>{precautionSummary}</p>}
                     {reentrySummary && <p>{reentrySummary}</p>}
+                    {watering && (
+                      <div className="product-watering-guidance">
+                        <div className="sr-cell-label">Watering after this application</div>
+                        <p className="watering-headline">{watering.headline}</p>
+                        <p>{watering.detail}</p>
+                      </div>
+                    )}
+                    {isLawn && manufacturer && (
+                      <p className="product-manufacturer-line">
+                        Manufacturer: {manufacturer}. Applied to the manufacturer&apos;s label directions.
+                      </p>
+                    )}
                   </div>
                 </div>
               </details>
@@ -6429,6 +6513,44 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 12px;
           line-height: 1.45;
           font-weight: 700;
+        }
+        .manufacturer-guideline-note {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 12px 14px;
+          margin-bottom: 14px;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .manufacturer-guideline-note strong {
+          color: var(--text);
+          font-weight: 750;
+        }
+        .applied-product-maker {
+          margin: -2px 0 8px;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.3;
+          font-weight: 600;
+        }
+        .product-watering-guidance {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 10px;
+        }
+        .product-watering-guidance .watering-headline {
+          margin-top: 4px;
+          color: var(--text);
+          font-weight: 700;
+        }
+        .product-watering-guidance p + p {
+          margin-top: 4px;
+        }
+        .product-manufacturer-line {
+          font-size: 13px;
         }
         .applied-product-card p {
           margin: 0;
