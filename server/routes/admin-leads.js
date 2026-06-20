@@ -972,7 +972,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         await trx('customers').where({ id: customerId }).update({
           pipeline_stage: 'won',
           pipeline_stage_changed_at: new Date(),
-          member_since: existingCustomer.member_since || etDateString(),
+          // Conversion date: keep a former customer's real start (churned/
+          // dormant re-booking), but overwrite a lead's intake date with today.
+          member_since: ['churned', 'dormant'].includes(existingCustomer.pipeline_stage)
+            ? (existingCustomer.member_since || etDateString())
+            : etDateString(),
           active: true,
           churned_at: null,
           churn_reason: null,

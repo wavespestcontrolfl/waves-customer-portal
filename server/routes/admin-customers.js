@@ -406,6 +406,11 @@ function isValidStage(stage) {
 // Post-conversion ("real customer") stages — entering one stamps member_since.
 // Mirrors the dashboard's whereRealCustomer definition.
 const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+// Stages indicating the row WAS (or is) a customer — so an existing member_since
+// is their real start and must be preserved. Anything else (new_lead, contacted,
+// estimate_*, follow_up, negotiating, lost) is a pre-sale lead: a member_since
+// there is just a lead-intake date and should be overwritten on conversion.
+const FORMER_OR_CURRENT_CUSTOMER_STAGES = new Set([...REAL_CUSTOMER_STAGES, 'churned', 'dormant']);
 
 // Lifecycle field stamps to apply when a customer's pipeline_stage CHANGES,
 // shared by PUT /:id/stage and the general PUT /:id edit so both keep
@@ -415,12 +420,18 @@ const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // after ET midnight. Returns {} for a no-op (same-stage) save so it never resets
 // pipeline_stage_changed_at or restamps churned_at on a churned→churned re-save.
 function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason } = {}) {
-  if (newStage === oldStage) return {};
+  if (newStage === oldStage) {
+    // No-op (same-stage) save: never restamp churned_at / pipeline_stage_changed_at,
+    // but still let an admin correct/add a churn reason on an already-churned row.
+    return (newStage === 'churned' && churnReason) ? { churn_reason: churnReason } : {};
+  }
   const stamps = { pipeline_stage_changed_at: new Date() };
   if (newStage === 'churned') {
-    // Always timestamp the churn so retention can see it; reason optional.
+    // Always timestamp the churn so retention can see it; reason optional. Set
+    // the reason explicitly (to the new value or null) so a stale reason from a
+    // prior churn never carries over to a fresh one.
     stamps.churned_at = today;
-    if (churnReason) stamps.churn_reason = churnReason;
+    stamps.churn_reason = churnReason || null;
   } else {
     // Reactivation / any non-churned target: clear a stale churn stamp so a
     // reactivated customer never carries a leftover churned_at. Keyed on the
@@ -430,9 +441,15 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
       stamps.churned_at = null;
       stamps.churn_reason = null;
     }
-    // First entry into a customer stage — stamp the "became a customer" date.
-    if (REAL_CUSTOMER_STAGES.has(newStage) && !customer.member_since) {
-      stamps.member_since = today;
+    if (REAL_CUSTOMER_STAGES.has(newStage)) {
+      if (!FORMER_OR_CURRENT_CUSTOMER_STAGES.has(oldStage)) {
+        // Converting from a lead stage → member_since is the conversion date,
+        // overwriting any lead-intake date a capture path stamped earlier.
+        stamps.member_since = today;
+      } else if (!customer.member_since) {
+        // Re-activating a former customer with no recorded start — best effort.
+        stamps.member_since = today;
+      }
     }
   }
   return stamps;

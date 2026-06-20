@@ -30,15 +30,29 @@ describe('stageLifecycleStamps', () => {
     expect(s.pipeline_stage_changed_at).toBeInstanceOf(Date);
   });
 
-  test('does not overwrite an existing member_since', () => {
+  test('keeps a former customer\'s real member_since (customer→customer move)', () => {
     const s = stageLifecycleStamps('won', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
     expect(s.member_since).toBeUndefined();
   });
 
-  test('always stamps churned_at (ET date) on churn, reason optional', () => {
-    const s = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'moved' });
-    expect(s.churned_at).toBe(TODAY);
-    expect(s.churn_reason).toBe('moved');
+  test('overwrites a lead\'s intake member_since with the conversion date', () => {
+    const s = stageLifecycleStamps('new_lead', 'won', { member_since: '2026-01-01' }, { today: TODAY });
+    expect(s.member_since).toBe(TODAY);
+  });
+
+  test('reactivating a former customer (churned) keeps its member_since', () => {
+    const s = stageLifecycleStamps('churned', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.member_since).toBeUndefined();
+  });
+
+  test('always stamps churned_at (ET date) on churn; reason set to value or null', () => {
+    const withReason = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'moved' });
+    expect(withReason.churned_at).toBe(TODAY);
+    expect(withReason.churn_reason).toBe('moved');
+    // No reason given → churn_reason cleared (don't carry a prior reason).
+    const noReason = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(noReason.churned_at).toBe(TODAY);
+    expect(noReason.churn_reason).toBeNull();
   });
 
   test('clears the churn stamp on reactivation out of churned', () => {
@@ -61,6 +75,11 @@ describe('stageLifecycleStamps', () => {
   test('a no-op same-stage save returns no stamps (preserves churned_at)', () => {
     expect(stageLifecycleStamps('churned', 'churned', { member_since: '2025-01-01' }, { today: TODAY })).toEqual({});
     expect(stageLifecycleStamps('active_customer', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY })).toEqual({});
+  });
+
+  test('a churned→churned re-save still applies a new churn reason', () => {
+    expect(stageLifecycleStamps('churned', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'price' }))
+      .toEqual({ churn_reason: 'price' });
   });
 });
 

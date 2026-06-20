@@ -27,26 +27,45 @@
 exports.up = async function up(knex) {
   // 1) Promote booked/paid customers stuck at new_lead.
   await knex.raw(`
-    UPDATE customers
+    UPDATE customers AS c
     SET pipeline_stage = 'active_customer',
-        member_since = COALESCE(member_since, (created_at AT TIME ZONE 'America/New_York')::date),
+        -- Promotion = they became a customer; drop any stale churn metadata.
+        churned_at = NULL,
+        churn_reason = NULL,
+        -- member_since = the CONVERSION date (first paid invoice / completed
+        -- service), not created_at (lead intake) — these rows were leads, so an
+        -- existing member_since is an intake date. Backdate stage-change to match
+        -- so they read as established customers, not fresh converts.
+        member_since = COALESCE(t.first_txn, c.member_since, (c.created_at AT TIME ZONE 'America/New_York')::date),
         pipeline_stage_changed_at = COALESCE(
-          (member_since::timestamp AT TIME ZONE 'America/New_York'),
-          pipeline_stage_changed_at,
-          created_at)
-    WHERE deleted_at IS NULL
-      AND active = true
+          (COALESCE(t.first_txn, c.member_since)::timestamp AT TIME ZONE 'America/New_York'),
+          c.pipeline_stage_changed_at,
+          c.created_at)
+    FROM (
+      SELECT cc.id,
+        LEAST(
+          (SELECT MIN((i.paid_at AT TIME ZONE 'America/New_York')::date) FROM invoices i WHERE i.customer_id = cc.id AND i.paid_at IS NOT NULL),
+          (SELECT MIN(s.scheduled_date) FROM scheduled_services s WHERE s.customer_id = cc.id AND s.status = 'completed'),
+          (SELECT MIN(r.service_date) FROM service_records r WHERE r.customer_id = cc.id AND r.status = 'completed')
+        ) AS first_txn
+      FROM customers cc
+      WHERE cc.deleted_at IS NULL AND cc.active = true
+        AND cc.pipeline_stage NOT IN ('active_customer', 'won', 'at_risk', 'churned', 'lost', 'dormant')
+    ) AS t
+    WHERE c.id = t.id
+      AND c.deleted_at IS NULL
+      AND c.active = true
       -- Any pre-sale lead stage (not just new_lead) — a paying customer could
       -- be stuck at contacted/estimate_sent/etc. EXCLUDE the deliberate
       -- end-states (churned/lost/dormant): an old payment must not resurrect a
       -- relationship that was intentionally ended.
-      AND pipeline_stage NOT IN ('active_customer', 'won', 'at_risk', 'churned', 'lost', 'dormant')
+      AND c.pipeline_stage NOT IN ('active_customer', 'won', 'at_risk', 'churned', 'lost', 'dormant')
       AND (
         -- paid_at OR status='paid' — the app treats status='paid' as paid even
         -- when paid_at is null (annual-prepay-renewals.js).
-        EXISTS (SELECT 1 FROM invoices i WHERE i.customer_id = customers.id AND (i.paid_at IS NOT NULL OR i.status = 'paid'))
-        OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = customers.id AND s.status = 'completed')
-        OR EXISTS (SELECT 1 FROM service_records r WHERE r.customer_id = customers.id AND r.status = 'completed')
+        EXISTS (SELECT 1 FROM invoices i WHERE i.customer_id = c.id AND (i.paid_at IS NOT NULL OR i.status = 'paid'))
+        OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND s.status = 'completed')
+        OR EXISTS (SELECT 1 FROM service_records r WHERE r.customer_id = c.id AND r.status = 'completed')
       )
   `);
 

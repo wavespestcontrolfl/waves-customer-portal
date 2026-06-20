@@ -898,10 +898,13 @@ const EstimateConverter = {
       : {
           pipeline_stage: 'active_customer',
           pipeline_stage_changed_at: new Date(),
-          // Persist the "became a customer" date if not already set (the lead
-          // may have carried a member_since from intake — keep the earlier one).
-          // Use the already-loaded row, not database.raw, to stay mock-friendly.
-          member_since: customer.member_since || etDateString(),
+          // member_since = the conversion date. If the row was already a
+          // customer (or a former one), keep its real start; if it was a lead,
+          // overwrite the lead-intake date with today. Uses the already-loaded
+          // row, not database.raw, to stay mock-friendly.
+          member_since: ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(customer.pipeline_stage)
+            ? (customer.member_since || etDateString())
+            : etDateString(),
           waveguard_tier: tier,
           monthly_rate: monthlyRate,
           active: true,
