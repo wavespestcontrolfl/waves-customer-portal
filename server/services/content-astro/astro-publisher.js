@@ -383,22 +383,32 @@ function normalizeAutonomousCategory(frontmatter = {}, brief = {}) {
 }
 
 // The binding blog schema caps meta_description at 160 chars
-// (packages/blog-schema/schema.json). The writer LLM overshoots despite its
-// prompt, which previously hard-failed the WHOLE publish (publish_validation_
-// failed) and wasted the generation. The publisher already owns fields the agent
-// drifts on (hero); clamp meta the same way — truncate at a word boundary to the
-// cap (stays ≥115 for any real sentence, so the schema min still holds) instead
-// of rejecting.
+// (packages/blog-schema/schema.json), and the title/meta spam gate hard-fails a
+// title over 90 chars (content-quality-gate `title_meta_spam_free`). The writer
+// LLM reliably overshoots both despite its prompt (prod: meta_length_192–240,
+// title_length_92/98), which previously hard-failed the WHOLE generation and
+// wasted it. The publisher already owns fields the agent drifts on (hero); clamp
+// title + meta the same way — truncate at a word boundary to the cap — instead
+// of rejecting. (meta stays ≥115 for any real sentence, so the schema min still
+// holds; a 90-char title still carries the keyword intent. Genuine spam — hype
+// stacking, "the best", repeats — is unaffected and still blocks.)
 const META_DESCRIPTION_MAX = 160;
-function clampMetaDescription(meta) {
-  const s = String(meta || '').trim();
-  if (s.length <= META_DESCRIPTION_MAX) return s;
-  const cut = s.slice(0, META_DESCRIPTION_MAX);
+const TITLE_MAX = 90;
+function clampToWordBoundary(value, max) {
+  const s = String(value || '').trim();
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
   const lastSpace = cut.lastIndexOf(' ');
   const trimmed = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut)
     .replace(/[\s.,;:–—-]+$/u, '')
     .trim();
   return trimmed || cut.trim();
+}
+function clampMetaDescription(meta) {
+  return clampToWordBoundary(meta, META_DESCRIPTION_MAX);
+}
+function clampTitle(title) {
+  return clampToWordBoundary(title, TITLE_MAX);
 }
 
 function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body = '', { slug, canonical } = {}) {
@@ -419,7 +429,7 @@ function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body =
   ].filter((type) => type !== 'FAQPage' || contentHasFaqSection(body));
 
   const data = {
-    title: String(frontmatter.title || brief.title || brief.target_keyword || '').trim(),
+    title: clampTitle(frontmatter.title || brief.title || brief.target_keyword || ''),
     slug: `/${slug}/`,
     meta_description: clampMetaDescription(frontmatter.meta_description),
     primary_keyword: String(frontmatter.primary_keyword || brief.target_keyword || '').trim(),
@@ -2358,6 +2368,11 @@ module.exports = {
   planInternalLinksForTarget,
   internalLinkPlanningDisabled,
   assertCodexReviewClear,
+  // Length clamps reused by the autonomous runner to normalize a draft's
+  // title/meta BEFORE the quality gate (the gate runs before publish, so the
+  // in-publisher normalization above is too late to salvage a length overshoot).
+  clampTitle,
+  clampMetaDescription,
   _internals: {
     generateHeroBuffer,
     compressToWebp,
@@ -2378,6 +2393,7 @@ module.exports = {
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
     clampMetaDescription,
+    clampTitle,
     buildDraftPrBody,
     buildMetadataPrBody,
     buildSeoReviewSection,

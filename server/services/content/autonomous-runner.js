@@ -400,6 +400,15 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed_agent', failure_message: 'no draft from agent' });
     }
 
+    // Bucket C: clamp the draft's title/meta to the gate limits BEFORE any gate
+    // runs. The title/meta spam gate hard-fails title>90 (and meta>190), and the
+    // publisher already clamps meta — but that happens AFTER this quality gate,
+    // and the title was never clamped at all. The LLM reliably overshoots length
+    // by a few chars (prod: title_length_92/98_over_90, meta 192–240), wasting
+    // the whole generation. Salvage a few-char overshoot into a publish instead
+    // of parking it; genuine spam (hype, "the best", repeats) still blocks.
+    this._clampDraftLengths(draft);
+
     // 3a. Operator slug pin (machine-checked, not just prompt-binding). The
     // intercept manifest declares the slug exact/binding; if the writer
     // drifts, the fully-autonomous lane would otherwise publish a
@@ -2189,6 +2198,30 @@ class AutonomousRunner {
 
     if (required) throw new Error('ASTRO_REPO_DIR or GitHub Astro corpus loader required');
     return [];
+  }
+
+  // Clamp a draft's title (<=90) and meta_description (<=160) at a word
+  // boundary, reusing the publisher's clamps so the limits stay single-sourced.
+  // Handles both draft shapes: emit_draft (frontmatter.title/meta_description)
+  // and emit_metadata_only (top-level title/meta_description). Null-safe and
+  // idempotent — running it on an already-short field is a no-op.
+  _clampDraftLengths(draft) {
+    if (!draft || typeof draft !== 'object') return;
+    let publisher;
+    try {
+      publisher = getAstroPublisher();
+    } catch {
+      return; // publisher unavailable → leave the draft untouched (gates still apply)
+    }
+    const { clampTitle, clampMetaDescription } = publisher || {};
+    if (typeof clampTitle !== 'function' || typeof clampMetaDescription !== 'function') return;
+    const fm = draft.frontmatter;
+    if (fm && typeof fm === 'object') {
+      if (fm.title != null) fm.title = clampTitle(fm.title);
+      if (fm.meta_description != null) fm.meta_description = clampMetaDescription(fm.meta_description);
+    }
+    if (draft.title != null) draft.title = clampTitle(draft.title);
+    if (draft.meta_description != null) draft.meta_description = clampMetaDescription(draft.meta_description);
   }
 
   _summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief) {

@@ -699,6 +699,49 @@ describe('autonomous frontmatter normalization (Bucket A generator fixes)', () =
   });
 });
 
+describe('autonomous draft length clamp (Bucket C)', () => {
+  const { clampTitle, clampMetaDescription } = AstroPublisher._internals;
+  const { evaluateTitleMetaSpam } = require('../services/content/title-meta-spam-gate');
+
+  describe('clampTitle — over-90 is normalized, not rejected', () => {
+    test('leaves a within-limit title unchanged', () => {
+      const t = 'Ant Trails in Bradenton: How to Spot Them and When to Call a Pro';
+      expect(t.length).toBeLessThanOrEqual(90);
+      expect(clampTitle(t)).toBe(t);
+    });
+
+    test('clamps an over-90 title to <=90 at a word boundary with no trailing punctuation', () => {
+      const long = 'Ant Trails in Bradenton Homes: How to Identify Them, Seal the Entry Points, and Decide When It Is Worth Calling a Professional';
+      expect(long.length).toBeGreaterThan(90);
+      const out = clampTitle(long);
+      expect(out.length).toBeLessThanOrEqual(90);
+      expect(long.startsWith(out)).toBe(true);
+      expect(out.includes(' ')).toBe(true); // didn't collapse to one mangled word
+      expect(/[\s.,;:–—-]$/u.test(out)).toBe(false);
+    });
+  });
+
+  test('clamped title + meta satisfy the spam gate length checks that were hard-failing in prod', () => {
+    // Reproduces the prod failure shapes: title_length_98_over_90 + meta_length_200_over_190.
+    const longTitle = 'The Complete Bradenton Homeowner Guide to Spotting Ant Trails Early and Knowing Exactly When to Call a Pro Today';
+    const longMeta = 'Ant trails in Bradenton homes can signal a much bigger colony hiding somewhere close, so here is exactly how to identify the trail, seal the entry points yourself, and decide when an inspection is truly worth it.';
+    expect(longTitle.length).toBeGreaterThan(90);
+    expect(longMeta.length).toBeGreaterThan(190);
+
+    // Raw draft hard-fails the gate on length.
+    const raw = evaluateTitleMetaSpam({ title: longTitle, meta_description: longMeta });
+    expect(raw.ok).toBe(false);
+    expect(raw.hard_failures.map((f) => f.reason).join(',')).toMatch(/title_length|meta_length/);
+
+    // After the clamp the length hard-fails are gone — the draft publishes instead of being parked.
+    const clamped = evaluateTitleMetaSpam({
+      title: clampTitle(longTitle),
+      meta_description: clampMetaDescription(longMeta),
+    });
+    expect(clamped.ok).toBe(true);
+  });
+});
+
 describe('Astro publisher autonomous draft adapter', () => {
   beforeEach(() => {
     jest.clearAllMocks();
