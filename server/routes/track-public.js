@@ -206,18 +206,22 @@ async function buildSummary(service) {
       .where({ scheduled_service_id: service.id })
       .orderBy('created_at', 'desc')
       .first('id', 'report_view_token', 'structured_notes');
-    // internal_only typed completions (Phase-1b shadow) never hand the
-    // customer a report link — not even on the token-scoped tracking page.
+    // Non-auto_send delivery postures (typed shadow/internal-only and
+    // disabled consultations) never hand the customer report artifacts — not
+    // even on the token-scoped tracking page.
     let trackNotes = {};
     try {
       trackNotes = typeof record?.structured_notes === 'string'
         ? JSON.parse(record.structured_notes)
         : (record?.structured_notes || {});
     } catch { trackNotes = {}; }
-    serviceReportToken = trackNotes.typedReportDelivery && trackNotes.typedReportDelivery !== 'auto_send'
+    const suppressCustomerArtifacts = !!(
+      trackNotes.typedReportDelivery && trackNotes.typedReportDelivery !== 'auto_send'
+    );
+    serviceReportToken = suppressCustomerArtifacts
       ? null
       : (record?.report_view_token || null);
-    if (record?.id) {
+    if (record?.id && !suppressCustomerArtifacts) {
       const photoRows = await db('service_photos')
         .where({ service_record_id: record.id })
         .orderBy('sort_order', 'asc')
@@ -404,6 +408,7 @@ router._test = {
   isTrackTokenLive,
   isFreshVehicleTimestamp,
   ensureEnRouteDestinationGeocoded,
+  buildSummary,
 };
 
 module.exports = router;

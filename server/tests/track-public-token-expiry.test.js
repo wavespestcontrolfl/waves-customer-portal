@@ -1,13 +1,44 @@
 jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: jest.fn(),
 }));
+const mockDb = jest.fn();
+jest.mock('../models/db', () => mockDb);
+const mockGetViewUrl = jest.fn();
+jest.mock('../services/photos', () => ({
+  getViewUrl: mockGetViewUrl,
+}));
 
 const { ensureCustomerGeocoded } = require('../services/geocoder');
 const trackPublicRouter = require('../routes/track-public');
 
+function makeQuery({ firstResult = null, selectResult = [] } = {}) {
+  const chain = {
+    where: jest.fn(() => chain),
+    orderBy: jest.fn(() => chain),
+    limit: jest.fn(() => chain),
+    first: jest.fn(async () => firstResult),
+    select: jest.fn(async () => selectResult),
+  };
+  return chain;
+}
+
+function installSummaryDb({ record = null, photos = [] } = {}) {
+  mockDb.mockImplementation((table) => {
+    if (table === 'service_records') {
+      return makeQuery({ firstResult: record });
+    }
+    if (table === 'service_photos') {
+      return makeQuery({ selectResult: photos });
+    }
+    return makeQuery();
+  });
+}
+
 describe('public track token expiry', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-05T12:00:00.000Z'));
+    mockDb.mockReset();
+    mockGetViewUrl.mockReset();
   });
 
   afterEach(() => {
@@ -59,5 +90,59 @@ describe('public track token expiry', () => {
     expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
     expect(row.latitude).toBeNull();
     expect(row.longitude).toBeNull();
+  });
+
+  test('hides report token and photos when frozen delivery suppresses customer artifacts', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'disabled' }),
+      },
+      photos: [{ s3_key: 'service-photos/record-1/internal.jpg' }],
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.serviceReportToken).toBeNull();
+    expect(summary.photos).toEqual([]);
+    expect(mockDb.mock.calls.map(([table]) => table)).not.toContain('service_photos');
+    expect(mockGetViewUrl).not.toHaveBeenCalled();
+  });
+
+  test('presigns completion photos when the frozen delivery is customer-visible', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      photos: [
+        { s3_key: 'service-photos/record-1/after-1.jpg' },
+        { s3_key: null },
+        { s3_key: 'service-photos/record-1/after-2.jpg' },
+      ],
+    });
+    mockGetViewUrl
+      .mockResolvedValueOnce('https://signed.example/after-1.jpg')
+      .mockResolvedValueOnce('https://signed.example/after-2.jpg');
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.serviceReportToken).toBe('report-token');
+    expect(summary.photos).toEqual([
+      'https://signed.example/after-1.jpg',
+      'https://signed.example/after-2.jpg',
+    ]);
+    expect(mockDb.mock.calls.map(([table]) => table)).toContain('service_photos');
+    expect(mockGetViewUrl).toHaveBeenCalledTimes(2);
   });
 });
