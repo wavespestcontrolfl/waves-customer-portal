@@ -18,12 +18,33 @@ enum API {
         let amount_cents: Int
         let currency: String
         let authToken: String?
+        // True only when GATE_TERMINAL_SURCHARGE is on server-side. Optional so
+        // older server responses (pre-feature) decode to nil → treated as off.
+        let surcharge_enabled: Bool?
+        // Server-calculated, so the pre-tap credit total shown matches the charge.
+        // Present only when surcharge is enabled; the credit total includes 2.9%.
+        let surcharge_cents: Int?
+        let credit_total_cents: Int?
     }
 
     struct PaymentIntentResponse: Decodable {
         let clientSecret: String
         let paymentIntentId: String
         let amount: Int
+    }
+
+    // Result of the post-tap surcharge step. `applied` is true only when the
+    // card read as credit and the PI was raised to base + 2.9%. Amounts are in
+    // cents. A no-op (gate off, debit/unknown, or recoverable failure) returns
+    // applied:false and the device confirms at base.
+    struct ApplySurchargeResponse: Decodable {
+        let applied: Bool
+        let funding: String?
+        let base: Int?
+        let surcharge: Int?
+        let total: Int?
+        let rateBps: Int?
+        let reason: String?
     }
 
     struct LoginResponse: Decodable {
@@ -67,8 +88,23 @@ enum API {
     }
 
     static func createPaymentIntent(jti: String) async throws -> PaymentIntentResponse {
+        // surcharge_capable tells the server this build can run the post-tap
+        // surcharge step. When the gate is on, the server refuses to mint a PI
+        // without it (so an old build can't settle a credit card base-only).
+        struct Body: Encodable { let jti: String; let surcharge_capable: Bool }
+        return try await request(
+            "/stripe/terminal/payment-intent",
+            body: Body(jti: jti, surcharge_capable: true),
+            auth: true,
+        )
+    }
+
+    // Called between collectPaymentMethod and confirmPaymentIntent. The server
+    // reads the now-known card funding and raises the PI to base + 2.9% for
+    // credit cards (no-op otherwise). Safe to call even when the feature is off.
+    static func applyTerminalSurcharge(jti: String) async throws -> ApplySurchargeResponse {
         let body = ["jti": jti]
-        return try await request("/stripe/terminal/payment-intent", body: body, auth: true)
+        return try await request("/stripe/terminal/apply-surcharge", body: body, auth: true)
     }
 
     static func connectionToken() async throws -> String {
