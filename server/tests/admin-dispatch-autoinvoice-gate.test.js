@@ -12,6 +12,8 @@ const base = {
   hasVisitPrice: false,
   invoiceAmount: 0,
   autoInvoicePricedVisits: false,
+  serviceType: 'Quarterly Pest Control Service',
+  isCallback: false,
 };
 
 // The leak shape: priced, self-pay, non-WaveGuard, no scheduler flag.
@@ -32,6 +34,24 @@ describe('shouldAutoInvoiceCompletion', () => {
 
   test('GATE ON: priced self-pay visit now invoices (leak closed)', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true })).toBe(true);
+  });
+
+  test('GATE ON: an always-free service type is NEVER auto-billed even with a stale price', () => {
+    const on = { ...pricedSelfPay, autoInvoicePricedVisits: true };
+    ['Waves Pest Control Appointment Service', 'Estimate service', 'Pest Control Re-Service', 'Follow-up visit']
+      .forEach((serviceType) => {
+        expect(shouldAutoInvoiceCompletion({ ...on, serviceType })).toBe(false);
+      });
+  });
+
+  test('GATE ON: a callback / re-treat is NEVER auto-billed even with a stale price', () => {
+    expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, isCallback: true })).toBe(false);
+  });
+
+  test('GATE ON: a paid inspection/rodent visit (ambiguous, not always-free) DOES invoice — price is authoritative at completion', () => {
+    const on = { ...pricedSelfPay, autoInvoicePricedVisits: true };
+    expect(shouldAutoInvoiceCompletion({ ...on, serviceType: 'WDO Inspection Service' })).toBe(true);
+    expect(shouldAutoInvoiceCompletion({ ...on, serviceType: 'Rodent Trapping Service' })).toBe(true);
   });
 
   test('GATE ON: every coverage guard still blocks the invoice', () => {

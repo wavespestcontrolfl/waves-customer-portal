@@ -3808,6 +3808,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       hasVisitPrice,
       invoiceAmount,
       autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+      serviceType: svc.service_type,
+      isCallback: svc.is_callback,
     });
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
@@ -6331,6 +6333,8 @@ router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
 // (GATE_AUTOINVOICE_PRICED_VISITS), any explicitly-priced visit also qualifies.
 // All coverage guards still apply, and autopayCoversVisit already requires
 // !hasVisitPrice, so a price-free autopay-covered visit is never billed here.
+const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
   alreadyPaid,
@@ -6343,14 +6347,22 @@ function shouldAutoInvoiceCompletion({
   hasVisitPrice,
   invoiceAmount,
   autoInvoicePricedVisits,
+  serviceType,
+  isCallback,
 }) {
   if (recapReviewOnly || alreadyPaid || prepaidCovered || autopayCoversVisit
     || preMintedInvoice || existingCompletionInvoice) {
     return false;
   }
   if (!(Number(invoiceAmount) > 0)) return false;
-  return !!createInvoiceOnComplete || !!waveguardTier
-    || (!!autoInvoicePricedVisits && !!hasVisitPrice);
+  // Explicit scheduler flag / WaveGuard tier are the existing, unchanged paths.
+  if (createInvoiceOnComplete || waveguardTier) return true;
+  // GATED new path: a priced visit qualifies — but NEVER an always-free type
+  // (appointment / estimate / re-service / follow-up) or a callback/re-treat,
+  // even if a stale or inherited price is present. Keeps this gate in lockstep
+  // with the Billing Recovery workbench's no-cost allowlist (shared module).
+  return !!autoInvoicePricedVisits && !!hasVisitPrice
+    && !isCallback && !isAlwaysFreeServiceType(serviceType);
 }
 
 module.exports = router;
