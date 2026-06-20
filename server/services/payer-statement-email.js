@@ -25,6 +25,12 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isEmailLike = (v) => typeof v === 'string' && EMAIL_RE.test(v.trim());
 const TERM_LABEL = { net15: 'Net 15', net30: 'Net 30', due_on_receipt: 'Due on receipt' };
 
+// A statement is deliverable only in a billed, owed state. `open` is still
+// accruing; `void`/`paid`/anything else must NOT be mailed as an amount due
+// (the PDF renders any non-paid/non-overdue status as "Due", so a voided
+// statement would otherwise reach AP looking collectible).
+const SENDABLE_STATUSES = new Set(['finalized', 'sent', 'viewed']);
+
 function currency(n) {
   return `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -87,7 +93,11 @@ async function sendStatementEmail(statementId, { dryRun = false, database = db }
 
   const statement = await database('payer_statements').where({ id: statementId }).first();
   if (!statement) return { ok: false, error: 'statement_not_found' };
-  if (statement.status === 'open') return { ok: false, error: 'statement_not_finalized' };
+  if (!SENDABLE_STATUSES.has(statement.status)) {
+    if (statement.status === 'open') return { ok: false, error: 'statement_not_finalized' };
+    logger.warn(`[payer-statement-email] statement ${statementId}: status '${statement.status}' is not sendable — NOT mailing`);
+    return { ok: false, error: 'statement_not_sendable', status: statement.status };
+  }
 
   const { apEmail, company, snapshot } = await resolveApRecipient(statement, database);
   if (!apEmail) {

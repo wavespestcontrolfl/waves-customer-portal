@@ -97,3 +97,12 @@ test('refuses to send an OPEN (not-yet-finalized) statement', async () => {
   expect(res.error).toBe('statement_not_finalized');
   expect(mockSendTemplate).not.toHaveBeenCalled();
 });
+
+test('refuses to email a VOID statement (never reaches AP as "Due")', async () => {
+  mockDbHandler = () => ({ where() { return this; }, first: async () => finalized({ status: 'void' }), update: async () => 1 });
+  const res = await sendStatementEmail(7);
+  expect(res.ok).toBe(false);
+  expect(res.error).toBe('statement_not_sendable');
+  expect(mockBuildPdf).not.toHaveBeenCalled();
+  expect(mockSendTemplate).not.toHaveBeenCalled();
+});
