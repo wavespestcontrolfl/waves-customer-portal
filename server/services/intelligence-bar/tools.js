@@ -922,7 +922,10 @@ async function updateCustomer(customerId, updates) {
     }
   }
 
-  logger.info(`[intelligence-bar] Updated customer ${customerId}:`, changes);
+  // notes maps to free-text crm_notes (gate codes, access details) — redact
+  // it from logs while still persisting the value.
+  const logChanges = changes.notes ? { ...changes, notes: '[redacted]' } : changes;
+  logger.info(`[intelligence-bar] Updated customer ${customerId}:`, logChanges);
 
   return {
     success: true,
@@ -950,7 +953,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
     : {};
   const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
 
-  logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, updates);
+  // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
+  const logUpdates = updates.notes !== undefined ? { ...updates, notes: '[redacted]' } : updates;
+  logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
 
   return {
     success: true,
