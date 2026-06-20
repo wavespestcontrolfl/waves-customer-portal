@@ -33,6 +33,7 @@ import {
   Share2,
   Wrench,
   Package,
+  Tags,
   ShieldCheck,
   BookMarked,
   Brain,
@@ -124,6 +125,7 @@ const NAV_SECTIONS = [
     items: [
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
+      { path: "/admin/price-match", icon: Tags, label: "Price Match" },
       { path: "/admin/compliance", icon: ShieldCheck, label: "Compliance" },
     ],
   },
