@@ -41,6 +41,9 @@ const {
 const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
+const {
+  syncCustomerWaveGuardPlanFromScheduledServices,
+} = require('../services/self-booking-plan-sync');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -1946,6 +1949,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     });
 
+    let waveguardPlanSync = null;
+    if (isRecurring) {
+      try {
+        waveguardPlanSync = await syncCustomerWaveGuardPlanFromScheduledServices({
+          customerId,
+        });
+      } catch (e) {
+        logger.error(`[schedule] WaveGuard plan sync failed for customer ${customerId}: ${e.message}`);
+      }
+    }
+
     // Register appointment-reminder rows synchronously, BEFORE the response, with
     // deferConfirmation so the slow Twilio confirmation SMS does NOT run here.
     //  - Honors the "Send confirmation SMS" checkbox: admin_manual defaults to true,
@@ -1985,6 +1999,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       id: svc.id,
       recurringCreated: isRecurring ? (recurringCount || 4) : 1,
       appointments: createdAppointments,
+      waveguardPlanSync,
       warnings: [],
     });
 

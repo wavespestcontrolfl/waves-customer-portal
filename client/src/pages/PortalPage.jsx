@@ -3336,11 +3336,12 @@ function BillingTab({ customer }) {
     : 'Not scheduled';
   const defaultCard = cards.find(c => c.isDefault) || cards[0];
   const lastPaymentFailed = balance?.lastPaymentFailed || false;
-  const tierName = customer?.tier || 'Bronze';
-  const tier = TIER[tierName];
+  const activeTierName = customer?.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const tierName = activeTierName || 'No Plan';
+  const tier = activeTierName ? TIER[tierName] : null;
   const monthlyRate = customer?.monthlyRate || 0;
-  const numServices = TIER_SERVICES[tierName] || 1;
-  const discount = TIER_DISCOUNTS[tierName] || 0;
+  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
+  const discount = activeTierName ? (TIER_DISCOUNTS[tierName] || 0) : 0;
 
   // Card expiry check — within 60 days
   const cardExpiringSoon = (() => {
@@ -3535,7 +3536,7 @@ function BillingTab({ customer }) {
               fontSize: 12,
               fontWeight: 850,
             }}>
-              WaveGuard {tierName}
+              {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
             <h1 style={{
               margin: '12px 0 8px',
@@ -3580,7 +3581,7 @@ function BillingTab({ customer }) {
           {[
             { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? `Next ${dueDateLabel}` : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
-            { label: 'Monthly plan', value: money(monthlyRate), sub: `WaveGuard ${tierName}` },
+            { label: 'Monthly plan', value: money(monthlyRate), sub: activeTierName ? `WaveGuard ${tierName}` : 'No active plan' },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
           ].map((item) => (
             <div key={item.label} style={{
@@ -3644,7 +3645,7 @@ function BillingTab({ customer }) {
           <div>
             <div style={sectionTitle}>Plan Charges</div>
             <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>
-              WaveGuard {tierName}
+              {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
           </div>
           <span style={{
@@ -3682,7 +3683,7 @@ function BillingTab({ customer }) {
             Saving {money(annualSavings, 0)}/year with your {tierName} bundle
           </div>
         )}
-        {tierName !== 'Platinum' && additionalSavings > 0 && (
+        {activeTierName && tierName !== 'Platinum' && additionalSavings > 0 && (
           <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
             Platinum would add {money(additionalSavings, 0)}/year in bundle savings.
           </div>
@@ -3854,7 +3855,9 @@ function BillingTab({ customer }) {
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 10, marginTop: 14 }}>
           <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>WaveGuard {tierName}</div>
+            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>
+              {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
+            </div>
             <div style={{ marginTop: 5, color: B.blueDeeper, fontSize: 18, fontWeight: 850 }}>{money(ytdRecurring)}</div>
           </div>
           <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
@@ -5510,8 +5513,9 @@ function LearnTab({ customer }) {
   const latestContent = allContent[0];
   const totalFaqQuestions = faq.reduce((sum, cat) => sum + (cat.questions?.length || 0), 0);
 
-  const tierName = customer?.tier || 'Bronze';
-  const numServices = TIER_SERVICES[tierName] || 1;
+  const activeTierName = customer?.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const tierName = activeTierName || 'No Plan';
+  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   const customerServiceNames = SERVICE_CATALOG
     .slice(0, numServices)
     .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
@@ -5526,7 +5530,7 @@ function LearnTab({ customer }) {
     : faq;
 
   const personalizeFaqAnswer = (answer) => {
-    if (!answer || !tierName) return answer;
+    if (!answer || !activeTierName) return answer;
     return answer
       .replace(/your (plan|membership|tier)/gi, `your WaveGuard ${tierName}`)
       .replace(/unlimited callbacks/gi, `unlimited callbacks (included with WaveGuard ${tierName})`)
@@ -5602,7 +5606,9 @@ function LearnTab({ customer }) {
               Learn
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              Seasonal pest and lawn guidance for Southwest Florida, plus answers tied to your WaveGuard plan.
+              {activeTierName
+                ? 'Seasonal pest and lawn guidance for Southwest Florida, plus answers tied to your WaveGuard plan.'
+                : 'Seasonal pest and lawn guidance for Southwest Florida, plus service and prevention resources.'}
             </div>
           </div>
           <div style={{
@@ -5615,10 +5621,12 @@ function LearnTab({ customer }) {
           }}>
             <div style={sectionTitle}>Your Plan</div>
             <div style={{ marginTop: 3, fontSize: 22, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
-              WaveGuard {tierName}
+              {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
             <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
-              {numServices} included service{numServices === 1 ? '' : 's'} in your guidance.
+              {activeTierName
+                ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
+                : 'Plan-specific guidance appears after activation.'}
             </div>
           </div>
         </div>
@@ -5911,7 +5919,7 @@ function LearnTab({ customer }) {
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
-                        {(q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
+                        {activeTierName && (q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
                           <div style={{
                             marginTop: 10,
                             padding: '9px 11px',
@@ -5997,7 +6005,7 @@ const SERVICE_COVERAGE = {
 const SERVICE_SCHEDULE_MONTHS = {
   pest_control: [0, 3, 6, 9],        // Jan, Apr, Jul, Oct (quarterly)
   lawn_care: [0, 2, 5, 8],            // Jan, Mar, Jun, Sep (4x/year)
-  mosquito: [3, 4, 5, 6, 7, 8, 9],   // Apr-Oct
+  mosquito: [1, 2, 3, 4, 5, 6, 7, 8, 9], // Feb-Oct (seasonal 9-visit program)
   tree_shrub: [1, 4, 7, 10],          // Feb, May, Aug, Nov
   termite: [0, 3, 6, 9],              // Quarterly
 };
@@ -6702,17 +6710,50 @@ function MyPlanTab({ customer }) {
     }).catch(console.error);
   }, []);
 
-  const tier = TIER[customer.tier];
-  const tierName = customer.tier || 'Bronze';
-  const tierIdx = TIER_ORDER.indexOf(tierName);
-  const discount = TIER_DISCOUNTS[tierName] || 0;
+  const serviceMatches = (svcId, service = {}) => {
+    const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
+    return (
+      (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
+      (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz') || svcType.includes('turf'))) ||
+      (svcId === 'mosquito' && svcType.includes('mosquito')) ||
+      (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub') || svcType.includes('palm'))) ||
+      (svcId === 'termite' && svcType.includes('termite'))
+    );
+  };
+
+  const activeTierName = customer.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const tier = activeTierName ? TIER[activeTierName] : null;
+  const tierName = activeTierName || 'No Plan';
+  const tierIdx = activeTierName ? TIER_ORDER.indexOf(activeTierName) : -1;
+  const discount = activeTierName ? (TIER_DISCOUNTS[activeTierName] || 0) : 0;
   const memberMonths = customer.memberSince
     ? Math.max(1, Math.round((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)))
     : 0;
-  const numServices = TIER_SERVICES[tierName] || 1;
+  const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
+
+  const detectCatalogServiceId = (service) => {
+    for (const svc of SERVICE_CATALOG) {
+      if (serviceMatches(svc.id, service)) return svc.id;
+    }
+    return null;
+  };
+  const detectedServiceIds = [];
+  const addDetectedService = (service) => {
+    const id = detectCatalogServiceId(service);
+    if (id && !detectedServiceIds.includes(id)) detectedServiceIds.push(id);
+  };
+  [nextService, ...upcomingServices, ...serviceHistory].filter(Boolean).forEach(addDetectedService);
+
+  const includedServices = detectedServiceIds.length
+    ? detectedServiceIds
+      .slice(0, activeTierName ? tierServiceLimit : detectedServiceIds.length)
+      .map(id => SERVICE_CATALOG.find(svc => svc.id === id))
+      .filter(Boolean)
+    : SERVICE_CATALOG.slice(0, tierServiceLimit);
+  const numServices = includedServices.length;
 
   // Calculate annual savings
-  const totalFullPrice = SERVICE_CATALOG.slice(0, numServices).reduce((sum, s) => sum + s.basePrice * 12, 0);
+  const totalFullPrice = includedServices.reduce((sum, s) => sum + s.basePrice * 12, 0);
   const annualSavings = totalFullPrice * discount;
   const monthlyRate = customer.monthlyRate || 0;
   const annualPrepay = customer.annualPrepay || null;
@@ -6727,12 +6768,11 @@ function MyPlanTab({ customer }) {
     : 'per month';
 
   // Build bundled services one-liner
-  const includedServices = SERVICE_CATALOG.slice(0, numServices);
   const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');
 
   // Build plan history timeline from member data
   const planTimeline = [];
-  if (customer.memberSince) {
+  if (customer.memberSince && activeTierName) {
     const startDate = parseDate(customer.memberSince);
     planTimeline.push({ date: startDate, label: `Started WaveGuard ${tierName}`, icon: 'rocket' });
   }
@@ -6753,7 +6793,7 @@ function MyPlanTab({ customer }) {
     upgradeDate.setMonth(upgradeDate.getMonth() + Math.floor(memberMonths * 0.4));
     planTimeline.push({ date: upgradeDate, label: `Upgraded to ${tierName}`, icon: 'upgrade' });
   }
-  if (numServices >= 3 && planTimeline.length <= 2) {
+  if (activeTierName && numServices >= 3 && planTimeline.length <= 2) {
     const startDate = parseDate(customer.memberSince);
     const addDate = new Date(startDate);
     addDate.setMonth(addDate.getMonth() + Math.floor(memberMonths * 0.6));
@@ -6765,17 +6805,6 @@ function MyPlanTab({ customer }) {
   const now = parseDate(etDateString());
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
-
-  const serviceMatches = (svcId, service = {}) => {
-    const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
-    return (
-      (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
-      (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz') || svcType.includes('turf'))) ||
-      (svcId === 'mosquito' && svcType.includes('mosquito')) ||
-      (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub') || svcType.includes('palm'))) ||
-      (svcId === 'termite' && svcType.includes('termite'))
-    );
-  };
 
   // Determine completed months from service history
   const getCompletedMonths = (svcId) => {
@@ -6852,6 +6881,20 @@ function MyPlanTab({ customer }) {
 
     return [...completedEvents, ...scheduledEvents]
       .sort((a, b) => parseDate(a.date) - parseDate(b.date));
+  };
+
+  const getScheduledMonthsForService = (svcId) => {
+    const actualMonths = MONTH_LABELS
+      .map((_, monthIndex) => (getCalendarEventsForMonth(svcId, monthIndex).length > 0 ? monthIndex : null))
+      .filter(monthIndex => monthIndex !== null);
+    if (actualMonths.length) return actualMonths;
+
+    const fallbackMonths = SERVICE_SCHEDULE_MONTHS[svcId] || [];
+    const memberSinceDate = customer.memberSince ? parseDate(customer.memberSince) : null;
+    if (memberSinceDate && !isNaN(memberSinceDate) && memberSinceDate.getFullYear() === currentYear) {
+      return fallbackMonths.filter(monthIndex => monthIndex >= memberSinceDate.getMonth());
+    }
+    return fallbackMonths;
   };
 
   const getCalendarDetail = (svc, monthIndex, statusLabel) => {
@@ -6945,7 +6988,7 @@ function MyPlanTab({ customer }) {
               background: tier ? `${tier.color}18` : '#F8FCFE',
               color: B.blueDeeper, fontSize: 12, fontWeight: 850,
             }}>
-              WaveGuard {tierName}
+              {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
             <h1 style={{
               margin: '12px 0 8px',
@@ -6958,7 +7001,9 @@ function MyPlanTab({ customer }) {
               Your plan
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {bundleSummary || 'Recurring service'} - {numServices} service{numServices > 1 ? 's' : ''} bundled
+              {activeTierName
+                ? `${bundleSummary || 'Recurring service'} - ${numServices} service${numServices > 1 ? 's' : ''} bundled`
+                : 'No recurring plan on file'}
             </div>
           </div>
           <div style={{
@@ -7017,14 +7062,16 @@ function MyPlanTab({ customer }) {
             <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7' }}>
               <div style={sectionTitle}>Included Services</div>
               <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>
-                {tierName} covers {numServices} recurring service{numServices > 1 ? 's' : ''}
+                {activeTierName
+                  ? `${tierName} covers ${numServices} recurring service${numServices > 1 ? 's' : ''}`
+                  : 'No recurring services on file'}
               </div>
             </div>
 
             <div>
               {includedServices.map((svc, index) => {
                 const completedMonths = getCompletedMonths(svc.id);
-                const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
+                const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const totalVisits = scheduleMonths.length;
                 const completedVisits = scheduleMonths.filter(m => completedMonths.has(m)).length;
                 const annualSavingsForService = svc.basePrice * 12 * discount;
@@ -7152,7 +7199,7 @@ function MyPlanTab({ customer }) {
             <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
             <div style={{ display: 'grid', gap: 15, marginTop: 16 }}>
               {includedServices.map((svc) => {
-                const scheduleMonths = SERVICE_SCHEDULE_MONTHS[svc.id] || [];
+                const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
                   <div key={svc.id}>
@@ -7277,15 +7324,17 @@ function MyPlanTab({ customer }) {
                   </span>
                 </div>
               ))}
-              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <span style={{ width: 10, height: 10, borderRadius: 999, background: B.green, marginTop: 5, flexShrink: 0 }} />
-                <span>
-                  <span style={{ display: 'block', color: muted, fontSize: 12, fontWeight: 700 }}>Now</span>
-                  <span style={{ display: 'block', marginTop: 2, color: B.green, fontSize: 14, fontWeight: 850 }}>
-                    Active - WaveGuard {tierName}
+              {activeTierName && (
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 999, background: B.green, marginTop: 5, flexShrink: 0 }} />
+                  <span>
+                    <span style={{ display: 'block', color: muted, fontSize: 12, fontWeight: 700 }}>Now</span>
+                    <span style={{ display: 'block', marginTop: 2, color: B.green, fontSize: 14, fontWeight: 850 }}>
+                      Active - WaveGuard {tierName}
+                    </span>
                   </span>
-                </span>
-              </div>
+                </div>
+              )}
             </div>
           </section>
 
@@ -9542,7 +9591,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
 
   // Callback recognition: pest/lawn issue within 30 days of last service
-  const tierName = customer?.tier || 'Bronze';
+  const activeTierName = customer?.tier && TIER_SERVICES[customer.tier] ? customer.tier : null;
+  const tierName = activeTierName || 'No Plan';
   const isCallbackEligible = isProblemCategory && lastService && (() => {
     const svcDate = parseDate(lastService.date);
     const daysSince = (new Date() - svcDate) / (1000 * 60 * 60 * 24);
@@ -9799,7 +9849,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     }}>
                       <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Plan</div>
-                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>WaveGuard {tierName}</div>
+                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>
+                          {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
+                        </div>
                       </div>
                       <div style={{ background: PORTAL_SHELL.page, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Last service</div>
@@ -9876,7 +9928,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                       <div style={{ minWidth: 0 }}>
                         <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Covered callback</div>
                         <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.successText, lineHeight: 1.4 }}>
-                          Callbacks are included with your WaveGuard {tierName} plan when an issue returns soon after service.
+                          {activeTierName
+                            ? `Callbacks are included with your WaveGuard ${tierName} plan when an issue returns soon after service.`
+                            : 'Callbacks may be included when an issue returns soon after service.'}
                         </div>
                       </div>
                     </div>

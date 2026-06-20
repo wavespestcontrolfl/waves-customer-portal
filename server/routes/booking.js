@@ -8,12 +8,10 @@ const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
-
-const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime']);
-
-function isOneTimeBookingSource(source) {
-  return ONE_TIME_BOOKING_SOURCES.has(String(source || '').toLowerCase());
-}
+const {
+  isOneTimeBookingSource,
+  syncSelfBookedRecurringPlan,
+} = require('../services/self-booking-plan-sync');
 
 function cleanBookingServiceLabel(value) {
   const label = String(value || '').trim().replace(/\s+/g, ' ');
@@ -988,11 +986,36 @@ router.post('/confirm', async (req, res, next) => {
 
     const { booking, serviceRow } = txResult;
 
-    let followUpRows = [];
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
+    let followUpRows = [];
+    let planSync = null;
+    if (!isOneTimeEstimateBooking && requestedRecurringPattern) {
+      try {
+        planSync = await syncSelfBookedRecurringPlan({
+          customerId: custId,
+          serviceRow,
+          serviceType: resolvedServiceType,
+          slotDate: slotDateStr,
+          slotStart: slot_start,
+          slotEnd: endTime,
+          technicianId: technician_id || null,
+          zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
+          durationMinutes: duration,
+          source: source || 'self_booked',
+          selfBookingId: booking.id,
+          activateCustomerPlan: false,
+          registerReminders: false,
+        });
+        followUpRows = planSync?.createdAppointments || [];
+      } catch (err) {
+        logger.error(`[booking:confirm] self-booking plan sync failed for customer ${custId}: ${err.message}`);
+      }
+    }
+
     const shouldSeedQuarterlyPestFollowUps =
-      !isOneTimeEstimateBooking
+      !planSync?.activated
+      && !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
       && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
     if (shouldSeedQuarterlyPestFollowUps) {
@@ -1086,7 +1109,7 @@ router.post('/confirm', async (req, res, next) => {
       logger.error(`[booking:confirm] SMS failed: ${err.message}`);
     }
 
-    res.json({ booking, confirmationCode: confCode });
+    res.json({ booking, confirmationCode: confCode, planSync });
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
     next(err);

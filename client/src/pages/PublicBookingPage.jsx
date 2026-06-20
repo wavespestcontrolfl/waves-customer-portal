@@ -18,6 +18,12 @@ const SERVICES = [
 ];
 
 const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime']);
+const RECURRING_SERVICE_PATTERNS = {
+  pest_control: 'quarterly',
+  lawn_care: 'quarterly',
+  mosquito: 'monthly',
+  tree_shrub: 'bimonthly',
+};
 
 export default function PublicBookingPage() {
   const [searchParams] = useSearchParams();
@@ -169,7 +175,9 @@ export default function PublicBookingPage() {
     } catch { /* best-effort */ }
   }, [address, applyCustomer]);
 
-  const isQuarterlyRecurringBooking = service.id === 'pest_control' && !ONE_TIME_BOOKING_SOURCES.has(source);
+  const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
+    ? null
+    : RECURRING_SERVICE_PATTERNS[service.id] || null;
 
   const handleConfirm = async () => {
     setLoading(true);
@@ -187,7 +195,7 @@ export default function PublicBookingPage() {
           service_type: quotedServiceLabel || service.label,
           quoted_service_label: quotedServiceLabel || null,
           duration_minutes: service.duration,
-          recurring_pattern: isQuarterlyRecurringBooking ? 'quarterly' : null,
+          recurring_pattern: recurringPattern,
           customer_notes: notes,
           source,
           referrer_url: document.referrer || null,
