@@ -1162,6 +1162,7 @@ router.get('/:date?', async (req, res, next) => {
       if (prefs?.pets_secured_plan) alerts.push(`Pet plan: ${prefs.pets_secured_plan}`);
       if (prefs?.chemical_sensitivities) alerts.push(`⚠️ Chemical sensitivity: ${prefs.chemical_sensitivity_details || 'yes'}`);
       if (prefs?.access_notes) alerts.push(prefs.access_notes);
+      if (prefs?.special_instructions) alerts.push(prefs.special_instructions);
       if (s.notes) alerts.push(s.notes);
 
       return {

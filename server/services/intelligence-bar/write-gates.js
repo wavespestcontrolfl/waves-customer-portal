@@ -14,6 +14,7 @@
 // Their no-confirmed call produces the rich preview shown to the operator.
 const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'create_customer',
+  'update_property_access',
   'optimize_all_routes',
   'optimize_tech_route',
   'assign_technician',

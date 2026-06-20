@@ -1142,6 +1142,7 @@ router.get('/', async (req, res, next) => {
       if (prefs?.pets_secured_plan) alerts.push({ type: 'pet_plan', text: prefs.pets_secured_plan });
       if (prefs?.chemical_sensitivities) alerts.push({ type: 'chemical', text: prefs.chemical_sensitivity_details || 'Chemical sensitivity' });
       if (prefs?.access_notes) alerts.push({ type: 'access', text: prefs.access_notes });
+      if (prefs?.special_instructions) alerts.push({ type: 'special', text: prefs.special_instructions });
       // Only add notes if there's meaningful content after cleaning
       if (cleanedNotes) alerts.push({ type: 'note', text: cleanedNotes });
       // Show "New customer" badge ONLY if genuinely new (no completed service records)
