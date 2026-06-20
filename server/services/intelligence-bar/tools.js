@@ -938,11 +938,15 @@ async function bulkUpdateCustomers(customerIds, updates) {
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
 
-  // Moving rows into a customer stage in bulk → ensure member_since is set so
-  // they're counted by member_since metrics. COALESCE keeps each existing start
-  // (no per-row before-state in a bulk update) and only fills the missing ones.
+  // Moving rows into a customer stage in bulk → set member_since per row from
+  // the OLD pipeline_stage (a CASE, since there's no per-row before-state),
+  // mirroring the route lifecycle: a pre-sale lead gets the conversion date
+  // (overwriting any intake date), a current/former customer keeps its real
+  // start (COALESCE fills only the missing).
   const stageStamp = ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
-    ? { member_since: db.raw('COALESCE(member_since, ?)', [etDateString()]) }
+    ? { member_since: db.raw(
+        `CASE WHEN pipeline_stage IN ('active_customer','won','at_risk','churned','dormant') THEN COALESCE(member_since, ?) ELSE ? END`,
+        [etDateString(), etDateString()]) }
     : {};
   const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
 
