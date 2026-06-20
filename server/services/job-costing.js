@@ -61,11 +61,14 @@ async function getFinancials(db) {
 /**
  * deriveRevenue — the per-visit revenue, mirroring the completion handler's
  * `invoiceAmount` (admin-dispatch.js): an explicit visit price wins, else a
- * recurring customer's monthly_rate, else $0. Callbacks/re-services are free by
- * definition for recurring customers, so they NEVER fall back to monthly_rate —
- * only an operator-set positive price gives a callback revenue. A revenue
- * already written on the record short-circuits so recompute stays idempotent.
- * Pure (no I/O) so it is unit-testable.
+ * recurring customer's monthly_rate, else $0. Free visits NEVER fall back to
+ * monthly_rate — only an operator-set positive price gives them revenue. Two
+ * kinds are free: callbacks/re-services, and INCLUDED follow-ups, which the
+ * scheduler creates with estimated_price=0 + followup_included=true and which
+ * the completion handler's shouldInvoice gate skips (admin-dispatch.js) — their
+ * revenue was already booked on the originating visit, so attributing a full
+ * monthly_rate here would double-count. A revenue already written on the record
+ * short-circuits so recompute stays idempotent. Pure (no I/O), unit-testable.
  */
 function deriveRevenue({ serviceRecord, scheduledService, customer } = {}) {
   const recordRevenue = Number(serviceRecord?.revenue);
@@ -74,9 +77,10 @@ function deriveRevenue({ serviceRecord, scheduledService, customer } = {}) {
   const visitPrice = Number(scheduledService?.estimated_price);
   if (Number.isFinite(visitPrice) && visitPrice > 0) return round2(visitPrice);
 
-  const isCallback = !!scheduledService?.is_callback;
+  const isFreeVisit = !!scheduledService?.is_callback
+    || scheduledService?.followup_included === true;
   const monthly = Number(customer?.monthly_rate);
-  if (!isCallback && Number.isFinite(monthly) && monthly > 0) return round2(monthly);
+  if (!isFreeVisit && Number.isFinite(monthly) && monthly > 0) return round2(monthly);
 
   return 0;
 }
@@ -117,21 +121,39 @@ function computeServiceRecordFinancials({
   };
 }
 
-async function calcLaborCost(db, technicianId, startTime, endTime, rate) {
+async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, endTime, rate) {
   let minutes = 0;
-  // Prefer time_entries overlapping the window (job_id may or may not match)
   try {
-    const entries = await db('time_entries')
-      .where({ technician_id: technicianId })
-      .whereBetween('clock_in', [
-        new Date(new Date(startTime || Date.now()).getTime() - 15 * 60000),
-        new Date(new Date(endTime || Date.now()).getTime() + 15 * 60000),
-      ])
-      .select('duration_minutes');
-    minutes = entries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
+    // Prefer the JOB time entries tied directly to this visit. time_entries.job_id
+    // IS the scheduled_services id (see time-tracking.js), so this attributes
+    // exactly. entry_type='job' excludes the shift/break/drive/admin_time clocks
+    // (a shift row spans the whole workday) and voided rows are dropped — the
+    // same scoping every other time-tracking consumer uses.
+    if (scheduledServiceId) {
+      const jobEntries = await db('time_entries')
+        .where({ job_id: scheduledServiceId, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('duration_minutes');
+      minutes = jobEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
+    }
+    // Else fall back to job entries overlapping the ACTUAL visit window — only
+    // when both real bounds exist. Never a Date.now() window: during the one-time
+    // backfill that would scoop up whatever a tech is clocked into at deploy time
+    // and mis-attribute it to an old visit.
+    if (!minutes && technicianId && startTime && endTime) {
+      const entries = await db('time_entries')
+        .where({ technician_id: technicianId, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .whereBetween('clock_in', [
+          new Date(new Date(startTime).getTime() - 15 * 60000),
+          new Date(new Date(endTime).getTime() + 15 * 60000),
+        ])
+        .select('duration_minutes');
+      minutes = entries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
+    }
   } catch { /* table may be absent */ }
 
-  // Fallback: actual_start/end on scheduled_services
+  // Final fallback: the actual_start/end span on the scheduled_service.
   if (!minutes && startTime && endTime) {
     minutes = Math.max(0, Math.round((new Date(endTime) - new Date(startTime)) / 60000));
   }
@@ -260,7 +282,7 @@ async function calculateJobCost(scheduledServiceId, db) {
   const { laborRate, driveCostPerStop } = await getFinancials(db);
   const revenue = deriveRevenue({ serviceRecord: record, scheduledService: svc, customer });
   const { laborCost, laborHours } = await calcLaborCost(
-    db, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
+    db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
   );
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)

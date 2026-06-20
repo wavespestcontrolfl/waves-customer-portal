@@ -3516,6 +3516,24 @@ router.post('/:id/close', requireAdmin, async (req, res, next) => {
         portal_attach_reason: result.portalAttachReason || null,
       },
     );
+
+    // Job costing (non-blocking, fire-and-forget) — mirrors the dispatch
+    // completion path (admin-dispatch.js). Project-backed services are completed
+    // here, not through dispatch, so without this their service_records financials
+    // (revenue / labor_hours / margin) would stay null and stay off the dashboard
+    // + /admin/revenue tiles. The backfill migration covers existing history; this
+    // keeps future project closeouts populated too.
+    const costingServiceId = project.scheduled_service_id;
+    if (result.serviceCompleted && costingServiceId) {
+      try {
+        const JobCosting = require('../services/job-costing');
+        void JobCosting.calculateJobCost(costingServiceId).catch((e) =>
+          logger.error(`[projects] job cost calc failed for ${costingServiceId}: ${e.message}`));
+      } catch (e) {
+        logger.error(`[projects] job costing require failed: ${e.message}`);
+      }
+    }
+
     res.json({
       ok: true,
       project: result.project,

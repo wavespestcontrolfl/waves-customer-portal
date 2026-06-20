@@ -46,6 +46,17 @@ describe('deriveRevenue — mirrors the completion handler invoiceAmount', () =>
     expect(rev).toBe(120);
   });
 
+  test('an included follow-up is free ($0), never monthly_rate (no double-count)', () => {
+    // Scheduler creates included follow-ups with estimated_price=0 +
+    // followup_included=true; the originating visit already booked the revenue.
+    const rev = deriveRevenue({
+      serviceRecord: {},
+      scheduledService: { estimated_price: 0, is_callback: false, followup_included: true },
+      customer: { monthly_rate: 99 },
+    });
+    expect(rev).toBe(0);
+  });
+
   test('no price anywhere yields $0', () => {
     expect(deriveRevenue({ serviceRecord: {}, scheduledService: {}, customer: {} })).toBe(0);
   });
