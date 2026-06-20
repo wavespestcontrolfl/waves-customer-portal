@@ -158,7 +158,10 @@ router.post('/:id/statements/:statementId/close', async (req, res, next) => {
 });
 
 // POST /api/admin/payers/:id/statements/:statementId/send — (re)send a closed
-// statement. Body { dryRun?: bool }. 409 if still open (close it first).
+// statement. Body { dryRun?: bool, force?: bool }. 409 if still open. A normal
+// send stays idempotent (stable first-delivery key — a double-click can't mail
+// AP twice); `force: true` makes a fresh attempt to RETRY a known blocked/
+// suppressed delivery (which the terminal key would otherwise dedupe forever).
 router.post('/:id/statements/:statementId/send', async (req, res, next) => {
   if (!isEnabled('payerStatements')) return res.status(403).json({ error: 'Payer statements are not enabled' });
   try {
@@ -166,9 +169,7 @@ router.post('/:id/statements/:statementId/send', async (req, res, next) => {
     if (!statement) return res.status(404).json({ error: 'Statement not found' });
     if (statement.status === 'open') return res.status(409).json({ error: 'Statement must be closed before sending' });
 
-    // Explicit operator (re)send → fresh attempt: retries a blocked/suppressed
-    // first delivery (the chained /close key is terminal once SendGrid blocks it).
-    const delivery = await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun, resend: true });
+    const delivery = await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun, forceResend: !!req.body?.force });
     if (!delivery.ok) return res.status(422).json({ error: delivery.error || 'send_failed', delivery });
     res.json({ delivery });
   } catch (err) {

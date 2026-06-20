@@ -98,12 +98,20 @@ test('first delivery passes a stable idempotency key (no double-send on retry)',
   }));
 });
 
-test('explicit resend is keyless — fresh attempt retries a blocked first delivery', async () => {
-  // Still finalized + never sent (the first attempt was blocked). An explicit
-  // resend must NOT reuse the first-delivery key (sendTemplate would dedupe to
-  // the terminal blocked row); it makes a fresh attempt.
+test('a normal (non-forced) send of a finalized statement stays keyed (no double-send)', async () => {
+  // /send without force is still a first delivery → must keep the stable key so a
+  // double-click / client retry can't email AP two copies.
   mockDbHandler = () => ({ where() { return this; }, first: async () => finalized(), update: async () => 1 });
-  await sendStatementEmail(7, { resend: true });
+  await sendStatementEmail(7); // forceResend defaults false
+  expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBe('payer_statement_sent:7');
+});
+
+test('forceResend is keyless — fresh attempt retries a blocked first delivery', async () => {
+  // Still finalized + never sent (the first attempt was blocked). An explicit
+  // force retry must NOT reuse the first-delivery key (sendTemplate would dedupe
+  // to the terminal blocked row); it makes a fresh attempt.
+  mockDbHandler = () => ({ where() { return this; }, first: async () => finalized(), update: async () => 1 });
+  await sendStatementEmail(7, { forceResend: true });
   expect(mockSendTemplate).toHaveBeenCalledTimes(1);
   expect(mockSendTemplate.mock.calls[0][0].idempotencyKey).toBeUndefined();
 });
