@@ -40,66 +40,72 @@ function searchQuery(product) {
   ).trim();
 }
 
-// Attributes that hold a value WITHOUT a text node: schema.org microdata
-// (content/href/value) AND storefront price data-attributes — Magento exposes the
-// amount as `data-price-amount`, BigCommerce (Keystone) as
-// `data-product-price-without-tax`, and the generic adapter selects bare
-// `[data-price]`. Those price elements are often empty `<span data-price="89.99">`,
-// so a text-only read returns nothing and the DOM fallback silently drops an
-// otherwise valid candidate. Read the attributes in this order, then text.
-const VALUE_ATTRS = ['content', 'href', 'value', 'data-price', 'data-price-amount', 'data-product-price-without-tax'];
+// Attributes that hold a value WITHOUT a text node, kept as TWO lists because the
+// safe attributes differ by what's being read:
+//   PRICE — content, value, and storefront price data-attributes (Magento
+//     data-price-amount, BigCommerce/Keystone data-product-price-without-tax, bare
+//     data-price). Often the price is an empty `<span data-price="89.99">`, so a
+//     text-only read drops the candidate. NOT href: a price selector that resolves
+//     to an anchor (`<a class="price" href="/p-89.html">`) would otherwise feed the
+//     URL's digits to parsePriceText as a bogus $89.
+//   AVAILABILITY — href, because schema.org marks stock state as a text-less
+//     `<link itemprop="availability" href="https://schema.org/OutOfStock">`.
+const PRICE_VALUE_ATTRS = ['content', 'value', 'data-price', 'data-price-amount', 'data-product-price-without-tax'];
+const AVAILABILITY_VALUE_ATTRS = ['content', 'href', 'value'];
 
-// Read an element's value preferring the attributes above over textContent.
+// Read an element's value from `attrs` (in order), falling back to textContent.
 // Pure + node-testable; collectSnapshot inlines the same rule for the browser
 // context. `el` is anything with getAttribute / textContent.
-function nodeValue(el) {
+function readValue(el, attrs) {
   if (!el) return '';
   if (el.getAttribute) {
-    for (const a of VALUE_ATTRS) {
+    for (const a of attrs) {
       const v = el.getAttribute(a);
       if (v) return String(v).trim();
     }
   }
   return el.textContent ? String(el.textContent).trim() : '';
 }
+const priceValue = (el) => readValue(el, PRICE_VALUE_ATTRS);
+const availabilityValue = (el) => readValue(el, AVAILABILITY_VALUE_ATTRS);
 
 // Runs IN THE BROWSER (page.evaluate). Must be self-contained — it only sees the
 // `sel` argument, never Node scope. Collects every signal the parsers might use.
 function collectSnapshot(sel) {
-  // Prefer value-bearing attributes before textContent: schema.org microdata
-  // (<meta content="...">, <link itemprop="availability" href=".../OutOfStock">)
-  // AND storefront price data-attributes (Magento data-price-amount, BigCommerce
-  // data-product-price-without-tax, bare data-price) are empty of text, so a
-  // text-only read would miss a price or sold-out signal entirely. (Inlined —
-  // collectSnapshot runs in page.evaluate and can't call the Node-side helper;
-  // the attribute list MUST stay in sync with nodeValue()'s VALUE_ATTRS, which is
-  // what the unit test covers.)
-  const VALUE_ATTRS = ['content', 'href', 'value', 'data-price', 'data-price-amount', 'data-product-price-without-tax'];
-  const textOf = (el) => {
+  // Prefer value-bearing attributes before textContent, but read DIFFERENT
+  // attributes for price vs availability (see the Node-side PRICE_VALUE_ATTRS /
+  // AVAILABILITY_VALUE_ATTRS — these inlined copies MUST stay in sync; that's what
+  // the unit test guards). PRICE never reads href (a price anchor's
+  // `/p-89.html` would parse as $89); AVAILABILITY reads href because schema.org
+  // uses `<link itemprop="availability" href=".../OutOfStock">` with no text.
+  // (Inlined — collectSnapshot runs in page.evaluate and can't see Node scope.)
+  const PRICE_VALUE_ATTRS = ['content', 'value', 'data-price', 'data-price-amount', 'data-product-price-without-tax'];
+  const AVAILABILITY_VALUE_ATTRS = ['content', 'href', 'value'];
+  const readValue = (el, attrs) => {
     if (!el) return '';
     if (el.getAttribute) {
-      for (const a of VALUE_ATTRS) {
+      for (const a of attrs) {
         const v = el.getAttribute(a);
         if (v) return String(v).trim();
       }
     }
     return el.textContent ? el.textContent.trim() : '';
   };
-  const allText = (selectors) => (selectors || [])
+  const allText = (selectors, attrs) => (selectors || [])
     .flatMap((s) => Array.from(document.querySelectorAll(s)))
-    .map((el) => textOf(el))
+    .map((el) => readValue(el, attrs))
     .filter(Boolean);
 
   const jsonLd = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
     .map((s) => s.textContent || '')
     .filter(Boolean);
 
-  const title = textOf(document.querySelector(sel.titleSelector || 'h1'))
+  const title = readValue(document.querySelector(sel.titleSelector || 'h1'), PRICE_VALUE_ATTRS)
     || (document.title || '').trim();
 
   const priceTexts = allText(sel.priceSelectors && sel.priceSelectors.length
     ? sel.priceSelectors
-    : ['[itemprop="price"]', '.price', '.product-price', '.our-price']);
+    : ['[itemprop="price"]', '.price', '.product-price', '.our-price'], PRICE_VALUE_ATTRS);
 
   // Collect ALL availability-selector matches, not just the first — a grouped
   // selector (Keystone's includes a generic BigCommerce field used for SKU/brand
@@ -108,7 +114,7 @@ function collectSnapshot(sel) {
   // catches "Out of Stock" wherever it appears, without forming a false phrase
   // across element boundaries.
   const availabilityText = sel.availabilitySelector
-    ? allText([sel.availabilitySelector]).join(' | ')
+    ? allText([sel.availabilitySelector], AVAILABILITY_VALUE_ATTRS).join(' | ')
     : '';
 
   // A bounded slice of body text so extract.js can hunt for an EPA reg number
@@ -201,4 +207,7 @@ function makeAdapter(config) {
   return { key: config.key, config, fetchCandidate };
 }
 
-module.exports = { makeAdapter, collectSnapshot, firstProductLink, searchQuery, targetOzOf, nodeValue, DEFAULT_TIMEOUT };
+module.exports = {
+  makeAdapter, collectSnapshot, firstProductLink, searchQuery, targetOzOf,
+  priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
+};
