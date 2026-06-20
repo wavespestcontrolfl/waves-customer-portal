@@ -185,6 +185,13 @@ async function loadInvoiceAnnualPrepay(invoice) {
     .catch(() => null);
   if (!term) return null;
   const prepayAmount = term.prepay_amount != null ? Number(term.prepay_amount) : null;
+  // A voided/refunded invoice flips its term to a terminal status but keeps the
+  // link on the invoice, so an old pay link / PDF would otherwise still list the
+  // covered visits as "Included". Drop them for terminal terms (same set the SMS
+  // path excludes) so a cancelled/refunded term never promises future visits.
+  const termTerminal = ['cancelled', 'canceled', 'refunded'].includes(
+    String(term.status || '').toLowerCase(),
+  );
   return {
     id: term.id,
     status: term.status,
@@ -197,7 +204,7 @@ async function loadInvoiceAnnualPrepay(invoice) {
     coverageServiceType: term.coverage_service_type || null,
     coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
     coverageCadence: term.coverage_cadence || null,
-    coverageVisits: buildCoverageVisits(term, prepayAmount),
+    coverageVisits: termTerminal ? [] : buildCoverageVisits(term, prepayAmount),
     setupFeeWaived: annualPrepaySetupFeeWaived(invoice),
   };
 }
