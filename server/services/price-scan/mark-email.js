@@ -44,10 +44,15 @@ function perOzEquiv(price, quantity) {
   return oz > 0 ? p / oz : null;
 }
 
+// parsePackSize normalizes some units to internal keys (e.g. "fl oz" -> "fl_oz").
+// Map them back to vendor-readable labels so the email never shows "$4.82/fl_oz".
+const UNIT_LABELS = { fl_oz: 'fl oz' };
+const unitLabel = (u) => UNIT_LABELS[u] || u;
+
 function fmtPerUnit(pu) {
   if (!pu) return '—';
   const digits = pu.value >= 1 ? 2 : 4;
-  return `$${pu.value.toFixed(digits)}/${pu.unit}`;
+  return `$${pu.value.toFixed(digits)}/${unitLabel(pu.unit)}`;
 }
 
 // Savings % on the $/oz basis. ALWAYS derived from the persisted baseline /
@@ -83,13 +88,16 @@ function lineFor(match) {
 
 // matches: [{ product, epaReg?, baseline:{vendor,price,quantity},
 //             competitor:{vendor,price,quantity,source_url,name?}, savingsPct? }]
-// Returns { subject, html, text, includedCount, skipped:[{product,reason}] } —
-// or null when nothing is left to ask about after the proof gate.
+// Returns { subject, html, text, includedCount, included, skipped:[{product,reason}] }
+// — or null when nothing is left to ask about after the proof gate. `included` is
+// the subset of input matches that actually made it into the email (proof-backed,
+// priced, positive savings), in the same biggest-savings-first order — so a caller
+// can persist a review snapshot that matches exactly what gets sent.
 function composeMarkEmail(matches, opts = {}) {
   const repName = opts.repName || 'Mark';
   const minPct = Number.isFinite(opts.minSavingsPct) ? opts.minSavingsPct : 0; // require positive savings
   const skipped = [];
-  const lines = [];
+  const kept = []; // { line, match } for entries that pass EVERY gate
   for (const m of matches || []) {
     if (!m || !m.competitor || !hasProof(m.competitor)) {
       skipped.push({ product: (m && m.product) || null, reason: 'no_proof_url' });
@@ -106,12 +114,14 @@ function composeMarkEmail(matches, opts = {}) {
       skipped.push({ product: line.product, reason: 'no_savings' });
       continue;
     }
-    lines.push(line);
+    kept.push({ line, match: m });
   }
-  if (!lines.length) return null;
+  if (!kept.length) return null;
 
-  // Sort biggest savings first.
-  lines.sort((a, b) => (b.savingsPct || 0) - (a.savingsPct || 0));
+  // Sort biggest savings first — lines (rendered) and included (snapshot) stay aligned.
+  kept.sort((a, b) => (b.line.savingsPct || 0) - (a.line.savingsPct || 0));
+  const lines = kept.map((k) => k.line);
+  const included = kept.map((k) => k.match);
   const topPct = lines[0].savingsPct;
   const subject = `Price-match request: ${lines.length} item${lines.length === 1 ? '' : 's'}`
     + (Number.isFinite(topPct) ? ` (up to ${Math.round(topPct * 100)}% per unit)` : '');
@@ -121,6 +131,7 @@ function composeMarkEmail(matches, opts = {}) {
     html: renderHtml(lines, repName, opts),
     text: renderText(lines, repName, opts),
     includedCount: lines.length,
+    included,
     skipped,
   };
 }

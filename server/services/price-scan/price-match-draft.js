@@ -33,7 +33,11 @@ async function createDraft(db, matches, opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text_body: composed.text,
-      matches: JSON.stringify(matches || []),
+      // Persist ONLY the opportunities that made it into the email (proof-backed,
+      // priced, positive savings) — never the raw input — so the admin review
+      // snapshot matches exactly what will be sent (no proofless/no-savings rows
+      // showing up in the review UI's proof links). Mirrors composed.includedCount.
+      matches: JSON.stringify(composed.included || []),
       included_count: composed.includedCount,
     })
     .returning('*');

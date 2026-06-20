@@ -102,6 +102,17 @@ describe('price-match-draft service', () => {
     expect(db._rows).toHaveLength(1);
   });
 
+  test('createDraft persists ONLY the included matches, not skipped rows', async () => {
+    const db = makeFakeDb();
+    const noProof = { product: 'No Proof', baseline: { price: 50, quantity: '1 gal' }, competitor: { price: 40, quantity: '1 gal' } };
+    const row = await createDraft(db, [noProof, proofMatch]); // one skipped, one kept
+    expect(row.included_count).toBe(1);
+    const stored = JSON.parse(row.matches);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].product).toBe(proofMatch.product); // the kept one, not 'No Proof'
+    expect(JSON.stringify(stored)).not.toContain('No Proof');
+  });
+
   test('createDraft returns null when nothing has proof (no empty draft)', async () => {
     const db = makeFakeDb();
     const noProof = { product: 'X', baseline: { price: 5, quantity: '1 oz' }, competitor: { price: 4, quantity: '1 oz' } };

@@ -77,6 +77,14 @@ describe('mark-email proof gate', () => {
     expect(out.skipped).toContainEqual({ product: 'Pricier Elsewhere', reason: 'no_savings' });
     expect(out.html).not.toContain('Pricier Elsewhere');
   });
+  test('included snapshot holds ONLY the matches that made it into the email', () => {
+    const noProof = { product: 'No Proof', baseline: { vendor: 'SiteOne', price: 50, quantity: '1 gal' }, competitor: { vendor: 'X', price: 40, quantity: '1 gal' } };
+    const pricier = { product: 'Pricier', baseline: { price: 95, quantity: '78 oz' }, competitor: { vendor: 'X', price: 110, quantity: '78 oz', source_url: 'https://x.com/p' } };
+    const out = composeMarkEmail([noProof, taurus, pricier]);
+    expect(out.includedCount).toBe(1);
+    expect(out.included).toHaveLength(1);
+    expect(out.included[0]).toBe(taurus); // the exact kept input, not a skipped row
+  });
   test('a supplied (stale) savingsPct cannot override the real prices', () => {
     // Claims 50% savings but the prices show the competitor is dearer -> excluded.
     const lying = {
@@ -115,6 +123,18 @@ describe('mark-email content', () => {
     }]);
     expect(out.text).toContain('$4.00/lb');
     expect(out.text).toContain('$3.40/lb');
+  });
+
+  test('fluid product renders a readable "fl oz" label, never the internal fl_oz key', () => {
+    const out = composeMarkEmail([{
+      product: 'Liquid Concentrate',
+      baseline: { vendor: 'SiteOne', price: 50, quantity: '32 fl oz' },
+      competitor: { vendor: 'V', price: 40, quantity: '32 fl oz', source_url: 'https://a.com/p' },
+    }]);
+    expect(out).not.toBeNull();
+    expect(out.text).toContain('/fl oz');
+    expect(out.text).not.toContain('fl_oz');
+    expect(out.html).not.toContain('fl_oz');
   });
 
   test('biggest savings first', () => {
