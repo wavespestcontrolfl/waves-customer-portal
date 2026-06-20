@@ -8,6 +8,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { whereLiveCustomer, CUSTOMER_STAGES } = require('../customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 // Internal/test customers excluded from sales-funnel analytics. Names are
@@ -230,11 +231,13 @@ async function getKpiSnapshot() {
   const [revMTD, revLastMonth, activeCount, newCount, pendingEst, servicesWeek, mrr, balances, healthDist] = await Promise.all([
     db('payments').where({ status: 'paid' }).whereBetween('payment_date', [r.month_start, r.month_end]).sum('amount as total').first(),
     db('payments').where({ status: 'paid' }).whereBetween('payment_date', [r.last_month_start, r.last_month_end]).sum('amount as total').first(),
-    // active=true alone isn't enough — soft-deleted customers can have
-    // active=true left over from before the delete. Match the rest of
-    // the dashboard by excluding deleted_at IS NOT NULL rows.
-    db('customers').where({ active: true }).whereNull('deleted_at').count('* as c').first(),
-    db('customers').where({ active: true }).whereNull('deleted_at').where('created_at', '>=', r.month_start).count('* as c').first(),
+    // Real customers only — active=true defaults true for leads, so match the
+    // dashboard tile's pipeline_stage filter (whereLiveCustomer) instead of
+    // counting prospects. Keeps the IB answer consistent with the tile.
+    db('customers').modify(whereLiveCustomer).count('* as c').first(),
+    db('customers').modify(whereLiveCustomer)
+      .whereRaw("created_at >= ?::timestamp AT TIME ZONE 'America/New_York'", [`${r.month_start}T00:00:00`])
+      .count('* as c').first(),
     db('estimates').whereIn('status', ['sent', 'viewed']).count('* as c').first(),
     db('scheduled_services').whereBetween('scheduled_date', [r.week_start, r.week_end]).select(
       db.raw("COUNT(*) as total"),
@@ -360,6 +363,7 @@ async function comparePeriods(input) {
         db({ c: 'customers' })
           .where('c.active', true)
           .whereNull('c.deleted_at')
+          .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
           .whereBetween('c.created_at', [fromTs, toTs])
       ).count('* as count').first();
       m.new_customers = parseInt(nc?.count || 0);

@@ -12,20 +12,7 @@ const {
   getProtocolWindowContext,
   summarizeProtocolContext,
 } = require('../lawn-protocol-operating-layer');
-
-const TRACK_BY_GRASS = {
-  st_augustine: 'st_augustine',
-  st_augustinegrass: 'st_augustine',
-  floratam: 'st_augustine',
-  palmetto: 'st_augustine',
-  bitterblue: 'st_augustine',
-  bermuda: 'bermuda',
-  bermudagrass: 'bermuda',
-  zoysia: 'zoysia',
-  zoysiagrass: 'zoysia',
-  bahia: 'bahia',
-  bahiagrass: 'bahia',
-};
+const { loadCustomerGrassContext } = require('../lawn-grass-context');
 
 async function safeBuild(label, fn) {
   try {
@@ -147,12 +134,13 @@ async function resolveAssignedProtocolId({ completion, assignment, knex }) {
 
 async function loadCustomerTurfTrack(record, knex) {
   if (!record?.customer_id) return null;
-  const profile = await knex('customer_turf_profiles')
-    .where({ customer_id: record.customer_id, active: true })
-    .first()
-    .catch(() => null);
-  const track = profile?.track_key || TRACK_BY_GRASS[String(profile?.grass_type || '').toLowerCase()] || null;
-  return track || null;
+  // Canonical grass resolution: turf-profile track_key -> profile grass_type ->
+  // legacy customers.lawn_type (normalized), validated against protocols.lawn.
+  // Returns null only when the grass is genuinely unknown, so we still surface
+  // the protocol for customers whose grass is known only from the legacy
+  // lawn_type field — without ever defaulting to a guessed grass.
+  const { trackKey } = await loadCustomerGrassContext(record.customer_id, knex);
+  return trackKey || null;
 }
 
 function publicInventoryDeduction(row = {}) {
@@ -242,7 +230,14 @@ async function buildLawnProtocolReportContext(record, knex, now) {
     : now;
   const windowKey = completion?.window_key || assignment?.lawn_protocol_window_key || null;
   const protocolId = await resolveAssignedProtocolId({ completion, assignment, knex });
-  const grassTrack = protocolId ? null : (await loadCustomerTurfTrack(record, knex)) || 'st_augustine';
+  // Resolve the customer's REAL turf track. Do NOT fall back to a default
+  // grass: with no assigned protocol and no known grass there is nothing
+  // protocol-specific to show, and defaulting to St. Augustine would put
+  // another grass's seasonal window + customer-note copy on the report — the
+  // assumed-attribute leak family (cf. the #1820 grass-type fix). Refuse to
+  // fabricate: skip the protocol context entirely when the grass is unknown.
+  const grassTrack = protocolId ? null : await loadCustomerTurfTrack(record, knex);
+  if (!protocolId && !grassTrack) return null;
 
   let context = null;
   if (windowKey) {
@@ -395,6 +390,7 @@ function isLawnService(record = {}) {
 
 module.exports = {
   buildServiceReportDynamicContext,
+  buildLawnProtocolReportContext,
   loadServiceRecordForDynamicContext,
   safeBuild,
   isLawnService,

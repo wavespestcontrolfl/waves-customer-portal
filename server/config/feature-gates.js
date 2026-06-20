@@ -220,6 +220,13 @@ const gates = {
   // Off in prod until the rendered section is verified on a live estimate.
   // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
+
+  // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
+  // Master gate for the cron job (double-gated behind cronJobs). Off by default
+  // in prod until the owner validates dry-run output; even when ON it stays in
+  // dry_run mode until AUTO_DISPATCH_MODE=apply is set. The admin API + manual
+  // run endpoints are unaffected by this gate (they're requireAdmin-only).
+  autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 };
 
 function isEnabled(gate) {

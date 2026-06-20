@@ -2,10 +2,12 @@ const {
   applySensitiveSpaHeaders,
   isServiceOutlinePath,
   isLawnReportPath,
+  isServiceReportPath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const LAWN_TOKEN = '0123456789abcdef0123456789abcdef';
+const REPORT_TOKEN = '0123456789abcdef0123456789abcdef';
 
 function mockResponse() {
   return { set: jest.fn() };
@@ -51,5 +53,25 @@ describe('sensitive SPA document headers', () => {
     expect(isLawnReportPath(`/lawn-report/${LAWN_TOKEN}/`)).toBe(true);
     expect(isLawnReportPath('/lawn-report/not-a-real-token')).toBe(false);
     expect(isLawnReportPath('/api/public/lawn-diagnostic/0123456789abcdef0123456789abcdef')).toBe(false);
+  });
+
+  test('marks customer + project post-service report shells noindex, no-referrer, no-store', () => {
+    for (const reportPath of [`/report/${REPORT_TOKEN}`, '/report/project/van-lee-0123456789ab']) {
+      const res = mockResponse();
+      applySensitiveSpaHeaders(reportPath, res);
+      expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+      expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    }
+  });
+
+  test('recognizes the post-service report shells but not the API or unrelated paths', () => {
+    expect(isServiceReportPath(`/report/${REPORT_TOKEN}`)).toBe(true);
+    expect(isServiceReportPath(`/report/${REPORT_TOKEN}/`)).toBe(true);
+    expect(isServiceReportPath('/report/project/van-lee-0123456789ab')).toBe(true);
+    expect(isServiceReportPath('/report/project/van-lee-2-0123456789ab')).toBe(true);
+    expect(isServiceReportPath('/report/not-a-real-token')).toBe(false);
+    expect(isServiceReportPath('/api/reports/0123456789abcdef0123456789abcdef')).toBe(false);
+    expect(isServiceReportPath('/reports')).toBe(false);
   });
 });

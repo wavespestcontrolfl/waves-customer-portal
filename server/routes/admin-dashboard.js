@@ -10,6 +10,7 @@ const {
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
+const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -72,6 +73,18 @@ function applyETTimestampWindow(qb, column, from, to) {
     .whereRaw(`${column} >= ?::timestamp AT TIME ZONE 'America/New_York'`, [`${from}T00:00:00`])
     .whereRaw(`${column} <  (?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'`, [`${to}T00:00:00`]);
 }
+
+// ET-midnight bind for single-sided timestamp boundaries (column <op> ET-midnight
+// of dateStr). Postgres on Railway runs UTC, so comparing a timestamptz against a
+// bare ET date string would shift the cutoff by the ET offset (the same trap
+// applyETTimestampWindow guards for ranges).
+const ET_MIDNIGHT_TS = "?::timestamp AT TIME ZONE 'America/New_York'";
+function etDayStart(dateStr) { return `${dateStr}T00:00:00`; }
+
+// Real-customer stages live in a shared module so the dashboard, Intelligence
+// Bar, and BI agent can't drift. `customers.active` defaults true for leads, so
+// pipeline_stage is what distinguishes a customer from a lead.
+function whereRealCustomer(qb) { return qb.whereIn('pipeline_stage', CUSTOMER_STAGES); }
 
 async function paidRevenueTotal(from, to) {
   const [ledger, paidInvoiceGaps] = await Promise.all([
@@ -155,8 +168,18 @@ router.get('/', dashboardCache, async (req, res, next) => {
     ] = await Promise.all([
       paidRevenueTotal(som, today),
       paidRevenueTotal(solm, eolm),
-      db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first(),
-      db('customers').where({ active: true }).whereNull('deleted_at').where('created_at', '>=', som).count('* as count').first(),
+      // Active customers = real customers (CUSTOMER_STAGES), not the whole
+      // customers table — `active=true` defaults true for new_lead/prospect rows.
+      db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer).count('* as count').first(),
+      // New customers this month = real customers (not leads) whose row was
+      // created this month, ET-anchored so the month boundary doesn't drift.
+      // NOTE: created_at is the row-creation (≈ lead-intake) time, a proxy for
+      // conversion — a lead created earlier and converted in-place this month is
+      // missed. Accurate acquisition-by-conversion-date needs a persisted
+      // customer_since (currently unpopulated); tracked as a follow-up.
+      db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
+        .modify((qb) => applyETTimestampWindow(qb, 'created_at', som, today))
+        .count('* as count').first(),
       db('estimates').whereIn('status', ['sent', 'viewed']).where('expires_at', '>', db.raw('NOW()')).count('* as count').first(),
       db('scheduled_services').where('scheduled_date', '>=', monW).where('scheduled_date', '<=', sunW).select(
         db.raw("COUNT(*) as total"),
@@ -444,15 +467,58 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
-    // Retention — customers who churned in window vs active at start
-    let retentionPct = null, churned = 0;
+    // Retention — of the customers who were LIVE at the START of the window, how
+    // many are STILL live now. "Retained" is read from current state (active +
+    // not-deleted + a customer stage), so churn (stage→churned), going dormant,
+    // and soft-delete are all counted as losses; reactivation is handled because
+    // the live state is the source of truth, not the sticky churned_at.
+    let retentionPct = null, lost = 0;
     try {
-      const churnedRow = await db('customers')
-        .whereNotNull('churned_at').where('churned_at', '>=', start).count('* as c').first();
-      churned = parseInt(churnedRow?.c || 0);
-      const activeStart = await db('customers').where({ active: true }).whereNull('deleted_at').count('* as c').first();
-      const base = parseInt(activeStart?.c || 0) + churned;
-      retentionPct = base > 0 ? Math.round(((base - churned) / base) * 1000) / 10 : null;
+      const enteredInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
+      const enteredBeforeWindow = `(pipeline_stage_changed_at < ${ET_MIDNIGHT_TS} OR pipeline_stage_changed_at IS NULL)`;
+      // Cohort = "was a live customer at the window start": existed before the
+      // window, not deleted before it, and either an ACTIVE customer-stage row
+      // entered before the window, OR one that left the customer base on/after
+      // the window start (churned or went dormant — so it was still a customer at
+      // the start). Limits, both pending a customer_since / deactivated_at signal:
+      //  - no per-stage history → a customer→customer move mid-window is excluded
+      //    from the base (its stage-entry falls inside the window);
+      //  - deactivation (active=false) has no timestamp, so it can't be placed in
+      //    a window — such rows are excluded entirely rather than mislabeled as a
+      //    loss. ET-anchored throughout.
+      const cohort = () => db('customers')
+        .whereRaw(`created_at < ${ET_MIDNIGHT_TS}`, [etDayStart(start)])
+        .where(function notDeletedBeforeStart() {
+          this.whereNull('deleted_at').orWhereRaw(`deleted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(start)]);
+        })
+        .where(function wasCustomerAtStart() {
+          this.where(function activeCustomerBeforeStart() {
+            this.where('active', true)
+              .whereIn('pipeline_stage', CUSTOMER_STAGES)
+              .whereRaw(enteredBeforeWindow, [etDayStart(start)]);
+          })
+            .orWhere(function departedInWindow() {
+              // Left the customer base on/after the window start. 'lost' is
+              // excluded — it's predominantly a lead stage, so a now-'lost' row
+              // can't be assumed to have been a customer.
+              this.whereIn('pipeline_stage', ['churned', 'dormant']).whereRaw(enteredInWindow, [etDayStart(start)]);
+            });
+        });
+
+      const baseRow = await cohort().count('* as c').first();
+      const base = parseInt(baseRow?.c || 0);
+
+      // Retained = cohort members still live now (active, not deleted, still a
+      // customer stage). Everyone else who was a customer at the start — churned,
+      // gone dormant, or deleted since — is a LOSS for the period (not all
+      // "churn", so the field is reported as `lost`).
+      const retainedRow = await cohort()
+        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
+        .count('* as c').first();
+      const retained = parseInt(retainedRow?.c || 0);
+      lost = Math.max(0, base - retained);
+
+      retentionPct = base > 0 ? Math.max(0, Math.round((retained / base) * 1000) / 10) : null;
     } catch (err) {
       logger.error(`[admin-dashboard] retention failed: ${err.message}`);
     }
@@ -528,7 +594,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       },
       sales: leadMetrics,
       ar: { days: arDays, open: arOpen, overdueCount: arOverdue },
-      retention: { pct: retentionPct, churned },
+      retention: { pct: retentionPct, lost },
       leaderboard,
     });
   } catch (err) { next(err); }
@@ -638,7 +704,11 @@ router.get('/compare', dashboardCache, async (req, res, next) => {
         paidRevenueTotal(from, to),
         db('scheduled_services').whereBetween('scheduled_date', [from, to])
           .select(db.raw("COUNT(*) as total"), db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed")).first(),
-        db('customers').where({ active: true }).whereBetween('created_at', [from, to + 'T23:59:59']).count('* as c').first(),
+        // Match the main KPI's new-customer definition: real customers (not
+        // leads) whose row was created in the window, ET-anchored.
+        db('customers').where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
+          .modify((qb) => applyETTimestampWindow(qb, 'created_at', from, to))
+          .count('* as c').first(),
       ]);
       return {
         revenue: parseFloat(rev || 0),

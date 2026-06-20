@@ -294,6 +294,11 @@ class SmartRebooker {
       const updated = await trx('scheduled_services')
         .where({ id: serviceId, status: service.status })
         .whereIn('status', Array.from(allowedStatuses))
+        // Optional caller-supplied expected-state predicate (e.g. auto-dispatch
+        // passing the locked/excluded flags + original date) so a concurrent
+        // operator lock/move is caught atomically here, not just by a prior read.
+        // .where({}) is a no-op, so callers that omit it are unaffected.
+        .where(options.expect || {})
         .update({
           ...updates,
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
