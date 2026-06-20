@@ -2707,7 +2707,7 @@ const InvoiceService = {
       const candidates = await db("invoices")
         .where({ scheduled_service_id: scheduledServiceId })
         .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
-        .select("id", "invoice_number", "stripe_payment_intent_id");
+        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
@@ -2758,6 +2758,18 @@ const InvoiceService = {
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
           const result = await db.transaction(async (trx) => {
+            // Phase 2: parent-before-child lock order (matches the edit/void
+            // paths) so a concurrent accrued edit/void + this cancellation can't
+            // AB-BA deadlock. Lock the statement FIRST (using the
+            // payer_statement_id carried from the candidate scan — it never
+            // changes after creation), skip a finalized one, then lock the
+            // invoice.
+            if (candidate.payer_statement_id) {
+              const stmt = await trx("payer_statements").where({ id: candidate.payer_statement_id }).forUpdate().first("status");
+              if (stmt && stmt.status !== "open") {
+                return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: candidate };
+              }
+            }
             const locked = await trx("invoices")
               .where({ id: candidate.id })
               .forUpdate()
@@ -2786,15 +2798,6 @@ const InvoiceService = {
                 skipped: `money already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment_recorded_at set"}); needs manual refund/credit review`,
                 invoice: locked,
               };
-            }
-            // Phase 2: an accrued child on a FINALIZED/sent statement is a billed
-            // line — skip the auto-void (the cancellation becomes a credit on the
-            // next statement). Lock + re-verify open, mirroring voidInvoice.
-            if (locked.payer_statement_id) {
-              const stmt = await trx("payer_statements").where({ id: locked.payer_statement_id }).forUpdate().first("status");
-              if (stmt && stmt.status !== "open") {
-                return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: locked };
-              }
             }
             const [voidedInvoice] = await trx("invoices")
               .where({ id: locked.id, status: locked.status })
