@@ -40,16 +40,25 @@ function searchQuery(product) {
   ).trim();
 }
 
-// Read an element's value preferring microdata attributes (content/href/value)
-// over textContent — price and availability are commonly <meta content="..."> or
-// <link itemprop="availability" href="https://schema.org/OutOfStock"> with no
-// text. Pure + node-testable; collectSnapshot inlines the same rule for the
-// browser context. `el` is anything with getAttribute / textContent.
+// Attributes that hold a value WITHOUT a text node: schema.org microdata
+// (content/href/value) AND storefront price data-attributes — Magento exposes the
+// amount as `data-price-amount`, BigCommerce (Keystone) as
+// `data-product-price-without-tax`, and the generic adapter selects bare
+// `[data-price]`. Those price elements are often empty `<span data-price="89.99">`,
+// so a text-only read returns nothing and the DOM fallback silently drops an
+// otherwise valid candidate. Read the attributes in this order, then text.
+const VALUE_ATTRS = ['content', 'href', 'value', 'data-price', 'data-price-amount', 'data-product-price-without-tax'];
+
+// Read an element's value preferring the attributes above over textContent.
+// Pure + node-testable; collectSnapshot inlines the same rule for the browser
+// context. `el` is anything with getAttribute / textContent.
 function nodeValue(el) {
   if (!el) return '';
   if (el.getAttribute) {
-    const attr = el.getAttribute('content') || el.getAttribute('href') || el.getAttribute('value');
-    if (attr) return String(attr).trim();
+    for (const a of VALUE_ATTRS) {
+      const v = el.getAttribute(a);
+      if (v) return String(v).trim();
+    }
   }
   return el.textContent ? String(el.textContent).trim() : '';
 }
@@ -57,17 +66,22 @@ function nodeValue(el) {
 // Runs IN THE BROWSER (page.evaluate). Must be self-contained — it only sees the
 // `sel` argument, never Node scope. Collects every signal the parsers might use.
 function collectSnapshot(sel) {
-  // Prefer microdata attributes (content/href/value) before textContent: price
-  // and availability are commonly <meta content="..."> or
-  // <link itemprop="availability" href="https://schema.org/OutOfStock"> with NO
-  // text, so a text-only read would miss a sold-out signal entirely. (Inlined —
+  // Prefer value-bearing attributes before textContent: schema.org microdata
+  // (<meta content="...">, <link itemprop="availability" href=".../OutOfStock">)
+  // AND storefront price data-attributes (Magento data-price-amount, BigCommerce
+  // data-product-price-without-tax, bare data-price) are empty of text, so a
+  // text-only read would miss a price or sold-out signal entirely. (Inlined —
   // collectSnapshot runs in page.evaluate and can't call the Node-side helper;
-  // this mirrors the exported nodeValue(), which is what the unit test covers.)
+  // the attribute list MUST stay in sync with nodeValue()'s VALUE_ATTRS, which is
+  // what the unit test covers.)
+  const VALUE_ATTRS = ['content', 'href', 'value', 'data-price', 'data-price-amount', 'data-product-price-without-tax'];
   const textOf = (el) => {
     if (!el) return '';
     if (el.getAttribute) {
-      const attr = el.getAttribute('content') || el.getAttribute('href') || el.getAttribute('value');
-      if (attr) return String(attr).trim();
+      for (const a of VALUE_ATTRS) {
+        const v = el.getAttribute(a);
+        if (v) return String(v).trim();
+      }
     }
     return el.textContent ? el.textContent.trim() : '';
   };

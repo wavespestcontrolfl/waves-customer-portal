@@ -16,6 +16,17 @@ describe('nodeValue (microdata attribute precedence)', () => {
     expect(nodeValue(el({ content: '89.00' }))).toBe('89.00'); // <meta itemprop="price" content="89.00">
     expect(nodeValue(el({ value: '95.00' }))).toBe('95.00');
   });
+  test('reads storefront price data-attributes before falling back to text', () => {
+    // <span data-price="89.99"> — the generic adapter's [data-price] selector, no text
+    expect(nodeValue(el({ 'data-price': '89.99' }))).toBe('89.99');
+    // Magento <span data-price-amount="40.00">
+    expect(nodeValue(el({ 'data-price-amount': '40.00' }))).toBe('40.00');
+    // BigCommerce / Keystone [data-product-price-without-tax]
+    expect(nodeValue(el({ 'data-product-price-without-tax': '36.77' }))).toBe('36.77');
+  });
+  test('schema.org microdata still wins over a data-price attribute', () => {
+    expect(nodeValue(el({ content: '89.00', 'data-price': '12.00' }))).toBe('89.00');
+  });
   test('falls back to textContent when no attribute', () => {
     expect(nodeValue(el({}, '  $95.00  '))).toBe('$95.00');
     expect(nodeValue(el({}, 'In Stock'))).toBe('In Stock');
