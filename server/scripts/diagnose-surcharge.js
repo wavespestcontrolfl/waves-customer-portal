@@ -149,6 +149,10 @@ const knex = require('knex')({
         console.log(`Payment ${p.id}: ⚠️  CREDIT card, policy ${p.surcharge_policy_version} ran but $0 surcharge — BUG (surcharge bypassed).${reconcile}`);
       } else if (p.card_funding === 'credit') {
         console.log(`Payment ${p.id}: ℹ️  funding now reads 'credit' but no surcharge policy was stamped — charged on a non-surcharge path or funding backfilled after the charge (not a live bug; verify charge path).${reconcile}`);
+      } else if (storedSurchargeCents > 0) {
+        // Only positively-confirmed credit cards may be surcharged. A positive
+        // surcharge on debit / prepaid / unknown funding is a policy violation.
+        console.log(`Payment ${p.id}: ⚠️  ${p.card_funding || 'UNKNOWN/null'} funding charged $${surcharge.toFixed(2)} surcharge — BUG (only confirmed credit cards may be surcharged; expected $0).${reconcile}`);
       } else if (!p.card_funding) {
         console.log(`Payment ${p.id}: ℹ️  funding UNKNOWN/null — failed closed to no surcharge (by design).${reconcile}`);
       } else {
