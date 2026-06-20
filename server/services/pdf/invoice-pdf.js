@@ -202,7 +202,8 @@ function annualPrepayCallout(doc, prepay, x, y, width) {
   doc.save();
   doc.fontSize(10).font('Helvetica');
   const bodyH = doc.heightOfString(body, { width: textW, lineGap: 2 });
-  const visitsH = visits.length ? 6 + visits.length * lineH : 0;
+  // Extra line at the bottom for the "target dates" caption.
+  const visitsH = visits.length ? 6 + visits.length * lineH + lineH : 0;
   const boxH = padY * 2 + labelGap + bodyH + visitsH;
   doc.roundedRect(x, y, width, boxH, 6).lineWidth(1).fillAndStroke(SOFT, WAVES_BLUE);
   doc.fontSize(8).font('Helvetica-Bold').fillColor(WAVES_BLUE)
@@ -214,12 +215,14 @@ function annualPrepayCallout(doc, prepay, x, y, width) {
     let vy = y + padY + labelGap + bodyH + 6;
     doc.fontSize(9);
     visits.forEach((v, i) => {
-      const left = `•  Visit ${i + 1} of ${visits.length} · ${formatInvoiceDateOnly(v.date)}`;
+      const left = `•  Visit ${i + 1} of ${visits.length} · target ${formatInvoiceDateOnly(v.date)}`;
       const right = `${v.amount != null ? `${currency(v.amount)}  ` : ''}${tag}`;
       doc.font('Helvetica').fillColor(BODY).text(left, x + padX, vy, { width: textW - tagW });
       doc.fillColor(MUTED).text(right, x + width - padX - tagW, vy, { width: tagW, align: 'right' });
       vy += lineH;
     });
+    doc.fontSize(8).fillColor(MUTED)
+      .text('Target dates — your actual visits follow your regular service route.', x + padX, vy, { width: textW });
   }
   doc.restore();
 

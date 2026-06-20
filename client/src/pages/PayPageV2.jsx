@@ -291,30 +291,35 @@ function CoverageVisitsList({ visits, status }) {
     .includes(String(status || '').toLowerCase());
   const tag = prepaid ? 'Prepaid' : 'Included';
   return (
-    <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: 0, display: 'grid', gap: 7 }}>
-      {visits.map((v, i) => (
-        <li key={i} style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 10,
-          fontSize: 13,
-          lineHeight: 1.4,
-          color: 'var(--text)',
-        }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <span style={{ color: 'var(--success)', fontWeight: 800 }}>✓</span>
-            <span>Visit {i + 1} of {visits.length} · {fmtDate(v.date)}</span>
-          </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
-            {v.amount != null && (
-              <span style={{ fontFamily: FONTS.mono, color: 'var(--text-muted)' }}>{fmtCurrency(v.amount)}</span>
-            )}
-            <span style={{ ...eyebrow, fontSize: 10, color: prepaid ? 'var(--success)' : '#9A6200' }}>{tag}</span>
-          </span>
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: 0, display: 'grid', gap: 7 }}>
+        {visits.map((v, i) => (
+          <li key={i} style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            fontSize: 13,
+            lineHeight: 1.4,
+            color: 'var(--text)',
+          }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <span style={{ color: 'var(--success)', fontWeight: 800 }}>✓</span>
+              <span>Visit {i + 1} of {visits.length} · target {fmtDate(v.date)}</span>
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+              {v.amount != null && (
+                <span style={{ fontFamily: FONTS.mono, color: 'var(--text-muted)' }}>{fmtCurrency(v.amount)}</span>
+              )}
+              <span style={{ ...eyebrow, fontSize: 10, color: prepaid ? 'var(--success)' : '#9A6200' }}>{tag}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.4, color: 'var(--text-muted)' }}>
+        Target dates — your actual visits follow your regular service route.
+      </div>
+    </>
   );
 }
 
