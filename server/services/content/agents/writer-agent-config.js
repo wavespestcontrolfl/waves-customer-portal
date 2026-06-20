@@ -26,6 +26,7 @@
 
 const MODELS = require('../../../config/models');
 const { FAQ_BLOCKED_SERVICES } = require('../content-guardrails');
+const { HYPE_TERMS, COMMERCIAL_TERMS } = require('../title-meta-spam-gate');
 
 // The FAQ-blocked list is interpolated into the system prompt straight from
 // content-guardrails so the writer's instructions can never drift from the
@@ -34,6 +35,16 @@ const { FAQ_BLOCKED_SERVICES } = require('../content-guardrails');
 // topic (rodent, termite, spider, bed-bug, …) deterministically fail the
 // guardrail at publish.
 const FAQ_BLOCKED_SERVICES_LIST = [...FAQ_BLOCKED_SERVICES].join(', ');
+
+// Same single-source-of-truth rule for the title/meta spam gate
+// (title-meta-spam-gate.js, enforced as the content-quality-gate HARD check
+// `title_meta_spam_free` on EVERY page type). The writer previously got no
+// guidance beyond length, so it would naturally emit marketing-shaped titles
+// ("Best Exterminator Near Me…", stacked adjectives, repeated keywords) that
+// hard-fail and waste the whole generation. Interpolate the exact term lists
+// the gate checks so the prompt can never drift from enforcement.
+const HYPE_TERMS_LIST = HYPE_TERMS.join(', ');
+const COMMERCIAL_TERMS_LIST = COMMERCIAL_TERMS.join(', ');
 
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
@@ -75,6 +86,24 @@ wasted):
 - frontmatter.meta_description: 115–160 characters. NEVER exceed 160 — over
   160 is a hard publish block (the publisher truncates any overflow at a word
   boundary, so write to 160 to keep your own phrasing).
+- TITLE + META ANTI-SPAM (binding — the title/meta spam gate hard-fails the
+  WHOLE draft on any one of these, exactly like a length overflow, and the run
+  is wasted). The frontmatter.title must NOT:
+    • say "the best" (or any "the best ___" superlative) — banned outright;
+    • contain "near me" — never in the title (near-me intent lives on landing
+      pages, not blog titles);
+    • use more than ONE "|" pipe separator;
+    • stack promotional words — keep these to AT MOST TWO across the whole
+      title (four or more is a hard block; three trips a soft warning):
+      ${HYPE_TERMS_LIST};
+    • repeat the primary keyword, city, service, or target keyword three or
+      more times — name each at most twice;
+    • repeat a commercial phrase — use each of these AT MOST ONCE in the title:
+      ${COMMERCIAL_TERMS_LIST}.
+  The frontmatter.meta_description must NOT contain "near me" more than once,
+  and must not stack five or more of those promotional words. Write a title a
+  knowledgeable neighbor would write: one clear keyword phrase plus a specific,
+  concrete hook beats a string of adjectives.
 - internal_links_to_add is a CHECKLIST, not a suggestion: every URL in the
   list must appear in the body at least once as a real markdown link with
   natural anchor text. The list includes the service hub URLs the publish
@@ -126,6 +155,11 @@ enforces):
   mandate wins — include the FAQ section exactly as the operator outline
   specifies, even on an otherwise FAQ-blocked topic. The publish guardrail
   honors the same exception for these briefs only.
+- SCHEMA MUST MATCH VISIBLE CONTENT: never emit FAQPage / faqPage structured
+  data unless the body actually renders a matching visible "Frequently Asked
+  Questions" section. Schema that describes an FAQ the page does not show is a
+  hard P0 publish block — so when the FAQ is omitted (FAQ-blocked topic, or a
+  page type that carries none), there must be no FAQ schema either.
 - Otherwise the page-type FAQ requirements above apply as written.
 
 ASTRO RENDERING — the body is published through the blog Astro pipeline.
