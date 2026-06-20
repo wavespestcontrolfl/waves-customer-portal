@@ -680,15 +680,26 @@ const InvoiceService = {
       depositCredit = null,
     } = createArgs;
 
-    // Phase 2 atomicity: when the statements gate is ON and the caller supplied
-    // no transaction, run the WHOLE create in one transaction so a NET-terms
-    // accrual (statement get/create + invoice insert + rollup) is atomic — else
-    // the advisory lock releases after one statement and the writes can interleave
-    // with a concurrent close. insertInvoiceRow savepoints each insert, so the
-    // invoice-number collision retry still works inside the transaction. Self-pay
-    // and gate-off creates are byte-identical (no wrap, no behaviour change).
+    // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
+    // insert + rollup) must be atomic, so run the whole create in one transaction
+    // when no caller transaction was supplied. But ONLY for an actual accrual —
+    // wrapping EVERY create would break create()'s best-effort tax/discount
+    // catches (a caught error inside a Postgres transaction still aborts it,
+    // rolling back the insert). So resolve the payer terms up front to decide;
+    // resolution THROWS under the gate (fail closed — a NET-terms job must not
+    // silently fall back to an individually-collectible invoice). insertInvoiceRow
+    // savepoints each insert, so the collision retry still works inside the txn.
     if (database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
-      return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+      const PayerSvc = require("./payer");
+      let preSsId = scheduledServiceId;
+      if (!preSsId && serviceRecordId) {
+        const srLink = await db("service_records").where({ id: serviceRecordId, customer_id: customerId }).first("scheduled_service_id").catch(() => null);
+        if (srLink?.scheduled_service_id) preSsId = srLink.scheduled_service_id;
+      }
+      const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: preSsId, throwOnError: true });
+      if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
+        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+      }
     }
 
     const customer = await database("customers").where({ id: customerId }).first();
@@ -730,6 +741,11 @@ const InvoiceService = {
       customerId,
       customer,
       scheduledServiceId: payerScheduledServiceId,
+      // Fail closed under the statements gate: if payer resolution is uncertain,
+      // a NET-terms job must NOT silently fall back to self-pay and create an
+      // individually-collectible invoice instead of accruing. (Default fail-soft
+      // when the gate is off — unchanged for everyone today.)
+      throwOnError: isEnabled("payerStatements"),
     });
 
     // Phase 2 (gated by GATE_PAYER_STATEMENTS): a NET-terms payer invoice is held
