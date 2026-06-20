@@ -6742,7 +6742,14 @@ function MyPlanTab({ customer }) {
     const id = detectCatalogServiceId(service);
     if (id && !detectedServiceIds.includes(id)) detectedServiceIds.push(id);
   };
-  [nextService, ...upcomingServices, ...serviceHistory].filter(Boolean).forEach(addDetectedService);
+  // Only recurring, non-callback visits represent WaveGuard plan coverage. One-time
+  // visits (e.g. a single termite inspection) and free re-service callbacks must not
+  // drive the included-services list, or under the tier-limit slice they could
+  // displace the customer's real plan. Service history (service_records) carries no
+  // is_recurring signal, so it is not used for detection. When nothing qualifies we
+  // fall back to the tier defaults below.
+  const isPlanCoverageRow = (s) => !!s && s.isRecurring === true && s.isCallback !== true;
+  [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
 
   const includedServices = detectedServiceIds.length
     ? detectedServiceIds
