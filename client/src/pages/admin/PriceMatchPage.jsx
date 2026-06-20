@@ -138,39 +138,41 @@ export default function PriceMatchPage() {
     setNotice(null);
     try {
       const res = await adminFetch(`/admin/price-match/drafts/${id}/${action}`, { method: "POST" });
+      // Resync FIRST, then set the message LAST — loadDrafts() runs setError(null)
+      // at its start, so any message set before it would be wiped before the
+      // operator sees it.
+      await loadDrafts();
+      await refreshDetail(id);
       if (action === "send") {
-        if (res && res.reconcile) {
-          setNotice("Email sent, but its status couldn't be recorded automatically — verify in SendGrid before any resend.");
-        } else {
-          setNotice(`Price-match request sent to ${recipient || "the rep"}.`);
-        }
+        setNotice(res && res.reconcile
+          ? "Email sent, but its status couldn't be recorded automatically — verify in SendGrid before any resend."
+          : `Price-match request sent to ${recipient || "the rep"}.`);
       } else if (action === "dismiss") {
         setNotice("Draft dismissed.");
       } else if (action === "reset") {
         setNotice("Draft reset to pending for re-review.");
       }
-      await loadDrafts();
-      await refreshDetail(id);
     } catch (err) {
       // ACTIONABLE send failures (config/recipient) — the email did NOT go out and
       // the draft is still actionable; show the real problem instead of hiding it as
       // a stale race, or the operator just keeps clicking Send into the same failure.
       const actionable = action === "send" && (err.code === "not_configured" || err.code === "rejected" || err.code === "send_attempt_unrecorded");
+      // Resync FIRST (the backend may have advanced the draft, e.g. pending ->
+      // sending), THEN set the message LAST so loadDrafts()'s setError(null) can't
+      // wipe an actionable failure explanation before the operator reads it.
+      await loadDrafts();
+      await refreshDetail(id);
       if (actionable) {
         setError(err.message || "The email could not be sent.");
       } else if (err.status === 409) {
         // Benign state race (already sent/sending, claim lost, or not stale enough
-        // to reset/dismiss) — just resync to the truth.
+        // to reset/dismiss) — resynced above; just note it.
         setNotice("That draft already changed state — showing the latest.");
       } else {
         // Ambiguous failure (e.g. a transport error left the backend holding the
-        // draft in 'sending'); surface it AND resync so the pane reflects that.
+        // draft in 'sending'); surface it (resynced above so the pane reflects it).
         setError(err.message || `Could not ${action} the draft`);
       }
-      // Always resync — the backend may have advanced the draft (e.g. pending -> sending)
-      // even when the request reported a failure.
-      await loadDrafts();
-      await refreshDetail(id);
     } finally {
       setBusy(false);
       setConfirmSend(false);
