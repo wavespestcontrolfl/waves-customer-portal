@@ -482,9 +482,14 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       // was still a customer at the start). member_since is stable across
       // customer→customer stage moves, so an active_customer→at_risk move
       // mid-window no longer drops the row from the base (the old stage-change
-      // proxy did). Remaining gap (pending deactivated_at): an active=false
-      // non-churned deactivation has no timestamp, so it's excluded entirely
-      // rather than mislabeled as an in-window loss.
+      // proxy did). Two bounded gaps remain, both needing point-in-time stage
+      // history to close (≤single-digit rows today, and 0 effect on the % while
+      // there are no losses):
+      //   - a former customer who REACTIVATES (churned/dormant→active) mid-window
+      //     keeps their original member_since, so they're counted as live-at-start
+      //     — indistinguishable from a legit active↔at_risk move without history;
+      //   - a deactivation (active=false, no timestamp) is excluded entirely
+      //     rather than placed in a window (pending a deactivated_at).
       const cohort = () => db('customers')
         .where('member_since', '<', start)
         .where(function notDeletedBeforeStart() {
