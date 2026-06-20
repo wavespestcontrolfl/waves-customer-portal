@@ -2516,8 +2516,8 @@ function AppliedProductsSection({ data, mode = 'live' }) {
         <div className="manufacturer-guideline-note">
           <strong>Following the manufacturer&apos;s directions.</strong> Every product below is
           applied to its manufacturer&apos;s label directions, and each card shows who makes it.
-          Once today&apos;s application has dried, your normal watering schedule is fine — your
-          technician&apos;s service notes call out anything specific for today&apos;s products.
+          Open &ldquo;More information&rdquo; on any product for its watering note, and follow your
+          technician&apos;s service notes for what to do after today&apos;s visit.
         </div>
       )}
       {applications.length > 0 && (
