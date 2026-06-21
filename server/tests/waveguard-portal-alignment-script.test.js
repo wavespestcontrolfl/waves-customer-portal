@@ -1,5 +1,6 @@
 const {
   buildCustomerUpdates,
+  buildParentUpdates,
   dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,
@@ -256,6 +257,16 @@ describe('WaveGuard portal alignment script helpers', () => {
       '2026-06-20',
       3,
     )).toEqual(['2026-07-31', '2026-09-11', '2026-10-23']);
+  });
+
+  test('realigns a missing or stale recurring_pattern to the detected plan cadence', () => {
+    const cols = { is_recurring: {}, recurring_pattern: {}, recurring_interval_days: {}, recurring_ongoing: {}, service_id: {}, create_invoice_on_complete: {} };
+    // Stale cadence -> corrected.
+    expect(buildParentUpdates({ recurring_pattern: 'quarterly' }, { recurringPattern: 'monthly' }, null, cols).recurring_pattern).toBe('monthly');
+    // Missing cadence -> filled.
+    expect(buildParentUpdates({ recurring_pattern: null }, { recurringPattern: 'monthly' }, null, cols).recurring_pattern).toBe('monthly');
+    // Already correct -> no pattern update.
+    expect(buildParentUpdates({ recurring_pattern: 'Monthly' }, { recurringPattern: 'monthly' }, null, cols)).not.toHaveProperty('recurring_pattern');
   });
 
   test('seasonal plans only generate in-season planned dates', () => {

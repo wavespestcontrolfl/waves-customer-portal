@@ -195,7 +195,17 @@ function buildParentUpdates(service, plan, serviceId, columns) {
   const updates = {};
 
   if (columnPresent(columns, 'is_recurring') && service.is_recurring !== true) updates.is_recurring = true;
-  if (columnPresent(columns, 'recurring_pattern') && !service.recurring_pattern) updates.recurring_pattern = plan.recurringPattern;
+  // Correct a missing OR stale cadence: the detected plan (from service_key/name) is
+  // authoritative, so e.g. a lawn_care_monthly row left as recurring_pattern='quarterly'
+  // is realigned to 'monthly'. The resolved pattern is then used for date planning and
+  // child rows below so we never seed from the stale anchor cadence.
+  if (
+    columnPresent(columns, 'recurring_pattern')
+    && plan.recurringPattern
+    && String(service.recurring_pattern || '').trim().toLowerCase() !== String(plan.recurringPattern).trim().toLowerCase()
+  ) {
+    updates.recurring_pattern = plan.recurringPattern;
+  }
   if (
     columnPresent(columns, 'recurring_interval_days')
     && plan.recurringIntervalDays
@@ -429,12 +439,19 @@ async function analyzeCustomer(customer, serviceColumns, customerColumns, servic
 
     const serviceId = serviceIds[plan.serviceKey] || null;
     const parentUpdates = buildParentUpdates(anchor, plan, serviceId, serviceColumns);
+    // Plan future dates and child rows from the RESOLVED cadence (parentUpdates may have
+    // corrected a stale recurring_pattern/interval), not the stale anchor values.
+    const resolvedAnchor = {
+      ...anchor,
+      recurring_pattern: parentUpdates.recurring_pattern || anchor.recurring_pattern,
+      recurring_interval_days: parentUpdates.recurring_interval_days || anchor.recurring_interval_days,
+    };
     const existingFutureDates = futureDatesForService(rows, key, today);
-    const targetDates = plannedFutureDates(anchor, plan, today, TARGET_FUTURE_VISITS);
+    const targetDates = plannedFutureDates(resolvedAnchor, plan, today, TARGET_FUTURE_VISITS);
     const missingDates = targetDates.filter((date) => !existingFutureDates.has(date));
     const childRows = missingDates.map((scheduledDate) => buildChildRow({
       customerId: customer.id,
-      parent: anchor,
+      parent: resolvedAnchor,
       plan,
       serviceId,
       columns: serviceColumns,
@@ -584,6 +601,7 @@ if (require.main === module) {
 module.exports = {
   buildChildRow,
   buildCustomerUpdates,
+  buildParentUpdates,
   dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,
