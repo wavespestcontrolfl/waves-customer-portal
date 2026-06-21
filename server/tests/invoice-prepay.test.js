@@ -148,6 +148,24 @@ describe('invoice-prepay helpers', () => {
       expect(visits.map((v) => v.amount)).toEqual([132, 132, 132, 132]);
     });
 
+    it('splits the total across rendered visits when a partial term truncates the schedule', () => {
+      // term_end before the 3rd quarterly date truncates a 4-visit schedule to 2.
+      const visits = buildCoverageVisits(
+        {
+          term_start: '2026-06-20',
+          term_end: '2026-11-30',
+          coverage_visit_count: 4,
+          coverage_cadence: 'quarterly',
+          coverage_service_type: 'Quarterly Pest Control',
+        },
+        528,
+      );
+      expect(visits.map((v) => v.date)).toEqual(['2026-06-20', '2026-09-20']);
+      // Amounts split by the 2 rendered visits, reconciling to the prepay total.
+      expect(visits.map((v) => v.amount)).toEqual([264, 264]);
+      expect(visits.reduce((sum, v) => sum + v.amount, 0)).toBe(528);
+    });
+
     it('returns an empty array when coverage is not configured', () => {
       expect(buildCoverageVisits({ term_start: '2026-06-20' }, 528)).toEqual([]);
       expect(buildCoverageVisits(null, 528)).toEqual([]);

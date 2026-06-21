@@ -146,7 +146,14 @@ function buildCoverageVisits(term, prepayAmount) {
       require('./annual-prepay-renewals')._private;
     const cadence = term.coverage_cadence || inferCoverageCadence(term);
     const dates = coverageScheduleDates(term.term_start, visitCount, cadence, term.term_end) || [];
-    const amounts = prepayAmount > 0 ? splitCoverageAmount(prepayAmount, visitCount) : [];
+    // Split by the number of rendered visits, not the sold visitCount: a partial
+    // term (term_end falling before the full cadence) truncates `dates`, and
+    // splitting by the original count would leave the displayed per-visit shares
+    // summing to less than the prepay total. For a full term dates.length ===
+    // visitCount, so this is unchanged for the common case.
+    const amounts = prepayAmount > 0 && dates.length > 0
+      ? splitCoverageAmount(prepayAmount, dates.length)
+      : [];
     return dates.map((date, index) => ({
       date,
       amount: amounts[index] != null ? amounts[index] : null,
