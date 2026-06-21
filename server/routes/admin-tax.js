@@ -810,7 +810,7 @@ router.get('/revenue/quarterly-estimate', async (req, res, next) => {
     const endDate = `${qEndP.year}-${pad2(qEndP.month)}-${pad2(qEndP.day)}`;
     const ytdStart = `${year}-01-01`;
 
-    const revenue = await db('payments').where('status', 'paid').whereNull('payer_id').whereBetween('payment_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
+    const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
     const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
 
     const ytdRevenue = parseFloat(revenue?.total || 0);

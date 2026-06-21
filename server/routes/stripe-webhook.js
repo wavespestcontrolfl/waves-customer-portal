@@ -2049,34 +2049,46 @@ async function findInvoiceForPayment(payment) {
 async function reverseStatementCascadeForDispute(statementId, disputedPi, reason) {
   await db.transaction(async (trx) => {
     const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
-    if (!stmt || stmt.status !== 'paid') return; // only a paid statement reverses
-    // Only reverse if the statement is STILL settled by the DISPUTED PI. Normal
-    // flow: dispute.created on PI A reopens it, AP re-pays with PI B (or offline),
-    // then a late closed(lost) for PI A lands — that replacement settlement must
-    // NOT be undone (mirrors the invoice dispute guard).
-    if (disputedPi && String(stmt.stripe_payment_intent_id || '') !== String(disputedPi)) {
-      logger.warn(`[stripe-webhook] statement S-${statementId} no longer settled by disputed PI ${disputedPi} (active ${stmt.stripe_payment_intent_id || 'none'}) — not reversing`);
-      return;
-    }
-    const { priorPayableStatus } = require('../services/payer-statement-settle');
+    if (!stmt) return;
+    const piMatches = String(stmt.stripe_payment_intent_id || '') === String(disputedPi || '');
     const now = new Date();
-    await trx('payer_statements').where({ id: statementId })
-      .update({
-        status: priorPayableStatus(stmt),
-        paid_at: null,
-        // Clear the settled PI/charge: /setup + reconcile treat a lingering
-        // succeeded PI as the active payment and 409, so the reopened AR could
-        // never be re-collected. The disputed `payments` row keeps the PI/charge
-        // for the audit trail.
-        stripe_payment_intent_id: null,
-        stripe_charge_id: null,
-        updated_at: now,
-      });
-    // Reopen the children the cascade settled (paid → draft = accrued again).
-    await trx('invoices').where({ payer_statement_id: statementId }).where('status', 'paid')
-      .update({ status: 'draft', paid_at: null, updated_at: now });
+
+    if (stmt.status === 'paid') {
+      // Only reverse if the statement is STILL settled by the DISPUTED PI. Normal
+      // flow: dispute.created on PI A reopens it, AP re-pays with PI B (or
+      // offline), then a late closed(lost) for PI A lands — that replacement
+      // settlement must NOT be undone (mirrors the invoice dispute guard).
+      if (disputedPi && !piMatches) {
+        logger.warn(`[stripe-webhook] statement S-${statementId} no longer settled by disputed PI ${disputedPi} (active ${stmt.stripe_payment_intent_id || 'none'}) — not reversing`);
+        return;
+      }
+      const { priorPayableStatus } = require('../services/payer-statement-settle');
+      await trx('payer_statements').where({ id: statementId })
+        .update({
+          status: priorPayableStatus(stmt),
+          paid_at: null,
+          // Clear the settled PI/charge: /setup + reconcile treat a lingering
+          // succeeded PI as the active payment and 409, so the reopened AR could
+          // never be re-collected. The disputed `payments` row keeps the PI/charge
+          // for the audit trail.
+          stripe_payment_intent_id: null,
+          stripe_charge_id: null,
+          updated_at: now,
+        });
+      // Reopen the children the cascade settled (paid → draft = accrued again).
+      await trx('invoices').where({ payer_statement_id: statementId }).where('status', 'paid')
+        .update({ status: 'draft', paid_at: null, updated_at: now });
+      logger.warn(`[stripe-webhook] statement S-${statementId} chargeback (${reason}) — reverted to owed; child invoices reopened`);
+    } else if (disputedPi && piMatches) {
+      // NOT yet settled, but the disputed PI is the statement's active PI — the
+      // dispute raced ahead of payment_intent.succeeded. Clear the active PI so
+      // the racing/late succeeded fails the active-PI binding and never settles
+      // the clawed-back charge (it records a stripe_orphan_charges review item).
+      await trx('payer_statements').where({ id: statementId })
+        .update({ stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: now });
+      logger.warn(`[stripe-webhook] statement S-${statementId} dispute (${reason}) BEFORE settlement — cleared active PI ${disputedPi} to block settle`);
+    }
   });
-  logger.warn(`[stripe-webhook] statement S-${statementId} chargeback (${reason}) — reverted to owed; child invoices reopened`);
 }
 
 async function restoreStatementCascadeForDispute(statementId, disputedPi) {
@@ -2114,6 +2126,31 @@ async function handleDisputeCreated(dispute) {
   const depositReversal = await handleDepositChargeReversed(dispute.payment_intent, 'dispute.created');
   if (depositReversal.handled) return;
 
+  // Statement disputes key on the PI, NOT the payments row: that row isn't created
+  // until payment_intent.succeeded settles, and Stripe does not guarantee webhook
+  // ordering. Resolve by PI so a dispute that races/precedes settlement still
+  // reverses a settled cascade OR clears the active PI to block the later settle
+  // of clawed-back money.
+  if (dispute.payment_intent) {
+    const disputedStmt = await db('payer_statements').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
+    if (disputedStmt) {
+      await reverseStatementCascadeForDispute(disputedStmt.id, dispute.payment_intent, `dispute.created (${reason})`);
+      // If settlement already wrote the payments row, mark it disputed for audit.
+      await db('payments').where({ stripe_charge_id: chargeId }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}` });
+      try {
+        await db('notifications').insert({
+          recipient_type: 'admin',
+          category: 'dispute',
+          title: `⚠️ Statement dispute opened: $${amount}`,
+          body: `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
+          icon: '⚠️',
+          link: '/admin/payers',
+        });
+      } catch (err) { logger.error(`[stripe-webhook] Statement dispute notification failed: ${err.message}`); }
+      return;
+    }
+  }
+
   // Revert payment + invoice
   // These are critical ledger writes: no .catch — a failure must
   // propagate so the event is NOT marked processed and Stripe retries.
@@ -2138,11 +2175,7 @@ async function handleDisputeCreated(dispute) {
       failure_reason: `Dispute: ${reason}`,
     });
 
-    if (payment.statement_id) {
-      // Statement chargeback — reverse the cascade (the invoice path below
-      // no-ops on a statement settlement and would leave it silently paid).
-      await reverseStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id, `dispute.created (${reason})`);
-    } else {
+    // (Statement payments are handled by the PI-keyed block above and return early.)
     // payments has no invoice_id column — the linkage lives in the
     // metadata JSON and on invoices.stripe_payment_intent_id. 'overdue'
     // (not 'unpaid', which no open-invoice query matches) puts the
@@ -2178,7 +2211,6 @@ async function handleDisputeCreated(dispute) {
         stripe_payment_intent_id: null,
         stripe_charge_id: null,
       });
-    }
     }
     }
   }

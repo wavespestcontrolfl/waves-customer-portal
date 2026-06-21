@@ -31,10 +31,10 @@ async function executeBITool(toolName, input) {
       const lastMonthEnd = etMonthEnd(new Date(), -1);
 
       const [revMTD, revLastMonth, mrr, oneTime, overdue, tierRevenue] = await Promise.all([
-        db('payments').where({ status: 'paid' }).whereNull('payer_id').where('payment_date', '>=', somDate).sum('amount as total').first(),
-        db('payments').where({ status: 'paid' }).whereNull('payer_id').where('payment_date', '>=', lastMonthStart).where('payment_date', '<=', lastMonthEnd).sum('amount as total').first(),
+        db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).sum('amount as total').first(),
+        db('payments').where({ status: 'paid' }).where('payment_date', '>=', lastMonthStart).where('payment_date', '<=', lastMonthEnd).sum('amount as total').first(),
         db('customers').where({ active: true }).where('monthly_rate', '>', 0).sum('monthly_rate as total').count('* as count').first(),
-        db('payments').where({ status: 'paid' }).whereNull('payer_id').where('payment_date', '>=', somDate).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
+        db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
         db('payments').whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id').sum('amount as total').first(),
         db('customers').where({ active: true }).select('waveguard_tier').count('* as count').sum('monthly_rate as revenue').groupBy('waveguard_tier'),
       ]);

@@ -90,7 +90,6 @@ async function paidRevenueTotal(from, to) {
   const [ledger, paidInvoiceGaps] = await Promise.all([
     db('payments')
       .where({ status: 'paid' })
-      .whereNull('payer_id') // exclude payer-scoped statement settlements (not homeowner revenue)
       .where('payment_date', '>=', from)
       .where('payment_date', '<=', to)
       .sum('amount as total')
@@ -119,7 +118,6 @@ async function paidRevenueDaily(from, to) {
   const [ledgerRows, paidInvoiceGapRows] = await Promise.all([
     db('payments')
       .where({ status: 'paid' })
-      .whereNull('payer_id') // exclude payer-scoped statement settlements (not homeowner revenue)
       .where('payment_date', '>=', from)
       .where('payment_date', '<=', to)
       .select(db.raw("payment_date::date as date"), db.raw("SUM(amount) as total"))
@@ -190,7 +188,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
       db('estimates').where({ status: 'accepted' }).whereNotNull('accepted_at').whereNotNull('sent_at').where('accepted_at', '>=', som)
         .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first(),
       computeMrrBreakdown(db, today),
-      db('payments').where({ status: 'paid' }).whereNull('payer_id').where('payment_date', '>=', som).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
+      db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
       // Today's schedule
       db('scheduled_services')
         .where({ 'scheduled_services.scheduled_date': today })

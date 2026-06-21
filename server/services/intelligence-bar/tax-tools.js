@@ -337,7 +337,7 @@ async function getQuarterlyEstimate(quarter) {
   const lastDay = new Date(Date.UTC(year, startMonthIdx + 3, 0)).getUTCDate();
   const endDate = `${year}-${String(startMonthIdx + 3).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-  const revenue = await db('payments').where('status', 'paid').whereNull('payer_id').whereBetween('payment_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
+  const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
   const expenses = await db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [startDate, endDate]).sum('amount as total').first().catch(() => ({ total: 0 }));
 
   const grossIncome = parseFloat(revenue?.total || 0);
@@ -390,7 +390,7 @@ async function getPnl(period) {
     }
 
     // Revenue
-    const revenue = await db('payments').where('status', 'paid').whereNull('payer_id').whereBetween('payment_date', [startDate, endDate])
+    const revenue = await db('payments').where('status', 'paid').whereBetween('payment_date', [startDate, endDate])
       .sum('amount as total').count('* as count').first().catch(() => ({ total: 0, count: 0 }));
 
     // COGS (product costs from service records)
