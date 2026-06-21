@@ -61,11 +61,11 @@ describe('targetOzOf (structured pack size -> oz gate)', () => {
 });
 
 describe('searchTokens', () => {
-  test('keeps distinctive >=3-char tokens, drops short formulation codes', () => {
-    expect(searchTokens({ vendorProductName: 'Taurus SC Termiticide' })).toEqual(['taurus', 'termiticide']); // "sc" dropped
+  test('keeps >=2-char tokens incl. formulation codes', () => {
+    expect(searchTokens({ vendorProductName: 'Taurus SC Termiticide' })).toEqual(['taurus', 'sc', 'termiticide']);
   });
-  test('prefers an explicit searchQuery', () => {
-    expect(searchTokens({ searchQuery: 'Bifen IT', name: 'X' })).toEqual(['bifen']); // "it" dropped (<3)
+  test('merges a slashed single-letter formulation code: I/T -> it', () => {
+    expect(searchTokens({ searchQuery: 'Bifen I/T Insecticide', name: 'X' })).toEqual(['bifen', 'it', 'insecticide']);
   });
 });
 
@@ -89,6 +89,18 @@ describe('bestMatchingLink (scored result selection)', () => {
       'https://www.domyown.com/talstar-professional-insecticide-p-97.html',
       'https://www.domyown.com/termidor-sc-p-184.html',
     ], product)).toBeNull();
+  });
+  test('a shared generic formulation token (sc) does NOT cross-match another brand', () => {
+    // "Taurus SC" shares "sc" with "termidor-sc"; brand (taurus) is mandatory, so no grab.
+    expect(bestMatchingLink(['https://www.domyown.com/termidor-sc-p-184.html'], product)).toBeNull();
+  });
+  test('terse slug that omits the category word still matches (Bifen I/T -> bifen-it, beats bifen-xts)', () => {
+    const bifen = { vendorProductName: 'Bifen I/T Insecticide', quantity: '96 oz' };
+    const got = bestMatchingLink([
+      'https://www.domyown.com/bifen-xts-insecticide-p-999.html', // also carries "insecticide" but not "it"
+      'https://www.domyown.com/bifen-it-p-226.html',
+    ], bifen);
+    expect(got).toBe('https://www.domyown.com/bifen-it-p-226.html');
   });
   test('no product context -> legacy first link', () => {
     expect(bestMatchingLink(links, {})).toBe(links[0]);

@@ -140,39 +140,64 @@ async function firstProductLink(page, config) {
   }, sels);
 }
 
-// The distinctive name tokens to match a search result against (>=3 chars, so a
-// formulation code like "SC" can't spuriously match an unrelated slug).
+// Tokens to match a product against a result slug: alphanumeric, >=2 chars, with
+// consecutive single letters merged so a slashed formulation code like "I/T" -> "it".
 function searchTokens(product) {
   const s = (product && (product.searchQuery || product.vendorProductName || product.productName || product.name)) || '';
-  return [...new Set((String(s).toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) => t.length >= 3))];
+  const raw = String(s).toLowerCase().match(/[a-z0-9]+/g) || [];
+  const merged = [];
+  let run = '';
+  for (const t of raw) {
+    if (t.length === 1) { run += t; continue; } // collapse i / t -> it
+    if (run) { merged.push(run); run = ''; }
+    merged.push(t);
+  }
+  if (run) merged.push(run);
+  return [...new Set(merged.filter((t) => t.length >= 2))];
+}
+
+// Chemical-class words that appear in many product names but DON'T distinguish one
+// product from another of the same brand (every Bifen is an "insecticide"), and which
+// vendors often drop from the slug. Excluded from scoring so they can't tip a tie to
+// the wrong variant; the brand token below still does the real gating.
+const GENERIC_NAME_TOKENS = new Set([
+  'insecticide', 'insecticides', 'termiticide', 'herbicide', 'herbicides',
+  'fungicide', 'fungicides', 'miticide', 'pesticide', 'rodenticide', 'nematicide', 'fertilizer',
+]);
+
+// Alphanumeric segments of a product URL path, as a Set for EXACT-segment matching
+// (so "sc" matches a "sc" segment, not a substring of "celsius").
+function slugSegments(href) {
+  let path = String(href);
+  try { path = new URL(href).pathname; } catch { /* relative/garbage — match as-is */ }
+  return new Set(path.toLowerCase().match(/[a-z0-9]+/g) || []);
 }
 
 // PURE: choose the result link whose URL slug best matches the product. Modern
 // storefront search is a relevance-ranked widget — the RIGHT product is often not
-// first (e.g. a DoMyOwn "Taurus SC" search lists Talstar above Taurus). Pick by
-// name-token overlap (require >=min(2,#tokens) so a recommendation for a product we
-// don't sell isn't grabbed), breaking ties by also matching the pack-size tokens so
-// the size-specific page wins when a vendor splits sizes across pages. Returns a
-// URL or null (null -> the product isn't in these results; skip, don't guess).
+// first (a DoMyOwn "Taurus SC" search lists Talstar above Taurus). The product's
+// BRAND token (first >=3-char name token) MUST appear as a slug segment, so a listing
+// for a product we don't carry is never grabbed; among brand matches the link sharing
+// the most distinctive name + pack-size tokens wins (so "bifen-it" beats "bifen-xts"
+// even though that slug also carries the generic "insecticide", and the size-specific
+// page beats the generic one). Returns null when nothing qualifies (skip, don't guess).
 function bestMatchingLink(hrefs, product) {
   const list = (hrefs || []).filter(Boolean);
   if (!list.length) return null;
   const nameToks = searchTokens(product);
   if (!nameToks.length) return list[0]; // no product context -> legacy first-link
+  const brand = nameToks.find((t) => t.length >= 3) || nameToks[0];
+  const scoreToks = nameToks.filter((t) => !GENERIC_NAME_TOKENS.has(t));
   const sizeToks = [...new Set((String((product && product.quantity) || '').toLowerCase().match(/[a-z0-9]+/g) || [])
     .filter((t) => t.length >= 2 && !nameToks.includes(t)))];
-  const need = Math.min(2, nameToks.length);
   let best = null;
-  let bestName = -1;
-  let bestTotal = -1;
+  let bestScore = -1;
   for (const href of list) {
-    const slug = String(href).toLowerCase();
-    const nameHits = nameToks.reduce((n, t) => n + (slug.includes(t) ? 1 : 0), 0);
-    if (nameHits < need) continue;
-    const total = nameHits + sizeToks.reduce((n, t) => n + (slug.includes(t) ? 1 : 0), 0);
-    if (nameHits > bestName || (nameHits === bestName && total > bestTotal)) {
-      best = href; bestName = nameHits; bestTotal = total;
-    }
+    const seg = slugSegments(href);
+    if (!seg.has(brand)) continue; // brand is mandatory
+    const score = scoreToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0)
+      + sizeToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0);
+    if (score > bestScore) { best = href; bestScore = score; }
   }
   return best;
 }
