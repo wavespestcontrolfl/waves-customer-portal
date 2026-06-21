@@ -662,10 +662,10 @@ async function queryRevenue(input) {
   if (group_by === 'customer') {
     const rows = await query.select(
       'customers.id', 'customers.first_name', 'customers.last_name',
-      db.raw('SUM(invoices.total) as total_revenue'),
+      db.raw('SUM(GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0)) as total_revenue'),
       db.raw('COUNT(*) as invoice_count'),
     ).groupBy('customers.id', 'customers.first_name', 'customers.last_name')
-      .orderByRaw('SUM(invoices.total) DESC').limit(50);
+      .orderByRaw('SUM(GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0)) DESC').limit(50);
 
     return { grouped_by: 'customer', rows: rows.map(r => ({ id: r.id, name: `${r.first_name} ${r.last_name}`, total_revenue: parseFloat(r.total_revenue || 0), invoice_count: parseInt(r.invoice_count) })) };
   }
@@ -673,7 +673,7 @@ async function queryRevenue(input) {
   if (group_by === 'month') {
     const rows = await query.select(
       db.raw("TO_CHAR(invoices.created_at, 'YYYY-MM') as month"),
-      db.raw('SUM(invoices.total) as total_revenue'),
+      db.raw('SUM(GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0)) as total_revenue'),
       db.raw('COUNT(*) as invoice_count'),
     ).groupByRaw("TO_CHAR(invoices.created_at, 'YYYY-MM')")
       .orderByRaw("TO_CHAR(invoices.created_at, 'YYYY-MM') DESC").limit(24);
@@ -693,14 +693,17 @@ async function queryRevenue(input) {
       if (status && status !== 'all') q.where('status', status);
     })
     .select(
-      db.raw('SUM(total) as total_revenue'),
+      // Amount due (total − applied account credit): a paid credit-applied invoice
+      // keeps its gross total but only collected the reduced cash, so summing raw
+      // total would overstate revenue by the consumed credit.
+      db.raw('SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as total_revenue'),
       db.raw('COUNT(*) as total_invoices'),
       db.raw("SUM(CASE WHEN status = 'overdue' THEN GREATEST(total - COALESCE(credit_applied, 0), 0) ELSE 0 END) as overdue_amount"),
     ).first();
 
   return {
     invoices: invoices.map(i => ({
-      id: i.id, customer: `${i.first_name} ${i.last_name}`, amount: parseFloat(i.total || 0), status: i.status, date: i.created_at,
+      id: i.id, customer: `${i.first_name} ${i.last_name}`, amount: Math.max(0, parseFloat(i.total || 0) - parseFloat(i.credit_applied || 0)), status: i.status, date: i.created_at,
     })),
     summary: {
       total_revenue: parseFloat(totals.total_revenue || 0),

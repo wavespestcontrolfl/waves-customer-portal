@@ -941,6 +941,13 @@ const StripeService = {
     let base;
     let surcharge;
     let total;
+    let coveredByCredit = false;
+    // Account credit this charge drew down (post-apply credit_applied − pre-apply).
+    // Captured outside the transaction so the orphan path (Stripe charged, DB write
+    // failed → rollback) can re-persist it: the rollback reverts the draw-down while
+    // the card was charged the REDUCED amount, so without this the customer keeps
+    // both the discount and the restored credit and the orphan no longer matches.
+    let chargeAppliedCreditDelta = 0;
     try {
       await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
@@ -966,6 +973,37 @@ const StripeService = {
             if (activeIntent.status !== 'canceled') {
               await stripe.paymentIntents.cancel(activeIntent.id);
             }
+          }
+        }
+
+        // The stale collection session (if any) was just cancelled, but its id
+        // is still on the row and applyAccountCreditToInvoice fail-closes on any
+        // attached PI. Clear it, then apply available account credit so the card
+        // is charged amount DUE, not the gross total — auto-apply otherwise only
+        // runs at dispatch completion, so this charge-now path (especially an
+        // invoice with an abandoned /pay PI, which would block the route-level
+        // apply) could collect gross while the customer's credit sits unused.
+        // Gated + idempotent; on full coverage there is nothing to charge.
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+          if (lockedInvoice.stripe_payment_intent_id) {
+            await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
+            lockedInvoice.stripe_payment_intent_id = null;
+          }
+          const { applyAccountCreditToInvoice } = require('./customer-credit');
+          await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
+            logger.warn(`[stripe] charge-time account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
+          const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+          if (recredited) Object.assign(lockedInvoice, recredited);
+          chargeAppliedCreditDelta = Math.round(
+            (((Number(lockedInvoice.credit_applied) || 0) - (Number(invoice.credit_applied) || 0)) * 100),
+          ) / 100;
+          if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            // Fully covered by account credit. COMMIT the credit draw-down +
+            // prepaid transition (return, don't throw — a throw would roll back
+            // the apply AND the PI clearing, stranding the invoice) and skip the
+            // card charge. Settled below, after the transaction commits.
+            coveredByCredit = true;
+            return;
           }
         }
 
@@ -1130,11 +1168,61 @@ const StripeService = {
       } catch (orphanErr) {
         logger.error(`[stripe] DOUBLE FAILURE: orphan-charges insert also failed for PI ${paymentIntent.id}: ${orphanErr.message}`);
       }
+      // The rollback reverted the account-credit draw-down, but the card was charged
+      // the REDUCED (credit-applied) amount. Re-persist that exact draw-down in a
+      // fresh committed transaction so the balance + invoice reflect the consumed
+      // credit and the orphan charge reconciles against the reduced amount due — else
+      // the customer keeps both the discount and the restored credit. Done directly
+      // (not via applyAccountCreditToInvoice, which fail-closes on the still-attached
+      // stale PI the rollback restored). Idempotent: only tops up to the charged level.
+      if (chargeAppliedCreditDelta > 0) {
+        try {
+          const { postCreditMovement, round2 } = require('./customer-credit');
+          await db.transaction(async (trx) => {
+            const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+            if (!locked) return;
+            const current = round2(locked.credit_applied || 0);
+            const target = round2((Number(invoice.credit_applied) || 0) + chargeAppliedCreditDelta);
+            if (current < target) {
+              await postCreditMovement({
+                customerId: invoice.customer_id,
+                delta: -round2(target - current),
+                source: 'adjustment',
+                invoiceId,
+                note: `Account credit consumed by orphaned card charge ${paymentIntent.id} (DB write failed post-charge)`,
+                createdBy: 'system:orphan_charge',
+              }, trx);
+              await trx('invoices').where({ id: invoiceId }).update({ credit_applied: target, updated_at: trx.fn.now() });
+            }
+          });
+        } catch (reErr) {
+          logger.error(`[stripe] CRITICAL: orphan credit re-persist failed for invoice ${invoiceId} (PI ${paymentIntent.id}): ${reErr.message}`);
+        }
+      }
       const chargedErr = new Error(`Stripe charge ${paymentIntent.id} succeeded but DB write failed for invoice ${invoice.invoice_number}`);
       chargedErr.code = 'STRIPE_CHARGED_DB_FAILED';
       chargedErr.stripePaymentIntentId = paymentIntent.id;
       chargedErr.amount = total;
       throw chargedErr;
+    }
+
+    if (coveredByCredit) {
+      // Account credit fully covered the invoice inside the committed transaction
+      // above (now prepaid) — no card was charged. Run the same post-payment side
+      // effects a real payment would (stop dunning, sync any annual-prepay term).
+      logger.info(`[stripe] Card-on-file: account credit fully covered invoice ${invoice.invoice_number} — no card charge`);
+      try {
+        await require('./invoice-followups').stopOnPayment(invoiceId);
+      } catch (e) {
+        logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
+      }
+      try {
+        const fresh = await db('invoices').where({ id: invoiceId }).first();
+        if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
+      } catch (e) {
+        logger.warn(`[stripe] term sync after credit coverage failed for ${invoiceId}: ${e.message}`);
+      }
+      return { covered_by_credit: true, status: 'prepaid', paymentId: null, paymentIntentId: null };
     }
 
     logger.info(`[stripe] Card-on-file charge succeeded: $${total} for invoice ${invoice.invoice_number}, PI ${paymentIntent.id}`);
@@ -1331,6 +1419,7 @@ const StripeService = {
     let baseAmount;
     let cardSurcharge;
     let cardTotal;
+    let coveredByCredit = false;
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -1340,6 +1429,72 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
+
+        // Auto-apply only does anything when the customer actually has account
+        // credit. Resolve the available balance once up front and gate BOTH the
+        // stale-PI triage and the apply on it, so an invoice for a customer with
+        // no credit runs the original PI lifecycle untouched (reuse an open PI,
+        // 409 on an in-flight one, replace a canceled one via the idempotency
+        // key). The triage must NEVER cancel/clear a PI when there's nothing to
+        // draw down. A missing customer row reads as zero.
+        let availableCredit = 0;
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit && lockedInvoice.customer_id) {
+          const creditRow = await trx('customers')
+            .where({ id: lockedInvoice.customer_id })
+            .first('account_credits');
+          availableCredit = Number(creditRow?.account_credits) || 0;
+        }
+
+        // Stale-PI triage BEFORE auto-apply: applyAccountCreditToInvoice
+        // fail-closes on any attached PI, and the reuse block below would
+        // otherwise re-price a dead PI at the gross amount. If the existing PI is
+        // non-live (no active payment row + a cancelable Stripe status), cancel it
+        // and clear the column so credit applies and a fresh PI is minted for
+        // amount due. Money actually in flight is left untouched (handled by the
+        // reuse block / its 409). The invoice is forUpdate-locked for the whole
+        // transaction, so this can't race a new PI; on any error it falls back to
+        // the pre-credit behaviour (the lone PI path has no double-charge risk).
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit
+          && availableCredit > 0
+          && lockedInvoice.stripe_payment_intent_id) {
+          try {
+            const existingPayment = await trx('payments')
+              .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
+              .first();
+            const terminalPayStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
+            const hasLivePayment = existingPayment && !terminalPayStatuses.includes(existingPayment.status);
+            if (!hasLivePayment) {
+              const existingPi = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+              const liveStatuses = ['processing', 'succeeded', 'requires_capture', 'requires_action'];
+              if (!liveStatuses.includes(existingPi.status)) {
+                if (existingPi.status !== 'canceled') await stripe.paymentIntents.cancel(existingPi.id);
+                await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
+                lockedInvoice.stripe_payment_intent_id = null;
+              }
+            }
+          } catch (e) {
+            logger.warn(`[stripe] pay-page stale-PI triage skipped for invoice ${invoiceId}: ${e.message}`);
+          }
+        }
+
+        // Apply available account credit before pricing so the customer pays
+        // amount due, not the gross total. This controlled setup POST — not the
+        // public-by-token GET — is the safe seam for it when the pay page is the
+        // first touch after credit was issued / a link is reused. Gated +
+        // idempotent; fail-closes on an attached PI. Full coverage COMMITS the
+        // prepaid transition (return, NOT throw → no rollback) and skips minting
+        // a PaymentIntent; settled after the transaction below.
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit && availableCredit > 0) {
+          const { applyAccountCreditToInvoice } = require('./customer-credit');
+          await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
+            logger.warn(`[stripe] pay-page account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
+          const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+          if (recredited) Object.assign(lockedInvoice, recredited);
+          if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            coveredByCredit = true;
+            return;
+          }
+        }
 
         // Charge base = amount due (total − applied account credit), not raw total.
         baseAmount = invoiceAmountDue(lockedInvoice);
@@ -1443,6 +1598,26 @@ const StripeService = {
         });
         if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
       });
+
+      if (coveredByCredit) {
+        // Account credit fully covered the invoice in the committed transaction
+        // above — no PaymentIntent to mint. Run the same post-payment side effects
+        // a real payment would, and return a covered state (no clientSecret) so
+        // the pay page settles instead of charging.
+        try {
+          await require('./invoice-followups').stopOnPayment(invoiceId);
+        } catch (e) {
+          logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
+        }
+        try {
+          const fresh = await db('invoices').where({ id: invoiceId }).first();
+          if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
+        } catch (e) {
+          logger.warn(`[stripe] term sync after credit coverage failed for ${invoiceId}: ${e.message}`);
+        }
+        logger.info(`[stripe] Pay-page: account credit fully covered invoice ${invoice.invoice_number} — no PaymentIntent`);
+        return { covered_by_credit: true, status: 'prepaid', clientSecret: null, paymentIntentId: null, amount: 0 };
+      }
 
       logger.info(`[stripe] Invoice PaymentIntent created: ${paymentIntent.id} for invoice ${invoice.invoice_number} (base=$${baseAmount})`);
       return {

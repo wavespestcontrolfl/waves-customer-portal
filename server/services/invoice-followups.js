@@ -381,6 +381,31 @@ async function fireStep(row) {
     logger.info(`[invoice-followups] paused sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
     return;
   }
+  // Apply any available account credit before dunning so the reminder bills amount
+  // due, not the gross balance — credit issued AFTER the invoice was sent isn't drawn
+  // down until a payment-ask seam runs, and this dunning touch is one of them. Gated +
+  // best-effort + idempotent. Re-read the (possibly reduced) invoice; if credit fully
+  // covered it the invoice is now prepaid/paid — stop the sequence instead of dunning.
+  // Track what THIS dun drew down so the no-channel-delivered path below can reverse
+  // it (don't consume credit for an undelivered reminder; matches the send/project
+  // rollback).
+  let dunAppliedCredit = 0;
+  try {
+    const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
+    const dunCreditResult = await autoApplyAccountCreditIfEnabled(row.invoice_id);
+    dunAppliedCredit = dunCreditResult?.applied || 0;
+    const fresh = await db('invoices').where({ id: row.invoice_id }).first('total', 'credit_applied', 'status');
+    if (fresh) {
+      row.total = fresh.total;
+      row.credit_applied = fresh.credit_applied;
+      if (['prepaid', 'paid'].includes(String(fresh.status || '').toLowerCase())) {
+        await stopOnPayment(row.invoice_id).catch(() => {});
+        return;
+      }
+    }
+  } catch (creditErr) {
+    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+  }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
   const serviceDate = row.service_date
@@ -439,6 +464,18 @@ async function fireStep(row) {
       paused_reason: smsSkipReason || emailResult.reason || emailResult.error || 'no_channel_delivered',
       next_touch_at: null,
     });
+    // No reminder went out — reverse the credit THIS dun drew down so we don't consume
+    // it for an undelivered touch (matches the invoice/project send rollback). Only
+    // this dun's increment; any prior applied credit stays. The invoice is collectible
+    // here, so reverseAppliedCredit (which refuses 'sending'/'prepaid') applies.
+    if (dunAppliedCredit > 0) {
+      try {
+        const { reverseAppliedCredit } = require('./customer-credit');
+        await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
+      } catch (e) {
+        logger.warn(`[invoice-followups] credit reversal after undelivered dun skipped for ${row.invoice_id}: ${e.message}`);
+      }
+    }
     return;
   }
 

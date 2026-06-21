@@ -7,6 +7,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('../services/audit-log');
+const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -1799,13 +1800,16 @@ router.get('/:id', async (req, res, next) => {
     // by `status !== 'paid'`).
     const COLLECTIBLE_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid']);
     const mappedInvoices = (invoices || []).map(inv => {
-      const total = parseFloat(inv.total || 0);
+      // Amount DUE / cash PAID both net out applied account credit (cents-safe
+      // via invoiceAmountDue) — a partial credit reduces what's owed and the
+      // cash collected, so the gross `total` would overstate both.
+      const amountDue = invoiceAmountDue(inv);
       const isPaid = inv.status === 'paid' || inv.status === 'prepaid';
       const isCollectible = COLLECTIBLE_STATUSES.has(inv.status);
       return {
         ...inv,
-        amount_due: isCollectible ? total : 0,
-        amount_paid: isPaid ? total : 0,
+        amount_due: isCollectible ? amountDue : 0,
+        amount_paid: isPaid ? amountDue : 0,
       };
     });
     // Lifetime revenue is the net of all paid payments (Stripe + Zelle/manual),

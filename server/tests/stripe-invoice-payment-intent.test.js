@@ -61,10 +61,17 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       where: jest.fn(() => paymentsQuery),
       first: jest.fn().mockResolvedValue(null),
     };
+    // Auto-apply resolves the customer's account-credit balance up front; these
+    // cases have no credit, so the original PI lifecycle must run untouched.
+    const customersQuery = {
+      where: jest.fn(() => customersQuery),
+      first: jest.fn().mockResolvedValue({ account_credits: '0.00' }),
+    };
 
     trxMock = jest.fn(table => {
       if (table === 'invoices') return lockedInvoiceQuery;
       if (table === 'payments') return paymentsQuery;
+      if (table === 'customers') return customersQuery;
       throw new Error(`Unexpected trx table: ${table}`);
     });
     dbMock = jest.fn(table => {

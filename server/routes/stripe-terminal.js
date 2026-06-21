@@ -103,6 +103,10 @@ function getHandoffSecret() {
 // adminAuthenticate guarantees req.technicianId is set — if that ever
 // changes the transaction aborts (advisory lock call throws on NULL).
 router.post('/handoff', adminAuthenticate, async (req, res) => {
+  // Hoisted so the generic catch below can reverse seam-applied credit when no
+  // handoff token ends up minted (any abort after the credit-apply).
+  let handoffAppliedCredit = 0;
+  let handoffTokenMinted = false;
   try {
     const secret = getHandoffSecret();
     if (!secret) {
@@ -113,8 +117,12 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     const { invoice_id } = req.body || {};
     if (!invoice_id) return res.status(400).json({ error: 'invoice_id required' });
 
-    const invoice = await db('invoices').where({ id: invoice_id }).first();
+    let invoice = await db('invoices').where({ id: invoice_id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+    // Status + Bill-To guards run FIRST — before any Stripe cancellation or
+    // credit-apply side effect — so we never cancel a payer's PaymentIntent (or
+    // touch a terminal invoice) only to then reject the in-person collection.
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
     if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
     if (invoice.status === 'processing') return res.status(409).json({ error: 'Bank payment is already processing' });
@@ -122,6 +130,23 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // payer-billed invoice — the tech must not collect the AP's invoice from the
     // service recipient. AR routes to the payer AP inbox.
     if (invoice.payer_id) return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
+
+    // Apply available account credit before pricing the handoff so the tech
+    // collects amount due (total − applied credit), not the gross total — on this
+    // charge-now path nothing else applies the credit first. No PI mutation here:
+    // applyAccountCreditToInvoice fail-closes on any attached PaymentIntent, so a
+    // stale /pay session simply isn't auto-applied rather than us cancelling it
+    // (cancelling races with /pay and the later mint — that belongs inside the
+    // mint's row lock, a follow-up). The common Tap-to-Pay flow is a
+    // completion-created invoice with no PI and gets amount due here. Gated +
+    // best-effort + idempotent; full coverage flips to 'prepaid', rejected below.
+    const { autoApplyAccountCreditIfEnabled } = require('../services/customer-credit');
+    const handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id);
+    handoffAppliedCredit = handoffCreditResult?.applied || 0;
+    invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;
+    if (invoice.status === 'prepaid') {
+      return res.status(400).json({ error: 'Invoice is now covered by account credit — no in-person collection needed' });
+    }
 
     // Collect the amount DUE (total − applied account credit), not raw total.
     const amount_cents = Math.round(invoiceAmountDue(invoice) * 100);
@@ -211,6 +236,17 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         ip_address: ipFromReq(req),
         user_agent: uaFromReq(req),
       });
+      // Mint was rate-limited — no handoff/deep link issued. Reverse any credit
+      // this seam applied above so we don't consume the customer's credit and
+      // edit-lock an invoice the tech couldn't actually collect on.
+      if (handoffCreditResult?.applied > 0) {
+        try {
+          const { reverseAppliedCredit } = require('../services/customer-credit');
+          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_rate_limited' });
+        } catch (e) {
+          logger.warn(`[stripe-terminal] credit reversal after rate-limited handoff skipped for ${invoice_id}: ${e.message}`);
+        }
+      }
       res.setHeader('Retry-After', String(rateLimitedRetryAfter));
       return res.status(429).json({
         error: 'Too many handoff mints. Try again in an hour.',
@@ -245,6 +281,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       user_agent: uaFromReq(req),
     });
 
+    handoffTokenMinted = true;
     res.json({
       token,
       deep_link: `wavespay://collect?t=${encodeURIComponent(token)}`,
@@ -253,6 +290,16 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[stripe-terminal] handoff mint failed: ${err.message}`);
+    // No handoff token was minted but we already applied credit above — return it
+    // so an aborted mint doesn't strand the customer's credit + edit-lock the invoice.
+    if (!handoffTokenMinted && handoffAppliedCredit > 0) {
+      try {
+        const { reverseAppliedCredit } = require('../services/customer-credit');
+        await reverseAppliedCredit({ invoiceId: req.body?.invoice_id, amount: handoffAppliedCredit, createdBy: 'system:handoff_mint_failed' });
+      } catch (e) {
+        logger.warn(`[stripe-terminal] credit reversal after failed handoff mint skipped: ${e.message}`);
+      }
+    }
     res.status(500).json({ error: 'Handoff mint failed' });
   }
 });
@@ -774,10 +821,12 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
       return res.status(403).json({ error: 'Handoff belongs to a different technician', code: 'tech_mismatch' });
     }
 
-    // Re-verify the invoice hasn't gone terminal or changed total since the PI
-    // was minted — mirror of the /payment-intent checks. The surcharge rides on
-    // the PI, not the invoice, but if the base itself moved the whole charge is
-    // stale and the tech must re-handoff.
+    // Re-verify the invoice hasn't gone terminal or changed its amount due since
+    // the PI was minted — mirror of the /payment-intent checks. The surcharge rides
+    // on the PI, not the invoice, but if the base itself moved the whole charge is
+    // stale and the tech must re-handoff. The handoff is minted for the amount DUE
+    // (total − applied account credit), so verify against that, not the gross total
+    // — else a partially credit-applied invoice always mismatches here.
     const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
     if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
       return res.status(409).json({
@@ -786,7 +835,7 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
       });
     }
     const baseCents = Number(handoff.amount_cents);
-    if (Math.round(Number(invoice.total) * 100) !== baseCents) {
+    if (Math.round(invoiceAmountDue(invoice) * 100) !== baseCents) {
       return res.status(409).json({ error: 'Invoice amount changed since handoff', code: 'invoice_amount_changed' });
     }
 

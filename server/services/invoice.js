@@ -1598,8 +1598,51 @@ const InvoiceService = {
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
   async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null } = {}) {
+    // Direct callers (batch sendImmediately, the AI-assistant send tool, the
+    // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
+    // before its own claim — so apply it here too, or those pay links bill the
+    // gross total. Skipped when allowClaimed: that's the wrapper calling in, and
+    // it already applied + handled full coverage before claiming. Gated +
+    // best-effort + idempotent; full coverage flips the invoice to 'prepaid' and
+    // the claim below rejects it as not-sendable (nothing left to collect).
+    // Claim FIRST so a lost concurrent-send race throws before any credit is drawn
+    // down — applying before the claim strands credit the winner can't see and we
+    // can't reverse off the winner's 'sending' row (reverseAppliedCredit refuses
+    // 'sending').
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
     const { invoice, previousStatus, claimed } = claim;
+
+    // Direct callers (batch sendImmediately, the AI-assistant send tool, the
+    // from-service SMS-only path) bypass sendViaSMSAndEmail, so apply credit here too
+    // or those pay links bill the gross total. Skipped when allowClaimed: that's the
+    // wrapper calling in, which already applied + handled full coverage. Now that we
+    // own the claim. Gated + best-effort + idempotent; full coverage flips the
+    // now-'sending' invoice to 'prepaid'.
+    let smsCreditResult = null;
+    if (!allowClaimed) {
+      const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
+      smsCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
+      if (smsCreditResult?.fullyCovered) {
+        // Covered by credit IS success for the caller (the invoice is now 'prepaid',
+        // settled — nothing to send). Direct callers check `sent || ok`, so flag
+        // ok:true; sent stays false because no SMS went out. No claim to restore —
+        // the apply flipped the row to the terminal 'prepaid' state.
+        return { sent: false, ok: true, covered_by_credit: true, code: "covered_by_credit", reason: "Invoice covered by account credit — nothing to collect" };
+      }
+    }
+    // Reverse this seam's credit application if the SMS ultimately isn't delivered
+    // (no phone / provider error) — otherwise we'd consume credit and edit-lock an
+    // invoice whose pay link never went out. No-op when nothing was applied here.
+    // Each failure path below restores the 'sending' claim first, so this can run.
+    const reverseSmsCreditOnFailure = async () => {
+      if (allowClaimed || !(smsCreditResult?.applied > 0)) return;
+      try {
+        const { reverseAppliedCredit } = require("./customer-credit");
+        await reverseAppliedCredit({ invoiceId, amount: smsCreditResult.applied, createdBy: "system:sms_send_failed" });
+      } catch (e) {
+        logger.warn(`[invoice] credit reversal after failed SMS send skipped for ${invoiceId}: ${e.message}`);
+      }
+    };
 
     // Third-party Bill-To: never text the homeowner a pay link for a
     // payer-billed invoice — the pay link + AR route to the payer (email).
@@ -1613,6 +1656,7 @@ const InvoiceService = {
       .first();
     if (!customer?.phone) {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
+      await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
     }
 
@@ -1736,6 +1780,7 @@ const InvoiceService = {
         `[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`,
       );
       await restoreSendClaim(invoiceId, previousStatus, claimed);
+      await reverseSmsCreditOnFailure();
       return {
         sent: false,
         reason: "template-missing",
@@ -1778,6 +1823,7 @@ const InvoiceService = {
         // Don't mark the invoice as sent if the wrapper blocked us.
         // The follow-up cron + admin can retry once the underlying
         // condition (consent, opt-out, etc.) is resolved.
+        await reverseSmsCreditOnFailure();
         const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
         err.code = sendResult.code;
         err.reason = sendResult.reason;
@@ -1825,6 +1871,10 @@ const InvoiceService = {
       return { sent: true, payUrl };
     } catch (err) {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
+      // Provider/Twilio error (or invoice-update failure) after we auto-applied
+      // credit above — the pay link was never delivered, so return the credit
+      // rather than leave it consumed + the invoice edit-locked.
+      await reverseSmsCreditOnFailure();
       logger.error(
         `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
       );
@@ -1843,13 +1893,40 @@ const InvoiceService = {
     } = {},
   ) {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
-    // individually. Refuse BEFORE claiming so we don't flip its status to
-    // 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
+    // individually. Refuse BEFORE claiming/applying credit so we don't flip its
+    // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
     const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
     }
+    // Claim FIRST, then apply credit. Applying before the claim strands credit when
+    // two sends race: the loser draws down the balance, but the winner already owns
+    // the 'sending' row — reverseAppliedCredit refuses 'sending', so the loser can't
+    // undo its apply, and the winner sees applied=0 (balance already consumed) and
+    // never reverses it either, leaving an undelivered, edit-locked invoice with
+    // credit_applied set. Claiming first means a lost race throws here before any
+    // credit is drawn down — nothing to reverse.
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    // Now that we own the claim, apply available account credit so the pay link the
+    // customer receives bills amount due (total − applied credit), not the gross
+    // total. Auto-apply otherwise only runs at dispatch completion, so invoices
+    // created via the manual / batch / from-service paths would send a gross pay
+    // link. Gated + best-effort + idempotent (sendViaSMS + sendInvoiceEmail both
+    // re-read the invoice by id, so they pick up the reduced amount). Full coverage
+    // flips the now-'sending' invoice to 'prepaid' — nothing to collect, report it
+    // covered; on a delivery failure the !ok path below restores the claim and
+    // reverses this seam's applied credit.
+    const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
+    const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
+    if (sendCreditResult?.fullyCovered) {
+      return {
+        ok: true,
+        covered_by_credit: true,
+        sms: { ok: false, code: "covered_by_credit" },
+        email: { ok: false, code: "covered_by_credit" },
+        payUrl: null,
+      };
+    }
     const { previousStatus, claimed } = claim;
     const { sendInvoiceEmail } = require("./invoice-email");
     const sms = { ok: false };
@@ -1949,8 +2026,23 @@ const InvoiceService = {
         });
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
+      // No channel delivered — reverse the credit this seam auto-applied before
+      // the send so we don't consume the customer's credit and edit-lock an
+      // invoice whose pay link never went out. Reverse ONLY when WE own the claim:
+      // for a pre-claimed (allowClaimed) scheduled send, restoreSendClaim is a
+      // no-op and the row is still 'sending', so reverseAppliedCredit would refuse
+      // — the caller (processScheduledSends) restores 'scheduled' then reverses
+      // creditApplied from the result.
+      if (!allowClaimed && sendCreditResult?.applied > 0) {
+        try {
+          const { reverseAppliedCredit } = require("./customer-credit");
+          await reverseAppliedCredit({ invoiceId, amount: sendCreditResult.applied, createdBy: "system:send_failed" });
+        } catch (e) {
+          logger.warn(`[invoice] credit reversal after failed send skipped for ${invoiceId}: ${e.message}`);
+        }
+      }
     }
-    return { ok, sms, email, payUrl };
+    return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0 };
   },
 
   async markDeliverySent(
@@ -2123,6 +2215,18 @@ const InvoiceService = {
           scheduled_send_error: error,
           updated_at: new Date(),
         });
+      // We pre-claimed this row, so sendViaSMSAndEmail couldn't reverse the credit
+      // it auto-applied (the row was 'sending'). Now that it's back to 'scheduled'
+      // and nothing was delivered, return that credit so it isn't stranded +
+      // edit-locking the invoice until the next attempt.
+      if (result.creditApplied > 0) {
+        try {
+          const { reverseAppliedCredit } = require("./customer-credit");
+          await reverseAppliedCredit({ invoiceId: inv.id, amount: result.creditApplied, createdBy: "system:scheduled_send_failed" });
+        } catch (e) {
+          logger.warn(`[invoice] credit reversal after failed scheduled send skipped for ${inv.id}: ${e.message}`);
+        }
+      }
       logger.error(
         `[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`,
       );
@@ -2733,6 +2837,52 @@ const InvoiceService = {
       await stopInvoiceFollowupSequence(id, "invoice_voided");
       return current;
     }
+    // 'prepaid' passes assertInvoiceVoidable so a credit-covered invoice can be
+    // voided (the txn returns the applied credit). But 'prepaid' alone can't tell
+    // a credit-only prepayment from a CASH-backed one. A cash-backed invoice books
+    // a payment row + sets payment_recorded_at at issuance; voiding it (instead of
+    // refunding) would hide collected money. Account-CREDIT prepayment sets neither
+    // signal (it only moves the credit ledger), so this still lets credit-covered
+    // invoices void. Mirrors the cancelled-service auto-void money guard.
+    const voidAppliedPayment = await db("payments")
+      .whereIn("status", ["paid", "processing"])
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [current.id])
+      .first("id");
+    if (current.payment_recorded_at || voidAppliedPayment) {
+      throw new Error(
+        `Cannot void an invoice with payment already applied (${voidAppliedPayment ? `payment ${voidAppliedPayment.id}` : "payment recorded"}) — issue a refund instead`,
+      );
+    }
+    // PI ↔ invoice ↔ webhook amount agreement: with partial credit, a collectible
+    // invoice can carry a live PaymentIntent (a customer mid-pay on /pay). Voiding
+    // returns the applied credit, so the PI must be cancelled FIRST — else the live
+    // client secret could still charge the reduced amount while the credit is back
+    // on the balance and the webhook skips the void invoice. Refuse if money is in
+    // flight; cancel a still-cancelable intent. Pre-lock Stripe triage (mirrors the
+    // apply-credit route); the transaction re-checks the PI id under the row lock.
+    const triagedVoidPiId = current.stripe_payment_intent_id || null;
+    if (triagedVoidPiId) {
+      const StripeService = require("./stripe");
+      let voidPi;
+      try {
+        voidPi = await StripeService.retrievePaymentIntent(triagedVoidPiId);
+      } catch (e) {
+        throw new Error(`Open payment session ${triagedVoidPiId} could not be verified (${e.message}); resolve it before voiding`);
+      }
+      if (!voidPi) {
+        throw new Error(`Open payment session ${triagedVoidPiId} could not be verified (payment service unavailable); resolve it before voiding`);
+      }
+      if (PI_MONEY_IN_FLIGHT_STATUSES.includes(voidPi.status)) {
+        throw new Error(`A payment is already in flight (${voidPi.status}); wait for it to settle or refund it before voiding`);
+      }
+      if (voidPi.status !== "canceled") {
+        try {
+          await StripeService.cancelPaymentIntent(triagedVoidPiId, { cancellation_reason: "abandoned" });
+        } catch (e) {
+          throw new Error(`Couldn't cancel the open payment session ${triagedVoidPiId} (${e.message}); resolve it before voiding`);
+        }
+      }
+    }
     // Void + deposit-ledger restore commit TOGETHER: a committed void beside
     // a still-consumed deposit strands the customer's money — the credit can
     // no longer roll forward or refund (a restore failure rolls the void
@@ -2760,6 +2910,25 @@ const InvoiceService = {
         .returning("*");
       if (!updated) {
         throw new Error("Invoice status changed while voiding — re-check and retry");
+      }
+      // A customer could have opened /pay and minted a NEW PaymentIntent between
+      // the pre-lock triage above and this locked update. If the attached PI
+      // changed, refuse — rolling back so the operator retries and the new PI gets
+      // triaged, rather than returning credit while a fresh client secret can charge.
+      if ((updated.stripe_payment_intent_id || null) !== triagedVoidPiId) {
+        throw new Error("A new payment session started for this invoice — re-check and retry the void");
+      }
+      // Re-check the money guard under the row lock: a cash payment could have
+      // recorded between the pre-transaction check and this update (a webhook can
+      // set payment_recorded_at / insert a paid payment row without flipping the
+      // status the conditional update keys on). Rolling back beats voiding away
+      // freshly-collected money.
+      const voidAppliedPaymentLocked = await trx("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
+        .first("id");
+      if (updated.payment_recorded_at || voidAppliedPaymentLocked) {
+        throw new Error("A payment was applied to this invoice while voiding — issue a refund instead");
       }
       const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
       await restoreDepositCreditForVoidedInvoice({ invoice: updated, trx });

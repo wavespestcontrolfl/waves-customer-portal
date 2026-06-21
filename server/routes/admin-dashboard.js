@@ -108,7 +108,9 @@ async function paidRevenueTotal(from, to) {
       from,
       to,
     )
-      .sum('i.total as total')
+      // Net applied account credit — same basis as paidRevenueDaily's gap series, so
+      // the period total reconciles to the chart (the card only collected amount due).
+      .select(db.raw('COALESCE(SUM(GREATEST(i.total - COALESCE(i.credit_applied, 0), 0)), 0) as total'))
       .first(),
   ]);
   return parseFloat(ledger?.total || 0) + parseFloat(paidInvoiceGaps?.total || 0);
@@ -142,7 +144,11 @@ async function paidRevenueDaily(from, to) {
       from,
       to,
     )
-      .select(db.raw(`${paidInvoiceGapDateExpr} as date`), db.raw('SUM(i.total) as total'))
+      // Net applied account credit out of the gross total: this gap fallback fills
+      // in paid Stripe invoices that have no payments-ledger row, and the card only
+      // collected amount due (total − credit_applied), so summing gross total would
+      // overstate cash on the revenue chart whenever partial credit was applied.
+      .select(db.raw(`${paidInvoiceGapDateExpr} as date`), db.raw('SUM(GREATEST(i.total - COALESCE(i.credit_applied, 0), 0)) as total'))
       .groupByRaw(paidInvoiceGapDateExpr)
       .orderBy('date'),
   ]);
@@ -537,8 +543,13 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
         .select(
           db.raw("COUNT(*) as issued"),
           db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
-          db.raw("SUM(total) as billed"),
-          db.raw("SUM(total) FILTER (WHERE status = 'paid') as collected_gross"),
+          // Net applied account credit out of BOTH billed and collected: the charge
+          // seams bill amount due (total − credit_applied), so a $100 invoice with
+          // $25 credit is a $75 cash bill collected as $75 — summing gross total
+          // would overstate both the cash billed and the cash collected (and the
+          // rate). Credit is a discount, not a collection success/failure.
+          db.raw("SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) as billed"),
+          db.raw("SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)) FILTER (WHERE status = 'paid') as collected_gross"),
           db.raw(`COALESCE(SUM(
             (SELECT COALESCE(SUM(p.refund_amount), 0) FROM payments p
                WHERE COALESCE(p.refund_amount, 0) > 0

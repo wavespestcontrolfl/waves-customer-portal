@@ -994,6 +994,12 @@ router.post('/:id/charge-card', async (req, res, next) => {
     const { paymentMethodId } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
 
+    // Account credit is auto-applied INSIDE chargeInvoiceWithSavedCard — after it
+    // validates the saved card + triages a stale PI, all in the same locked
+    // transaction — and on full coverage it commits 'prepaid' and returns
+    // { covered_by_credit: true } instead of charging. Do NOT pre-apply here: a
+    // stale/invalid paymentMethodId would otherwise consume credit before the
+    // card check throws, leaving the invoice reduced/edit-locked with no charge.
     const StripeService = require('../services/stripe');
     const result = await StripeService.chargeInvoiceWithSavedCard(req.params.id, paymentMethodId);
     res.json({ success: true, ...result });
@@ -1819,8 +1825,35 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
         }
-        if (locked.status !== 'prepaid') {
-          const err = new Error('Only a prepaid invoice can be reversed'); err.statusCode = 400; err.isOperational = true; throw err;
+        // Reversible: a fully-covered prepaid invoice, OR a still-collectible
+        // invoice carrying a PARTIAL auto-applied credit. The latter is otherwise
+        // edit-locked (credit_applied > 0 blocks editing) with no way to return
+        // the credit short of voiding — this is that return path.
+        const isPrepaid = locked.status === 'prepaid';
+        const isCollectibleWithCredit = !isPrepaid
+          && !INVOICE_UNCOLLECTIBLE_STATUSES.includes(locked.status)
+          // 'sending' isn't in INVOICE_UNCOLLECTIBLE_STATUSES, but a concurrent
+          // send may hold the claim and be delivering a reduced-amount pay link —
+          // reversing here would pull the credit out from under it (same race
+          // reverseAppliedCredit guards). Refuse while a send is in flight.
+          && String(locked.status || '').toLowerCase() !== 'sending'
+          && CustomerCredit.round2(locked.credit_applied || 0) > 0;
+        if (!isPrepaid && !isCollectibleWithCredit) {
+          const err = new Error('Only a prepaid invoice or one with partially applied account credit can be reversed'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+        // A partial reversal raises the invoice's amount due (credit_applied → 0),
+        // but an active payment plan was built against the REDUCED amount due — its
+        // total_balance wouldn't move, so reversing here would under-collect and
+        // desync AR. Refuse until the plan is cancelled/recreated. (Mirrors the
+        // apply-side active-plan guard; a fully-prepaid invoice is exempt — it is
+        // credit-covered with nothing on a collection plan.)
+        if (isCollectibleWithCredit) {
+          const activePlan = await trx('payment_plans')
+            .where({ invoice_id: id, status: 'active' })
+            .first('id');
+          if (activePlan) {
+            const err = new Error('This invoice has an active payment plan built against the reduced balance — cancel or recreate the plan before reversing the applied credit'); err.statusCode = 409; err.isOperational = true; throw err;
+          }
         }
         const restore = CustomerCredit.round2(locked.credit_applied || 0);
         if (restore <= 0) {
@@ -1836,25 +1869,47 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
           createdBy: recordedBy,
         }, trx);
 
-        // Restore the status the invoice held before it was prepaid (draft/
-        // scheduled/sent/viewed/overdue); fall back to 'sent' for older rows
-        // minted before prepaid_prev_status existed.
-        await trx('invoices').where({ id }).update({
-          status: locked.prepaid_prev_status || 'sent',
-          credit_applied: 0,
-          prepaid_at: null,
-          prepaid_by: null,
-          prepaid_prev_status: null,
-          paid_at: null,
-          setup_fee_waived: false,
-          updated_at: trx.fn.now(),
-        });
+        if (isPrepaid) {
+          // Restore the status the invoice held before it was prepaid (draft/
+          // scheduled/sent/viewed/overdue); fall back to 'sent' for older rows
+          // minted before prepaid_prev_status existed.
+          await trx('invoices').where({ id }).update({
+            status: locked.prepaid_prev_status || 'sent',
+            credit_applied: 0,
+            prepaid_at: null,
+            prepaid_by: null,
+            prepaid_prev_status: null,
+            paid_at: null,
+            setup_fee_waived: false,
+            updated_at: trx.fn.now(),
+          });
+        } else {
+          // Partial credit on a still-collectible invoice. If a PaymentIntent was
+          // minted against the reduced amount due, reversing the credit raises the
+          // amount due while that PI could still settle for the lower amount —
+          // refuse (fail closed, under this row lock) and let the operator resolve
+          // the open session first. (apply-credit cancels the PI before applying;
+          // this is the symmetric guard for the reverse direction. The whole
+          // transaction — including the credit restore above — rolls back.)
+          if (locked.stripe_payment_intent_id) {
+            const err = new Error('This invoice has an open payment session — resolve it before reversing the applied credit');
+            err.statusCode = 409; err.isOperational = true; throw err;
+          }
+          // Return the credit and clear credit_applied — the status and stamps are
+          // already correct, and this re-opens the invoice for editing.
+          await trx('invoices').where({ id }).update({
+            credit_applied: 0,
+            updated_at: trx.fn.now(),
+          });
+        }
 
         // If apply-credit had activated a linked annual-prepay term, un-pay it:
         // drop the term back to payment_pending and clear the future-visit
         // prepaid stamps so covered visits bill normally again. A later real
         // payment reactivates it (renewal-decided terms are left untouched).
-        if (locked.annual_prepay_term_id) {
+        // Prepaid-only: a partial credit on a collectible invoice never activated
+        // a term.
+        if (isPrepaid && locked.annual_prepay_term_id) {
           await trx('annual_prepay_terms')
             .where({ id: locked.annual_prepay_term_id })
             .whereNull('renewal_decision')
@@ -1964,12 +2019,27 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     try {
       const adminId = req.user?.id || req.technicianId || null;
       paymentPlan = await db.transaction(async (trx) => {
+        // Re-read the invoice under a row lock so a concurrent seam auto-apply can't
+        // lower amount due between the earlier read and this insert and leave a plan
+        // that over-collects the now-applied credit. Re-clamp the balance to the FRESH
+        // amount due and re-validate the installment against it.
+        const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+        const lockedAmountDue = lockedInvoice ? invoiceAmountDue(lockedInvoice) : amountDue;
+        const lockedTotalBalance = Math.min(totalBalance, lockedAmountDue);
+        if (!(lockedTotalBalance > 0)) {
+          const e = new Error('Invoice has no remaining balance after applied account credit — no payment plan needed');
+          e.statusCode = 409; throw e;
+        }
+        if (paymentAmount > lockedTotalBalance) {
+          const e = new Error('paymentAmount cannot exceed the invoice balance after applied account credit');
+          e.statusCode = 400; throw e;
+        }
         const [createdPlan] = await trx('payment_plans')
           .insert({
             customer_id: invoice.customer_id,
             invoice_id: invoice.id,
             payment_method_id: paymentMethodId,
-            total_balance: totalBalance,
+            total_balance: lockedTotalBalance,
             payment_amount: paymentAmount,
             payment_frequency: paymentFrequency,
             plan_start_date: planStartDate,
@@ -1992,6 +2062,11 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     } catch (err) {
       if (err?.code === '23505' && String(err.constraint || '').includes('payment_plans_one_active_per_invoice')) {
         return res.status(409).json({ error: 'Invoice already has an active payment plan' });
+      }
+      // Under-lock re-clamp validations (balance covered by credit / installment too
+      // large after credit) surface as client errors, not 500s.
+      if (err?.statusCode === 400 || err?.statusCode === 409) {
+        return res.status(err.statusCode).json({ error: err.message });
       }
       throw err;
     }
@@ -2019,7 +2094,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       customer_id: invoice.customer_id,
       action: 'payment_plan_created',
       description: `Payment plan created for invoice ${invoice.invoice_number || invoice.id}: `
-        + `$${paymentAmount.toFixed(2)} ${paymentFrequency} toward $${totalBalance.toFixed(2)} — ${createdBy}`,
+        + `$${paymentAmount.toFixed(2)} ${paymentFrequency} toward $${Number(paymentPlan.total_balance).toFixed(2)} — ${createdBy}`,
       metadata: {
         invoice_id: invoice.id,
         payment_plan_id: paymentPlan.id,

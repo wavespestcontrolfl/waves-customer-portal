@@ -9,14 +9,28 @@ const logger = require('../services/logger');
 // Token is 64-char crypto-random and has no TTL — receipts are records, not
 // actions, so customers may retrieve them months later for bookkeeping.
 
-async function loadPaymentForInvoice(invoiceId, customerId) {
+async function loadPaymentForInvoice(invoiceId, customerId, { stripePaymentIntentId = null, stripeChargeId = null } = {}) {
   try {
-    const row = await db('payments')
+    const base = () => db('payments')
       .where({ customer_id: customerId })
       .whereIn('status', ['paid', 'refunded', 'processing'])
+      .orderBy('created_at', 'desc');
+    // Primary: payments tagged with this invoice in metadata.invoice_id.
+    let row = await base()
       .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoiceId])
-      .orderBy('created_at', 'desc')
       .first();
+    // Fallback for legacy / card-on-file rows that predate the metadata tag: resolve
+    // by the invoice's own Stripe PaymentIntent / charge id. Without this a refunded
+    // invoice can return no payment row → the receipt PDF would render no refund and
+    // read as 'paid'.
+    if (!row && (stripePaymentIntentId || stripeChargeId)) {
+      row = await base()
+        .where(function () {
+          if (stripePaymentIntentId) this.orWhere('stripe_payment_intent_id', stripePaymentIntentId);
+          if (stripeChargeId) this.orWhere('stripe_charge_id', stripeChargeId);
+        })
+        .first();
+    }
     return row || null;
   } catch (err) {
     logger.warn(`[receipt-v2] payment lookup failed: ${err.message}`);
@@ -38,7 +52,10 @@ router.get('/:token', async (req, res, next) => {
 
     const customer = data.customer || {};
     const lineItems = data.line_items || [];
-    const payment = await loadPaymentForInvoice(data.id, data.customer_id);
+    const payment = await loadPaymentForInvoice(data.id, data.customer_id, {
+      stripePaymentIntentId: data.stripe_payment_intent_id,
+      stripeChargeId: data.stripe_charge_id,
+    });
 
     const refundAmount = payment ? Number(payment.refund_amount || 0) : 0;
     const totalPaid = payment ? Number(payment.amount || 0) : Number(data.total || 0);
@@ -60,6 +77,9 @@ router.get('/:token', async (req, res, next) => {
         taxRate: parseFloat(data.tax_rate),
         taxAmount: parseFloat(data.tax_amount),
         total: parseFloat(data.total),
+        // Applied account credit reduces the cash charged — surface it so the
+        // receipt page can show the deduction and visually reconcile to the total.
+        creditApplied: parseFloat(data.credit_applied || 0),
         dueDate: data.due_date,
         paidAt: data.paid_at,
         paymentMethod: data.payment_method,
@@ -142,9 +162,26 @@ router.get('/:token/pdf', async (req, res, next) => {
   try {
     const data = await InvoiceService.getByToken(req.params.token);
     if (!data) return res.status(404).json({ error: 'Receipt not found' });
-    if (data.status !== 'paid') return res.status(409).json({ error: 'Receipt not available — invoice unpaid' });
+    // Receipt permanence: a paid invoice that is later (fully) refunded moves to
+    // status 'refunded' but keeps a valid bookkeeping receipt for the payment that
+    // occurred — the view route + payment lookup already serve refunded receipts,
+    // so the PDF must too (otherwise a credit-applied full refund silently breaks
+    // the existing receipt link).
+    if (!['paid', 'refunded'].includes(data.status)) {
+      return res.status(409).json({ error: 'Receipt not available — invoice unpaid' });
+    }
 
-    const payment = await loadPaymentForInvoice(data.id, data.customer_id);
+    const payment = await loadPaymentForInvoice(data.id, data.customer_id, {
+      stripePaymentIntentId: data.stripe_payment_intent_id,
+      stripeChargeId: data.stripe_charge_id,
+    });
+    // A refunded receipt MUST show the refund — if the payment/refund row can't be
+    // resolved (e.g. a legacy row with neither metadata.invoice_id nor a matching
+    // PI/charge), refuse rather than render a PDF that omits the refund and reads as
+    // a plain 'paid' receipt for a refunded invoice.
+    if (data.status === 'refunded' && !payment) {
+      return res.status(409).json({ error: 'Receipt not available — refund record could not be resolved' });
+    }
     // Keep the receipt's Bill-To consistent with the invoice (payer, not the
     // homeowner, when the job was third-party-billed).
     await require('../services/payer').attachToInvoice(data);

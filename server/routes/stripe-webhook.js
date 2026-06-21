@@ -1605,6 +1605,7 @@ async function handleChargeRefunded(charge) {
         stripe_refund_id: refundId,
       });
     const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
+    let result = pmt;
     if (isFullRefund) {
       // Resolve the invoice from every available link (PI, metadata.invoice_id,
       // charge.payment_intent, invoices.stripe_charge_id) — a reconciled
@@ -1614,9 +1615,34 @@ async function handleChargeRefunded(charge) {
       if (invId) {
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
         await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+        // Pre-settlement refund: charge.refunded arrived before payment_intent.succeeded
+        // wrote the payments row (the update above hit 0 rows → pmt is null), but the
+        // invoice still resolved + was marked 'refunded'. The later succeeded handler
+        // skips refunded invoices, so without a row here the refunded receipt PDF + the
+        // refund email have nothing to read. Insert a durable refunded marker (mirrors
+        // the statement pre-settlement branch). Idempotent: a replay updates this row
+        // above and finds it via pmt, so it won't double-insert.
+        if (!pmt) {
+          const inv = await trx('invoices').where({ id: invId }).first('customer_id', 'invoice_number');
+          const [marker] = await trx('payments').insert({
+            customer_id: inv?.customer_id || null,
+            processor: 'stripe',
+            stripe_payment_intent_id: charge.payment_intent || null,
+            stripe_charge_id: chargeId,
+            payment_date: etDateString(),
+            amount: (charge.amount || refundAmountCents) / 100,
+            status: 'refunded',
+            refund_amount: cumulativeRefundAmountDollars,
+            refund_status: 'full',
+            stripe_refund_id: refundId,
+            description: `Invoice ${inv?.invoice_number || invId} fully refunded`,
+            metadata: JSON.stringify({ invoice_id: invId, source: 'invoice_refund' }),
+          }).returning('*');
+          result = marker;
+        }
       }
     }
-    return pmt;
+    return result;
   });
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
