@@ -15,7 +15,9 @@
  */
 
 const net = require('net');
-const dns = require('dns').promises;
+const dns = require('dns');
+const http = require('http');
+const https = require('https');
 const logger = require('../logger');
 
 // ── SSRF guards ───────────────────────────────────────────────────────────────
@@ -50,11 +52,60 @@ function isBlockedHostname(host) {
 async function hostResolvesPublic(host) {
   if (net.isIP(host)) return !isPrivateIp(host);
   try {
-    const addrs = await dns.lookup(host, { all: true });
+    const addrs = await dns.promises.lookup(host, { all: true });
     return addrs.length > 0 && addrs.every((a) => !isPrivateIp(a.address));
   } catch {
     return false;
   }
+}
+
+// A dns.lookup-style callback that rejects private IPs. Passed as the `lookup`
+// option to the actual http(s) request so the check is tied to the REAL socket
+// connection — this is what closes the DNS-rebinding gap a preflight can't
+// (the preflight and the connection would otherwise resolve independently).
+function rejectingLookup(hostname, options, callback) {
+  const cb = typeof options === 'function' ? options : callback;
+  const opts = typeof options === 'function' ? {} : (options || {});
+  dns.lookup(hostname, { ...opts, all: true }, (err, addresses) => {
+    if (err) return cb(err);
+    const list = Array.isArray(addresses) ? addresses : [{ address: addresses, family: opts.family || 4 }];
+    for (const a of list) {
+      if (isPrivateIp(a.address)) return cb(new Error(`blocked private address for ${hostname}`));
+    }
+    if (opts.all) return cb(null, list);
+    return cb(null, list[0].address, list[0].family);
+  });
+}
+
+// Default fetcher: a minimal GET over Node http/https that pins the private-IP
+// check to the connection via `lookup`. redirect:'manual' shape so the caller's
+// per-hop revalidation still runs. Returns a fetch-like object (ok/status/
+// headers.get/text) so tests can inject a plain mock instead. Never throws.
+function nodeFetch(url, { signal, headers, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let u;
+    try { u = new URL(url); } catch { return done(null); }
+    const mod = u.protocol === 'http:' ? http : https;
+    let req;
+    try {
+      req = mod.request(u, { method: 'GET', headers, signal, lookup: rejectingLookup }, (res) => {
+        const status = res.statusCode || 0;
+        const wrap = (body) => ({ ok: status >= 200 && status < 300, status, headers: { get: (k) => res.headers[String(k).toLowerCase()] ?? null }, text: async () => body });
+        if (status < 200 || status >= 300) { res.resume(); return done(wrap('')); } // incl. 3xx (caller follows)
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { data += c; if (data.length >= 600000) { data = data.slice(0, 600000); res.destroy(); done(wrap(data)); } });
+        res.on('end', () => done(wrap(data)));
+        res.on('close', () => done(wrap(data)));      // never wait forever if 'end' is skipped
+        res.on('error', () => done(null));
+      });
+    } catch { return done(null); }
+    req.setTimeout(timeoutMs, () => req.destroy());   // independent stall guard
+    req.on('error', () => done(null));
+    req.end();
+  });
 }
 
 // Probed in order; we stop early once we have an email.
@@ -158,7 +209,7 @@ async function fetchText(url, { fetchFn, timeoutMs, resolveHostFn = hostResolves
  *                         contributor_path, checked_at }
  * Never throws.
  */
-async function findContact(domain, { fetchFn = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, maxFetches = MAX_FETCHES, resolveHostFn = hostResolvesPublic } = {}) {
+async function findContact(domain, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, maxFetches = MAX_FETCHES, resolveHostFn = hostResolvesPublic } = {}) {
   const host = normalizeDomain(domain);
   const result = {
     domain: host,

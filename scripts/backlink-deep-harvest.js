@@ -206,10 +206,13 @@ async function rescore(db, args) {
   scored.forEach((s, i) => {
     const r = rows[i];
     const isOutreachIntent = scorer.OUTREACH_INTENTS.has(s.intent_class) || s.gate.lane === 'haro_platform';
-    // Demote only un-worked rows (status 'prospect') whose outreach claim fails:
-    // no contact path, HARO platform, or a low composite — i.e. the national
-    // directories. Never touch rows already in flight (contacted/placed/live/…).
-    const demote = r.status === 'prospect' && isOutreachIntent && (!s.gate.ok || s.gate.lane === 'haro_platform' || s.score < 40);
+    // Demote only un-worked rows whose outreach claim fails (no contact path,
+    // HARO platform, or a low composite — the national directories). NEVER touch
+    // a row already in flight: status stays 'prospect' while a draft is prepared
+    // or sent, with outreach_status/claimed_at carrying the real state, so demote
+    // would yank prepared drafts out of the approval/reconciliation queues.
+    const inFlight = (r.outreach_status && r.outreach_status !== 'none') || r.claimed_at;
+    const demote = r.status === 'prospect' && !inFlight && isOutreachIntent && (!s.gate.ok || s.gate.lane === 'haro_platform' || s.score < 40);
     updates.push({ r, s, demote });
     if (demote) demotions.push({ domain: r.target_domain, intent: s.intent_class, score: s.score, reason: s.gate.reason || (s.gate.lane === 'haro_platform' ? 'HARO platform' : 'low relevance') });
   });
