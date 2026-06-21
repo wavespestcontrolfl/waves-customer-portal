@@ -23,6 +23,8 @@ const {
   recordPropertyTypeIsWeak,
   buildFieldVerifyFlags,
   mergeAiAnalyses,
+  applySatelliteAttachmentType,
+  applyParcelTurfBound,
 } = routePrivate;
 
 beforeEach(() => jest.clearAllMocks());
@@ -132,6 +134,43 @@ describe('buildFieldVerifyFlags — townhome nudge', () => {
     expect(typeFlag).toBeTruthy();
     expect(typeFlag.reason).toMatch(/confirm townhome vs single-family/i);
     expect(typeFlag.reason).toMatch(/interior row unit/i);
+  });
+});
+
+describe('ordering: reclassify before the turf cap (codex P1 regression)', () => {
+  // applyParcelTurfBound skips townhome/condo. If the satellite reclassify ran
+  // AFTER the cap, a weak "Single Family" attached unit would have its turf
+  // clamped to its small parcel and be underpriced. The route applies the
+  // attachment type FIRST; this pins that the cap then leaves turf alone.
+  test('attached unit with turf above parcel area is NOT clamped once reclassified first', () => {
+    const rc = weakAiRecord({ _parcel: { polygonAreaSqft: 2000 } });
+    const ai = { structureAttachment: 'ATTACHED_END', confidenceScore: 60, estimatedTurfSf: 6000 };
+
+    applySatelliteAttachmentType(rc, ai); // route order: BEFORE the cap
+    applyParcelTurfBound(ai, rc);
+
+    expect(rc.propertyType).toBe('Townhome');
+    expect(ai.estimatedTurfSf).toBe(6000); // untouched — cap skipped townhome
+    expect(ai.turfCappedToParcel).toBeUndefined();
+  });
+
+  test('a detached single-family unit above parcel area still gets clamped', () => {
+    const rc = weakAiRecord({ _parcel: { polygonAreaSqft: 2000 } });
+    const ai = { structureAttachment: 'DETACHED', confidenceScore: 80, estimatedTurfSf: 6000 };
+
+    applySatelliteAttachmentType(rc, ai);
+    applyParcelTurfBound(ai, rc);
+
+    expect(rc.propertyType).toBe('Single Family');
+    expect(ai.estimatedTurfSf).toBe(2000); // clamped to parcel
+    expect(ai.turfCappedToParcel).toBe(true);
+  });
+
+  test('applySatelliteAttachmentType is idempotent (no re-apply after the route call)', () => {
+    const rc = weakAiRecord();
+    const ai = { structureAttachment: 'ATTACHED_END', confidenceScore: 60 };
+    expect(applySatelliteAttachmentType(rc, ai)).toBe('Townhome');
+    expect(applySatelliteAttachmentType(rc, ai)).toBeNull(); // already satellite-sourced
   });
 });
 

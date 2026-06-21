@@ -441,6 +441,11 @@ async function performPropertyLookup(address, options = {}) {
 
     if (analyses.length) {
       result.aiAnalysis = mergeAiAnalyses(analyses);
+      // Reclassify a weak record from the satellite attachment read BEFORE the
+      // turf cap: applyParcelTurfBound skips townhome/condo, so doing this first
+      // keeps an attached unit's turf from being clamped to its small parcel and
+      // underpriced (the cached aiAnalysis is then saved already-correct).
+      applySatelliteAttachmentType(result.propertyRecord, result.aiAnalysis);
       applyParcelTurfBound(result.aiAnalysis, result.propertyRecord);
       logger.info('[property-lookup] Trio AI analysis complete', {
         sources: result.aiAnalysis._sources,
@@ -1125,6 +1130,22 @@ function applyVisionPropertyTypeEvidence(rc, propertyType, ai) {
   } catch (_) { /* keep the prior quality summary on any recompute error */ }
 }
 
+// Surface a satellite-detected townhome/condo on a weak-typed record. Shared
+// by the fresh-lookup route (called BEFORE applyParcelTurfBound so the turf cap
+// — which deliberately skips townhome/condo — sees the reclassified type and
+// doesn't clamp an attached unit's turf to its small parcel) and by
+// buildEnrichedProfile (cache-hit + standalone callers). Idempotent: re-running
+// on an already-satellite record is a no-op. Never touches commercial or
+// authoritatively-typed records.
+function applySatelliteAttachmentType(rc, ai) {
+  if (!rc || rc._propertyTypeSource === 'satellite') return null;
+  if (detectCategory(rc, ai) === 'COMMERCIAL') return null;
+  const candidate = propertyTypeFromAttachment(ai);
+  if (!candidate || !recordPropertyTypeIsWeak(rc)) return null;
+  applyVisionPropertyTypeEvidence(rc, candidate, ai);
+  return candidate;
+}
+
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
@@ -1137,20 +1158,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
   const commercialProfile = category === 'COMMERCIAL';
   const commercialSubtype = commercialProfile ? resolveCommercialSubtype(rc, ai) : null;
 
-  // New-construction / weak-record fallback: when no authoritative source
-  // pinned the residential type, let a confident satellite attachment read
-  // surface a townhome/condo instead of silently defaulting to Single Family.
-  // Mutates rc (value + evidence + quality) so the response, flags, and pricing
-  // all see it; only fires when the record's type is weak (never overrides
-  // county/cadastral/verified data).
-  let visionPropertyType = null;
-  if (!commercialProfile) {
-    const candidate = propertyTypeFromAttachment(ai);
-    if (candidate && recordPropertyTypeIsWeak(rc)) {
-      visionPropertyType = candidate;
-      applyVisionPropertyTypeEvidence(rc, candidate, ai);
-    }
-  }
+  // New-construction / weak-record fallback: surface a satellite-detected
+  // townhome/condo when no authoritative source pinned the type. For fresh
+  // lookups the route already applied this before the turf cap; the call here
+  // is idempotent and covers cache-hit + standalone callers. The rc-null branch
+  // can't carry evidence, so it only seeds the displayed type.
+  const appliedVisionType = applySatelliteAttachmentType(rc, ai);
+  const visionPropertyType = appliedVisionType
+    || (!rc && !commercialProfile ? propertyTypeFromAttachment(ai) : null);
 
   const profile = {
     // ── ADDRESS ──
@@ -3040,6 +3055,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyParcelTurfBound,
+  applySatelliteAttachmentType,
   applyVisionPropertyTypeEvidence,
   computeFootprintTurf,
   buildFieldVerifyFlags,
