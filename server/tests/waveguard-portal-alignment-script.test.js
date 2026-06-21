@@ -4,6 +4,7 @@ const {
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
+  parseArgs,
   parseBooleanFlag,
   representativePlanKeys,
   serviceFamilyKey,
@@ -203,6 +204,17 @@ describe('WaveGuard portal alignment script helpers', () => {
       customerColumns,
       '2026-06-20',
     )).toEqual({});
+  });
+
+  test('parses value flags in both --key=value and --key value forms', () => {
+    // Space-separated value flags must work (documented as --limit N / --customer-id <uuid>).
+    expect(parseArgs(['--apply', '--limit', '20'])).toEqual({ apply: true, limit: '20' });
+    expect(parseArgs(['--limit=20', '--include-inactive'])).toEqual({ limit: '20', 'include-inactive': true });
+    expect(parseArgs(['--customer-id', 'abc-123', '--apply'])).toEqual({ 'customer-id': 'abc-123', apply: true });
+    // Boolean flags never swallow a following token.
+    expect(parseArgs(['--apply', '--include-inactive'])).toEqual({ apply: true, 'include-inactive': true });
+    expect(parseArgs(['--apply=false'])).toEqual({ apply: 'false' });
+    expect(parseArgs([])).toEqual({});
   });
 
   test('parses --apply/--include-inactive so dry-run stays the default', () => {

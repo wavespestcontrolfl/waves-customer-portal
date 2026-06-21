@@ -39,13 +39,34 @@ const TIER_ORDER_LOWER = TIER_ORDER.map(tier => tier.toLowerCase());
 
 const SERVICE_PLANS = { ...SELF_BOOKING_RECURRING_PLANS };
 
-const ARGS = Object.fromEntries(
-  process.argv.slice(2).map((arg) => {
-    if (!arg.startsWith('--')) return [arg, true];
-    const [key, value] = arg.slice(2).split('=');
-    return [key, value === undefined ? true : value];
-  })
-);
+// Flags that take a value; everything else is a boolean switch. Supports both
+// `--limit=20` and `--limit 20` (the usage text documents the space form), so a
+// documented command never silently drops its cap / customer filter.
+const VALUE_FLAGS = new Set(['limit', 'customer-id']);
+
+function parseArgs(argv = []) {
+  const out = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) continue;
+    const eq = arg.indexOf('=');
+    if (eq !== -1) {
+      out[arg.slice(2, eq)] = arg.slice(eq + 1);
+      continue;
+    }
+    const key = arg.slice(2);
+    const next = argv[i + 1];
+    if (VALUE_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
+      out[key] = next;
+      i += 1;
+    } else {
+      out[key] = true;
+    }
+  }
+  return out;
+}
+
+const ARGS = parseArgs(process.argv.slice(2));
 
 function parseBooleanFlag(value) {
   if (value === true) return true;
@@ -379,6 +400,7 @@ module.exports = {
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
+  parseArgs,
   parseBooleanFlag,
   representativePlanKeys,
   serviceFamilyKey,
