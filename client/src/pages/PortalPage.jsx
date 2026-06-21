@@ -5985,13 +5985,23 @@ const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const TIER_SERVICES = { Bronze: 1, Silver: 2, Gold: 3, Platinum: 4 };
 const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
 
-// Shared WaveGuard membership check. A customer is an active member if they carry a
-// recognized tier, or — for legacy/active members whose tier was never backfilled —
-// a positive monthly rate (mirrors server membership logic). Genuine non-members
-// (no tier and no billing) resolve to null so the portal does not fabricate a Bronze
-// plan for leads. Bronze is the conservative floor used until the alignment script
-// backfills the real tier.
+// Tier values that explicitly mean "not a WaveGuard member" (mirrors the server
+// NON_MEMBERSHIP_TIER_KEYS in services/waveguard-existing-services.js).
+const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
+function membershipTierKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+// Shared WaveGuard membership check (mirrors server isMembershipCustomerRow). A
+// customer is an active member if they carry a recognized tier; an explicit
+// non-member sentinel (One-Time/none/na/...) is NOT a member even with a positive
+// monthly rate; otherwise legacy/active members whose tier was never backfilled fall
+// back to a positive monthly rate. Genuine non-members resolve to null so the portal
+// does not fabricate a Bronze plan. Bronze is the conservative floor until the
+// alignment script backfills the real tier.
 function resolveActiveTierName(customer = {}) {
+  const tierKey = membershipTierKey(customer?.tier);
+  if (tierKey && NON_MEMBERSHIP_TIER_KEYS.has(tierKey)) return null;
   if (customer && customer.tier && TIER_SERVICES[customer.tier]) return customer.tier;
   const rate = Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0);
   if (Number.isFinite(rate) && rate > 0) return 'Bronze';
