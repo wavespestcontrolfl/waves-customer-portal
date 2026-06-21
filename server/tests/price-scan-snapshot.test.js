@@ -1,7 +1,7 @@
 // No jsdom: collectSnapshot's DOM querying is browser I/O (exercised by the live
 // proof). The unit-testable part — preferring microdata attributes over text,
 // and the structured-size oz gate — is covered here with plain objects.
-const { priceValue, availabilityValue, targetOzOf, bestMatchingLink, searchTokens } = require('../services/price-scan/adapters/base');
+const { priceValue, availabilityValue, targetOzOf, bestMatchingLink, rankedMatchingLinks, searchTokens } = require('../services/price-scan/adapters/base');
 
 // Minimal element stub: attributes + textContent, like a DOM node.
 const el = (attrs = {}, text = '') => ({
@@ -115,5 +115,25 @@ describe('bestMatchingLink (scored result selection)', () => {
   });
   test('empty list -> null', () => {
     expect(bestMatchingLink([], product)).toBeNull();
+  });
+});
+
+describe('rankedMatchingLinks (try same-brand variants in turn)', () => {
+  test('surfaces ALL same-brand variants so the caller verifies each (single-letter formulation)', () => {
+    // "Talstar P" formulation token is a lone letter the slug can\'t reliably encode,
+    // so brand-only ties -> both variants returned for verifyMatch to choose between.
+    const ranked = rankedMatchingLinks([
+      'https://www.domyown.com/talstar-xtra-insecticide-p-1.html',
+      'https://www.domyown.com/talstar-professional-insecticide-p-97.html',
+    ], { vendorProductName: 'Talstar P', quantity: '1 gallon' });
+    expect(ranked).toHaveLength(2);
+    expect(ranked.every((h) => /talstar/.test(h))).toBe(true);
+  });
+  test('excludes non-brand links entirely (never opened/verified)', () => {
+    expect(rankedMatchingLinks([
+      'https://www.domyown.com/bifen-it-p-226.html',
+      'https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html',
+    ], { vendorProductName: 'Taurus SC Termiticide', quantity: '78 oz' }))
+      .toEqual(['https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html']);
   });
 });

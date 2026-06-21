@@ -16,8 +16,12 @@ const {
   extractSizeToken,
   mapAvailability,
   quantityToOz,
+  verifyMatch,
 } = require('../extract');
 const { convertToOz } = require('../../product-costing');
+
+// How many top-ranked search results to actually open + verify before giving up.
+const MAX_SEARCH_CANDIDATES = 4;
 
 // The oz-equivalent of the product we're scanning for, so the JSON-LD parser can
 // pick the matching variant offer on a multi-size page. packSizeValue/Unit are
@@ -173,19 +177,21 @@ function slugSegments(href) {
   return new Set(path.toLowerCase().match(/[a-z0-9]+/g) || []);
 }
 
-// PURE: choose the result link whose URL slug best matches the product. Modern
-// storefront search is a relevance-ranked widget — the RIGHT product is often not
-// first (a DoMyOwn "Taurus SC" search lists Talstar above Taurus). The product's
-// BRAND token (first >=3-char name token) MUST appear as a slug segment, so a listing
-// for a product we don't carry is never grabbed; among brand matches the link sharing
-// the most distinctive name + pack-size tokens wins (so "bifen-it" beats "bifen-xts"
-// even though that slug also carries the generic "insecticide", and the size-specific
-// page beats the generic one). Returns null when nothing qualifies (skip, don't guess).
-function bestMatchingLink(hrefs, product) {
+// PURE: rank the result links by how well their URL slug matches the product, best
+// first. Modern storefront search is a relevance-ranked widget — the RIGHT product is
+// often not first (a DoMyOwn "Taurus SC" search lists Talstar above Taurus). The
+// product's BRAND token (first >=3-char name token) MUST appear as a slug segment, so
+// a listing for a product we don't carry is never returned; among brand matches the
+// link sharing the most distinctive name + pack-size tokens ranks highest ("bifen-it"
+// over "bifen-xts" even though that slug also carries the generic "insecticide", and
+// the size-specific page over the generic one). Same-brand variants we can't tell
+// apart by slug (Talstar P vs Talstar XTRA) tie and keep widget order — the caller
+// opens them in turn and lets verifyMatch choose. Returns [] when nothing qualifies.
+function rankedMatchingLinks(hrefs, product) {
   const list = (hrefs || []).filter(Boolean);
-  if (!list.length) return null;
+  if (!list.length) return [];
   const nameToks = searchTokens(product);
-  if (!nameToks.length) return list[0]; // no product context -> legacy first-link
+  if (!nameToks.length) return list.slice(0, 1); // no product context -> legacy first-link
   const brand = nameToks.find((t) => t.length >= 3) || nameToks[0];
   const scoreToks = nameToks.filter((t) => !GENERIC_NAME_TOKENS.has(t));
   // Keep numeric size tokens of ANY length (a single-digit pack like "5 lb" or the
@@ -193,24 +199,30 @@ function bestMatchingLink(hrefs, product) {
   // LETTERS are dropped as noise.
   const sizeToks = [...new Set((String((product && product.quantity) || '').toLowerCase().match(/[a-z0-9]+/g) || [])
     .filter((t) => !nameToks.includes(t) && (t.length >= 2 || /\d/.test(t))))];
-  let best = null;
-  let bestScore = -1;
+  const scored = [];
   for (const href of list) {
     const seg = slugSegments(href);
     if (!seg.has(brand)) continue; // brand is mandatory
     const score = scoreToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0)
       + sizeToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0);
-    if (score > bestScore) { best = href; bestScore = score; }
+    scored.push({ href, score });
   }
-  return best;
+  // Stable sort by score desc — preserves widget order for ties (e.g. same-brand
+  // variants we can't tell apart by slug, like Talstar P vs Talstar XTRA).
+  return scored.map((s, i) => ({ ...s, i })).sort((a, b) => (b.score - a.score) || (a.i - b.i)).map((s) => s.href);
 }
 
-// Collect every candidate result link, then pick the best match for the product.
-async function pickProductLink(page, config, product) {
+// The single best slug match (the head of the ranked list), or null.
+function bestMatchingLink(hrefs, product) {
+  return rankedMatchingLinks(hrefs, product)[0] || null;
+}
+
+// Collect every candidate result link from the page (deduped, in document order).
+async function collectResultLinks(page, config) {
   const sels = config.productLinkSelectors && config.productLinkSelectors.length
     ? config.productLinkSelectors
     : ['a.product-link', '.product-item a', '.product a'];
-  const hrefs = await page.evaluate((selectors) => {
+  return page.evaluate((selectors) => {
     const seen = new Set();
     const out = [];
     for (const s of selectors) {
@@ -220,33 +232,15 @@ async function pickProductLink(page, config, product) {
     }
     return out;
   }, sels);
-  return bestMatchingLink(hrefs, product);
 }
 
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
-  async function fetchCandidate(page, vendor, product) {
-    // 1. Resolve the product page URL.
-    let url = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
-    if (!url) {
-      const searchUrl = config.buildSearchUrl
-        ? config.buildSearchUrl(product, vendor)
-        : null;
-      if (!searchUrl) return null;
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
-      // Results are commonly injected by a client-side search widget, so they
-      // aren't in the DOM at domcontentloaded — wait (bounded) for the first
-      // result link to appear before picking. Non-fatal if it times out.
-      const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
-      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs || 8000 }).catch(() => {});
-      url = await pickProductLink(page, config, product);
-      if (!url) return null;
-    }
-
-    // 2. Load the product page and snapshot it. domcontentloaded (NOT
-    // networkidle — ad/analytics chatter means networkidle never fires on these
-    // storefronts); an optional short settle lets client-rendered prices paint.
+  // Open ONE product URL, snapshot it, and shape a candidate (or null if no usable
+  // priced offer at the target size). domcontentloaded (NOT networkidle — ad chatter
+  // never settles); an optional short settle lets client-rendered prices paint.
+  async function scrapeCandidate(page, vendor, product, url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
     if (config.settleMs) await page.waitForTimeout(config.settleMs);
     const sel = {
@@ -256,15 +250,15 @@ function makeAdapter(config) {
     };
     const snapshot = await page.evaluate(collectSnapshot, sel);
 
-    // 3. Parse with the pure helpers: size-aware JSON-LD first; DOM fallback only
-    // when JSON-LD carried no offers (offerFromSnapshot enforces the size gate so
-    // a default DOM variant can't be reported as the requested pack).
+    // Size-aware JSON-LD first; DOM fallback only when JSON-LD carried no offers
+    // (offerFromSnapshot enforces the size gate so a default variant can't be
+    // reported as the requested pack).
     const offer = offerFromSnapshot(snapshot, { targetOz: targetOzOf(product) });
     if (!offer || offer.price == null) return null;
 
-    // When JSON-LD priced the offer but didn't state availability, fall back to
-    // the DOM availability text — otherwise a sold-out page reports 'unknown'
-    // (which compare does NOT exclude) and can rank as a savings opportunity.
+    // When JSON-LD priced the offer but didn't state availability, fall back to the
+    // DOM availability text — otherwise a sold-out page reports 'unknown' (which
+    // compare does NOT exclude) and can rank as a savings opportunity.
     let availability = offer.availability || 'unknown';
     if (availability === 'unknown' && snapshot.availabilityText) {
       availability = mapAvailability(snapshot.availabilityText);
@@ -289,17 +283,53 @@ function makeAdapter(config) {
       competing_same_size: !!offer.competingSameSize,
       price_type: config.priceType || 'public',
       // The real vendors.id (UUID) the /report worker keys on — a DB vendor row
-      // provides `.id`. This is NOT the adapter slug (selectAdapterKey decides
-      // that from host/name/url; the two are independent).
+      // provides `.id`. This is NOT the adapter slug (selectAdapterKey decides that
+      // from host/name/url; the two are independent).
       vendor_id: vendor.vendor_id || vendor.id,
       vendor: vendor.name || vendor.vendor_id || vendor.id,
     };
+  }
+
+  async function fetchCandidate(page, vendor, product) {
+    // Direct URL (explicit vendor.url or a builder) — one shot.
+    const directUrl = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
+    if (directUrl) return scrapeCandidate(page, vendor, product, directUrl);
+
+    // Otherwise search the vendor and open the best matches.
+    const searchUrl = config.buildSearchUrl ? config.buildSearchUrl(product, vendor) : null;
+    if (!searchUrl) return null;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
+    // Results are commonly injected by a client-side search widget, so they aren't in
+    // the DOM at domcontentloaded — wait (bounded) for the first result link. Non-fatal.
+    const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
+    await page.waitForSelector(waitSel, { timeout: config.searchWaitMs || 8000 }).catch(() => {});
+
+    // Search is fuzzy + relevance-ranked, and slug heuristics can't always tell
+    // same-brand variants apart (Talstar P vs Talstar XTRA). So open the top-ranked
+    // results in turn and let verifyMatch (EPA / formulation / size) pick the real
+    // one — returning the first that VERIFIES rather than betting on a single link.
+    const ranked = rankedMatchingLinks(await collectResultLinks(page, config), product);
+    const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
+    let fallback = null;
+    for (const url of ranked.slice(0, cap)) {
+      const cand = await scrapeCandidate(page, vendor, product, url);
+      if (!cand) continue;
+      if (!fallback) fallback = cand; // best-ranked priced page, if nothing verifies
+      const verdict = verifyMatch(
+        { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
+        product,
+      );
+      if (verdict.matched) return cand;
+    }
+    // Nothing verified — return the top priced page so the scanner reports a precise
+    // 'unverified' (with signals) rather than a blunt 'no_candidate'.
+    return fallback;
   }
 
   return { key: config.key, config, fetchCandidate };
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, firstProductLink, pickProductLink, bestMatchingLink, searchTokens,
+  makeAdapter, collectSnapshot, firstProductLink, rankedMatchingLinks, bestMatchingLink, searchTokens,
   searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };
