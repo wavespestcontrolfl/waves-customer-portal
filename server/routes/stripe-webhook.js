@@ -1414,6 +1414,33 @@ async function handleChargeRefunded(charge) {
   const cumulativeRefundAmountDollars = (charge.amount_refunded || refundAmountCents) / 100;
   const isFullRefund = charge.refunded === true;
 
+  // Statement refund REORDERED ahead of settlement: if a FULL refund arrives
+  // before payment_intent.succeeded wrote the statement payments row, resolve the
+  // statement by PI and clear/reset its active PI (so the later succeeded fails
+  // the active-PI binding and never settles refunded money) + persist a durable
+  // refunded marker. Mirrors the dispute pre-settlement guard.
+  if (charge.payment_intent && isFullRefund) {
+    const rowExists = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
+    if (!rowExists) {
+      const stmtByPi = await db('payer_statements').where({ stripe_payment_intent_id: charge.payment_intent }).first();
+      if (stmtByPi) {
+        await db.transaction(async (trx) => {
+          await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, `charge.refunded (full, pre-settlement)`, { database: trx });
+          await trx('payments').insert({
+            customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
+            processor: 'stripe', stripe_payment_intent_id: charge.payment_intent, stripe_charge_id: chargeId,
+            payment_date: etDateString(), amount: (charge.amount || refundAmountCents) / 100,
+            status: 'refunded', refund_amount: cumulativeRefundAmountDollars, refund_status: 'full', stripe_refund_id: refundId,
+            description: `Payer statement S-${stmtByPi.id} fully refunded (pre-settlement)`,
+            metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, source: 'statement_refund' }),
+          });
+        });
+        logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} full refund before settlement — cascade reversed, active PI cleared`);
+        return;
+      }
+    }
+  }
+
   await db('payments')
     .where({ stripe_charge_id: chargeId })
     .update({
@@ -2383,9 +2410,24 @@ async function handleDisputeClosed(dispute) {
     if (status === 'won' || status === 'warning_closed') {
       // Funds reinstated — restore paid status
       await db('payments').where({ id: payment.id }).update({ status: 'paid', metadata: finalMeta });
-      // Statement: restore the cascade (unless re-collected meanwhile). The
-      // invoice path below no-ops for a statement payment.
-      if (payment.statement_id) await restoreStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id);
+      // Statement won: only RE-APPLY a settlement that was already validated
+      // (base_amount_cents present ⇒ settleStatementPaid ran the
+      // computeChargeAmount/funding checks). If this row is a PRE-settlement
+      // dispute MARKER (never validated), do NOT mark the statement paid directly
+      // — restore the active PI and let the eventual payment_intent.succeeded
+      // settle it through the canonical surcharge/amount validation.
+      if (payment.statement_id) {
+        if (payment.base_amount_cents != null) {
+          await restoreStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id);
+        } else {
+          await db('payer_statements')
+            .where({ id: payment.statement_id })
+            .whereIn('status', ['finalized', 'sent', 'viewed'])
+            .whereNull('stripe_payment_intent_id')
+            .update({ stripe_payment_intent_id: payment.stripe_payment_intent_id, updated_at: new Date() });
+          logger.warn(`[stripe-webhook] statement S-${payment.statement_id} dispute won (pre-settlement marker) — restored active PI, awaiting succeeded for validated settlement`);
+        }
+      }
       const invoice = await findInvoiceForPayment(payment);
       const wonInvoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
       const wonDisputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
