@@ -281,6 +281,50 @@ function AnnualPrepayInvoicePanel({ term }) {
   );
 }
 
+// The individual visits an annual prepayment covers, with each visit's share of
+// the total. Makes the "full year" concrete — it's four dated services, not one.
+// Tagged "Prepaid" once the term is active, "Included" while the invoice is
+// still pending payment.
+function CoverageVisitsList({ visits, status }) {
+  if (!Array.isArray(visits) || visits.length === 0) return null;
+  const prepaid = ['active', 'renewed', 'renewal_pending', 'switch_plan']
+    .includes(String(status || '').toLowerCase());
+  const tag = prepaid ? 'Prepaid' : 'Included';
+  return (
+    <>
+      <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: 0, display: 'grid', gap: 7 }}>
+        {visits.map((v, i) => (
+          <li key={i} style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            fontSize: 14,
+            lineHeight: 1.4,
+            color: 'var(--text)',
+          }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <span style={{ color: 'var(--success)', display: 'inline-flex' }}>
+                <Icon name="check" size={14} strokeWidth={3} />
+              </span>
+              <span>Visit {i + 1} of {visits.length} · target {fmtDate(v.date)}</span>
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+              {v.amount != null && (
+                <span style={{ fontFamily: FONTS.mono, color: 'var(--text-muted)' }}>{fmtCurrency(v.amount)}</span>
+              )}
+              <span style={{ ...eyebrow, fontSize: 10, color: prepaid ? 'var(--success)' : '#9A6200' }}>{tag}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.4, color: 'var(--text-muted)' }}>
+        Target dates — your actual visits follow your regular service route.
+      </div>
+    </>
+  );
+}
+
 function DetailBlock({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
@@ -1422,6 +1466,10 @@ export default function PayPageV2() {
                   <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.5 }}>
                     {prepayCalloutText}
                   </div>
+                  <CoverageVisitsList
+                    visits={annualPrepay?.coverageVisits}
+                    status={annualPrepay?.status}
+                  />
                 </div>
               </div>
             )}

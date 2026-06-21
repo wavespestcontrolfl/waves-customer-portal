@@ -6,7 +6,7 @@ const DiscountEngine = require("./discount-engine");
 const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
-const { loadInvoiceAnnualPrepay } = require("./invoice-prepay");
+const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -1624,6 +1624,11 @@ const InvoiceService = {
     const serviceType = invoice.service_type || invoice.title || "your service";
 
     let formattedDate = "";
+    // Whether the invoice's service date is *today* in ET. The annual-prepay
+    // "Today's visit is the first of N" clause is gated on this: a resend from
+    // sent/viewed/overdue or a delayed/scheduled send can run on a day other
+    // than service_date, where a same-day claim would be false.
+    let serviceDateIsTodayET = false;
     if (invoice.service_date) {
       try {
         // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
@@ -1640,27 +1645,82 @@ const InvoiceService = {
             year: "numeric",
             timeZone: "America/New_York",
           });
+          // Compare date-only values, not the midnight Date through ET: Knex
+          // returns DATE as a Date at UTC midnight, which etDateString() would
+          // format as the previous ET calendar day and wrongly drop the clause
+          // on the real service date. The raw YYYY-MM-DD already is the calendar
+          // date (UTC-midnight Date → toISOString slice; string → leading slice).
+          const serviceYmd =
+            invoice.service_date instanceof Date
+              ? invoice.service_date.toISOString().slice(0, 10)
+              : String(invoice.service_date).slice(0, 10);
+          serviceDateIsTodayET = serviceYmd === etDateString(new Date());
         }
       } catch {
         formattedDate = "";
       }
     }
 
-    // Body comes from the editable invoice_sent template. If the row is
-    // missing/disabled, we skip the SMS rather than falling back to inline copy.
+    // Annual-prepay invoices use a dedicated, coverage-aware template — the
+    // generic invoice_sent copy ("...completed on {service_date}") misframes a
+    // full year of prepaid visits as a single completed service. Resolve the
+    // term up front; a cancelled/refunded term reverts to the standard copy.
+    const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
+    // coverageActive is the descriptor's single source of truth for "is this
+    // term still covered" — it keeps a renewal lapse (cancelled +
+    // renewal_decision='cancel', still covered through term_end) active while
+    // excluding true void/refund terms, matching the billing guard.
+    const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
+    const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
+
+    // Body comes from the editable invoice_sent template (or its annual-prepay
+    // variant). If the row is missing/disabled, we skip the SMS rather than
+    // falling back to inline copy.
     let body = null;
     try {
       const templates = require("../routes/admin-sms-templates");
-      body = await templates.getTemplate("invoice_sent", {
-        first_name: customer.first_name || "",
-        service_type: serviceType,
-        service_date: formattedDate || "today",
-        pay_url: payUrl,
-      }, {
+      const tplOpts = {
         workflow: "invoice_send",
         entity_type: "invoice",
         entity_id: invoiceId,
-      });
+      };
+      // The annual-prepay variant is its own template row, so it would render
+      // even when ops disabled the base invoice_sent kill switch — and the
+      // provider (messageType 'invoice' → invoice_sent) would then swallow the
+      // send as a fake success and mark the invoice sent without delivery,
+      // blocking retries. Honor the base kill switch here so a disabled
+      // invoice_sent skips the variant too and the invoice stays retryable
+      // (falls through to the null-body skip + restoreSendClaim path below).
+      const invoiceSmsActive = await templates.isTemplateActive("invoice");
+      if (prepayActive && invoiceSmsActive) {
+        // Coverage summary is built when a visit count is configured; a
+        // display-only prepay flag (no count) still gets the prepay framing via
+        // a generic phrase instead of the misleading "completed on" copy.
+        const coverageSummary = coverage?.coverageSummary || "your annual service plan";
+        // Only claim "today" when the service date actually is today in ET —
+        // resends and delayed sends run on other days. Off-day sends drop the
+        // clause; the coverage summary still conveys the full-term framing.
+        const firstVisitClause = coverage && serviceDateIsTodayET
+          ? ` Today's visit is the first of ${coverage.coverageCount}.`
+          : "";
+        body = await templates.getTemplate("invoice_sent_annual_prepay", {
+          first_name: customer.first_name || "",
+          coverage_summary: coverageSummary,
+          first_visit_clause: firstVisitClause,
+          pay_url: payUrl,
+        }, tplOpts);
+      }
+      if (!body) {
+        // Either an ordinary invoice, or the prepay template was missing/disabled
+        // — fall back to the standard invoice_sent copy so a missing variant row
+        // never blocks the send.
+        body = await templates.getTemplate("invoice_sent", {
+          first_name: customer.first_name || "",
+          service_type: serviceType,
+          service_date: formattedDate || "today",
+          pay_url: payUrl,
+        }, tplOpts);
+      }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
     }

@@ -72,7 +72,7 @@ import {
 import { launchTapToPay } from "../../lib/tapToPay";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { computeCardTotal } from "../../lib/cardSurcharge";
-import { invoiceDateOnly } from "../../lib/invoiceDates";
+import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -1097,7 +1097,7 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                               inv.annual_prepay_status === "active" ? D.green : D.amber,
                             )}>
                               {annualPrepayInvoiceLabel(inv)}
-                              {inv.annual_prepay_term_end ? ` · through ${inv.annual_prepay_term_end}` : ""}
+                              {inv.annual_prepay_term_end ? ` · through ${formatInvoiceDate(inv.annual_prepay_term_end)}` : ""}
                             </span>
                           )}
                           {cardOnFile && canCollect && (

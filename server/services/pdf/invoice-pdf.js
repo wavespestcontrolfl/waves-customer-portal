@@ -185,20 +185,45 @@ function annualPrepayCallout(doc, prepay, x, y, width) {
   body += '.';
   if (prepay.setupFeeWaived) body += ' Your one-time setup fee is waived.';
 
+  // The dated visits this prepayment covers, each with its share of the total —
+  // makes the "full year" concrete on the printed invoice.
+  const visits = Array.isArray(prepay.coverageVisits) ? prepay.coverageVisits : [];
+  const prepaid = ['active', 'renewed', 'renewal_pending', 'switch_plan']
+    .includes(String(prepay.status || '').toLowerCase());
+  const tag = prepaid ? 'Prepaid' : 'Included';
+
   const padX = 12;
   const padY = 10;
   const labelGap = 16;
+  const lineH = 14;
   const textW = width - padX * 2;
+  const tagW = 132;
 
   doc.save();
   doc.fontSize(10).font('Helvetica');
   const bodyH = doc.heightOfString(body, { width: textW, lineGap: 2 });
-  const boxH = padY * 2 + labelGap + bodyH;
+  // Extra line at the bottom for the "target dates" caption.
+  const visitsH = visits.length ? 6 + visits.length * lineH + lineH : 0;
+  const boxH = padY * 2 + labelGap + bodyH + visitsH;
   doc.roundedRect(x, y, width, boxH, 6).lineWidth(1).fillAndStroke(SOFT, WAVES_BLUE);
   doc.fontSize(8).font('Helvetica-Bold').fillColor(WAVES_BLUE)
     .text('ANNUAL PREPAYMENT', x + padX, y + padY, { characterSpacing: 1.2 });
   doc.fontSize(10).font('Helvetica').fillColor(BODY)
     .text(body, x + padX, y + padY + labelGap, { width: textW, lineGap: 2 });
+
+  if (visits.length) {
+    let vy = y + padY + labelGap + bodyH + 6;
+    doc.fontSize(9);
+    visits.forEach((v, i) => {
+      const left = `•  Visit ${i + 1} of ${visits.length} · target ${formatInvoiceDateOnly(v.date)}`;
+      const right = `${v.amount != null ? `${currency(v.amount)}  ` : ''}${tag}`;
+      doc.font('Helvetica').fillColor(BODY).text(left, x + padX, vy, { width: textW - tagW });
+      doc.fillColor(MUTED).text(right, x + width - padX - tagW, vy, { width: tagW, align: 'right' });
+      vy += lineH;
+    });
+    doc.fontSize(8).fillColor(MUTED)
+      .text('Target dates — your actual visits follow your regular service route.', x + padX, vy, { width: textW });
+  }
   doc.restore();
 
   return y + boxH + 14;
