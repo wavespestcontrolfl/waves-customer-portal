@@ -236,6 +236,9 @@ async function findContact(domain, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TI
     }
     if (WRITE_FOR_US_RE.test(html)) {
       result.contributor_path = result.contributor_path || url;
+      // Persist a reachable URL too — has_contact_path with a null contact_url
+      // would pass the gate but leave the worker nothing to act on.
+      result.contact_url = result.contact_url || url;
       result.has_contact_path = true;
     }
 

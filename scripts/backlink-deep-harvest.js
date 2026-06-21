@@ -212,7 +212,14 @@ async function rescore(db, args) {
     // or sent, with outreach_status/claimed_at carrying the real state, so demote
     // would yank prepared drafts out of the approval/reconciliation queues.
     const inFlight = (r.outreach_status && r.outreach_status !== 'none') || r.claimed_at;
-    const demote = r.status === 'prospect' && !inFlight && isOutreachIntent && (!s.gate.ok || s.gate.lane === 'haro_platform' || s.score < 40);
+    // A contact already on file counts as a contact path — a transient fetch
+    // failure (probe returns nothing) must not reject an otherwise-valid row.
+    // Only HARO platforms demote regardless; no-contact/low-score demotes apply
+    // only when the row has no stored contact either.
+    const hadContact = !!(r.contact_email || r.contact_url);
+    const demote = r.status === 'prospect' && !inFlight && isOutreachIntent && (
+      s.gate.lane === 'haro_platform' || (!hadContact && (!s.gate.ok || s.score < 40))
+    );
     updates.push({ r, s, demote });
     if (demote) demotions.push({ domain: r.target_domain, intent: s.intent_class, score: s.score, reason: s.gate.reason || (s.gate.lane === 'haro_platform' ? 'HARO platform' : 'low relevance') });
   });

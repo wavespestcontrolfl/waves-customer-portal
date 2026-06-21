@@ -38,6 +38,18 @@ describe('contact-finder', () => {
     expect(r.contact_url).toBe('https://site.com/contact');
   });
 
+  test('a "write for us" page persists a reachable contact_url even without an email', async () => {
+    const fetchFn = mockFetch({
+      'https://blog.com/': '<p>home</p>',
+      'https://blog.com/contact': '<p>no form, no email</p>',
+      'https://blog.com/write-for-us': '<h1>Write for us</h1><p>pitch your guest post</p>',
+    });
+    const r = await findContact('blog.com', { fetchFn, resolveHostFn: async () => true });
+    expect(r.has_contact_path).toBe(true);
+    expect(r.contributor_path).toBe('https://blog.com/write-for-us');
+    expect(r.contact_url).toBe('https://blog.com/write-for-us'); // worker has something to act on
+  });
+
   test('no contact path → has_contact_path false (the gate trips)', async () => {
     const fetchFn = mockFetch({ 'https://dead.com/': '<p>nothing useful</p>' });
     const r = await findContact('dead.com', { fetchFn, resolveHostFn: async () => true });
