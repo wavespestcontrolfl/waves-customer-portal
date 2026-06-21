@@ -47,6 +47,7 @@ const logger = require('../logger');
 const { parseETDateTime } = require('../../utils/datetime-et');
 const interceptSeeder = require('./intercept-brief-seeder');
 const { normalizeSpokeSites } = require('../content-astro/spoke-sites');
+const { spokeBlogNetworkEnabled } = require('./spoke-blog-network');
 
 const OPERATOR_INTERCEPT_BUCKET = interceptSeeder.OPERATOR_INTERCEPT_BUCKET;
 const { BYLINE_AUTHORS } = interceptSeeder._internals;
@@ -212,6 +213,10 @@ function rowForBrief(brief, manifest, { now = new Date() } = {}) {
  * pending.
  */
 async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new Date() } = {}) {
+  if (!spokeBlogNetworkEnabled()) {
+    logger.info('[spoke-seed-seeder] spoke blog network disabled (set SPOKE_BLOG_NETWORK_ENABLED=true to enable) — blogs publish hub-only; no spoke topics seeded');
+    return { disabled: true, count: 0, rows: [] };
+  }
   const manifest = loadManifest(file);
   const rows = manifest.briefs.map((brief) => rowForBrief(brief, manifest, { now }));
   if (dryRun) return { dryRun: true, count: rows.length, rows };
@@ -408,6 +413,7 @@ module.exports = {
   targetSitesFor,
   buildSpokeOverlay,
   _internals: {
+    spokeBlogNetworkEnabled,
     normalizeTargetSite,
     serviceForBrief,
     blockedTopicIdFor,

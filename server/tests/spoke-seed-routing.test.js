@@ -94,6 +94,40 @@ describe('spoke-seed-seeder: manifest + rows', () => {
   });
 });
 
+describe('spoke blog network kill switch (owner directive 2026-06-16: blogs are hub-only)', () => {
+  const ORIG = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+  afterEach(() => {
+    if (ORIG === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    else process.env.SPOKE_BLOG_NETWORK_ENABLED = ORIG;
+  });
+
+  test('disabled by default: seedAll no-ops, queues nothing (hub-only)', async () => {
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    expect(seeder._internals.spokeBlogNetworkEnabled()).toBe(false);
+    const result = await seeder.seedAll({});
+    expect(result.disabled).toBe(true);
+    expect(result.count).toBe(0);
+    expect(result.rows).toEqual([]);
+  });
+
+  test('stays disabled for non-truthy flag values', () => {
+    for (const v of ['', 'false', '0', 'off', 'no']) {
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = v;
+      expect(seeder._internals.spokeBlogNetworkEnabled()).toBe(false);
+    }
+  });
+
+  test('SPOKE_BLOG_NETWORK_ENABLED=true re-enables seeding (logic intact)', async () => {
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    expect(seeder._internals.spokeBlogNetworkEnabled()).toBe(true);
+    // dryRun short-circuits before any DB write — proves the manifest still
+    // composes the 5 curated rows when the lane is explicitly re-enabled.
+    const result = await seeder.seedAll({ dryRun: true });
+    expect(result.disabled).toBeUndefined();
+    expect(result.rows.length).toBe(5);
+  });
+});
+
 describe('MDX {{token}} crash guard (proof-caught bug)', () => {
   test('spoke binding instructions never tell the writer to emit {{brandName}} (crashes .mdx builds)', () => {
     const m = seeder.loadManifest();
@@ -123,6 +157,15 @@ describe('MDX {{token}} crash guard (proof-caught bug)', () => {
 describe('astro-publisher: spoke domain + canonical routing', () => {
   const { _internals } = require('../services/content-astro/astro-publisher');
 
+  // The spoke network is OFF by default (kill switch); routing only applies when
+  // it is explicitly enabled, so these routing assertions enable it.
+  const ORIG_FLAG = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+  beforeEach(() => { process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true'; });
+  afterEach(() => {
+    if (ORIG_FLAG === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    else process.env.SPOKE_BLOG_NETWORK_ENABLED = ORIG_FLAG;
+  });
+
   test('resolveSpokeTarget: exactly one non-hub spoke routes; hub/empty/multi do not', () => {
     expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com'] })).toBe('sarasotaflpestcontrol.com');
     expect(_internals.resolveSpokeTarget({ target_sites: [] })).toBeNull();
@@ -130,6 +173,29 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
     expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com', 'veniceflpestcontrol.com'] })).toBeNull();
     // falls back to the persisted operator_brief copy
     expect(_internals.resolveSpokeTarget({ voice_constraints: { operator_brief: { target_sites: ['veniceflpestcontrol.com'] } } })).toBe('veniceflpestcontrol.com');
+  });
+
+  test('kill switch: a queued spoke target does NOT fan out when the network is disabled (publishes hub-only)', () => {
+    // Owner directive 2026-06-16: blogs are hub-only. Even if a spoke-seed row is
+    // already queued (or was seeded during a temporary re-enable), the publishing
+    // path must refuse to route it to a spoke when the flag is off.
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com'] })).toBeNull();
+    expect(_internals.resolveSpokeTarget({ voice_constraints: { operator_brief: { target_sites: ['veniceflpestcontrol.com'] } } })).toBeNull();
+    // re-enable → routes again (logic intact)
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com'] })).toBe('sarasotaflpestcontrol.com');
+  });
+
+  test('hub-only merge guard short-circuits when the network is re-enabled (toggle is coherent end-to-end)', async () => {
+    // With the lane explicitly re-enabled, spoke-targeted PRs are intended, so
+    // the merge guard must NOT reject them — otherwise the seed -> publish ->
+    // merge chain is half-enabled (spoke PRs created but un-mergeable). The
+    // enabled path returns before any GitHub IO, so no network mock is needed.
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    await expect(
+      _internals.assertOpenPublishPrIsHubOnly({ slug: '/pest-control/x-sarasota/', astro_branch_name: 'content/x' }, { number: 1 }),
+    ).resolves.toBeUndefined();
   });
 
   test('blogOriginForSpoke: spoke www origin vs hub origin', () => {
@@ -166,6 +232,56 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
     const fm = { slug: `/${slug}/`, canonical: `https://www.sarasotaflpestcontrol.com/${slug}/` };
     expect(_internals.assertCanonicalMatchesSlug(fm, slug, 'https://www.sarasotaflpestcontrol.com'))
       .toBe(`https://www.sarasotaflpestcontrol.com/${slug}/`);
+  });
+});
+
+describe('autonomous-pr-poller: spoke kill switch on the auto-merge path', () => {
+  // The poller merges autonomous blog PRs directly (gh.mergePr), bypassing
+  // mergeAstro's hub-only guard — so a stale spoke PR could auto-merge despite
+  // the seed/publish gates. The kill switch must block that merge path too.
+  const { _internals: poller } = require('../services/content/autonomous-pr-poller');
+  const ORIG = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+  afterEach(() => {
+    if (ORIG === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    else process.env.SPOKE_BLOG_NETWORK_ENABLED = ORIG;
+  });
+
+  const runFor = (canonical) => ({
+    action_type: 'new_supporting_blog',
+    draft_payload: JSON.stringify({ frontmatter: { canonical } }),
+  });
+  const spokeRun = runFor('https://www.sarasotaflpestcontrol.com/pest-control/x-sarasota/');
+  const hubRun = runFor('https://www.wavespestcontrol.com/pest-control/x/');
+
+  test('disabled: a spoke-targeted run is blocked from auto-merge; a hub run is not', () => {
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    expect(poller.spokeMergeBlockedByKillSwitch(spokeRun)).toBe(true);
+    expect(poller.spokeMergeBlockedByKillSwitch(hubRun)).toBe(false);
+  });
+
+  test('enabled: spoke-targeted runs may auto-merge again (logic intact)', () => {
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    expect(poller.spokeMergeBlockedByKillSwitch(spokeRun)).toBe(false);
+    expect(poller.spokeMergeBlockedByKillSwitch(hubRun)).toBe(false);
+  });
+
+  test('disabled: an off-hub NON-blog run (spoke service-page refresh) is NOT blocked', () => {
+    // The blog kill switch only gates NEW spoke-blog fanout. A refresh of an
+    // existing spoke service page resolves off-hub via draft.page_url, but it is
+    // not blog fanout and must still be allowed to auto-merge.
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    const refreshRun = {
+      action_type: 'refresh_existing_page',
+      draft_payload: JSON.stringify({ page_url: 'https://www.sarasotaflpestcontrol.com/pest-control-sarasota-fl/' }),
+    };
+    const rewriteRun = {
+      action_type: 'rewrite_title_meta',
+      draft_payload: JSON.stringify({ target_url: 'https://www.sarasotaflpestcontrol.com/lawn-care-sarasota-fl/' }),
+    };
+    expect(poller.spokeMergeBlockedByKillSwitch(refreshRun)).toBe(false);
+    expect(poller.spokeMergeBlockedByKillSwitch(rewriteRun)).toBe(false);
+    // ...but a NEW spoke blog post on the same domain is still blocked.
+    expect(poller.spokeMergeBlockedByKillSwitch(spokeRun)).toBe(true);
   });
 });
 

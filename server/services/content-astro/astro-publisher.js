@@ -32,6 +32,7 @@ const contentGuardrails = require('../content/content-guardrails');
 const factCheckGate = require('../content/fact-check-gate');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
+const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
 const { etDateString } = require('../../utils/datetime-et');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -105,7 +106,18 @@ function resolveSpokeTarget(brief = {}) {
   const fromOverlay = normalizeSpokeSites(brief?.voice_constraints?.operator_brief?.target_sites);
   const sites = (fromBrief.length ? fromBrief : fromOverlay)
     .filter((k) => !BLOG_HUB_DOMAINS.includes(k));
-  return sites.length === 1 ? sites[0] : null;
+  const spoke = sites.length === 1 ? sites[0] : null;
+  // Kill-switch enforcement at the PUBLISHING chokepoint. The seeder gate stops
+  // NEW spoke topics from being queued, but a spoke-seed row already in
+  // opportunity_queue — or one seeded during a temporary re-enable that is later
+  // turned off — would otherwise still fan out here. Honor the owner directive:
+  // when the network is disabled, no blog post publishes to a spoke; it falls
+  // back to the hub-only policy (null) and publishes on the hub instead.
+  if (spoke && !spokeBlogNetworkEnabled()) {
+    logger.info(`[astro-publisher] spoke blog network disabled — "${spoke}"-targeted post routed to the hub only (set SPOKE_BLOG_NETWORK_ENABLED=true to fan out to spokes)`);
+    return null;
+  }
+  return spoke;
 }
 
 // The canonical origin a blog post publishes under: the spoke's own canonical
@@ -1596,6 +1608,13 @@ async function mergeAstro(postId) {
 }
 
 async function assertOpenPublishPrIsHubOnly(post, pr) {
+  // Hub-only merge guard. Enforced whenever the spoke blog network is disabled
+  // (the default) — a post can only carry non-hub domains here if it slipped
+  // past the publish-time routing, so reject it. When an operator has EXPLICITLY
+  // re-enabled the lane (SPOKE_BLOG_NETWORK_ENABLED=true), spoke-targeted PRs are
+  // intended, so skip the assertion — otherwise the seed -> publish -> merge
+  // chain is half-enabled (spoke PRs would be created but could never merge).
+  if (spokeBlogNetworkEnabled()) return;
   const ref = post.astro_branch_name || pr?.head?.ref;
   const slug = post.slug || slugify(post.title);
   const resolved = await resolveExistingAstroFileAtRef(`${ASTRO_BLOG_DIR}/${slug}`, ref);
@@ -2412,6 +2431,7 @@ module.exports = {
     blogOriginForSpoke,
     stampBlogDomains,
     stampHubOnlyBlogDomains,
+    assertOpenPublishPrIsHubOnly,
     syncDraftPublishTarget,
     mdxBreakingToken,
   },

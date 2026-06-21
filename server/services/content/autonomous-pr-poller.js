@@ -55,6 +55,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { spokeBlogNetworkEnabled } = require('./spoke-blog-network');
 
 const PENDING_OUTCOME = 'completed_pending_review';
 const BLOG_PENDING_SKIP_REASON = 'astro_pr_pending_merge';
@@ -165,6 +166,26 @@ function targetForRun(run) {
     // render only on their spoke, so proposing hub→spoke-path links 404s.
     planLinks: isNewPage && !canonicalIsOffHub(url),
   };
+}
+
+// Kill-switch gate for the AUTONOMOUS merge path. This poller merges blog PRs
+// directly (gh.mergePr) and bypasses mergeAstro's assertOpenPublishPrIsHubOnly,
+// so a spoke-targeted PR created before the spoke blog network was disabled
+// could otherwise auto-merge and fan out to a spoke despite the seed/publish/
+// mergeAstro gates. Mirror the same hub-only policy here: when the network is
+// disabled, a run whose resolved target is off-hub (a spoke self-canonical,
+// which the publisher syncs into draft_payload.frontmatter.canonical) must not
+// auto-merge. Enabled = spoke PRs are intended (mergeAstro's guard is likewise
+// skipped), so the single flag governs every merge path.
+function spokeMergeBlockedByKillSwitch(run) {
+  if (spokeBlogNetworkEnabled()) return false;
+  // Scope the block to NEW spoke-blog fanout only. maybeAutoMerge also handles
+  // rewrite_title_meta / refresh_existing_page runs, whose target is an
+  // ALREADY-EXISTING page (e.g. a spoke service page) — legitimately off-hub and
+  // not blog fanout. The blog kill switch must not park those; blocking them
+  // would strand routine spoke service-page refreshes while the lane is off.
+  if (String(run.action_type || '') !== 'new_supporting_blog') return false;
+  return canonicalIsOffHub(targetForRun(run).url);
 }
 
 /**
@@ -551,6 +572,16 @@ async function maybeAutoMerge(run, pr) {
     throw err; // lookup outage etc. — transient, retry next tick
   }
 
+  // 2b. Hub-only kill switch (mirrors mergeAstro's assertOpenPublishPrIsHubOnly,
+  //     which THIS path bypasses). Never auto-merge a spoke-targeted PR while
+  //     the spoke blog network is disabled — a stale spoke PR from before the
+  //     lane was turned off would otherwise fan out to a spoke. Parks until the
+  //     lane is re-enabled or the PR is closed.
+  if (spokeMergeBlockedByKillSwitch(run)) {
+    logger.info(`[autonomous-pr-poller] auto-merge blocked for run ${run.id}: PR #${pr.number} targets a spoke but the spoke blog network is disabled (set SPOKE_BLOG_NETWORK_ENABLED=true to allow)`);
+    return { pending: true, reason: 'spoke_blog_network_disabled' };
+  }
+
   // 3. Last-instant queue re-check: the gates above take seconds of network
   //    time, and the tick-start queue validation is stale by now. An
   //    operator requeue/dismiss landing in that window must block the merge
@@ -715,6 +746,7 @@ module.exports = {
     isMetadataLane,
     closedSkipReasonForRun,
     targetForRun,
+    spokeMergeBlockedByKillSwitch,
     resolveTargetForRun,
     queueRowStillParked,
     finalizeMerged,

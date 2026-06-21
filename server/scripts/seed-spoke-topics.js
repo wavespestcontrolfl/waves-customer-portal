@@ -32,6 +32,11 @@ const file = ARGS.file ? String(ARGS.file) : undefined;
 (async function main() {
   try {
     const result = await seeder.seedAll({ ...(file ? { file } : {}), dryRun });
+    if (result.disabled) {
+      console.log('Spoke blog network is DISABLED — all blog content publishes to the hub (wavespestcontrol.com) only.');
+      console.log('No spoke topics were seeded. Set SPOKE_BLOG_NETWORK_ENABLED=true to re-enable the per-spoke blog lane.');
+      process.exit(0);
+    }
     for (const row of result.rows) {
       const window = row.available_at
         ? `available ${row.available_at.toISOString().slice(0, 10)}`
