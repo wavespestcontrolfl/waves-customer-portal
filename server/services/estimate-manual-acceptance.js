@@ -3,6 +3,8 @@ const logger = require('./logger');
 const EstimateConverter = require('./estimate-converter');
 const AccountMembershipEmail = require('./account-membership-email');
 const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
+const { normalizeProposal } = require('./estimate-proposal');
+const proposalWin = require('./proposal-win');
 const {
   estimateDataHasUnresolvedManagerApproval,
 } = require('./estimate-delivery-options');
@@ -133,14 +135,23 @@ async function markEstimateManuallyAccepted({
       throw httpError('Manager approval is required before this estimate can be manually accepted.', 400);
     }
 
-    if (estimate.bill_by_invoice) {
+    const isCommercialProposal = isCommercialProposalEstimate(estimate);
+
+    // Invoice-mode: a normal estimate's due-immediately invoice is built by
+    // EstimateConverter via the customer link, so manual accept still rejects
+    // it. A commercial proposal instead builds its own first invoice from the
+    // proposal line items below (#1917 invoice-mode win), so it passes here.
+    if (estimate.bill_by_invoice && !isCommercialProposal) {
       throw httpError(
         'Invoice-mode estimates must be accepted through the customer link so the due-immediately invoice is created correctly.',
         400,
       );
     }
 
-    if (!estimate.customer_id) {
+    // No linked customer: a normal estimate must be linked first (the converter
+    // needs a customer). A commercial proposal win auto-creates and promotes
+    // the customer from the proposal/contact details (#1917 lead-win).
+    if (!estimate.customer_id && !isCommercialProposal) {
       throw httpError(
         'Manual acceptance requires the estimate to be linked to a customer first.',
         400,
@@ -180,6 +191,12 @@ async function markEstimateManuallyAccepted({
       throw httpError('Annual prepay is not available for this estimate service mix.', 400);
     }
 
+    // #1917: a commercial proposal's customer creation + first invoice run AFTER
+    // the guarded status flip below, so they only execute on the accept that
+    // actually won the race — a losing/already-accepted path never orphans a
+    // duplicate customer or invoice.
+    let proposalCustomer = null;
+
     const now = trx.fn.now();
     const updates = {
       status: 'accepted',
@@ -210,23 +227,83 @@ async function markEstimateManuallyAccepted({
       throw httpError('Estimate is no longer active.', 409);
     }
 
-    await logManualAcceptance(trx, {
-      estimate,
-      updatedEstimate,
-      adminUserId,
-      source,
-      billingTerm: normalizedBillingTerm,
-    });
+    // Race guard: re-derive proposal mode from the CLAIMED row. The validity
+    // guards above ran on the pre-claim SELECT; if a proposal-mode toggle
+    // committed between that read and this guarded UPDATE, the guards + the
+    // branch below would act on the wrong mode — routing a now-proposal through
+    // the legacy EstimateConverter (dropping its pricing/tax/cadence), or
+    // vice-versa. Bail so the operator retries against fresh state rather than
+    // mis-billing. (No-toggle is the norm, so this never fires in practice.)
+    if (isCommercialProposalEstimate(updatedEstimate) !== isCommercialProposal) {
+      throw httpError('This estimate changed while it was being accepted. Refresh and try again.', 409);
+    }
 
     // A commercial proposal's pricing lives in estimate_data.proposal.buildings,
     // which EstimateConverter does not read — it converts from the legacy
     // result/recurring service mix. Auto-converting here would activate the
-    // wrong (or empty) service mix and drop the proposal's tax/cadence, so for
-    // a proposal-enabled estimate we record the win (status + linked-lead) and
-    // leave commercial onboarding/billing to the operator.
-    const isCommercialProposal = isCommercialProposalEstimate(updatedEstimate);
+    // wrong (or empty) service mix and drop the proposal's tax/cadence, so a
+    // proposal records the win (status + linked-lead). Invoice-mode proposals
+    // additionally build their first invoice straight from the proposal lines
+    // (#1917); non-invoice-mode proposals leave billing to the operator.
     let conversion = null;
-    if (!isCommercialProposal && (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected)) {
+    let proposalInvoice = null;
+    if (isCommercialProposal) {
+      // Lead-win: create/link + promote the customer now. Only the flip winner
+      // reaches here, so a concurrent accept can't orphan a duplicate customer.
+      if (!updatedEstimate.customer_id) {
+        proposalCustomer = await proposalWin.ensureCustomerForProposalWin({
+          trx,
+          estimate: updatedEstimate,
+          proposal: normalizeProposal(updatedEstimate),
+        });
+        await trx('estimates')
+          .where({ id: updatedEstimate.id })
+          .update({ customer_id: proposalCustomer.customerId, updated_at: now });
+        updatedEstimate.customer_id = proposalCustomer.customerId;
+      } else {
+        // Pre-linked customer: proposals skip EstimateConverter (which normally
+        // promotes the linked customer), so promote/reactivate here — otherwise
+        // a proposal linked to a lead/inactive/churned customer is won + invoiced
+        // while the customer stays outside active-customer/revenue queries.
+        await proposalWin.promoteLinkedCustomerForProposalWin({
+          trx,
+          customerId: updatedEstimate.customer_id,
+        });
+      }
+      // Flag the (created or pre-linked) customer commercial for a TAXABLE
+      // proposal even when we're not building the first invoice now — otherwise a
+      // pre-linked residential/lead customer stays non-commercial and any later
+      // invoice for this taxable commercial work would be forced to $0 tax,
+      // underbilling. Idempotent (a new lead-win customer is already commercial).
+      await proposalWin.flagProposalCustomerCommercialIfTaxable({
+        trx,
+        customerId: updatedEstimate.customer_id,
+        proposal: normalizeProposal(updatedEstimate),
+      });
+      // Invoice-mode win: build the first invoice from the proposal line items.
+      if (updatedEstimate.bill_by_invoice) {
+        try {
+          proposalInvoice = await proposalWin.createProposalAcceptanceInvoice({
+            trx,
+            estimate: updatedEstimate,
+            proposal: normalizeProposal(updatedEstimate),
+            customerId: updatedEstimate.customer_id,
+          });
+        } catch (err) {
+          logger.warn(`[estimate-manual-acceptance] proposal invoice failed for estimate ${updatedEstimate.id}: ${err.message}`);
+          throw httpError('Proposal invoice could not be created; estimate was not marked accepted.', 500);
+        }
+        // Invoice mode promises a first invoice. If the proposal has no billable
+        // lines, there is nothing to bill — reject so the transaction rolls back
+        // rather than recording an invoice-mode win with no invoice.
+        if (!proposalInvoice) {
+          throw httpError(
+            'This invoice-mode proposal has no billable line items to invoice. Add priced lines or turn off invoice mode before winning it.',
+            400,
+          );
+        }
+      }
+    } else if (asMoneyOrNull(updatedEstimate.monthly_total) || annualPrepaySelected) {
       try {
         // Manual Mark Won keeps scheduling under operator control. Standard
         // verbal wins also skip the setup invoice. Annual-prepay verbal wins
@@ -253,12 +330,27 @@ async function markEstimateManuallyAccepted({
       }
     }
 
+    // Audit the win AFTER the customer is created/linked so a newly-created
+    // no-customer proposal customer gets the acceptance event in its timeline
+    // (activity_log is keyed on customer_id). updatedEstimate.customer_id is now
+    // final for every path: created/linked above for proposals, already set for
+    // non-proposals. A throw above rolls back this same trx, so no orphan log.
+    await logManualAcceptance(trx, {
+      estimate,
+      updatedEstimate,
+      adminUserId,
+      source,
+      billingTerm: normalizedBillingTerm,
+    });
+
     return {
       acceptedEstimate: updatedEstimate,
       alreadyAccepted: false,
       shouldRunDownstream: true,
       previousEstimate: estimate,
       conversion,
+      proposalInvoice,
+      proposalCustomer,
     };
   });
 
@@ -267,6 +359,8 @@ async function markEstimateManuallyAccepted({
     alreadyAccepted,
     shouldRunDownstream,
     conversion,
+    proposalInvoice = null,
+    proposalCustomer = null,
   } = claim;
 
   const warnings = [];
@@ -307,6 +401,19 @@ async function markEstimateManuallyAccepted({
     conversion,
     billingTerm: normalizedBillingTerm,
     warnings,
+    // #1917 proposal win surfaces: the auto-built invoice + whether a new
+    // customer was created, so the admin UI can link to them.
+    proposalInvoice: proposalInvoice
+      ? {
+        id: proposalInvoice.id,
+        invoiceNumber: proposalInvoice.invoice_number,
+        token: proposalInvoice.token,
+        total: proposalInvoice.total,
+      }
+      : null,
+    createdCustomer: proposalCustomer?.created
+      ? { id: proposalCustomer.customerId }
+      : null,
   };
 }
 

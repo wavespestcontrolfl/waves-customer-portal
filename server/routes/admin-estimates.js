@@ -1185,6 +1185,7 @@ router.get('/', async (req, res, next) => {
           archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
+          isCommercialProposal: estData?.proposal?.enabled === true,
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
           pricingRisk: pricingRiskById.get(e.id) || null,

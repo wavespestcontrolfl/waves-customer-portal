@@ -25,10 +25,31 @@ function validateEstimateDeliveryOptions({
       return 'Offer one-time option requires a one-time total on the estimate.';
     }
   }
-  if (billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
+  if (billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0
+    && !hasBillableCommercialProposal(estimateData)) {
+    // A commercial proposal carries its pricing in estimate_data.proposal
+    // (the top-level totals stay 0), and its first invoice is built from the
+    // proposal lines on win (#1917) — so a billable proposal satisfies the
+    // "billable total" requirement here.
     return 'Bill by invoice requires a billable recurring or one-time total.';
   }
   return null;
+}
+
+// True when the estimate carries an enabled commercial proposal with at least
+// one positively-priced line item — the billable basis for invoice-mode even
+// though the legacy top-level totals are 0.
+function hasBillableCommercialProposal(estimateData) {
+  const data = parseEstimateData(estimateData);
+  const proposal = data && data.proposal;
+  if (!proposal || proposal.enabled !== true || !Array.isArray(proposal.buildings)) return false;
+  return proposal.buildings.some((building) =>
+    Array.isArray(building?.lineItems) && building.lineItems.some((li) => {
+      const qty = Number(li?.quantity ?? 1) || 0;
+      const price = Number(li?.unitPrice ?? li?.unit_price ?? li?.price ?? 0) || 0;
+      return qty > 0 && price > 0;
+    }),
+  );
 }
 
 function parseEstimateData(estimateData) {
