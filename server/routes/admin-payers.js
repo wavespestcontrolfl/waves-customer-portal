@@ -194,6 +194,12 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
     if (!owned) return res.status(404).json({ error: 'Statement not found' });
 
     const method = String(req.body?.method || 'check').toLowerCase(); // check | ach | wire | offline
+    // OFFLINE methods only — a card/unknown value would record a card-family
+    // settlement at the BASE amount with no surcharge (the surcharge MUST derive
+    // from computeChargeAmount on the online pay path, never here).
+    if (!['check', 'ach', 'wire', 'offline'].includes(method)) {
+      return res.status(400).json({ error: 'Reconcile method must be one of: check, ach, wire, offline' });
+    }
     const rawAmount = req.body?.amount; // validated against the LOCKED total inside the txn
 
     // Cancel + settle UNDER ONE LOCK: a concurrent /pay/statement/:token/setup

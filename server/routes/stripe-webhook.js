@@ -1452,6 +1452,28 @@ async function handleChargeRefunded(charge) {
     }
   }
 
+  // Statement payment refund: do the row update AND (full) cascade reversal
+  // together UNDER the per-statement money lock — otherwise a racing
+  // payment_intent.succeeded could flip the same row back to `paid` between the
+  // generic update below and the reversal, leaving refunded money counted as paid.
+  const preRefundRow = await db('payments').where({ stripe_charge_id: chargeId }).first();
+  if (preRefundRow?.statement_id) {
+    const { withStatementMoneyLock } = require('../services/payer-statement-settle');
+    await withStatementMoneyLock(preRefundRow.statement_id, async (trx) => {
+      await trx('payments').where({ id: preRefundRow.id }).update({
+        status: isFullRefund ? 'refunded' : 'paid',
+        refund_amount: cumulativeRefundAmountDollars,
+        refund_status: isFullRefund ? 'full' : 'partial',
+        stripe_refund_id: refundId,
+      });
+      if (isFullRefund) {
+        await reverseStatementCascadeForDispute(preRefundRow.statement_id, preRefundRow.stripe_payment_intent_id, `charge.refunded (full $${cumulativeRefundAmountDollars.toFixed(2)})`, { database: trx });
+      }
+    });
+    logger.warn(`[stripe-webhook] statement S-${preRefundRow.statement_id} ${isFullRefund ? 'fully' : 'partially'} refunded${isFullRefund ? ' — cascade reversed to owed' : ''} (in-lock)`);
+    return; // statement refund fully handled; no homeowner refund-email path
+  }
+
   await db('payments')
     .where({ stripe_charge_id: chargeId })
     .update({
@@ -1462,15 +1484,6 @@ async function handleChargeRefunded(charge) {
     });
 
   const refundedPayment = await db('payments').where({ stripe_charge_id: chargeId }).first();
-
-  // Statement settlement refund: a statement payments row has statement_id (no
-  // customer_id). A FULL refund must reverse the statement cascade — otherwise
-  // payer_statements stays `paid` with all child invoices paid and AR never
-  // recollects the refunded money (PI-scoped, like the dispute reversal).
-  if (refundedPayment?.statement_id && isFullRefund) {
-    await reverseStatementCascadeForDispute(refundedPayment.statement_id, refundedPayment.stripe_payment_intent_id, `charge.refunded (full $${cumulativeRefundAmountDollars.toFixed(2)})`);
-    logger.warn(`[stripe-webhook] statement S-${refundedPayment.statement_id} fully refunded — cascade reversed to owed`);
-  }
 
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
