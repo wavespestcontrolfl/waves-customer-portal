@@ -529,7 +529,7 @@ async function getRevenueBreakdown(input) {
   }
 
   if (group_by === 'customer') {
-    const rows = await db('payments').where({ status: 'paid' }).whereNull('payer_id').whereBetween('payment_date', [from, to])
+    const rows = await db('payments').where({ status: 'paid' }).whereNull('payments.payer_id').whereBetween('payment_date', [from, to])
       .leftJoin('customers', 'payments.customer_id', 'customers.id')
       .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         db.raw('SUM(payments.amount) as total'), db.raw('COUNT(*) as payments'))

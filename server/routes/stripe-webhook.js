@@ -2159,6 +2159,18 @@ async function handleDisputeCreated(dispute) {
   if (dispute.payment_intent) {
     const disputedStmt = await db('payer_statements').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
     if (disputedStmt) {
+      // Late/retried created replay: if this dispute already CLOSED won (the
+      // payments row carries dispute_final for it), the won-close restored the
+      // active PI — reversing now would clear the PI + reopen children + undo
+      // reinstated funds. Honor the recorded final outcome and skip. (Statement-
+      // scoped; invoice disputes keep their own guard below.)
+      const priorRow = await db('payments').where({ stripe_charge_id: chargeId }).first();
+      let priorMeta = {};
+      try { priorMeta = priorRow?.metadata ? (typeof priorRow.metadata === 'string' ? JSON.parse(priorRow.metadata) : priorRow.metadata) : {}; } catch (e) { /* legacy */ }
+      if (priorMeta.dispute_final && priorMeta.dispute_id === dispute.id) {
+        logger.warn(`[stripe-webhook] statement S-${disputedStmt.id} dispute ${dispute.id} already closed (${priorMeta.dispute_final}) — late created replay, skipping reversal`);
+        return;
+      }
       // ATOMIC: reverse/clear the statement AND upsert the durable disputed
       // payments row in ONE transaction. If the row write fails, the PI-clear
       // rolls back too, so the Stripe retry's PI lookup still finds the statement
