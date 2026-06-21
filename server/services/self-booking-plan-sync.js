@@ -170,6 +170,10 @@ const MOSQUITO_RECURRING_PLANS = {
     tier: 'Bronze',
     monthlyRate: 45,
     recurringPattern: 'monthly',
+    // Seasonal = monthly cadence but only the Feb–Oct mosquito season (9 visits).
+    // Generators must clamp planned occurrences to these months so an Oct anchor does
+    // not produce Nov–Jan plan-covered visits (the pattern alone is unbounded monthly).
+    seasonMonths: [2, 3, 4, 5, 6, 7, 8, 9, 10],
     visitsPerYear: 9,
     targetAppointmentCount: 4,
   },

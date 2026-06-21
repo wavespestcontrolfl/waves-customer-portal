@@ -265,17 +265,27 @@ function futureDatesForService(rows, serviceKey, today) {
     .filter(Boolean));
 }
 
+function dateInSeason(dateStr, seasonMonths) {
+  if (!Array.isArray(seasonMonths) || !seasonMonths.length) return true;
+  const month = Number(String(dateStr).slice(5, 7));
+  return seasonMonths.includes(month);
+}
+
 function plannedFutureDates(anchor, plan, today, targetCount) {
   const base = dateKey(anchor.scheduled_date) || today;
   const pattern = anchor.recurring_pattern || plan.recurringPattern;
   const intervalDays = anchor.recurring_interval_days || plan.recurringIntervalDays || null;
+  // Seasonal plans (e.g. seasonal mosquito) keep a monthly cadence but only generate
+  // in-season visits, so an Oct anchor does not seed Nov–Jan plan-covered rows.
+  const seasonMonths = plan.seasonMonths || null;
+  const inWindow = (date) => date >= today && dateInSeason(date, seasonMonths);
   const generated = buildRecurringOccurrenceDates(base, pattern, 36, { intervalDays });
-  const future = generated.filter((date) => date >= today);
+  const future = generated.filter(inWindow);
   if (future.length >= targetCount) return future.slice(0, targetCount);
 
   const extendedBase = future[future.length - 1] || base;
   const extended = buildRecurringOccurrenceDates(extendedBase, pattern, targetCount + 12, { intervalDays })
-    .filter((date) => date >= today);
+    .filter(inWindow);
   return Array.from(new Set([...future, ...extended])).slice(0, targetCount);
 }
 

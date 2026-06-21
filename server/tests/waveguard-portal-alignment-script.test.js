@@ -258,6 +258,21 @@ describe('WaveGuard portal alignment script helpers', () => {
     )).toEqual(['2026-07-31', '2026-09-11', '2026-10-23']);
   });
 
+  test('seasonal plans only generate in-season planned dates', () => {
+    // Seasonal mosquito (monthly cadence, Feb–Oct) anchored in October must skip
+    // Nov/Dec/Jan instead of seeding out-of-season plan-covered visits.
+    const dates = plannedFutureDates(
+      { scheduled_date: '2026-10-15', recurring_pattern: 'monthly' },
+      { recurringPattern: 'monthly', seasonMonths: [2, 3, 4, 5, 6, 7, 8, 9, 10] },
+      '2026-10-01',
+      4,
+    );
+    expect(dates).toHaveLength(4);
+    const months = dates.map((d) => Number(d.slice(5, 7)));
+    expect(months.every((m) => m >= 2 && m <= 10)).toBe(true);
+    expect(months.some((m) => [11, 12, 1].includes(m))).toBe(false);
+  });
+
   test('reads pg DATE columns as the stored calendar day without an ET shift', () => {
     // pg returns a DATE column as a midnight Date; on a UTC server converting it as an
     // instant through ET would shift it back a day. etDateString always uses ET, so an

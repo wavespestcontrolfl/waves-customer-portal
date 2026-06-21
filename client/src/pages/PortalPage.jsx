@@ -6769,9 +6769,16 @@ function MyPlanTab({ customer }) {
   // visits (e.g. a single termite inspection) and free re-service callbacks must not
   // drive the included-services list, or under the tier-limit slice they could
   // displace the customer's real plan. Service history (service_records) carries no
-  // is_recurring signal, so it is not used for detection. When nothing qualifies we
-  // fall back to the tier defaults below.
-  const isPlanCoverageRow = (s) => !!s && s.isRecurring === true && s.isCallback !== true;
+  // is_recurring signal, so it is not used for detection. We also exclude
+  // non-qualifying families — palm injection, rodent, and one-time work — to match the
+  // server classifier (toQualifyingKey), so e.g. a recurring palm row never shows as
+  // Tree & Shrub coverage. When nothing qualifies we fall back to the tier defaults.
+  const PLAN_NON_QUALIFIER_RE = /palm|rodent|one[\s_-]?time|onetime/;
+  const isPlanCoverageRow = (s) => {
+    if (!s || s.isRecurring !== true || s.isCallback === true) return false;
+    const text = (s.serviceType || s.service_type || s.type || '').toLowerCase();
+    return !PLAN_NON_QUALIFIER_RE.test(text);
+  };
   [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
 
   // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
