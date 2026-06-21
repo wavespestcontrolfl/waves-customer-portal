@@ -140,6 +140,61 @@ async function firstProductLink(page, config) {
   }, sels);
 }
 
+// The distinctive name tokens to match a search result against (>=3 chars, so a
+// formulation code like "SC" can't spuriously match an unrelated slug).
+function searchTokens(product) {
+  const s = (product && (product.searchQuery || product.vendorProductName || product.productName || product.name)) || '';
+  return [...new Set((String(s).toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) => t.length >= 3))];
+}
+
+// PURE: choose the result link whose URL slug best matches the product. Modern
+// storefront search is a relevance-ranked widget — the RIGHT product is often not
+// first (e.g. a DoMyOwn "Taurus SC" search lists Talstar above Taurus). Pick by
+// name-token overlap (require >=min(2,#tokens) so a recommendation for a product we
+// don't sell isn't grabbed), breaking ties by also matching the pack-size tokens so
+// the size-specific page wins when a vendor splits sizes across pages. Returns a
+// URL or null (null -> the product isn't in these results; skip, don't guess).
+function bestMatchingLink(hrefs, product) {
+  const list = (hrefs || []).filter(Boolean);
+  if (!list.length) return null;
+  const nameToks = searchTokens(product);
+  if (!nameToks.length) return list[0]; // no product context -> legacy first-link
+  const sizeToks = [...new Set((String((product && product.quantity) || '').toLowerCase().match(/[a-z0-9]+/g) || [])
+    .filter((t) => t.length >= 2 && !nameToks.includes(t)))];
+  const need = Math.min(2, nameToks.length);
+  let best = null;
+  let bestName = -1;
+  let bestTotal = -1;
+  for (const href of list) {
+    const slug = String(href).toLowerCase();
+    const nameHits = nameToks.reduce((n, t) => n + (slug.includes(t) ? 1 : 0), 0);
+    if (nameHits < need) continue;
+    const total = nameHits + sizeToks.reduce((n, t) => n + (slug.includes(t) ? 1 : 0), 0);
+    if (nameHits > bestName || (nameHits === bestName && total > bestTotal)) {
+      best = href; bestName = nameHits; bestTotal = total;
+    }
+  }
+  return best;
+}
+
+// Collect every candidate result link, then pick the best match for the product.
+async function pickProductLink(page, config, product) {
+  const sels = config.productLinkSelectors && config.productLinkSelectors.length
+    ? config.productLinkSelectors
+    : ['a.product-link', '.product-item a', '.product a'];
+  const hrefs = await page.evaluate((selectors) => {
+    const seen = new Set();
+    const out = [];
+    for (const s of selectors) {
+      for (const a of document.querySelectorAll(s)) {
+        if (a && a.href && !seen.has(a.href)) { seen.add(a.href); out.push(a.href); }
+      }
+    }
+    return out;
+  }, sels);
+  return bestMatchingLink(hrefs, product);
+}
+
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
@@ -152,7 +207,12 @@ function makeAdapter(config) {
         : null;
       if (!searchUrl) return null;
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
-      url = await firstProductLink(page, config);
+      // Results are commonly injected by a client-side search widget, so they
+      // aren't in the DOM at domcontentloaded — wait (bounded) for the first
+      // result link to appear before picking. Non-fatal if it times out.
+      const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
+      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs || 8000 }).catch(() => {});
+      url = await pickProductLink(page, config, product);
       if (!url) return null;
     }
 
@@ -212,6 +272,6 @@ function makeAdapter(config) {
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, firstProductLink, searchQuery, targetOzOf,
-  priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
+  makeAdapter, collectSnapshot, firstProductLink, pickProductLink, bestMatchingLink, searchTokens,
+  searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };

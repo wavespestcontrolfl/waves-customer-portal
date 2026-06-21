@@ -1,7 +1,7 @@
 // No jsdom: collectSnapshot's DOM querying is browser I/O (exercised by the live
 // proof). The unit-testable part — preferring microdata attributes over text,
 // and the structured-size oz gate — is covered here with plain objects.
-const { priceValue, availabilityValue, targetOzOf } = require('../services/price-scan/adapters/base');
+const { priceValue, availabilityValue, targetOzOf, bestMatchingLink, searchTokens } = require('../services/price-scan/adapters/base');
 
 // Minimal element stub: attributes + textContent, like a DOM node.
 const el = (attrs = {}, text = '') => ({
@@ -57,5 +57,43 @@ describe('targetOzOf (structured pack size -> oz gate)', () => {
   });
   test('falls back to a free-text quantity string', () => {
     expect(targetOzOf({ quantity: '78 oz' })).toBe(78);
+  });
+});
+
+describe('searchTokens', () => {
+  test('keeps distinctive >=3-char tokens, drops short formulation codes', () => {
+    expect(searchTokens({ vendorProductName: 'Taurus SC Termiticide' })).toEqual(['taurus', 'termiticide']); // "sc" dropped
+  });
+  test('prefers an explicit searchQuery', () => {
+    expect(searchTokens({ searchQuery: 'Bifen IT', name: 'X' })).toEqual(['bifen']); // "it" dropped (<3)
+  });
+});
+
+describe('bestMatchingLink (scored result selection)', () => {
+  const product = { vendorProductName: 'Taurus SC Termiticide', quantity: '78 oz' };
+  const links = [
+    'https://www.domyown.com/talstar-professional-insecticide-p-97.html',
+    'https://www.domyown.com/termidor-sc-p-184.html',
+    'https://www.domyown.com/taurus-sc-termiticide-p-1816.html',
+    'https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html',
+  ];
+  test('picks the matching product even when it is NOT first (relevance-ranked widget)', () => {
+    const got = bestMatchingLink(links, product);
+    expect(got).toMatch(/taurus-sc-termiticide/);
+  });
+  test('size tokens break the tie toward the size-specific page', () => {
+    expect(bestMatchingLink(links, product)).toBe('https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html');
+  });
+  test('returns null when the product is not in the results (no false grab)', () => {
+    expect(bestMatchingLink([
+      'https://www.domyown.com/talstar-professional-insecticide-p-97.html',
+      'https://www.domyown.com/termidor-sc-p-184.html',
+    ], product)).toBeNull();
+  });
+  test('no product context -> legacy first link', () => {
+    expect(bestMatchingLink(links, {})).toBe(links[0]);
+  });
+  test('empty list -> null', () => {
+    expect(bestMatchingLink([], product)).toBeNull();
   });
 });
