@@ -179,6 +179,12 @@ function targetForRun(run) {
 // skipped), so the single flag governs every merge path.
 function spokeMergeBlockedByKillSwitch(run) {
   if (spokeBlogNetworkEnabled()) return false;
+  // Scope the block to NEW spoke-blog fanout only. maybeAutoMerge also handles
+  // rewrite_title_meta / refresh_existing_page runs, whose target is an
+  // ALREADY-EXISTING page (e.g. a spoke service page) — legitimately off-hub and
+  // not blog fanout. The blog kill switch must not park those; blocking them
+  // would strand routine spoke service-page refreshes while the lane is off.
+  if (String(run.action_type || '') !== 'new_supporting_blog') return false;
   return canonicalIsOffHub(targetForRun(run).url);
 }
 

@@ -264,6 +264,25 @@ describe('autonomous-pr-poller: spoke kill switch on the auto-merge path', () =>
     expect(poller.spokeMergeBlockedByKillSwitch(spokeRun)).toBe(false);
     expect(poller.spokeMergeBlockedByKillSwitch(hubRun)).toBe(false);
   });
+
+  test('disabled: an off-hub NON-blog run (spoke service-page refresh) is NOT blocked', () => {
+    // The blog kill switch only gates NEW spoke-blog fanout. A refresh of an
+    // existing spoke service page resolves off-hub via draft.page_url, but it is
+    // not blog fanout and must still be allowed to auto-merge.
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    const refreshRun = {
+      action_type: 'refresh_existing_page',
+      draft_payload: JSON.stringify({ page_url: 'https://www.sarasotaflpestcontrol.com/pest-control-sarasota-fl/' }),
+    };
+    const rewriteRun = {
+      action_type: 'rewrite_title_meta',
+      draft_payload: JSON.stringify({ target_url: 'https://www.sarasotaflpestcontrol.com/lawn-care-sarasota-fl/' }),
+    };
+    expect(poller.spokeMergeBlockedByKillSwitch(refreshRun)).toBe(false);
+    expect(poller.spokeMergeBlockedByKillSwitch(rewriteRun)).toBe(false);
+    // ...but a NEW spoke blog post on the same domain is still blocked.
+    expect(poller.spokeMergeBlockedByKillSwitch(spokeRun)).toBe(true);
+  });
 });
 
 describe('content-guardrails: narrow brand-token exemption on spoke pages', () => {
