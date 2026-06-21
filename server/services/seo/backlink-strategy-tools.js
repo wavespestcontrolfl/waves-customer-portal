@@ -251,10 +251,13 @@ async function executeBacklinkTool(toolName, input) {
           target_url: p.target_url || null,
           target_page: p.target_page,
           anchor_planned: p.anchor_planned || scored?.suggested_anchor || null,
-          // Only honor an agent-supplied link_type if the worker can claim it;
-          // otherwise use the scorer's coerced (claimable) type so the row
-          // never strands in 'prospect'.
-          link_type: (p.link_type && scorer.CLAIMABLE_LINK_TYPES.has(p.link_type)) ? p.link_type : (scored?.intent_class || null),
+          // The scorer's classification is CANONICAL: the contact gate was
+          // evaluated against it (signup-lane skips the contact check), so an
+          // agent-supplied link_type must NOT override the lane — else a
+          // no-contact directory could be stored as 'editorial' and cold-emailed.
+          // Honor p.link_type only when scoring didn't run (fail-soft), and only
+          // if it is worker-claimable.
+          link_type: scored?.intent_class || ((p.link_type && scorer.CLAIMABLE_LINK_TYPES.has(p.link_type)) ? p.link_type : null),
           priority: p.priority || scored?.priority || null,
           domain_rating: p.domain_rating || null,
           notes: p.notes || null,

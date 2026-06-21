@@ -291,7 +291,10 @@ async function mapPool(items, limit, fn) {
  * score a batch. Returns one enriched result per candidate.
  * candidate: { domain, domain_rating, spam_score, source_url, sample_anchors[], links_to_competitors[] }
  */
-async function scoreCandidates(candidates, { anthropic, fetchFn = fetch, findContactFn = findContact, concurrency = 5 } = {}) {
+async function scoreCandidates(candidates, { anthropic, fetchFn, findContactFn = findContact, concurrency = 5 } = {}) {
+  // NB: fetchFn is intentionally left undefined unless a test injects one, so
+  // findContact falls back to its SSRF-pinned nodeFetch default. Defaulting it to
+  // global fetch here would bypass the connection-level private-IP check.
   if (!candidates.length) return [];
   const classifications = await classifyBatch(candidates, { anthropic });
 
