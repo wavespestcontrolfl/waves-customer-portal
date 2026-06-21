@@ -5,9 +5,10 @@
  * in a Toll Brothers community) is often absent from the FDOR cadastral roll,
  * the county PAO, AND the listing sites, so propertyType used to default
  * silently to "Single Family" from an unknown source. The satellite vision
- * pass now reports structureAttachment; when the record's type is weak, that
- * read surfaces a townhome/condo as satellite evidence with a verify nudge —
- * never overriding authoritative county/cadastral/verified data.
+ * pass now reports structureAttachment; when the record's type is weak AND the
+ * read is confident, that surfaces a townhome/condo as satellite evidence with
+ * a verify nudge — never overriding authoritative data, and never repricing on
+ * a low-confidence / divergent guess (townhome/condo is a discount).
  */
 
 jest.mock('../services/logger', () => ({
@@ -54,6 +55,18 @@ function weakAiRecord(overrides = {}) {
   };
 }
 
+// A merged-vision-shaped analysis: mergeAiAnalyses stamps both the blended
+// confidenceScore and the field-level _structureAttachmentConfidence the
+// pricing guard actually reads.
+function mergedAi(attachment, conf, extra = {}) {
+  return {
+    structureAttachment: attachment,
+    confidenceScore: conf,
+    _structureAttachmentConfidence: conf,
+    ...extra,
+  };
+}
+
 describe('propertyTypeFromAttachment', () => {
   test('maps the attached enums to estimator types the pricing normalizer understands', () => {
     expect(propertyTypeFromAttachment({ structureAttachment: 'ATTACHED_END' })).toBe('Townhome');
@@ -92,8 +105,7 @@ describe('recordPropertyTypeIsWeak', () => {
 describe('buildEnrichedProfile — satellite attachment fallback', () => {
   test('weak record + confident ATTACHED_END surfaces a townhome as satellite evidence with a verify nudge', () => {
     const rc = weakAiRecord();
-    const ai = { structureAttachment: 'ATTACHED_END', confidenceScore: 75 };
-    const profile = buildEnrichedProfile(rc, ai, 27.4, -82.4);
+    const profile = buildEnrichedProfile(rc, mergedAi('ATTACHED_END', 75), 27.4, -82.4);
 
     expect(profile.propertyType).toBe('Townhome');
     // Mutated onto the record so flags + pricing + the response all agree.
@@ -109,8 +121,7 @@ describe('buildEnrichedProfile — satellite attachment fallback', () => {
       propertyType: 'Single Family',
       _fieldEvidence: { propertyType: { sourceType: 'county', fieldVerify: false, score: 100 } },
     });
-    const ai = { structureAttachment: 'ATTACHED_END', confidenceScore: 90 };
-    const profile = buildEnrichedProfile(rc, ai, 27.4, -82.4);
+    const profile = buildEnrichedProfile(rc, mergedAi('ATTACHED_END', 90), 27.4, -82.4);
 
     expect(profile.propertyType).toBe('Single Family');
     expect(rc._propertyTypeSource).toBeUndefined();
@@ -118,21 +129,21 @@ describe('buildEnrichedProfile — satellite attachment fallback', () => {
 
   test('detached/unknown attachment leaves the default untouched', () => {
     const rc = weakAiRecord();
-    const profile = buildEnrichedProfile(rc, { structureAttachment: 'DETACHED', confidenceScore: 80 }, 27.4, -82.4);
+    const profile = buildEnrichedProfile(rc, mergedAi('DETACHED', 80), 27.4, -82.4);
     expect(profile.propertyType).toBe('Single Family');
     expect(rc._propertyTypeSource).toBeUndefined();
   });
 });
 
-describe('confidence gate (codex P2) — never reprice on a shaky read', () => {
-  test('low confidence does NOT change the priced type (stays Single Family)', () => {
+describe('confidence gate (codex P2/P1) — never reprice on a shaky read', () => {
+  test('low field-level confidence does NOT change the priced type (stays Single Family)', () => {
     const rc = weakAiRecord();
-    const profile = buildEnrichedProfile(rc, { structureAttachment: 'ATTACHED_END', confidenceScore: 50 }, 27.4, -82.4);
+    const profile = buildEnrichedProfile(rc, mergedAi('ATTACHED_END', 50), 27.4, -82.4);
     expect(profile.propertyType).toBe('Single Family');
     expect(rc._propertyTypeSource).toBeUndefined();
   });
 
-  test('missing confidenceScore does NOT change the priced type', () => {
+  test('missing field-level confidence does NOT change the priced type', () => {
     const rc = weakAiRecord();
     const profile = buildEnrichedProfile(rc, { structureAttachment: 'STACKED' }, 27.4, -82.4);
     expect(profile.propertyType).toBe('Single Family');
@@ -141,21 +152,46 @@ describe('confidence gate (codex P2) — never reprice on a shaky read', () => {
 
   test('cross-provider divergence on structureAttachment blocks the change even at high confidence', () => {
     const rc = weakAiRecord();
-    const ai = {
-      structureAttachment: 'ATTACHED_END',
-      confidenceScore: 85,
-      aiDivergences: [{ field: 'structureAttachment', primary: 'claude' }],
-    };
+    const ai = mergedAi('ATTACHED_END', 85, { aiDivergences: [{ field: 'structureAttachment', primary: 'claude' }] });
     const profile = buildEnrichedProfile(rc, ai, 27.4, -82.4);
     expect(profile.propertyType).toBe('Single Family');
     expect(rc._propertyTypeSource).toBeUndefined();
+  });
+
+  // The codex P1: a lone low-confidence provider's gap-filled attachment must
+  // not average its way past the bar via two high-confidence providers that
+  // omitted the field.
+  test('gap-filled attachment from a single low-confidence provider is NOT applied', () => {
+    const merged = mergeAiAnalyses([
+      { provider: 'claude', analysis: { confidenceScore: 85 } },
+      { provider: 'openai', analysis: { confidenceScore: 85 } },
+      { provider: 'gemini', analysis: { structureAttachment: 'ATTACHED_END', confidenceScore: 40 } },
+    ]);
+    expect(merged.structureAttachment).toBe('ATTACHED_END'); // gap-filled
+    expect(merged.confidenceScore).toBeGreaterThanOrEqual(70); // blended avg clears the bar...
+    expect(merged._structureAttachmentConfidence).toBe(40); // ...but the actual read does not
+
+    const rc = weakAiRecord();
+    applySatelliteAttachmentType(rc, merged);
+    expect(rc._propertyTypeSource).toBeUndefined();
+  });
+
+  test('consensus high-confidence attachment IS applied end-to-end through the merge', () => {
+    const merged = mergeAiAnalyses([
+      { provider: 'claude', analysis: { structureAttachment: 'ATTACHED_END', confidenceScore: 80 } },
+      { provider: 'openai', analysis: { structureAttachment: 'ATTACHED_END', confidenceScore: 75 } },
+      { provider: 'gemini', analysis: { confidenceScore: 60 } },
+    ]);
+    expect(merged._structureAttachmentConfidence).toBe(80);
+    const rc = weakAiRecord();
+    expect(applySatelliteAttachmentType(rc, merged)).toBe('Townhome');
   });
 });
 
 describe('buildFieldVerifyFlags — townhome nudge', () => {
   test('a satellite-sourced propertyType gets a townhome-specific confirm message', () => {
     const rc = weakAiRecord();
-    const ai = { structureAttachment: 'ATTACHED_INTERIOR', confidenceScore: 75 };
+    const ai = mergedAi('ATTACHED_INTERIOR', 75);
     buildEnrichedProfile(rc, ai, 27.4, -82.4); // applies the satellite evidence
     const flags = buildFieldVerifyFlags(rc, ai);
     const typeFlag = flags.find((f) => f.field === 'propertyType');
@@ -172,7 +208,7 @@ describe('ordering: reclassify before the turf cap (codex P1 regression)', () =>
   // attachment type FIRST; this pins that the cap then leaves turf alone.
   test('attached unit with turf above parcel area is NOT clamped once reclassified first', () => {
     const rc = weakAiRecord({ _parcel: { polygonAreaSqft: 2000 } });
-    const ai = { structureAttachment: 'ATTACHED_END', confidenceScore: 75, estimatedTurfSf: 6000 };
+    const ai = mergedAi('ATTACHED_END', 75, { estimatedTurfSf: 6000 });
 
     applySatelliteAttachmentType(rc, ai); // route order: BEFORE the cap
     applyParcelTurfBound(ai, rc);
@@ -184,7 +220,7 @@ describe('ordering: reclassify before the turf cap (codex P1 regression)', () =>
 
   test('a detached single-family unit above parcel area still gets clamped', () => {
     const rc = weakAiRecord({ _parcel: { polygonAreaSqft: 2000 } });
-    const ai = { structureAttachment: 'DETACHED', confidenceScore: 80, estimatedTurfSf: 6000 };
+    const ai = mergedAi('DETACHED', 80, { estimatedTurfSf: 6000 });
 
     applySatelliteAttachmentType(rc, ai);
     applyParcelTurfBound(ai, rc);
@@ -196,7 +232,7 @@ describe('ordering: reclassify before the turf cap (codex P1 regression)', () =>
 
   test('applySatelliteAttachmentType is idempotent (no re-apply after the route call)', () => {
     const rc = weakAiRecord();
-    const ai = { structureAttachment: 'ATTACHED_END', confidenceScore: 75 };
+    const ai = mergedAi('ATTACHED_END', 75);
     expect(applySatelliteAttachmentType(rc, ai)).toBe('Townhome');
     expect(applySatelliteAttachmentType(rc, ai)).toBeNull(); // already satellite-sourced
   });
@@ -209,6 +245,7 @@ describe('mergeAiAnalyses — structureAttachment', () => {
       { provider: 'gemini', analysis: { structureAttachment: 'ATTACHED_END', confidenceScore: 85 } },
     ]);
     expect(merged.structureAttachment).toBe('ATTACHED_END');
+    expect(merged._structureAttachmentConfidence).toBe(85);
   });
 
   test('fills the field from a secondary provider when the primary omitted it', () => {
@@ -217,5 +254,6 @@ describe('mergeAiAnalyses — structureAttachment', () => {
       { provider: 'openai', analysis: { structureAttachment: 'STACKED', confidenceScore: 40 } },
     ]);
     expect(merged.structureAttachment).toBe('STACKED');
+    expect(merged._structureAttachmentConfidence).toBe(40);
   });
 });

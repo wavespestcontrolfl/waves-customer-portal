@@ -1143,11 +1143,15 @@ const SATELLITE_TYPE_MIN_CONFIDENCE = (() => {
 })();
 
 // A satellite attachment read is trustworthy enough to reprice on only when the
-// merged analysis is at/above the confidence bar AND the vision models did not
-// diverge on structureAttachment (mergeAiAnalyses records cross-provider
-// disagreement in aiDivergences).
+// provider(s) that actually reported the winning structureAttachment value are
+// at/above the confidence bar (_structureAttachmentConfidence, stamped by
+// mergeAiAnalyses — NOT the blended average, which a lone low-confidence
+// gap-fill could ride past) AND the vision models did not diverge on the field
+// (aiDivergences). No fallback to the average: the guard is only reached when
+// structureAttachment is present, and the merge always stamps the field-level
+// confidence in that case, so a missing stamp means "don't reprice".
 function satelliteAttachmentIsConfident(ai) {
-  const conf = Number(ai?.confidenceScore);
+  const conf = Number(ai?._structureAttachmentConfidence);
   if (!Number.isFinite(conf) || conf < SATELLITE_TYPE_MIN_CONFIDENCE) return false;
   return !(Array.isArray(ai?.aiDivergences)
     && ai.aiDivergences.some((d) => d && d.field === 'structureAttachment'));
@@ -2980,6 +2984,23 @@ function mergeAiAnalyses(providerResults) {
   if (divergences.length) {
     merged.aiDivergences = divergences;
     merged.analysisNotes = (merged.analysisNotes || '') + ` AI models diverged on: ${divergences.map(d => d.field).join(', ')}.`;
+  }
+
+  // Confidence behind the FINAL structureAttachment value — the max confidence
+  // among the providers that actually reported THAT value, not the blended
+  // average. structureAttachment can be gap-filled from a single low-confidence
+  // provider while two high-confidence providers omitted it; the pricing guard
+  // (satelliteAttachmentIsConfident) keys off this so a lone low-confidence read
+  // can't average its way past the bar and reprice a home (codex P1).
+  if (merged.structureAttachment) {
+    const want = String(merged.structureAttachment).toUpperCase();
+    const supporters = sorted.filter(
+      (r) => String(r.analysis?.structureAttachment || '').toUpperCase() === want
+    );
+    merged._structureAttachmentConfidence = supporters.reduce(
+      (mx, r) => Math.max(mx, Number(r.analysis?.confidenceScore) || 0), 0
+    );
+    merged._structureAttachmentSupport = supporters.length;
   }
 
   return merged;
