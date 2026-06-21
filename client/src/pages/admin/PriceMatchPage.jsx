@@ -191,8 +191,10 @@ export default function PriceMatchPage() {
       const res = await adminFetch(`/admin/price-match/scan`, { method: "POST", body: JSON.stringify({ mode }) });
       if (mode === "select") {
         const names = (res && res.products) || [];
+        const vendorList = (res && res.vendors) || [];
         const preview = names.length ? ` — ${names.slice(0, 8).join(", ")}${names.length > 8 ? "…" : ""}` : "";
-        setNotice(`Selection preview: ${(res && res.evaluated) || 0} product${res && res.evaluated === 1 ? "" : "s"} would be scanned${preview}.`);
+        const across = vendorList.length ? ` across ${vendorList.join(", ")}` : "";
+        setNotice(`Selection preview: ${(res && res.evaluated) || 0} product${res && res.evaluated === 1 ? "" : "s"} would be scanned${across}${preview}.`);
       } else {
         setNotice("Scan started — it runs in the background; refresh in a few minutes to see any new draft.");
       }
