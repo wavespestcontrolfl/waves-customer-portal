@@ -8,6 +8,8 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const draftSvc = require('../services/price-scan/price-match-draft');
+const { runWeeklyScan } = require('../services/price-scan/weekly-scan');
+const { runExclusive } = require('../utils/cron-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -83,6 +85,31 @@ router.post('/drafts/:id/reset', async (req, res, next) => {
     if (!row) return res.status(409).json({ code: 'not_sending', error: 'Draft is not resettable (only a stale claim whose send was never attempted can be reset).' });
     logger.info('price-match draft reset from sending', { draftId: Number(req.params.id), technicianId: req.technicianId });
     return res.json({ draft: row });
+  } catch (err) { return next(err); }
+});
+
+// POST /api/admin/price-match/scan — owner manually triggers the weekly scan to
+// validate it before enabling the cron. requireAdmin only, so it's unaffected by
+// the GATE_PRICE_SCAN cron gate. body { mode }:
+//   'select' (default) — fast: returns the products that WOULD be scanned, no
+//                        browser launch, no draft. Use to verify selection.
+//   'run'              — full live scan + draft. Can take minutes (live scrapes),
+//                        so it runs fire-and-forget under the same lock as the cron
+//                        (no overlap / duplicate drafts); poll the drafts list for
+//                        the result.
+router.post('/scan', async (req, res, next) => {
+  try {
+    const mode = req.body && req.body.mode === 'run' ? 'run' : 'select';
+    if (mode === 'select') {
+      const result = await runWeeklyScan({ selectOnly: true });
+      return res.json(result);
+    }
+    res.status(202).json({ ok: true, started: true });
+    runExclusive('price-scan-weekly', async () => {
+      const result = await runWeeklyScan();
+      logger.info(`[price-match] manual scan run by ${req.technicianId}: ${JSON.stringify(result)}`);
+    }).catch((err) => logger.error(`[price-match] manual scan failed: ${err.message}`));
+    return undefined;
   } catch (err) { return next(err); }
 });
 

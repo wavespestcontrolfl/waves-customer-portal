@@ -152,13 +152,17 @@ function reportItemsFromScan(product, scan) {
 const DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
   + 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// Live entry point: launch a headless browser and scan for real, giving each
-// vendor its own page. Lazy-requires playwright so importing scanner.js (engine
-// + pure helpers) never needs a browser. This is the I/O wrapper around the
-// unit-tested scanProduct; the live Taurus SC proof drives it.
-async function runScan(product, vendors, opts = {}) {
+// Live BATCH entry: launch ONE headless browser and scan many products through it
+// (a shared context, one page per fetch), so a weekly run doesn't pay a browser
+// launch per product. Lazy-requires playwright so importing scanner.js (engine +
+// pure helpers) never needs a browser — a missing browser rejects the whole batch
+// once (the caller maps that to a clean skip), while a per-PRODUCT scrape failure
+// is captured as { product, error } and never sinks the rest of the batch.
+//   specs: [{ product, vendors }]  ->  [{ product, scan } | { product, error }]
+async function runScanMany(specs, opts = {}) {
   const { chromium } = require('playwright');
   const browser = await chromium.launch({ headless: opts.headless !== false });
+  const results = [];
   try {
     const context = await browser.newContext({ userAgent: opts.userAgent || DESKTOP_UA });
     const fetchCandidate = async (adapter, vendor, prod) => {
@@ -169,14 +173,31 @@ async function runScan(product, vendors, opts = {}) {
         await page.close().catch(() => {});
       }
     };
-    return await scanProduct(product, vendors, { fetchCandidate });
+    for (const spec of specs || []) {
+      try {
+        const scan = await scanProduct(spec.product, spec.vendors, { fetchCandidate });
+        results.push({ product: spec.product, scan });
+      } catch (error) {
+        results.push({ product: spec.product, error });
+      }
+    }
   } finally {
     await browser.close().catch(() => {});
   }
+  return results;
+}
+
+// Live single-product entry (the Taurus SC proof drives it). Thin wrapper over the
+// batch runner so the browser I/O lives in one place.
+async function runScan(product, vendors, opts = {}) {
+  const [res] = await runScanMany([{ product, vendors }], opts);
+  if (res && res.error) throw res.error;
+  return res ? res.scan : null;
 }
 
 module.exports = {
   SOURCE_TYPE,
+  runScanMany,
   hasProof,
   buildReportItem,
   scanProduct,

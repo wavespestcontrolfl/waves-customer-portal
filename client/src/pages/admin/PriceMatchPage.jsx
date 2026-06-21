@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, Send, XCircle, RotateCcw, ChevronRight, ExternalLink, AlertTriangle } from "lucide-react";
+import { RefreshCw, Send, XCircle, RotateCcw, ChevronRight, ExternalLink, AlertTriangle, Search, Play } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -80,6 +80,7 @@ export default function PriceMatchPage() {
 
   const [busy, setBusy] = useState(false); // an action (send/dismiss/reset) is in flight
   const [confirmSend, setConfirmSend] = useState(false);
+  const [scanning, setScanning] = useState(false); // a manual scan trigger is in flight
 
   // Always-current selection, so an in-flight refresh can't clobber the pane after
   // the operator has moved on to a different draft.
@@ -179,6 +180,29 @@ export default function PriceMatchPage() {
     }
   }, [recipient, loadDrafts, refreshDetail]);
 
+  // Manually trigger the weekly scan to validate it before the cron is enabled.
+  // 'select' = fast preview of which products would be scanned; 'run' = full live
+  // scan + draft, which runs in the background (poll/refresh for the new draft).
+  const triggerScan = useCallback(async (mode) => {
+    setScanning(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await adminFetch(`/admin/price-match/scan`, { method: "POST", body: JSON.stringify({ mode }) });
+      if (mode === "select") {
+        const names = (res && res.products) || [];
+        const preview = names.length ? ` — ${names.slice(0, 8).join(", ")}${names.length > 8 ? "…" : ""}` : "";
+        setNotice(`Selection preview: ${(res && res.evaluated) || 0} product${res && res.evaluated === 1 ? "" : "s"} would be scanned${preview}.`);
+      } else {
+        setNotice("Scan started — it runs in the background; refresh in a few minutes to see any new draft.");
+      }
+    } catch (err) {
+      setError(err.message || "Could not start the scan");
+    } finally {
+      setScanning(false);
+    }
+  }, []);
+
   const matches = detail ? parseMatches(detail.matches) : [];
   const proofRows = matches.filter((m) => m && m.competitor && m.competitor.source_url);
 
@@ -197,6 +221,8 @@ export default function PriceMatchPage() {
         title="Price Match"
         actions={[
           { key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: loadDrafts },
+          { key: "preview", label: "Preview scan", size: "sm", variant: "ghost", icon: Search, disabled: scanning, onClick: () => triggerScan("select") },
+          { key: "run", label: scanning ? "Starting…" : "Run scan", size: "sm", icon: Play, disabled: scanning, onClick: () => triggerScan("run") },
         ]}
       />
 
