@@ -293,6 +293,30 @@ const STATUS_COLORS = {
   void: D.muted,
 };
 
+// Statuses where a balance is no longer collectible — mirrors the server's
+// INVOICE_UNCOLLECTIBLE_STATUSES. For collectible invoices the admin surfaces
+// quote the amount DUE (total − applied account credit, served as `amount_due`);
+// settled/terminal invoices keep showing their gross total (face value).
+const UNCOLLECTIBLE_STATUSES = new Set([
+  "paid", "prepaid", "processing", "void", "refunded", "canceled", "cancelled",
+]);
+
+function invoiceCreditApplied(inv = {}) {
+  return Number(inv.credit_applied || 0);
+}
+
+// The amount an operator should quote/collect: amount due for a collectible
+// invoice (so a partial account credit is reflected), else the gross total.
+function invoiceDisplayAmount(inv = {}) {
+  const total = Number(inv.total || 0);
+  if (UNCOLLECTIBLE_STATUSES.has(inv.status)) return total;
+  const due =
+    inv.amount_due != null
+      ? Number(inv.amount_due)
+      : total - invoiceCreditApplied(inv);
+  return Math.max(0, due);
+}
+
 function formatDateParam(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -1035,8 +1059,21 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                             fontFamily: "'Roboto', Arial, sans-serif",
                           }}
                         >
-                          ${parseFloat(inv.total).toFixed(2)}
+                          ${invoiceDisplayAmount(inv).toFixed(2)}
                         </div>{" "}
+                        {!UNCOLLECTIBLE_STATUSES.has(inv.status) &&
+                          invoiceCreditApplied(inv) > 0 && (
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: D.muted,
+                                marginTop: 2,
+                              }}
+                            >
+                              ${invoiceCreditApplied(inv).toFixed(2)} credit
+                              applied
+                            </div>
+                          )}
                         <div
                           style={{
                             fontSize: 14,
@@ -2159,7 +2196,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
         </div>
         <div style={{ fontSize: 13, color: D.muted, marginBottom: 18 }}>
           Invoice #{invoice.invoice_number} · $
-          {parseFloat(invoice.total).toFixed(2)} · {customerName}
+          {invoiceDisplayAmount(invoice).toFixed(2)} · {customerName}
         </div>
 
         {loading ? (
@@ -2487,7 +2524,7 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
         </div>{" "}
         <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
           Invoice #{invoice.invoice_number} · $
-          {parseFloat(invoice.total).toFixed(2)} · {invoice.first_name}{" "}
+          {invoiceDisplayAmount(invoice).toFixed(2)} · {invoice.first_name}{" "}
           {invoice.last_name}
         </div>{" "}
         <label
@@ -3085,7 +3122,7 @@ function RecordPaymentModal({
         </div>{" "}
         <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
           Invoice #{invoice.invoice_number} · $
-          {parseFloat(invoice.total).toFixed(2)} · {invoice.first_name}{" "}
+          {invoiceDisplayAmount(invoice).toFixed(2)} · {invoice.first_name}{" "}
           {invoice.last_name}
         </div>{" "}
         <label

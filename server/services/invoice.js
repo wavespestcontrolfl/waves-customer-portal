@@ -2150,6 +2150,10 @@ const InvoiceService = {
     const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
     return {
       ...invoice,
+      // amount_due = total − applied account credit, so the admin detail shows
+      // what's actually collectible (every charge/collection path bills this).
+      // credit_applied is already on the row; expose the computed amount too.
+      amount_due: invoiceAmountDue(invoice),
       customer,
       active_payment_plan: activePaymentPlan,
       annual_prepay,
@@ -2322,7 +2326,14 @@ const InvoiceService = {
         .orderBy("invoices.created_at", "desc");
     }
 
-    const invoices = await query.limit(safeLimit).offset(safeOffset);
+    const rows = await query.limit(safeLimit).offset(safeOffset);
+    // Expose amount_due (total − applied account credit) per row so the admin
+    // list renders the collectible balance, not the pre-credit total. credit_applied
+    // is already present via invoices.*; this only adds the computed figure.
+    const invoices = rows.map((row) => ({
+      ...row,
+      amount_due: invoiceAmountDue(row),
+    }));
     const [{ count }] = await applyFilters(
       db("invoices").leftJoin(
         "customers",
