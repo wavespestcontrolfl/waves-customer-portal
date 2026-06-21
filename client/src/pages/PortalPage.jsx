@@ -6937,14 +6937,17 @@ function MyPlanTab({ customer }) {
     const actualMonths = MONTH_LABELS
       .map((_, monthIndex) => (getCalendarEventsForMonth(svcId, monthIndex).length > 0 ? monthIndex : null))
       .filter(monthIndex => monthIndex !== null);
-    if (actualMonths.length) return actualMonths;
 
     const fallbackMonths = SERVICE_SCHEDULE_MONTHS[svcId] || [];
     const memberSinceDate = customer.memberSince ? parseDate(customer.memberSince) : null;
-    if (memberSinceDate && !isNaN(memberSinceDate) && memberSinceDate.getFullYear() === currentYear) {
-      return fallbackMonths.filter(monthIndex => monthIndex >= memberSinceDate.getMonth());
-    }
-    return fallbackMonths;
+    const cadenceMonths = (memberSinceDate && !isNaN(memberSinceDate) && memberSinceDate.getFullYear() === currentYear)
+      ? fallbackMonths.filter(monthIndex => monthIndex >= memberSinceDate.getMonth())
+      : fallbackMonths;
+
+    // Overlay actual events on the expected plan cadence rather than replacing it, so a
+    // member with only a partially-seeded schedule (e.g. one upcoming quarterly visit)
+    // still shows all planned cadence months, not just the seeded one.
+    return Array.from(new Set([...cadenceMonths, ...actualMonths])).sort((a, b) => a - b);
   };
 
   const getCalendarDetail = (svc, monthIndex, statusLabel) => {

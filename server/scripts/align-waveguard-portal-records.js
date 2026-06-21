@@ -18,6 +18,7 @@ const {
   serviceRowCountsTowardWaveGuard,
 } = require('../services/self-booking-plan-sync');
 const { etDateString } = require('../utils/datetime-et');
+const AppointmentReminders = require('../services/appointment-reminders');
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const TIER_ORDER_LOWER = TIER_ORDER.map(tier => tier.toLowerCase());
@@ -456,6 +457,7 @@ async function analyzeCustomer(customer, serviceColumns, customerColumns, servic
 }
 
 async function applyCustomerRepair(repair) {
+  const insertedVisits = [];
   await db.transaction(async (trx) => {
     if (Object.keys(repair.customerUpdates).length) {
       await trx('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
@@ -466,10 +468,32 @@ async function applyCustomerRepair(repair) {
         await trx('scheduled_services').where({ id: serviceRepair.anchorId }).update(serviceRepair.parentUpdates);
       }
       for (const row of serviceRepair.childRows) {
-        await trx('scheduled_services').insert(row);
+        const [inserted] = await trx('scheduled_services').insert(row).returning('*');
+        if (inserted?.id) insertedVisits.push(inserted);
       }
     }
   });
+
+  // Register 72h/24h reminders for the inserted visits — the reminder cron only scans
+  // appointment_reminders, so without this, backfilled plan visits would get none.
+  // After the repair commits, each in its own sub-transaction (idempotent per
+  // scheduled_service_id) so a reminder failure never rolls back the inserted visit.
+  for (const visit of insertedVisits) {
+    const startHHMM = visit.window_start ? String(visit.window_start).slice(0, 5) : '08:00';
+    try {
+      await db.transaction((sp) =>
+        AppointmentReminders.registerVisitReminderInTx(sp, {
+          scheduledServiceId: visit.id,
+          customerId: repair.customer.id,
+          appointmentTime: `${dateKey(visit.scheduled_date)}T${startHHMM}`,
+          serviceType: visit.service_type,
+          source: 'waveguard_portal_alignment',
+        }),
+      );
+    } catch (err) {
+      console.error(`[align] reminder registration skipped for service ${visit.id}: ${err.message}`);
+    }
+  }
 }
 
 function summarizeRepair(repair) {
