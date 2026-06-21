@@ -235,6 +235,37 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
   });
 });
 
+describe('autonomous-pr-poller: spoke kill switch on the auto-merge path', () => {
+  // The poller merges autonomous blog PRs directly (gh.mergePr), bypassing
+  // mergeAstro's hub-only guard — so a stale spoke PR could auto-merge despite
+  // the seed/publish gates. The kill switch must block that merge path too.
+  const { _internals: poller } = require('../services/content/autonomous-pr-poller');
+  const ORIG = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+  afterEach(() => {
+    if (ORIG === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    else process.env.SPOKE_BLOG_NETWORK_ENABLED = ORIG;
+  });
+
+  const runFor = (canonical) => ({
+    action_type: 'new_supporting_blog',
+    draft_payload: JSON.stringify({ frontmatter: { canonical } }),
+  });
+  const spokeRun = runFor('https://www.sarasotaflpestcontrol.com/pest-control/x-sarasota/');
+  const hubRun = runFor('https://www.wavespestcontrol.com/pest-control/x/');
+
+  test('disabled: a spoke-targeted run is blocked from auto-merge; a hub run is not', () => {
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    expect(poller.spokeMergeBlockedByKillSwitch(spokeRun)).toBe(true);
+    expect(poller.spokeMergeBlockedByKillSwitch(hubRun)).toBe(false);
+  });
+
+  test('enabled: spoke-targeted runs may auto-merge again (logic intact)', () => {
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    expect(poller.spokeMergeBlockedByKillSwitch(spokeRun)).toBe(false);
+    expect(poller.spokeMergeBlockedByKillSwitch(hubRun)).toBe(false);
+  });
+});
+
 describe('content-guardrails: narrow brand-token exemption on spoke pages', () => {
   const guardrails = require('../services/content/content-guardrails');
   const spoke = ['sarasotaflpestcontrol.com'];
