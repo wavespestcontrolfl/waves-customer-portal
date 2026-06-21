@@ -1078,17 +1078,18 @@ function propertyTypeFromAttachment(ai) {
   }
 }
 
-// A record's propertyType is "weak" when nothing authoritative pinned it:
-// missing, no evidence trail (unknown source), flagged for field-verify, or
-// from a generic/unknown source. Strong county/cadastral/listing/verified
-// values are NOT weak — satellite never overrides them, it only flags
-// divergence elsewhere.
+// A record's propertyType is "weak" only when the WINNING source is itself
+// weak: missing value, no evidence trail, or a non-specific unknown/generic
+// source. A fieldVerify flag alone does NOT make it weak — mergePropertyRecords
+// sets fieldVerify on mere source disagreement even when authoritative county /
+// cadastral / listing / verified data won the field, and satellite must never
+// override those for a (discounted) townhome/condo type (codex P1).
 function recordPropertyTypeIsWeak(rc) {
   if (!rc || !rc.propertyType) return true;
   const ev = rc._fieldEvidence?.propertyType;
   if (!ev) return true;
-  if (ev.fieldVerify) return true;
-  return ['unknown', 'generic'].includes(String(ev.sourceType || '').toLowerCase());
+  const sourceType = String(ev.sourceType || '').toLowerCase();
+  return sourceType === '' || sourceType === 'unknown' || sourceType === 'generic';
 }
 
 // Surface a satellite-derived townhome/condo as real evidence: overwrite the

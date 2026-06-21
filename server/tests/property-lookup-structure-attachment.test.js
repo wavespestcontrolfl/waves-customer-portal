@@ -90,13 +90,18 @@ describe('recordPropertyTypeIsWeak', () => {
     expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family' })).toBe(true); // no evidence
   });
 
-  test('unknown/generic source or a field-verify flag are weak', () => {
+  test('only unknown/generic (or empty) sources are weak', () => {
     expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: 'unknown' } } })).toBe(true);
     expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: 'generic' } } })).toBe(true);
-    expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: 'county', fieldVerify: true } } })).toBe(true);
+    expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: '' } } })).toBe(true);
   });
 
-  test('authoritative county/cadastral/verified values are NOT weak', () => {
+  test('authoritative sources are NOT weak — even when flagged for field-verify (codex P1)', () => {
+    // mergePropertyRecords sets fieldVerify on source disagreement even when
+    // the authoritative source won; satellite must NOT override these.
+    expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: 'county', fieldVerify: true } } })).toBe(false);
+    expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: 'cadastral', fieldVerify: true } } })).toBe(false);
+    expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: 'listing', fieldVerify: true } } })).toBe(false);
     expect(recordPropertyTypeIsWeak({ propertyType: 'Single Family', _fieldEvidence: { propertyType: { sourceType: 'county', fieldVerify: false } } })).toBe(false);
     expect(recordPropertyTypeIsWeak({ propertyType: 'Townhome', _fieldEvidence: { propertyType: { sourceType: 'verified', fieldVerify: false } } })).toBe(false);
   });
@@ -120,6 +125,17 @@ describe('buildEnrichedProfile — satellite attachment fallback', () => {
     const rc = weakAiRecord({
       propertyType: 'Single Family',
       _fieldEvidence: { propertyType: { sourceType: 'county', fieldVerify: false, score: 100 } },
+    });
+    const profile = buildEnrichedProfile(rc, mergedAi('ATTACHED_END', 90), 27.4, -82.4);
+
+    expect(profile.propertyType).toBe('Single Family');
+    expect(rc._propertyTypeSource).toBeUndefined();
+  });
+
+  test('does NOT override authoritative county data that is merely flagged for field-verify (codex P1)', () => {
+    const rc = weakAiRecord({
+      propertyType: 'Single Family',
+      _fieldEvidence: { propertyType: { sourceType: 'county', fieldVerify: true, disagreement: true, score: 100 } },
     });
     const profile = buildEnrichedProfile(rc, mergedAi('ATTACHED_END', 90), 27.4, -82.4);
 
