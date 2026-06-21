@@ -395,6 +395,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
+  // Scans top-spend products for a cheaper competitor per-unit price and stages a
+  // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
+  // Monday 6:00am ET.
+  // =========================================================================
+  cron.schedule('0 6 * * 1', async () => {
+    if (!isEnabled('priceScanWeekly')) return;
+    logger.info('Running: Weekly vendor price scan');
+    try {
+      // runExclusive: live scrapes + a single draft insert — a deploy overlap must
+      // not double-scan or stage duplicate drafts.
+      await runExclusive('price-scan-weekly', async () => {
+        const { runWeeklyScan } = require('./price-scan/weekly-scan');
+        const result = await runWeeklyScan();
+        logger.info(`[price-scan] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly price scan failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // SEO COMMAND CENTER CRONS (gated behind GATE_SEO_INTELLIGENCE)
   // =========================================================================
 

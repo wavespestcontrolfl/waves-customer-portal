@@ -236,6 +236,13 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // Weekly autonomous vendor price scan -> stages a price-match draft for the
+  // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).
+  // Explicit opt-in in ALL envs (it hits external vendor sites via a headless
+  // browser, so it must never auto-run in dev). The admin "run now" endpoint is
+  // requireAdmin-only and unaffected by this gate. Double-gated behind cronJobs.
+  priceScanWeekly: process.env.GATE_PRICE_SCAN === 'true',
+
   // Card-Present Surcharge (Tap to Pay) — adds the 2.9% credit-card surcharge to
   // in-person card_present charges, mirroring the online flow. Card-present
   // funding is only known AFTER the tap, so the PI is minted at base and raised
