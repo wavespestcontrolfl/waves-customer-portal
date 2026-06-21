@@ -334,29 +334,41 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6:05AM — Point-in-time MRR snapshot (upsert the current ET month).
-  // Keeps the MRR Trend honest: past months read their real recorded MRR
-  // instead of being recomputed at today's prices. Each month's row freezes at
-  // its last value when the month rolls over.
+  // Point-in-time MRR snapshot — keeps the MRR Trend honest: past months read
+  // their real recorded MRR instead of being recomputed at today's prices.
+  //  - DAILY 6:05AM ET: refresh the CURRENT month's row (in-progress month stays
+  //    live; it freezes once the month rolls over and is no longer the current).
+  //  - 11:50PM ET on the month's LAST day: capture the month at (near) its end so
+  //    it freezes at a true month-end value rather than the 6:05am-on-the-final-
+  //    day value. recordMrrSnapshot() always records the CURRENT month, so a
+  //    closed month is never overwritten with next-month customer state.
   // =========================================================================
   cron.schedule('5 6 * * *', async () => {
     try {
       // runExclusive: a deploy overlap must not double-write the same month.
       await runExclusive('mrr-monthly-snapshot', async () => {
         const { recordMrrSnapshot } = require('./mrr-snapshot');
-        const { etMonthStart, etDateString } = require('./../utils/datetime-et');
-        // On the 1st of the ET month, finalize the just-ended month before
-        // refreshing the current one. Its last in-month write was at 6:05am on
-        // its final day, so any conversion/churn/rate change later that day was
-        // missed; today's MRR reflects the full final day, so record it under
-        // the prior month (etMonthStart offset -1) as that month's end value.
-        if (etDateString().endsWith('-01')) {
-          await recordMrrSnapshot(etMonthStart(new Date(), -1));
-        }
         await recordMrrSnapshot();
       });
     } catch (err) {
       logger.error(`[mrr-snapshot] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Month-end capture: fire on days 28–31 at 11:50pm ET, but only on the ACTUAL
+  // final day (tomorrow ET is the 1st). Records the current (ending) month so it
+  // freezes near its true end, capturing same-final-day conversions/churn/rate
+  // changes the 6:05am run missed.
+  cron.schedule('50 23 28-31 * *', async () => {
+    const { etDateString, addETDays } = require('./../utils/datetime-et');
+    if (!etDateString(addETDays(new Date(), 1)).endsWith('-01')) return;
+    try {
+      await runExclusive('mrr-monthly-snapshot', async () => {
+        const { recordMrrSnapshot } = require('./mrr-snapshot');
+        await recordMrrSnapshot();
+      });
+    } catch (err) {
+      logger.error(`[mrr-snapshot] month-end cron failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
