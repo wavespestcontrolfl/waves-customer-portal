@@ -6044,6 +6044,20 @@ router.put('/:token/accept', async (req, res, next) => {
     const annualPrepayInvoiceAmount = annualPrepaySelected
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
+    // annualPrepayInvoiceAmount is the UNDISCOUNTED recurring annual (the base the
+    // converter needs). For post-accept customer/admin messaging we must quote the
+    // amount actually invoiced: non-pest/mosquito mixes are discounted by
+    // ANNUAL_PREPAY_DISCOUNT_PCT (the converter applies it; mirror it here so the
+    // copy never quotes the raw annual). Pest/mosquito keep the full annual.
+    const annualPrepayMixHasFeeService = (Array.isArray(recurringSvcList) ? recurringSvcList : []).some((svc) => {
+      const key = recurringServiceKey(svc);
+      return key === 'pest_control' || key === 'mosquito';
+    });
+    const annualPrepayDisplayAmount = annualPrepayInvoiceAmount == null
+      ? null
+      : (annualPrepayMixHasFeeService
+        ? annualPrepayInvoiceAmount
+        : Math.round(annualPrepayInvoiceAmount * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100);
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
     const acceptedFrequencyKey = selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey;
     const acceptedServiceTierKey = selectedFrequency?.billingFrequencyKey ? selectedFrequency.key : null;
@@ -6483,7 +6497,7 @@ router.put('/:token/accept', async (req, res, next) => {
         }
         invoiceModeResult = true;
         invoiceIdResult = annualPrepayConversionResult.draftInvoiceId;
-        invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayInvoiceAmount || null;
+        invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayDisplayAmount || null;
         invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
         invoiceServiceLabelResult = 'Annual prepay';
         invoiceKindResult = 'annual_prepay';
@@ -6667,7 +6681,7 @@ router.put('/:token/accept', async (req, res, next) => {
             }
           }
         } else if (annualPrepaySelected) {
-          const amountText = annualPrepayInvoiceAmount != null ? ` for ${fmtMoney(annualPrepayInvoiceAmount)}` : '';
+          const amountText = annualPrepayDisplayAmount != null ? ` for ${fmtMoney(annualPrepayDisplayAmount)}` : '';
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
             {
@@ -6870,7 +6884,7 @@ router.put('/:token/accept', async (req, res, next) => {
         reservationCommitted,
         bookingUrl,
         billingTerm,
-        annualPrepayAmount: annualPrepayInvoiceAmount,
+        annualPrepayAmount: annualPrepayDisplayAmount,
       });
       await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
@@ -6904,7 +6918,7 @@ router.put('/:token/accept', async (req, res, next) => {
           invoicePayUrl,
           reservationCommitted,
           billingTerm,
-          annualPrepayAmount: annualPrepayInvoiceAmount,
+          annualPrepayAmount: annualPrepayDisplayAmount,
         }),
       });
     } catch (e) {
