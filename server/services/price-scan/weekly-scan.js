@@ -1,34 +1,49 @@
-// Autonomous weekly vendor price scan (PR4 of the price-scan lane). The piece that
-// makes the lane actually RUN by itself: pick the products we spend the most on
-// that have a SiteOne baseline, scan a competitor (DoMyOwn) for a cheaper published
-// per-unit price, and stage ONE price-match draft for the SiteOne rep (Mark) in
-// /admin/price-match. Nothing is emailed — a human reviews + sends the draft.
+// Autonomous weekly vendor price scan (price-scan lane). The piece that makes the
+// lane RUN by itself: pick the products we spend the most on that have a SiteOne
+// baseline, scan the public competitors we have adapters for (DoMyOwn / Solutions /
+// Keystone) for a cheaper published per-unit price, and stage ONE price-match draft
+// for the SiteOne rep (Mark) in /admin/price-match. Nothing is emailed — a human
+// reviews + sends the draft.
 //
 // Layering: this module is pure orchestration + DB. The browser I/O is injected
-// (scanner.runScanMany) so the assembly + opportunity mapping stay unit-tested,
-// and a missing Playwright browser degrades to a clean skip rather than a crash.
+// (scanner.runScanMany) so the assembly + opportunity mapping stay unit-tested, and
+// a missing Playwright browser degrades to a clean skip rather than a crash.
 
 const dbModule = require('../../models/db');
 const logger = require('../logger');
 const { runScanMany } = require('./scanner');
 const { createDraft } = require('./price-match-draft');
+const { selectAdapterKey } = require('./adapters/registry');
 
-// How many top-spend products to scan per run. Kept modest — each is a live scrape.
+// How many top-spend products to scan per run. Kept modest — each product is scraped
+// across every scrapable vendor, so this bounds total live page loads.
 const DEFAULT_LIMIT = Number(process.env.PRICE_SCAN_MAX_PRODUCTS) || 25;
 
 // The codebase's canonical "live price" gate (see price_sync_control_layer): only
-// operator-approved, active vendor_pricing rows. Critically this EXCLUDES the
-// Hermes worker's `pending` rows, so an unapproved/auto-ingested URL never feeds the
-// live browser and an unapproved price never becomes a SiteOne baseline.
+// operator-approved, active vendor_pricing rows. Critically this EXCLUDES the Hermes
+// worker's `pending` rows, so an unapproved/auto-ingested URL never feeds the live
+// browser and an unapproved price never becomes a SiteOne baseline.
 const APPROVED_STATES = ['approved', 'auto_approved'];
 
-// Only navigate a competitor URL we can confirm is on the expected host — a
-// mis-mapped/foreign URL is dropped (the adapter then searches DoMyOwn by name).
-function isDomyownUrl(url) {
-  try {
-    const host = new URL(String(url)).hostname.toLowerCase();
-    return host === 'domyown.com' || host.endsWith('.domyown.com');
-  } catch { return false; }
+// The public storefronts we have a bespoke, search-capable adapter for. A vendor is
+// only scanned if it's price_scraping_enabled AND resolves to one of these (Veseris
+// arrives with the PR2b login adapter; everything else falls to the generic adapter,
+// which needs a direct URL and no search, so it's not driven autonomously).
+const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone'];
+
+const hostOf = (url) => {
+  try { return new URL(String(url)).hostname.toLowerCase(); } catch { return null; }
+};
+const baseHost = (h) => String(h || '').toLowerCase().replace(/^www\./, '');
+
+// A scraped URL is only navigated if it's actually on the vendor's own host — a
+// mis-mapped/foreign URL is dropped (the adapter then searches that vendor by name).
+// `vendorWebsite` may be a full URL or a bare host.
+function isOnHost(url, vendorWebsite) {
+  const h = baseHost(hostOf(url));
+  const e = baseHost(hostOf(vendorWebsite) || vendorWebsite);
+  if (!h || !e) return false;
+  return h === e || h.endsWith(`.${e}`);
 }
 
 // Tolerant parse of a draft's `matches` (jsonb -> array, but accept a string too).
@@ -65,12 +80,22 @@ async function vendorByName(db, name) {
   return db('vendors').whereRaw('lower(name) = lower(?)', [name]).first();
 }
 
-// PURE: a baseline DB row -> { product, vendors, spend } for scanProduct/runScanMany.
-// `quantity` is the pack we compare on — prefer SiteOne's own pack string, then the
-// catalog container_size, then the numeric unit_size_oz. The competitor target URL
-// is optional: with it the adapter scrapes the product page directly; without it the
-// adapter searches the vendor by name.
-function toScanSpec(row, { domyownId, domyownName, domyownUrl } = {}) {
+// The competitor vendors to scan: price_scraping_enabled + active + backed by one of
+// our bespoke adapters. DB-driven, so toggling vendors is a flag flip, not a deploy.
+async function scrapableVendors(db) {
+  const rows = await db('vendors')
+    .where('price_scraping_enabled', true)
+    .andWhere((b) => b.where('active', true).orWhereNull('active'))
+    .select('id', 'name', 'website');
+  return rows.filter((v) => SCRAPABLE_ADAPTER_KEYS.includes(selectAdapterKey({ name: v.name, url: v.website })));
+}
+
+// PURE: a baseline DB row + the competitor vendor list -> { product, vendors, spend }
+// for scanProduct/runScanMany. `quantity` is the pack we compare on — prefer
+// SiteOne's own pack string, then catalog container_size, then numeric unit_size_oz.
+// Each vendor's URL (host-validated, optional) is looked up in urlByVendorId; without
+// one the adapter searches that vendor by name.
+function toScanSpec(row, vendors = [], urlByVendorId = null) {
   const quantity = row.siteone_quantity
     || row.container_size
     || (row.unit_size_oz ? `${row.unit_size_oz} oz` : null);
@@ -87,36 +112,34 @@ function toScanSpec(row, { domyownId, domyownName, domyownUrl } = {}) {
       quantity: row.siteone_quantity || quantity,
     },
   };
-  const vendors = [{
-    vendor_id: domyownId,
-    name: domyownName || 'DoMyOwn',
-    url: domyownUrl || null,
-  }];
-  return { product, vendors, spend: Number(row.monthly_cost_estimate) || 0 };
+  const vlist = (vendors || []).map((v) => ({
+    vendor_id: v.id,
+    name: v.name,
+    url: (urlByVendorId && urlByVendorId.get && urlByVendorId.get(v.id)) || null,
+  }));
+  return { product, vendors: vlist, spend: Number(row.monthly_cost_estimate) || 0 };
 }
 
-// PURE: dedup baseline rows to one per product (caller orders by recency so the
-// first row per product wins), rank by monthly spend (then SiteOne price), take the
-// top `limit`, and shape each into a scan spec. `urlByProductId` is a Map of
-// product_id -> DoMyOwn product URL (optional).
-function assembleScanSpecs(baselineRows, urlByProductId, { limit = DEFAULT_LIMIT, domyownId, domyownName } = {}) {
+// PURE: dedup baseline rows to one per product (caller orders by recency so the first
+// row per product wins), rank by monthly spend (then SiteOne price), take the top
+// `limit`, and shape each into a scan spec. `urlByProduct` is a Map of
+// product_id -> Map(vendor_id -> url).
+function assembleScanSpecs(baselineRows, urlByProduct, { limit = DEFAULT_LIMIT, vendors = [] } = {}) {
   const byProduct = new Map();
   for (const r of baselineRows || []) if (!byProduct.has(r.id)) byProduct.set(r.id, r);
   const ranked = [...byProduct.values()].sort((a, b) => (
     (Number(b.monthly_cost_estimate) || 0) - (Number(a.monthly_cost_estimate) || 0)
     || (Number(b.siteone_price) || 0) - (Number(a.siteone_price) || 0)
   ));
-  return ranked.slice(0, Math.max(0, limit)).map((r) => toScanSpec(r, {
-    domyownId,
-    domyownName,
-    domyownUrl: urlByProductId ? urlByProductId.get(r.id) : null,
-  }));
+  return ranked.slice(0, Math.max(0, limit)).map((r) => toScanSpec(
+    r, vendors, urlByProduct && urlByProduct.get ? urlByProduct.get(r.id) : null,
+  ));
 }
 
-// Fetch top-spend products that have a SiteOne baseline price + their DoMyOwn URLs,
-// then assemble scan specs. Wrapped so a schema surprise degrades to an empty list
-// (the cron logs zero rather than crashing).
-async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, domyownId, domyownName } = {}) {
+// Fetch top-spend products that have an APPROVED SiteOne baseline + each scrapable
+// vendor's APPROVED, on-host product URL, then assemble scan specs. Wrapped so a
+// schema surprise degrades to an empty list (the cron logs zero rather than crashing).
+async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, vendors = [] } = {}) {
   try {
     const baselineRows = await db('products_catalog as pc')
       .join('vendor_pricing as so', 'so.product_id', 'pc.id')
@@ -133,23 +156,26 @@ async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, domyow
       .orderBy('so.last_checked_at', 'desc'); // most-recent SiteOne row wins the per-product dedup
 
     const ids = [...new Set(baselineRows.map((r) => r.id))];
-    const urlByProductId = new Map();
-    if (domyownId && ids.length) {
-      const dmoRows = await db('vendor_pricing')
-        .where('vendor_id', domyownId)
+    const vendorById = new Map((vendors || []).map((v) => [v.id, v]));
+    const vendorIds = [...vendorById.keys()];
+    const urlByProduct = new Map(); // product_id -> Map(vendor_id -> url)
+    if (vendorIds.length && ids.length) {
+      const rows = await db('vendor_pricing')
+        .whereIn('vendor_id', vendorIds)
         .andWhere('is_active', true)
         .whereIn('approval_status', APPROVED_STATES) // never hand a pending/unapproved URL to the browser
         .whereIn('product_id', ids)
         .whereNotNull('vendor_product_url')
-        .select('product_id', 'vendor_product_url');
-      // ...and only an on-host URL is navigated; anything else falls back to search.
-      for (const d of dmoRows) {
-        if (!urlByProductId.has(d.product_id) && isDomyownUrl(d.vendor_product_url)) {
-          urlByProductId.set(d.product_id, d.vendor_product_url);
-        }
+        .select('product_id', 'vendor_id', 'vendor_product_url');
+      for (const r of rows) {
+        const v = vendorById.get(r.vendor_id);
+        if (!v || !isOnHost(r.vendor_product_url, v.website)) continue; // per-vendor host validation
+        if (!urlByProduct.has(r.product_id)) urlByProduct.set(r.product_id, new Map());
+        const pm = urlByProduct.get(r.product_id);
+        if (!pm.has(r.vendor_id)) pm.set(r.vendor_id, r.vendor_product_url);
       }
     }
-    return assembleScanSpecs(baselineRows, urlByProductId, { limit, domyownId, domyownName });
+    return assembleScanSpecs(baselineRows, urlByProduct, { limit, vendors });
   } catch (err) {
     logger.error(`[price-scan] product selection failed: ${err.message}`);
     return [];
@@ -168,7 +194,7 @@ function opportunityToMatch(product, scan) {
     epaReg: product.epaReg || null,
     baseline: { vendor: opp.baseline.vendor || 'SiteOne', price: Number(opp.baseline.price), quantity: opp.baseline.quantity },
     competitor: {
-      vendor: best.vendor || 'DoMyOwn',
+      vendor: best.vendor || 'competitor',
       price: Number(best.price),
       quantity: best.quantity,
       source_url: best.source_url,
@@ -177,15 +203,36 @@ function opportunityToMatch(product, scan) {
   };
 }
 
-// Heuristic: did the batch fail because the headless browser isn't available in
-// this environment (no playwright package / no chromium binary)? Then it's a clean
-// skip, not an error to alarm on.
+// Aggregate per-vendor outcomes across a batch — verified candidates vs skip reasons
+// — so a 0-opportunity run is explainable ("DoMyOwn matched 3, none cheaper" vs
+// "Solutions matched 0 — search isn't resolving" vs "Keystone blocked").
+function tallyBreakdown(results) {
+  const vendors = {};
+  let productsMatched = 0;
+  let verifiedTotal = 0;
+  const bump = (name) => { vendors[name] = vendors[name] || { verified: 0, skipped: {} }; return vendors[name]; };
+  for (const r of results || []) {
+    if (!r || r.error) continue;
+    const scan = r.scan || {};
+    const verified = scan.verified || [];
+    const skipped = scan.skipped || [];
+    if (verified.length) productsMatched += 1;
+    for (const v of verified) { bump(v.vendor || 'unknown').verified += 1; verifiedTotal += 1; }
+    for (const s of skipped) { const b = bump(s.vendor || 'unknown'); b.skipped[s.reason] = (b.skipped[s.reason] || 0) + 1; }
+  }
+  return { vendors, productsMatched, verifiedTotal };
+}
+
+// Heuristic: did the batch fail because the headless browser isn't available in this
+// environment (no playwright package / no chromium binary)? Then it's a clean skip,
+// not an error to alarm on.
 function isBrowserUnavailable(err) {
   return /playwright|chromium|browser|executable|launch|ENOENT/i.test((err && err.message) || '');
 }
 
 // Run one weekly scan. Returns a summary; never throws. deps are injectable for tests:
-//   { db, scanMany, createDraft, selectSpecs, vendorByName, limit, selectOnly }
+//   { db, scanMany, createDraft, selectSpecs, scrapableVendors, vendorByName, specs,
+//     vendors, activeMatchKeys, limit, selectOnly }
 async function runWeeklyScan(opts = {}) {
   const db = opts.db || dbModule;
   const scanMany = opts.scanMany || runScanMany;
@@ -193,24 +240,27 @@ async function runWeeklyScan(opts = {}) {
   const resolveVendor = opts.vendorByName || vendorByName;
   const limit = opts.limit || DEFAULT_LIMIT;
 
-  const [siteone, domyown] = await Promise.all([resolveVendor(db, 'SiteOne'), resolveVendor(db, 'DoMyOwn')]);
-  if (!siteone || !domyown) {
-    logger.warn('[price-scan] weekly scan skipped — SiteOne/DoMyOwn vendor row missing');
+  const siteone = await resolveVendor(db, 'SiteOne');
+  if (!siteone) {
+    logger.warn('[price-scan] weekly scan skipped — SiteOne vendor row missing');
     return { ok: false, reason: 'vendors_missing', evaluated: 0 };
   }
+  const vendors = opts.vendors || await (opts.scrapableVendors || scrapableVendors)(db);
+  if (!vendors.length) {
+    logger.warn('[price-scan] weekly scan skipped — no scrapable competitor vendors enabled');
+    return { ok: false, reason: 'no_scrapable_vendors', evaluated: 0 };
+  }
 
-  const specs = opts.specs || await (opts.selectSpecs || selectScanProducts)(db, {
-    limit, siteoneId: siteone.id, domyownId: domyown.id, domyownName: domyown.name,
-  });
+  const specs = opts.specs || await (opts.selectSpecs || selectScanProducts)(db, { limit, siteoneId: siteone.id, vendors });
 
   // Verification mode: prove the selection without launching the browser.
   if (opts.selectOnly) {
-    logger.info(`[price-scan] weekly scan (select-only): ${specs.length} products`);
-    return { ok: true, selectOnly: true, evaluated: specs.length, products: specs.map((s) => s.product.name) };
+    logger.info(`[price-scan] weekly scan (select-only): ${specs.length} products x ${vendors.length} vendors (${vendors.map((v) => v.name).join(', ')})`);
+    return { ok: true, selectOnly: true, evaluated: specs.length, vendors: vendors.map((v) => v.name), products: specs.map((s) => s.product.name) };
   }
   if (!specs.length) {
-    logger.info('[price-scan] weekly scan: no products with a SiteOne baseline to scan');
-    return { ok: true, evaluated: 0, scanned: 0, opportunities: 0, draftId: null };
+    logger.info('[price-scan] weekly scan: no products with an approved SiteOne baseline to scan');
+    return { ok: true, evaluated: 0, scanned: 0, opportunities: 0, draftId: null, vendors: vendors.map((v) => v.name) };
   }
 
   let results;
@@ -222,7 +272,7 @@ async function runWeeklyScan(opts = {}) {
     return { ok: false, reason, evaluated: specs.length };
   }
 
-  const summary = { evaluated: specs.length, scanned: 0, opportunities: 0, errors: 0 };
+  const summary = { evaluated: specs.length, scanned: 0, opportunities: 0, errors: 0, duplicates: 0 };
   const matches = [];
   for (const r of results) {
     if (r.error) {
@@ -235,9 +285,14 @@ async function runWeeklyScan(opts = {}) {
     if (match) { matches.push(match); summary.opportunities += 1; }
   }
 
+  // Per-vendor diagnostics — makes a 0-opportunity run interpretable.
+  const breakdown = tallyBreakdown(results);
+  summary.productsMatched = breakdown.productsMatched;
+  summary.verifiedTotal = breakdown.verifiedTotal;
+  summary.vendorBreakdown = breakdown.vendors;
+
   let draftId = null;
   let includedCount = 0;
-  summary.duplicates = 0;
   if (matches.length) {
     // Drop any opportunity already covered by a pending/sending draft (PER-MATCH, so
     // {A} pending + a new {A,B} scan stages only B) — a retry or next week's run
@@ -253,7 +308,7 @@ async function runWeeklyScan(opts = {}) {
       includedCount = row ? row.included_count : 0;
     }
   }
-  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.opportunities} opps, ${summary.duplicates} dup, ${summary.errors} err -> draft ${draftId || 'none'} (${includedCount} items)`);
+  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.productsMatched} matched, ${summary.opportunities} opps, ${summary.duplicates} dup, ${summary.errors} err -> draft ${draftId || 'none'} (${includedCount} items); per-vendor=${JSON.stringify(summary.vendorBreakdown)}`);
   return { ok: true, ...summary, draftId, includedCount };
 }
 
@@ -263,12 +318,15 @@ module.exports = {
   assembleScanSpecs,
   toScanSpec,
   opportunityToMatch,
+  tallyBreakdown,
   isBrowserUnavailable,
-  isDomyownUrl,
+  isOnHost,
+  scrapableVendors,
   matchKey,
   activeMatchKeys,
   parseMatches,
   vendorByName,
+  SCRAPABLE_ADAPTER_KEYS,
   APPROVED_STATES,
   DEFAULT_LIMIT,
 };
