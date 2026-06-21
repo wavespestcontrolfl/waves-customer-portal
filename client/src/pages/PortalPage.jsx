@@ -6809,13 +6809,19 @@ function MyPlanTab({ customer }) {
   const annualPrepay = customer.annualPrepay || null;
   const annualPrepayLabel = annualPrepayStatusLabel(annualPrepay);
   const annualPrepayLine = annualPrepayTermLine(annualPrepay);
-  const planBillingLabel = annualPrepayLabel || 'Active plan';
-  const planBillingValue = annualPrepay
-    ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
-    : formatPortalMoney(monthlyRate);
-  const planBillingSub = annualPrepay
-    ? annualPrepayLine
-    : 'per month';
+  // No-plan customers (no active tier) must not be shown an "Active plan" success card
+  // with a $0.00 monthly rate — present a neutral no-plan state instead.
+  const planBillingLabel = !activeTierName
+    ? 'No active plan'
+    : (annualPrepayLabel || 'Active plan');
+  const planBillingValue = !activeTierName
+    ? '—'
+    : (annualPrepay
+      ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
+      : formatPortalMoney(monthlyRate));
+  const planBillingSub = !activeTierName
+    ? 'No WaveGuard plan on file'
+    : (annualPrepay ? annualPrepayLine : 'per month');
 
   // Build bundled services one-liner
   const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');
@@ -7063,11 +7069,11 @@ function MyPlanTab({ customer }) {
             minWidth: compact ? '100%' : 190,
             padding: '14px 16px',
             borderRadius: 8,
-            background: '#F0FDF4',
-            border: '1px solid #BBF7D0',
+            background: activeTierName ? '#F0FDF4' : '#F8FAFC',
+            border: `1px solid ${activeTierName ? '#BBF7D0' : '#E2E8F0'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: '#047857', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: activeTierName ? '#047857' : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               {planBillingLabel}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.blueDeeper }}>

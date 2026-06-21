@@ -416,10 +416,16 @@ async function analyzeCustomer(customer, serviceColumns, customerColumns, servic
   // Re-align enrolled members only: never seed plan-covered recurring rows (which set
   // create_invoice_on_complete=false) for a per-visit customer who is not WaveGuard-enrolled.
   const serviceRepairs = [];
+  const scheduledAnchorIds = new Set();
   for (const key of (isMembershipCustomerRow(customer) ? detectedKeys : [])) {
     const plan = SERVICE_PLANS[key];
     const anchor = chooseAnchor(rows, key, today);
     if (!anchor) continue;
+    // A combined/bundle row (e.g. "Pest + Lawn + Mosquito") detects multiple plan keys
+    // that all resolve to the SAME anchor row; schedule only one future series per anchor
+    // occurrence so --apply does not insert duplicate scheduled_services/reminders.
+    if (scheduledAnchorIds.has(anchor.id)) continue;
+    scheduledAnchorIds.add(anchor.id);
 
     const serviceId = serviceIds[plan.serviceKey] || null;
     const parentUpdates = buildParentUpdates(anchor, plan, serviceId, serviceColumns);
