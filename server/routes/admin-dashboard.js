@@ -518,7 +518,10 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       collectedCount = parseInt(cAgg?.paid || 0);
       billedTotal = parseFloat(cAgg?.billed || 0);
       collectedTotal = parseFloat(cAgg?.collected || 0);
-      collectionRate = issuedCount > 0 ? Math.round((collectedCount / issuedCount) * 1000) / 10 : null;
+      // Dollar-based ($ collected / $ billed), NOT a count ratio — cash collection
+      // is what matters, and a count ratio would let one small paid invoice mask a
+      // large unpaid one. The paid/issued counts are kept for the tile sub only.
+      collectionRate = billedTotal > 0 ? Math.round((collectedTotal / billedTotal) * 1000) / 10 : null;
     } catch (err) {
       logger.error(`[admin-dashboard] collection rate failed: ${err.message}`);
     }
