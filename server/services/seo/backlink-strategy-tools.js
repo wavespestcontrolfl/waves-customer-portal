@@ -228,8 +228,11 @@ async function executeBacklinkTool(toolName, input) {
           logger.warn(`[backlink-strategy] scoring failed for ${domain}: ${err.message}`);
         }
 
-        if (scored && !scored.gate.ok) {
-          gated.push({ domain, reason: scored.gate.reason });
+        // Skip outreach gate failures AND HARO platforms: link_type='haro' is in
+        // the worker's OUTREACH_TYPES, so a helpareporter-style domain on the
+        // board would get cold-emailed — but those are join-not-email.
+        if (scored && (!scored.gate.ok || scored.gate.lane === 'haro_platform')) {
+          gated.push({ domain, reason: scored.gate.reason || 'HARO platform — join, not an outreach target' });
           skipped++;
           continue;
         }

@@ -29,6 +29,7 @@
 require('dotenv').config();
 const knex = require('knex');
 
+const { etDateString } = require('../server/utils/datetime-et');
 const dataforseo = require('../server/services/seo/dataforseo');
 const scorer = require('../server/services/seo/prospect-scorer');
 const { DEFAULT_COMPETITOR_DOMAINS } = require('../server/services/seo/competitor-gap-miner')._internals;
@@ -72,7 +73,7 @@ function normDomain(v) {
 }
 
 const items = (resp) => resp?.tasks?.[0]?.result?.[0]?.items || resp?.tasks?.[0]?.result || [];
-const todayTag = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
+const todayTag = () => etDateString().replace(/-/g, ''); // America/New_York, not UTC
 
 async function resolveMoneyPages(topics) {
   let urls = [];
@@ -150,7 +151,7 @@ async function harvest(db, args) {
   console.log(`[harvest] ${promotable.length} promotable (contactable outreach, score >= ${args.promoteMin})`);
   console.log('[harvest] top promotable sample:');
   promotable.slice(0, 12).forEach((s) => console.log(
-    `   ${String(s.score).padStart(5)}  T${s.tier}  ${s.intent_class.padEnd(10)} ${s.candidate.domain}  → ${s.contact?.contact_email || s.contact?.contact_url || '(form)'}`));
+    `   ${String(s.score).padStart(5)}  T${s.tier}  ${s.intent_class.padEnd(10)} ${s.candidate.domain}  contact=${s.contact?.contact_email ? 'email' : s.contact?.contact_url ? 'form/url' : 'none'}`));
 
   if (args.dryRun) { console.log('\n[harvest] DRY-RUN — no writes.'); return; }
 
@@ -164,10 +165,10 @@ async function harvest(db, args) {
         // referring_domains is domain-level — no specific URL — but source_url is
         // NOT NULL, so record the domain root as the source page.
         source_url: `https://${s.candidate.domain}/`,
-        link_type: s.intent_class, waves_has_link: false, prospect_priority: s.priority, last_checked: new Date().toISOString().slice(0, 10),
+        link_type: s.intent_class, waves_has_link: false, prospect_priority: s.priority, last_checked: etDateString(),
       };
       if (exists) await db('seo_competitor_backlinks').where({ id: exists.id }).update({ ...row, updated_at: new Date() });
-      else await db('seo_competitor_backlinks').insert({ ...row, first_seen: new Date().toISOString().slice(0, 10) });
+      else await db('seo_competitor_backlinks').insert({ ...row, first_seen: etDateString() });
       intelWrites++;
     }
   }
