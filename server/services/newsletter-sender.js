@@ -28,7 +28,7 @@ const { recordTouchpoint } = require('./conversations');
 const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities } = require('./newsletter-draft');
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
-const { QUIZ_HTML_TOKEN, QUIZ_TEXT_TOKEN, DEFAULT_QUIZ_ID, hasQuizToken, renderQuizHtml, renderQuizText } = require('./newsletter-quiz');
+const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -462,10 +462,13 @@ async function sendCampaign(sendId, opts = {}) {
   // Batch-loaded once; resolved per recipient in the substitutions map below.
   const personalizationByCustomer = await loadPersonalizationContext(subscribersToSend);
 
-  // Does this campaign carry the in-email quiz? Computed once. When true, each
-  // recipient's {{quiz}} / {{quiz-text}} token resolves to a block whose answer
-  // links carry THAT recipient's engagement_token (newsletter-quiz.js).
-  const quizEnabled = hasQuizToken(send.html_body) || hasQuizToken(send.text_body);
+  // Does this campaign carry an in-email quiz? Computed once. When true, each
+  // recipient's quiz token(s) — {{quiz}} / {{quiz:id}} / {{quiz-text}} /
+  // {{quiz-text:id}} — resolve to a block whose answer links carry THAT
+  // recipient's engagement_token (newsletter-quiz.js). quizBody is scanned for
+  // the tokens; html + text are joined so a token in either part is found.
+  const quizBody = [send.html_body, send.text_body].filter(Boolean).join('\n');
+  const quizEnabled = hasQuizToken(quizBody);
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
@@ -509,13 +512,11 @@ async function sendCampaign(sendId, opts = {}) {
             [GREETING_NAME_TOKEN]: greetingNameValueFor(s.first_name),
             [CITY_TOKEN]: pctx?.city || DEFAULT_CITY_LABEL,
             [GRASS_TYPE_TOKEN]: pctx?.grassLabel || DEFAULT_GRASS_LABEL,
-            // Per-recipient quiz block — answer links carry this recipient's
-            // engagement_token so a click tags the right subscriber. Missing
+            // Per-recipient quiz block(s) — answer links carry this recipient's
+            // engagement_token so a click tags the right subscriber. Resolves
+            // every quiz token in the body (default or {{quiz:id}}). Missing
             // token (shouldn't happen post-migration) → neutral link-free render.
-            ...(quizEnabled ? {
-              [QUIZ_HTML_TOKEN]: renderQuizHtml({ token: deliveryBySub.get(s.id)?.engagement_token, quizId: DEFAULT_QUIZ_ID }),
-              [QUIZ_TEXT_TOKEN]: renderQuizText({ token: deliveryBySub.get(s.id)?.engagement_token, quizId: DEFAULT_QUIZ_ID }),
-            } : {}),
+            ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row

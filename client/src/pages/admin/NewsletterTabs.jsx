@@ -30,6 +30,10 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const INPUT_CLS =
   "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900";
 const TEXTAREA_CLS = `${INPUT_CLS} font-mono leading-relaxed`;
+// Mirrors the server QUIZ_TOKEN_PATTERN (newsletter-quiz.js) — matches
+// {{quiz}}, {{quiz:id}}, {{quiz-text}}, {{quiz-text:id}}. Used to detect
+// whether the body already carries a quiz (one quiz per email).
+const QUIZ_TOKEN_RE = /\{\{quiz(?:-text)?(?::[a-z0-9-]+)?\}\}/i;
 const PANEL_CLS = "bg-white border-hairline border-zinc-200 rounded-sm";
 const SOURCE_SEGMENTS = [
   { value: "footer", label: "Footer" },
@@ -264,8 +268,16 @@ export function ComposeView({
   const [previewText, setPreviewText] = useState("");
   const [htmlBody, setHtmlBody] = useState("");
   const [textBody, setTextBody] = useState("");
-  // Ref on the HTML body textarea so the quiz token inserts at the cursor.
+  // Ref on the HTML body textarea so quiz/image snippets insert at the cursor.
   const htmlBodyRef = useRef(null);
+  // Available in-email quizzes (server config via /quizzes) + the one the
+  // operator will insert. Defaults to the first (lawn) once loaded.
+  const [quizOptions, setQuizOptions] = useState([]);
+  const [selectedQuizId, setSelectedQuizId] = useState("");
+  // Inline image inserter (toggle + fields).
+  const [showImageInsert, setShowImageInsert] = useState(false);
+  const [imageUrl, setImageUrl] = useState("");
+  const [imageAlt, setImageAlt] = useState("");
   // Locked event ids from the last AI draft — carried into the /sends save so
   // the sent newsletter can advance events_raw.times_featured for what shipped.
   const [draftEventIds, setDraftEventIds] = useState([]);
@@ -296,34 +308,68 @@ export function ComposeView({
   // autopilot row when the user has already started typing.
   const userHasEdited = useRef(false);
 
-  // Insert the {{quiz}} engagement-quiz token at the cursor (falls back to
-  // append). At send time each recipient's {{quiz}} resolves to tap-to-answer
-  // buttons whose links tag the subscriber by interest (lawn-interested,
-  // lawn:brown-patch, …) — that tag then feeds the Tags segment filter above.
-  // Also seeds {{quiz-text}} into the plain-text fallback so the text part
-  // carries the quiz too.
-  const insertQuizBlock = useCallback(() => {
+  // Insert a snippet into the HTML body at the cursor (falls back to append).
+  const insertIntoHtmlBody = useCallback((snippet) => {
     userHasEdited.current = true;
-    const token = "{{quiz}}";
     const el = htmlBodyRef.current;
     setHtmlBody((cur) => {
-      if (cur.includes(token)) return cur; // one quiz per email
       if (el && typeof el.selectionStart === "number") {
         const start = el.selectionStart;
         const end = el.selectionEnd;
-        return `${cur.slice(0, start)}\n<!-- lawn quiz -->\n${token}\n${cur.slice(end)}`;
+        return `${cur.slice(0, start)}${snippet}${cur.slice(end)}`;
       }
-      return `${cur}\n${token}\n`;
+      return `${cur}${snippet}`;
     });
+  }, []);
+
+  // Insert the chosen quiz token at the cursor. At send time each recipient's
+  // {{quiz}}/{{quiz:id}} resolves to tap-to-answer buttons whose links tag the
+  // subscriber by interest (lawn-interested, lawn:brown-patch, …) — that tag
+  // then feeds the Tags segment filter above. The default lawn quiz uses the
+  // bare {{quiz}} token; others use {{quiz:id}}. Also seeds the matching
+  // {{quiz-text}} into the plain-text fallback when one already exists.
+  const insertQuizBlock = useCallback(() => {
+    const quizId = selectedQuizId || quizOptions[0]?.id || "lawn-headache-v1";
+    const isDefault = quizId === "lawn-headache-v1";
+    const htmlToken = isDefault ? "{{quiz}}" : `{{quiz:${quizId}}}`;
+    const textToken = isDefault ? "{{quiz-text}}" : `{{quiz-text:${quizId}}}`;
+    if (QUIZ_TOKEN_RE.test(htmlBody)) return; // one quiz per email
+    insertIntoHtmlBody(`\n<!-- quiz: ${quizId} -->\n${htmlToken}\n`);
     // Only add the text-part quiz when a plain-text fallback already exists —
     // seeding it into an empty text body would ship a text part that is ONLY
     // the quiz (worse than no text part, which lets clients render the HTML).
     setTextBody((cur) =>
-      !cur || cur.includes("{{quiz-text}}") ? cur : `${cur}\n{{quiz-text}}`,
+      !cur || QUIZ_TOKEN_RE.test(cur) ? cur : `${cur}\n${textToken}`,
     );
     setStatus(
-      "Lawn quiz inserted — each recipient gets tap-to-answer buttons that tag them by interest for segmentation.",
+      "Quiz inserted — each recipient gets tap-to-answer buttons that tag them by interest for segmentation.",
     );
+  }, [selectedQuizId, quizOptions, htmlBody, insertIntoHtmlBody]);
+
+  // Insert a responsive image block at the cursor. URL is required; alt is
+  // optional but encouraged. The body is operator-authored HTML inserted as-is
+  // by the send pipeline, so this is just a styled <img> convenience.
+  const insertImage = useCallback(() => {
+    const url = imageUrl.trim();
+    if (!url) return;
+    const altAttr = imageAlt.trim().replace(/"/g, "&quot;");
+    insertIntoHtmlBody(
+      `\n<div style="text-align:center;margin:20px 0;"><img src="${url.replace(/"/g, "&quot;")}" alt="${altAttr}" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" /></div>\n`,
+    );
+    setImageUrl("");
+    setImageAlt("");
+    setShowImageInsert(false);
+  }, [imageUrl, imageAlt, insertIntoHtmlBody]);
+
+  // Load available quizzes for the picker (server config is source of truth).
+  useEffect(() => {
+    adminFetch("/admin/newsletter/quizzes")
+      .then((d) => {
+        const list = d.quizzes || [];
+        setQuizOptions(list);
+        setSelectedQuizId((cur) => cur || list[0]?.id || "");
+      })
+      .catch(() => {});
   }, []);
 
   // Segment
@@ -916,18 +962,71 @@ export function ComposeView({
           </div>{" "}
           <div>
             {" "}
-            <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
               <FieldLabel>HTML body</FieldLabel>{" "}
-              <button
-                type="button"
-                onClick={insertQuizBlock}
-                disabled={htmlBody.includes("{{quiz}}")}
-                className="h-7 px-2.5 text-11 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed u-focus-ring"
-                title="Insert a tap-to-answer lawn quiz. Each recipient's answer tags them by interest for segmentation."
-              >
-                {htmlBody.includes("{{quiz}}") ? "Quiz added" : "Insert lawn quiz"}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowImageInsert((v) => !v)}
+                  className="h-7 px-2.5 text-11 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
+                  title="Insert a responsive image at the cursor."
+                >
+                  Insert image
+                </button>
+                <select
+                  value={selectedQuizId}
+                  onChange={(e) => setSelectedQuizId(e.target.value)}
+                  disabled={QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0}
+                  className="h-7 px-2 text-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 disabled:opacity-40 u-focus-ring"
+                  title="Choose which quiz to insert"
+                >
+                  {quizOptions.map((q) => (
+                    <option key={q.id} value={q.id}>{q.label}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={insertQuizBlock}
+                  disabled={QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0}
+                  className="h-7 px-2.5 text-11 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed u-focus-ring"
+                  title="Insert a tap-to-answer quiz. Each recipient's answer tags them by interest for segmentation."
+                >
+                  {QUIZ_TOKEN_RE.test(htmlBody) ? "Quiz added" : "Insert quiz"}
+                </button>
+              </div>
             </div>
+            {showImageInsert && (
+              <div className="flex items-end gap-2 mb-2 p-2 border-hairline border-zinc-200 rounded-sm bg-zinc-50 flex-wrap">
+                <div className="flex-1 min-w-[180px]">
+                  <FieldLabel>Image URL</FieldLabel>
+                  <input
+                    type="url"
+                    value={imageUrl}
+                    onChange={(e) => setImageUrl(e.target.value)}
+                    className={`${INPUT_CLS} font-mono`}
+                    placeholder="https://…/image.jpg"
+                  />
+                </div>
+                <div className="flex-1 min-w-[140px]">
+                  <FieldLabel>Alt text</FieldLabel>
+                  <input
+                    type="text"
+                    value={imageAlt}
+                    onChange={(e) => setImageAlt(e.target.value)}
+                    className={INPUT_CLS}
+                    placeholder="Describe the image"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={insertImage}
+                  disabled={!imageUrl.trim()}
+                  className="h-9 px-3 text-12 font-medium rounded-sm bg-zinc-900 text-white hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed u-focus-ring"
+                >
+                  Insert
+                </button>
+              </div>
+            )}
             <textarea
               ref={htmlBodyRef}
               value={htmlBody}
@@ -939,9 +1038,9 @@ export function ComposeView({
             <p className="text-11 text-ink-tertiary mt-1">
               The unsubscribe footer + List-Unsubscribe header are added
               automatically — do not include your own.{" "}
-              {htmlBody.includes("{{quiz}}") && (
+              {QUIZ_TOKEN_RE.test(htmlBody) && (
                 <span className="text-ink-secondary">
-                  {"{{quiz}}"} renders per-recipient tap-to-answer buttons that
+                  The quiz token renders per-recipient tap-to-answer buttons that
                   tag the subscriber by interest.
                 </span>
               )}
@@ -1873,6 +1972,10 @@ export function HistoryView() {
   // operator expands an A/B row, then cached.
   const [variantStats, setVariantStats] = useState({});
   const [expandedId, setExpandedId] = useState(null);
+  // Per-send quiz-results panel — fetched lazily when the operator expands a
+  // quiz row, then cached. Independent of the A/B panel (a send can have both).
+  const [quizResults, setQuizResults] = useState({});
+  const [quizOpenId, setQuizOpenId] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -1920,6 +2023,23 @@ export function HistoryView() {
       }
     } catch {
       /* surfaces as 'no breakdown available' below */
+    }
+  };
+
+  // Toggle the quiz-results panel. First open lazy-loads the aggregated answer
+  // breakdown; subsequent toggles read from the cache.
+  const toggleQuiz = async (id) => {
+    if (quizOpenId === id) {
+      setQuizOpenId(null);
+      return;
+    }
+    setQuizOpenId(id);
+    if (quizResults[id]) return;
+    try {
+      const d = await adminFetch(`/admin/newsletter/sends/${id}/quiz-results`);
+      setQuizResults((prev) => ({ ...prev, [id]: d }));
+    } catch {
+      setQuizResults((prev) => ({ ...prev, [id]: { error: true } }));
     }
   };
 
@@ -1979,6 +2099,10 @@ export function HistoryView() {
               : 0;
             const isAb = !!s.subject_b;
             const isOpen = expandedId === s.id;
+            const hasQuiz =
+              QUIZ_TOKEN_RE.test(s.html_body || "") ||
+              QUIZ_TOKEN_RE.test(s.text_body || "");
+            const quizIsOpen = quizOpenId === s.id;
             return (
               <div
                 key={s.id}
@@ -2004,6 +2128,16 @@ export function HistoryView() {
                           }
                         >
                           A/B {isOpen ? "▾" : "▸"}
+                        </button>
+                      )}
+                      {hasQuiz && s.status === "sent" && (
+                        <button
+                          type="button"
+                          onClick={() => toggleQuiz(s.id)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
+                          title={quizIsOpen ? "Hide quiz results" : "Show quiz results"}
+                        >
+                          Quiz {quizIsOpen ? "▾" : "▸"}
                         </button>
                       )}
                       {s.segment_filter && (
@@ -2067,12 +2201,80 @@ export function HistoryView() {
                     subjectB={s.subject_b}
                   />
                 )}
+                {hasQuiz && quizIsOpen && (
+                  <QuizResultsBreakdown data={quizResults[s.id]} />
+                )}
               </div>
             );
           })}
         </div>
       )}
     </Card>
+  );
+}
+
+// ── Quiz results breakdown ───────────────────────────────────────────
+//
+// Per-campaign in-email quiz responses from /sends/:id/quiz-results: answer
+// counts (labeled via the server quiz config), total responses, and the
+// response rate over recipients. Monochrome bars (zinc) — this is data, not
+// an alert, so no decorative color.
+function QuizResultsBreakdown({ data }) {
+  if (!data) {
+    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Loading quiz results…</div>;
+  }
+  if (data.error) {
+    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Couldn't load quiz results.</div>;
+  }
+  if (!data.totalResponses) {
+    return (
+      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+        No quiz responses yet — they appear as recipients tap an answer.
+      </div>
+    );
+  }
+  return (
+    <div className="px-5 pb-4 -mt-1 space-y-3">
+      <div className="text-11 text-ink-secondary u-nums">
+        {data.totalResponses} response{data.totalResponses === 1 ? "" : "s"} ·{" "}
+        {data.responseRate}% of {data.totalRecipients} recipient
+        {data.totalRecipients === 1 ? "" : "s"} · tagged for segmentation
+      </div>
+      {data.quizzes.map((q) => {
+        const max = Math.max(1, ...q.answers.map((a) => a.count));
+        return (
+          <div
+            key={q.quizId}
+            className="border-hairline border-zinc-200 rounded-sm p-3 bg-white"
+          >
+            <div className="text-12 font-medium text-zinc-900 mb-2">{q.question}</div>
+            <div className="space-y-1.5">
+              {q.answers.map((a) => {
+                const share = q.responses
+                  ? Math.round((a.count / q.responses) * 100)
+                  : 0;
+                return (
+                  <div key={a.key} className="flex items-center gap-2 text-12">
+                    <span className="w-28 shrink-0 text-ink-secondary truncate">
+                      {a.label}
+                    </span>
+                    <span className="flex-1 h-3 bg-zinc-100 rounded-sm overflow-hidden">
+                      <span
+                        className="block h-full bg-zinc-900"
+                        style={{ width: `${Math.round((a.count / max) * 100)}%` }}
+                      />
+                    </span>
+                    <span className="w-16 shrink-0 text-right u-nums text-ink-secondary">
+                      {a.count} · {share}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

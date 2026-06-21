@@ -841,6 +841,37 @@ router.get('/tags', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/newsletter/quizzes — available in-email quizzes for the
+// composer picker (id, question, answers + the interest tags each writes).
+// Server config is the single source of truth so the client can't drift.
+router.get('/quizzes', async (req, res, next) => {
+  try {
+    const { listQuizzes } = require('../services/newsletter-quiz');
+    res.json({ quizzes: listQuizzes() });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/newsletter/sends/:id/quiz-results — per-campaign quiz response
+// breakdown for the History view: answer counts (labeled via the quiz config),
+// total responses, and the response rate over the campaign's recipients.
+router.get('/sends/:id/quiz-results', async (req, res, next) => {
+  try {
+    const { aggregateQuizResults } = require('../services/newsletter-quiz');
+    const sendId = req.params.id;
+
+    const totalRow = await db('newsletter_send_deliveries').where({ send_id: sendId }).count('* as c').first();
+    const rows = await db('newsletter_send_deliveries')
+      .where({ send_id: sendId })
+      .whereNotNull('quiz_answered_at')
+      .select('quiz_id', 'quiz_answer')
+      .count('* as n')
+      .groupBy('quiz_id', 'quiz_answer');
+
+    const agg = aggregateQuizResults({ rows, totalRecipients: Number(totalRow?.c || 0) });
+    res.json({ sendId, ...agg });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/newsletter/segment-preview — count subscribers matching a segment
 router.post('/segment-preview', async (req, res, next) => {
   try {

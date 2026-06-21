@@ -17,7 +17,7 @@ const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
-const { resolveAnswer, recordQuizResponse } = require('../services/newsletter-quiz');
+const { resolveAnswer, recordQuizResponse, getQuiz } = require('../services/newsletter-quiz');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } = require('../constants/business');
 const { publicPortalUrl } = require('../utils/portal-url');
 
@@ -192,8 +192,8 @@ router.get('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
     const heading = 'One tap to confirm.';
     const bodyHtml = `
           <p>${label
-            ? `You picked <strong>${escapeHtml(label)}</strong>. Confirm and we'll bring a free lawn check on your next visit.`
-            : `Confirm and we'll bring a free lawn check on your next visit.`}</p>
+            ? `You picked <strong>${escapeHtml(label)}</strong>. Tap confirm and we'll take it from here.`
+            : `Tap confirm and we'll take it from here.`}</p>
           <form method="POST" action="/api/public/newsletter/quiz/${tokenSafe}/${quizIdSafe}/${answerSafe}">
             <button type="submit" class="btn">Confirm${label ? ` — ${escapeHtml(label)}` : ''}</button>
           </form>
@@ -222,16 +222,16 @@ router.post('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    const ans = resolveAnswer(quizId, answer);
-    const headache = ans && ans.key !== 'not-sure' ? ans.label.toLowerCase() : null;
+    // Per-quiz copy so pest/mosquito respondents don't see lawn wording.
+    const quiz = getQuiz(quizId);
+    const landingLine = quiz?.landingLine || "We'll follow up on your next visit.";
+    const bookLabel = quiz?.bookLabel || 'Book a visit';
     const bookUrl = `${publicPortalUrl()}/book`;
     const heading = "Thanks — we've got you.";
     const bodyHtml = `
-          <p>${headache
-            ? `We'll take a closer look at the <strong>${escapeHtml(headache)}</strong> on your lawn during your next visit.`
-            : `We'll bring a free lawn check on your next visit.`}</p>
+          <p>${escapeHtml(landingLine)}</p>
           <p style="margin-bottom:6px;">Want it sooner?</p>
-          <p style="margin:0 0 10px;"><a href="${escapeHtml(bookUrl)}" class="btn">Book a lawn check</a></p>
+          <p style="margin:0 0 10px;"><a href="${escapeHtml(bookUrl)}" class="btn">${escapeHtml(bookLabel)}</a></p>
           <p style="margin-bottom:0; font-size:14px;">or call us at <a href="${WAVES_SUPPORT_PHONE_TEL}">${escapeHtml(WAVES_SUPPORT_PHONE_DISPLAY)}</a>.</p>
         `;
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
