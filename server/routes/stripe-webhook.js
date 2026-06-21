@@ -619,17 +619,19 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
     await db.transaction(async (trx) => {
       const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
       if (!stmt) { logger.warn(`[stripe-webhook] statement ${statementId} not found for PI ${piId}`); return; }
-      if (stmt.status === 'paid') return; // idempotent (duplicate/late)
 
-      // Active-PI binding: settle ONLY when the statement's stored PI is exactly
-      // this PI (NON-NULL match). A null/different stored PI means this success is
-      // stale/orphan/replaced (or the statement was reconciled offline / a dispute
-      // cleared the PI) — record a manual-refund/review item and never settle.
+      // Active-PI binding FIRST — before the idempotent-paid shortcut. Settle (or
+      // no-op) only when the statement's stored PI is exactly this PI (NON-NULL
+      // match). A null/different stored PI means this success is stale/orphan/
+      // replaced; even if the statement is already `paid` by another PI/offline,
+      // this PI collected money that needs a durable manual-refund record, not a
+      // silent skip.
       if (String(stmt.stripe_payment_intent_id || '') !== String(piId)) {
         await recordStatementPaymentIssue(paymentIntent, statementId, `orphan/stale success: PI ${piId}, active ${stmt.stripe_payment_intent_id || 'none'} (status ${stmt.status}) — manual refund/review`);
         logger.warn(`[stripe-webhook] statement S-${statementId} non-active-PI success ${piId} (active ${stmt.stripe_payment_intent_id || 'none'})`);
         return;
       }
+      if (stmt.status === 'paid') return; // idempotent — THIS PI already settled
 
       // Surcharge correctness: recompute the expected total for the ACTUAL
       // confirmed funding and require the charged amount to match (binds surcharge
@@ -657,8 +659,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
         surchargePolicyVersion: policyVersion,
         cardFunding: funding,
         source: 'stripe_webhook',
-        database: trx,
-      });
+      }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
     });
     logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
   } else if (eventType === 'processing') {
@@ -2071,6 +2072,15 @@ async function restoreStatementCascadeForDispute(statementId, disputedPi) {
     const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
     // Skip if already paid (re-collected after the reversal) or void.
     if (!stmt || stmt.status === 'paid' || stmt.status === 'void') return;
+    // Skip if AP started a REPLACEMENT after dispute.created reopened it: an
+    // in-flight payment (`processing`) or a different active PI must not be
+    // overwritten by restoring the won-dispute PI — that would double-collect or
+    // strand the replacement. Leave it for manual review.
+    if (stmt.status === 'processing'
+      || (stmt.stripe_payment_intent_id && String(stmt.stripe_payment_intent_id) !== String(disputedPi))) {
+      logger.warn(`[stripe-webhook] statement S-${statementId} dispute won, but a replacement payment exists (status ${stmt.status}, PI ${stmt.stripe_payment_intent_id || 'none'}) — not auto-restoring`);
+      return;
+    }
     const now = new Date();
     await trx('payer_statements').where({ id: statementId })
       .update({ status: 'paid', paid_at: now, stripe_payment_intent_id: disputedPi || stmt.stripe_payment_intent_id || null, updated_at: now });
