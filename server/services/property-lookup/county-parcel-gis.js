@@ -341,9 +341,16 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
   }
 }
 
+// Don't start a county query with less than this much budget left — too little
+// time to land a result, and the caller needs the remainder for the FDOR
+// statewide layer and the PAO address search.
+const MIN_COUNTY_GIS_QUERY_MS = 500;
+
 // Resolve a geocoded point to a county parcel. With a county hint (from the
 // geocoder) only that county's layer is queried; without one, the three
-// serviced counties are tried in order until one matches.
+// serviced counties are tried in order until one matches — but the WHOLE loop
+// shares a single deadline (timeoutMs total, not per county) so a missing
+// county hint can't spend 3x the GIS budget and starve the FDOR/PAO fallbacks.
 async function lookupCountyParcelByPoint(lat, lng, options = {}) {
   if (isDisabled()) {
     logger.info('[county-parcel-gis] skipped — COUNTY_PARCEL_GIS_DISABLED');
@@ -351,12 +358,19 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
   }
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 
-  const timeoutMs = timeoutMsFor(options);
   const hinted = normalizeCountyName(options.county);
   const order = hinted ? [hinted] : ['Manatee', 'Sarasota', 'Charlotte'];
+  const deadline = Date.now() + timeoutMsFor(options);
 
   for (const county of order) {
-    const parcel = await queryCountyLayer(county, lat, lng, timeoutMs).catch(() => null);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < MIN_COUNTY_GIS_QUERY_MS) {
+      logger.info('[county-parcel-gis] budget exhausted before all counties tried — degrading', {
+        remainingMs,
+      });
+      break;
+    }
+    const parcel = await queryCountyLayer(county, lat, lng, remainingMs).catch(() => null);
     if (parcel) return parcel;
   }
   return null;

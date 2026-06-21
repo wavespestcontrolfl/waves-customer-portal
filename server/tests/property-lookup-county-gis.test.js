@@ -155,6 +155,14 @@ describe('lookupCountyParcelByPoint', () => {
     expect(await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' })).toBeNull();
   });
 
+  test('shared deadline: a budget too small to query returns null without a fetch (codex P1)', async () => {
+    global.fetch = jest.fn();
+    // No hint → would fan out to 3 counties; a sub-threshold budget must not
+    // start any query (preserve the FDOR/PAO fallback budget).
+    expect(await lookupCountyParcelByPoint(PT.lat, PT.lng, { timeoutMs: 100 })).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   test('without a county hint, tries the serviced counties until one matches', async () => {
     global.fetch = jest.fn()
       .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [] }) }) // Manatee miss
