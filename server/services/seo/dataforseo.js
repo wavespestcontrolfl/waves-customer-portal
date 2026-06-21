@@ -115,14 +115,39 @@ class DataForSEO {
     }]);
   }
 
-  // Backlinks for domain
-  async getBacklinks(target, limit = 1000) {
-    return this.request('/backlinks/backlinks/live', [{
-      target,
-      limit,
-      order_by: ['rank.desc'],
-      filters: ['dofollow', '=', true],
-    }]);
+  // Backlinks for domain. dofollowOnly defaults true to preserve every existing
+  // caller (verifier, scanCompetitorGaps); the deep-harvest passes false so the
+  // scorer can also see nofollow opportunities (plan §4.1 — the prior hard
+  // filter made nofollow links invisible).
+  async getBacklinks(target, limit = 1000, { dofollowOnly = true } = {}) {
+    // order_by uses the COMMA format ('rank,desc'); the prior 'rank.desc' (dot)
+    // is rejected by DataForSEO with 40501 Invalid Field and silently returned
+    // null — which is why scanCompetitorGaps never populated seo_competitor_backlinks.
+    const task = { target, limit, order_by: ['rank,desc'] };
+    if (dofollowOnly) task.filters = ['dofollow', '=', true];
+    return this.request('/backlinks/backlinks/live', [task]);
+  }
+
+  // Every referring domain pointing at a target — one row per domain
+  // (domain, rank, backlinks count, first/last seen). The cheap, correct
+  // primitive for "every site that links to competitor X" (deep harvest).
+  async getReferringDomains(target, { limit = 1000 } = {}) {
+    // No order_by — the referring_domains endpoint rejects it (40501 Invalid
+    // Field). Callers sort client-side; DataForSEO returns highest-rank first.
+    return this.request('/backlinks/referring_domains/live', [{ target, limit }]);
+  }
+
+  // Bulk domain rank for up to 1000 targets in ONE call (credit discipline).
+  async bulkRanks(targets) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    return this.request('/backlinks/bulk_ranks/live', [{ targets }]);
+  }
+
+  // Bulk backlink spam score for up to 1000 targets in ONE call — feeds the
+  // spam/PBN drop-filter before we spend LLM/contact budget on a domain.
+  async bulkSpamScore(targets) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    return this.request('/backlinks/bulk_spam_score/live', [{ targets }]);
   }
 
   // Keyword search volume

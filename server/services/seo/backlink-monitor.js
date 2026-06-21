@@ -282,7 +282,14 @@ class BacklinkMonitor {
           first_seen: link.first_seen || etDateString(),
           last_checked: etDateString(),
           waves_has_link: hasWavesLink,
-          prospect_priority: !hasWavesLink && (link.domain_from_rank || 0) > 30 ? 'high' : 'medium',
+          // Relevance + lead-value aware priority (not raw DR>30), contact-agnostic
+          // for cost — see prospect-scorer.heuristicPriority.
+          prospect_priority: hasWavesLink ? 'medium' : require('./prospect-scorer').heuristicPriority({
+            domain: link.domain_from,
+            source_url: link.url_from,
+            domain_rating: link.domain_from_rank,
+            sample_anchors: link.anchor ? [link.anchor] : [],
+          }),
         });
         if (!hasWavesLink) {
           gaps++;

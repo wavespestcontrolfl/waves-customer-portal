@@ -199,6 +199,9 @@ async function executeBacklinkTool(toolName, input) {
       const prospects = input.prospects || [];
       let added = 0, skipped = 0;
       const duplicates = [];
+      const gated = []; // outreach targets dropped for lacking a contact path
+
+      const scorer = require('./prospect-scorer');
 
       for (const p of prospects) {
         const domain = normalizeDomain(p.target_domain) || normalizeDomain(p.target_url);
@@ -209,23 +212,60 @@ async function executeBacklinkTool(toolName, input) {
           .first();
         if (exists) { duplicates.push(domain); skipped++; continue; }
 
+        // Score on relevance + lead-value + contactability (not raw DR), and
+        // GATE outreach-intent targets with no way to reach a human. Fail-soft:
+        // any scorer error falls back to inserting with the agent's own values.
+        let scored = null;
+        try {
+          const [r] = await scorer.scoreCandidates([{
+            domain,
+            domain_rating: p.domain_rating || null,
+            source_url: p.target_url || null,
+            sample_anchors: p.anchor_planned ? [p.anchor_planned] : [],
+          }]);
+          scored = r;
+        } catch (err) {
+          logger.warn(`[backlink-strategy] scoring failed for ${domain}: ${err.message}`);
+        }
+
+        if (scored && !scored.gate.ok) {
+          gated.push({ domain, reason: scored.gate.reason });
+          skipped++;
+          continue;
+        }
+
+        const qs = scored ? {
+          relevance: scored.relevance_0_100,
+          lead_value_tier: scored.lead_value_tier,
+          is_local_swfl: scored.is_local_swfl,
+          intent_class: scored.intent_class,
+          gate_lane: scored.gate.lane,
+          scored_by: 'create_link_prospects',
+        } : null;
+
         await db('seo_link_prospects').insert({
           target_domain: domain,
           target_url: p.target_url || null,
           target_page: p.target_page,
-          anchor_planned: p.anchor_planned || null,
-          link_type: p.link_type || null,
-          priority: p.priority || null,
+          anchor_planned: p.anchor_planned || scored?.suggested_anchor || null,
+          link_type: p.link_type || scored?.intent_class || null,
+          priority: p.priority || scored?.priority || null,
           domain_rating: p.domain_rating || null,
           notes: p.notes || null,
+          contact_email: scored?.contact?.contact_email || null,
+          contact_url: scored?.contact?.contact_url || null,
+          contact_checked_at: scored?.contact ? new Date() : null,
+          score: scored?.score ?? null,
+          tier: scored?.tier ?? null,
+          quality_signals: qs ? JSON.stringify(qs) : null,
           source: 'strategy_agent',
           owner: 'strategy_agent',
         });
         added++;
       }
 
-      logger.info(`[backlink-strategy] Created ${added} link prospects, skipped ${skipped}`);
-      return { added, skipped, duplicates };
+      logger.info(`[backlink-strategy] Created ${added} link prospects, skipped ${skipped} (${gated.length} gated: no contact)`);
+      return { added, skipped, duplicates, gated };
     }
 
     case 'list_prospects': {
