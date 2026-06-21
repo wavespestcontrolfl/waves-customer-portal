@@ -212,6 +212,11 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
     // truly in flight (and fails closed if the PI can't be verified).
     let settledAmount;
     const result = await db.transaction(async (trx) => {
+      // Take the statement money advisory lock BEFORE the row lock — same order
+      // as the webhook money paths (advisory → FOR UPDATE) so a concurrent
+      // settle/refund/dispute can't deadlock with this reconcile (it also matches
+      // the order settleStatementPaid uses internally).
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(owned.id)]);
       const locked = await trx('payer_statements').where({ id: owned.id }).forUpdate().first();
       if (!locked) { const e = new Error('Statement not found'); e.statusCode = 404; throw e; }
       if (locked.status === 'paid') { const e = new Error('Statement is already paid'); e.statusCode = 409; throw e; }

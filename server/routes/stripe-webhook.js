@@ -1422,21 +1422,29 @@ async function handleChargeRefunded(charge) {
   // statement by PI and clear/reset its active PI (so the later succeeded fails
   // the active-PI binding and never settles refunded money) + persist a durable
   // refunded marker. Mirrors the dispute pre-settlement guard.
-  if (charge.payment_intent && isFullRefund) {
+  if (charge.payment_intent) {
     const stmtByPi = await db('payer_statements').where({ stripe_payment_intent_id: charge.payment_intent }).first();
     const preRow = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
     if (stmtByPi && !preRow) {
       const { withStatementMoneyLock } = require('../services/payer-statement-settle');
-      // Under the per-statement money lock, RE-CHECK the row: settle may have
-      // inserted the paid row between the pre-check and the lock. Reverse the
-      // cascade either way, then mark the (now-existing) paid row refunded or
-      // insert a durable refunded marker.
+      // ANY statement refund (full OR partial) before the settlement row exists.
+      // Under the money lock, RE-CHECK the row (settle may have inserted it in the
+      // window). A partial refund left only to the generic 0-row update would be
+      // LOST, and the later succeeded would settle the full gross — overstating cash.
       await withStatementMoneyLock(stmtByPi.id, async (trx) => {
         const rowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first();
-        await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, 'charge.refunded (full)', { database: trx });
         if (rowInLock) {
-          await trx('payments').where({ id: rowInLock.id }).update({ status: 'refunded', refund_amount: cumulativeRefundAmountDollars, refund_status: 'full', stripe_refund_id: refundId });
-        } else {
+          // Settled in the window — apply the refund to the existing row.
+          await trx('payments').where({ id: rowInLock.id }).update({
+            status: isFullRefund ? 'refunded' : 'paid',
+            refund_amount: cumulativeRefundAmountDollars,
+            refund_status: isFullRefund ? 'full' : 'partial',
+            stripe_refund_id: refundId,
+          });
+          if (isFullRefund) await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, 'charge.refunded (full)', { database: trx });
+        } else if (isFullRefund) {
+          // Full refund pre-settlement: reverse the cascade + durable refunded marker.
+          await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, 'charge.refunded (full)', { database: trx });
           await trx('payments').insert({
             customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
             processor: 'stripe', stripe_payment_intent_id: charge.payment_intent, stripe_charge_id: chargeId,
@@ -1445,9 +1453,19 @@ async function handleChargeRefunded(charge) {
             description: `Payer statement S-${stmtByPi.id} fully refunded`,
             metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, source: 'statement_refund' }),
           });
+        } else {
+          // Partial refund pre-settlement: the eventual succeeded will settle the
+          // statement, but it can't know about this refund. Persist a durable
+          // manual-review item so the partial refund isn't lost from the ledger.
+          await trx('stripe_orphan_charges').insert({
+            stripe_payment_intent_id: charge.payment_intent, stripe_charge_id: chargeId,
+            customer_id: null, invoice_id: null, amount: refundAmountDollars,
+            source: 'statement_pay_webhook',
+            original_db_error: `statement S-${stmtByPi.id}: partial refund $${refundAmountDollars.toFixed(2)} before settlement — reconcile refund_amount after settle`,
+          }).onConflict('stripe_payment_intent_id').ignore();
         }
       });
-      logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} full refund — cascade reversed (in-lock recheck)`);
+      logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} ${isFullRefund ? 'full' : 'partial'} refund handled in-lock (pre-settlement)`);
       return;
     }
   }
