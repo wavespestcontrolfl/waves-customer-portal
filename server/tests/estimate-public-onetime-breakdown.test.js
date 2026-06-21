@@ -2372,6 +2372,57 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
   });
 
+  test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {
+    const html = renderPage('terms-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('class="card plan-terms-card"');
+    expect(html).toContain('Cancel, refunds &amp; our guarantee');
+    expect(html).toContain('Cancel anytime &mdash; no contract');
+    expect(html).toContain('setup is refundable');
+    expect(html).toContain('Annual prepay is prorated');
+    expect(html).toContain('backed by a 90-day money-back guarantee');
+  });
+
+  test('quote-required estimates do not render the plan terms card', () => {
+    const html = renderPage('terms-quote-token', {
+      status: 'quote_required',
+      quoteRequired: true,
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {},
+      },
+    });
+
+    // The CSS class is always present in the <style> block; assert the card
+    // element and its body copy are gated out, not the stylesheet rule.
+    expect(html).not.toContain('class="card plan-terms-card"');
+    expect(html).not.toContain('Cancel anytime &mdash; no contract');
+  });
+
   test('one-time pest choice excludes WaveGuard setup from the choice price and add-on table', async () => {
     const estimateData = {
       result: {
@@ -4144,7 +4195,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('For comparison, your lawn care plan averages');
     expect(html).toContain('.q-bar{display:none}');
     expect(html).not.toContain('Wave Goodbye to Pests!');
-    expect(html).not.toContain('90-day money-back guarantee');
+    // The pest mini-guarantee ("Try us risk-free…") must not leak into lawn copy;
+    // the 90-day money-back guarantee now appears via the dedicated plan-terms
+    // section (owner-confirmed it applies to lawn too).
+    expect(html).not.toContain('Try us risk-free');
+    expect(html).toContain('class="card plan-terms-card"');
+    expect(html).toContain('backed by a 90-day money-back guarantee');
     expect(html).not.toContain('Free annual termite inspection');
     expect(html).not.toContain('What WaveGuard members get');
   });

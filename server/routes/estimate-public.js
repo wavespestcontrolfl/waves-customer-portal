@@ -3317,6 +3317,36 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>
   </section>` : '';
 
+  // Cancel / refund / guarantee terms — surfaced on the SSR estimate so a
+  // high-consideration buyer sees exactly where they stand before approving.
+  // Policy (owner-confirmed): setup fully refundable, annual prepay prorated
+  // on unused visits, cancel anytime with no contract, 90-day money-back +
+  // free re-service. Gated to recurring plans (same condition as the billing
+  // card) and mode-aware so it hides in one-time mode.
+  const planTermsCardHtml = showBillingCard ? `
+  <section class="card plan-terms-card"${billingModeAttr}>
+    <h2>Cancel, refunds &amp; our guarantee</h2>
+    <p class="billing-lede">No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.</p>
+    <ul class="plan-terms-list">
+      <li class="plan-terms-item">
+        <span class="plan-terms-term">Cancel anytime &mdash; no contract</span>
+        <span class="plan-terms-detail">No long-term commitment. Stop after any visit, with no cancellation fee.</span>
+      </li>
+      ${showMembershipFee && !membershipSetupWaivedForExistingCustomer ? `<li class="plan-terms-item">
+        <span class="plan-terms-term">Your ${fmtMoney(membershipFee)} setup is refundable</span>
+        <span class="plan-terms-detail">Change your mind? Just ask and we&rsquo;ll refund the WaveGuard setup in full.</span>
+      </li>` : ''}
+      ${showAnnualPrepayOption ? `<li class="plan-terms-item">
+        <span class="plan-terms-term">Annual prepay is prorated</span>
+        <span class="plan-terms-detail">On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.</span>
+      </li>` : ''}
+      <li class="plan-terms-item">
+        <span class="plan-terms-term">90-day money-back guarantee</span>
+        <span class="plan-terms-detail">Not satisfied? We re-treat between visits free &mdash; and you&rsquo;re backed by a 90-day money-back guarantee.</span>
+      </li>
+    </ul>
+  </section>` : '';
+
   const servicePriceCardsHtml = billingServiceRows
     .filter((row) => row.price != null)
     .map((row) => {
@@ -3736,6 +3766,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .payment-summary-row.payment-summary-total{border-top:1px solid #1B2C5B;margin-top:4px;padding-top:12px}
   .payment-summary-row.payment-summary-total span{color:#1B2C5B}
   .payment-summary-row.payment-summary-total strong{font-size:15px;color:#1B2C5B}
+  .plan-terms-card{display:grid;gap:14px}
+  .plan-terms-card h2{margin-bottom:0}
+  .plan-terms-list{display:grid;gap:10px;margin:0;padding:0;list-style:none}
+  .plan-terms-item{display:grid;gap:3px;background:#fff;border:1px solid #E7E2D7;border-left:4px solid #1F7A4D;border-radius:10px;padding:12px 14px}
+  .plan-terms-term{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.3}
+  .plan-terms-detail{font-size:14px;color:#3F4A65;line-height:1.5}
   .manual-discount-row{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:12px 0 0;padding:10px 12px;border:1px solid #DCFCE7;border-radius:10px;background:#F0FDF4;color:${BRAND.green};font-size:14px;font-weight:800}
   .manual-discount-row strong{white-space:nowrap;font-size:14px}
   .payment-choice-cta{margin-top:auto;width:100%;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
@@ -3966,6 +4002,8 @@ ${shellTopBar()}
   ${estimateAskBlockHtml}
 
   ${billingCardHtml}
+
+  ${planTermsCardHtml}
 
   ${prefsBlockHtml}
 
