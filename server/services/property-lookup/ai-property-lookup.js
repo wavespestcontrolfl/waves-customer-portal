@@ -849,22 +849,43 @@ function attachParcelMeta(merged, parcel) {
 // the PAO building-type text / numeric DOR code flatten to "Single Family".
 const COUNTY_GIS_SPECIFIC_TYPES = new Set(['Townhome', 'Interior Townhome', 'Condo', 'Duplex', 'Multifamily']);
 
+// A merged type the GIS description is allowed to UPGRADE — blank, or the
+// generic residential label the PAO building-type text / DOR code report for
+// everything (the exact value a paired villa or condo gets flattened to).
+function isGenericResidentialType(value) {
+  if (isMissingPropertyValue(value)) return true;
+  return /^(single\s*family|single-family|residential|sfr)\b/i.test(String(value).trim());
+}
+
 // Field-specific override for propertyType only. The merge caps every county
 // source at the same score, so a same-weight PAO record (generic "Single
 // Family") wins the tie over the county GIS record by input order — losing the
 // paired-villa/condo classification the GIS land-use description uniquely
 // carries. When the GIS type came from that description, let it win the TYPE
-// field (every other field keeps the normal merge, so PAO's live sqft/year are
-// untouched). Only UPGRADES specificity (villa/condo/duplex/multifamily) or
-// fills a blank — never downgrades an already-specific merged type to generic.
+// field ONLY when the merged value is blank or generic residential; every other
+// field keeps the normal merge (PAO's live sqft/year untouched). It never
+// overwrites an already-specific merged type (another live county/AI "Condo",
+// "Duplex", "Commercial", …) — that genuine conflict is left as-is but flagged
+// for verification.
 function applyCountyGisTypeOverride(merged, cadastralRecord) {
   if (!merged || !cadastralRecord?._typeFromUseDesc) return merged;
   const gisType = cadastralRecord.propertyType;
-  if (isMissingPropertyValue(gisType)) return merged;
-  const mergedMissing = isMissingPropertyValue(merged.propertyType);
-  if (!mergedMissing && !COUNTY_GIS_SPECIFIC_TYPES.has(gisType)) return merged;
-  if (!mergedMissing && normalizeEvidenceValue(merged.propertyType) === normalizeEvidenceValue(gisType)) return merged;
+  if (isMissingPropertyValue(gisType) || !COUNTY_GIS_SPECIFIC_TYPES.has(gisType)) return merged;
+  if (!isMissingPropertyValue(merged.propertyType)
+      && normalizeEvidenceValue(merged.propertyType) === normalizeEvidenceValue(gisType)) return merged;
 
+  // Merged type is already specific AND disagrees — don't overwrite one
+  // specific source with another; surface the conflict for operator review.
+  if (!isGenericResidentialType(merged.propertyType)) {
+    if (merged._fieldEvidence?.propertyType) {
+      merged._fieldEvidence.propertyType.disagreement = true;
+      merged._fieldEvidence.propertyType.fieldVerify = true;
+      merged._dataQuality = buildPropertyDataQuality(merged._fieldEvidence, merged._aiProviders || []);
+    }
+    return merged;
+  }
+
+  // Blank / generic residential → upgrade to the specific county classification.
   merged.propertyType = gisType;
   const gisEvidence = cadastralRecord._fieldEvidence?.propertyType?.[0];
   if (merged._fieldEvidence) {

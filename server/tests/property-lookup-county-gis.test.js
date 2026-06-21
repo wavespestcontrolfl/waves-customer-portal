@@ -236,6 +236,36 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     expect(merged._fieldEvidence.propertyType.fieldVerify).toBe(false);
   });
 
+  test('override does NOT overwrite an already-specific conflicting type, but flags it (codex P1)', () => {
+    const gisParcel = {
+      county: 'Manatee', parcelId: '1', situsAddress: '1 A ST', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 7200, dorUseCode: '01', landUseDescription: 'Half Duplex/Paired Villa (1554)',
+      sourceUrl: 'https://gis.manateepao.gov/x', gisProvider: 'manatee_gis',
+    };
+    const cadastralRecord = buildCadastralRecord(gisParcel, 'addr'); // -> Townhome, _typeFromUseDesc
+    // A specific, conflicting live result (e.g. PAO/AI) already won the merge.
+    const merged = {
+      propertyType: 'Condo',
+      _aiProviders: ['manatee_pao'],
+      _fieldEvidence: { propertyType: { value: 'Condo', sourceType: 'county', fieldVerify: false, disagreement: false, evidence: [] } },
+    };
+    applyCountyGisTypeOverride(merged, cadastralRecord);
+    expect(merged.propertyType).toBe('Condo'); // NOT overwritten with Townhome
+    expect(merged._fieldEvidence.propertyType.fieldVerify).toBe(true); // conflict surfaced
+    expect(merged._fieldEvidence.propertyType.disagreement).toBe(true);
+  });
+
+  test('override does not touch a "Commercial" merged type', () => {
+    const cadastralRecord = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '1 A ST', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 7200, dorUseCode: '01', landUseDescription: 'Half Duplex/Paired Villa (1554)',
+      sourceUrl: 'https://gis.manateepao.gov/x', gisProvider: 'manatee_gis',
+    }, 'addr');
+    const merged = { propertyType: 'Commercial', _aiProviders: [], _fieldEvidence: { propertyType: { value: 'Commercial', sourceType: 'county', fieldVerify: false, evidence: [] } } };
+    applyCountyGisTypeOverride(merged, cadastralRecord);
+    expect(merged.propertyType).toBe('Commercial');
+  });
+
   test('override never downgrades an already-specific type and skips DOR-only types', () => {
     // GIS type came from the DOR code (not the description) → no override flag.
     const dorOnly = buildCadastralRecord({
