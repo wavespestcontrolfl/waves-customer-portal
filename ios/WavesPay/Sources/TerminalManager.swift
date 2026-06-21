@@ -151,7 +151,7 @@ final class TerminalManager: NSObject {
     // amount (the surcharge) after collect and before confirm. Off → today's
     // single-amount behavior, byte-for-byte.
     private func collectMethod(pi: PaymentIntent, allowAmountUpdate: Bool) async throws -> PaymentIntent {
-        let config = try? CollectConfigurationBuilder()
+        let config = try? CollectPaymentIntentConfigurationBuilder()
             .setUpdatePaymentIntent(allowAmountUpdate)
             .build()
         return try await withCheckedThrowingContinuation { cont in
