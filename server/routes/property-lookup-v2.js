@@ -1130,18 +1130,42 @@ function applyVisionPropertyTypeEvidence(rc, propertyType, ai) {
   } catch (_) { /* keep the prior quality summary on any recompute error */ }
 }
 
+// Minimum overall vision confidence before a satellite attachment read is
+// allowed to CHANGE the priced property type. The estimator prices directly
+// off profile.propertyType and townhome/condo is a discount, so an obstructed
+// or low-confidence guess must NOT silently underprice a detached home — below
+// this bar we leave the safe default (Single Family) and the weak-source
+// verify flag still nudges the operator. Env-tunable; 70 mirrors the UI's HIGH
+// confidence band.
+const SATELLITE_TYPE_MIN_CONFIDENCE = (() => {
+  const n = Number(process.env.SATELLITE_TYPE_MIN_CONFIDENCE);
+  return Number.isFinite(n) && n >= 0 ? n : 70;
+})();
+
+// A satellite attachment read is trustworthy enough to reprice on only when the
+// merged analysis is at/above the confidence bar AND the vision models did not
+// diverge on structureAttachment (mergeAiAnalyses records cross-provider
+// disagreement in aiDivergences).
+function satelliteAttachmentIsConfident(ai) {
+  const conf = Number(ai?.confidenceScore);
+  if (!Number.isFinite(conf) || conf < SATELLITE_TYPE_MIN_CONFIDENCE) return false;
+  return !(Array.isArray(ai?.aiDivergences)
+    && ai.aiDivergences.some((d) => d && d.field === 'structureAttachment'));
+}
+
 // Surface a satellite-detected townhome/condo on a weak-typed record. Shared
 // by the fresh-lookup route (called BEFORE applyParcelTurfBound so the turf cap
 // — which deliberately skips townhome/condo — sees the reclassified type and
 // doesn't clamp an attached unit's turf to its small parcel) and by
 // buildEnrichedProfile (cache-hit + standalone callers). Idempotent: re-running
-// on an already-satellite record is a no-op. Never touches commercial or
-// authoritatively-typed records.
+// on an already-satellite record is a no-op. Never touches commercial,
+// authoritatively-typed, or low-confidence/divergent reads.
 function applySatelliteAttachmentType(rc, ai) {
   if (!rc || rc._propertyTypeSource === 'satellite') return null;
   if (detectCategory(rc, ai) === 'COMMERCIAL') return null;
   const candidate = propertyTypeFromAttachment(ai);
   if (!candidate || !recordPropertyTypeIsWeak(rc)) return null;
+  if (!satelliteAttachmentIsConfident(ai)) return null;
   applyVisionPropertyTypeEvidence(rc, candidate, ai);
   return candidate;
 }
@@ -1165,7 +1189,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
   // can't carry evidence, so it only seeds the displayed type.
   const appliedVisionType = applySatelliteAttachmentType(rc, ai);
   const visionPropertyType = appliedVisionType
-    || (!rc && !commercialProfile ? propertyTypeFromAttachment(ai) : null);
+    || (!rc && !commercialProfile && satelliteAttachmentIsConfident(ai)
+      ? propertyTypeFromAttachment(ai)
+      : null);
 
   const profile = {
     // ── ADDRESS ──
