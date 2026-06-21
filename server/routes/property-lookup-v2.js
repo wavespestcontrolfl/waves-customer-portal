@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -877,6 +877,7 @@ IMPORTANT RULES:
 - DRIVEWAY: "largeDriveway" means the driveway is wider than a standard 2-car width (~20ft) OR extends significantly along the side of the home OR has a circular/turnaround area. Standard SWFL driveways are 2-car width going straight to the garage — that is NOT large. Only mark YES if it's notably oversized.
 - For construction material: if the property record already identified it, confirm or note disagreement. If unknown, infer from satellite (CBS=stucco appearance, wood frame=siding visible, etc.)
 - For foundation: SWFL default is slab-on-grade. Only flag raised/crawlspace if clearly visible (house elevated, visible piers/stilts, lattice skirting).
+- STRUCTURE ATTACHMENT (drives townhome/condo vs single-family pricing): look at the roofline and the neighbors. A free-standing home with gaps to both neighbors is DETACHED. A unit at the end of a continuous shared roofline / row of identical units is ATTACHED_END (one party wall). A unit boxed in between two others in that row is ATTACHED_INTERIOR (two party walls, often no side yard). Floors stacked with separate ground-level entries (an apartment/condo building) are STACKED. New master-planned SWFL communities mix detached homes with attached villas/townhomes on the same street — judge THIS structure, not the community. If you genuinely cannot tell, return UNKNOWN rather than guessing DETACHED.
 - Estimate impervious surface as a percentage of the total lot, not just what you see — account for areas under the roof line too.
 - Be aggressive about detecting features — it's better to flag "POSSIBLE" than to miss something. Pest control pricing depends on accurate property assessment.
 
@@ -891,6 +892,10 @@ Return a JSON object with exactly these fields:
 {
   "propertyUse": "RESIDENTIAL" | "COMMERCIAL" | "MIXED" | "UNKNOWN",
   "commercialUseType": "OFFICE_RETAIL" | "WAREHOUSE_LIGHT" | "RESTAURANT_FOOD_SERVICE" | "MEDICAL_OFFICE" | "INDUSTRIAL" | "SCHOOL_DAYCARE" | "GOVERNMENT_MUNICIPAL" | "HOA_COMMON_AREA" | "MULTIFAMILY_COMMON_AREA" | "OTHER" | "NONE",
+
+  "structureAttachment": "DETACHED" | "ATTACHED_END" | "ATTACHED_INTERIOR" | "STACKED" | "UNKNOWN",
+  "sharedWallCount": number (0 for a free-standing home, 1 for an end unit, 2 for an interior row unit),
+  "structureAttachmentNotes": "string — what tells you it's attached/detached: continuous shared roofline, party walls, a row of identical units, stacked floors with separate entries",
 
   "pool": "YES" | "NO" | "POSSIBLE",
   "poolCage": "YES" | "NO" | "POSSIBLE",
@@ -1054,6 +1059,72 @@ function computeFootprintTurf(rc) {
   };
 }
 
+// Maps a satellite-detected structure attachment to an estimator property
+// type. DETACHED / UNKNOWN return null — no attached signal, so records and AI
+// search keep deciding. The returned strings are what the pricing normalizer
+// (commercial-helpers normalizePropertyType) tokenizes: "Townhome" →
+// townhome_end, "Interior Townhome" → townhome_interior, "Condo" → condo_*.
+function propertyTypeFromAttachment(ai) {
+  switch (String(ai?.structureAttachment || '').toUpperCase()) {
+    case 'ATTACHED_END': return 'Townhome';
+    case 'ATTACHED_INTERIOR': return 'Interior Townhome';
+    case 'STACKED': return 'Condo';
+    default: return null;
+  }
+}
+
+// A record's propertyType is "weak" when nothing authoritative pinned it:
+// missing, no evidence trail (unknown source), flagged for field-verify, or
+// from a generic/unknown source. Strong county/cadastral/listing/verified
+// values are NOT weak — satellite never overrides them, it only flags
+// divergence elsewhere.
+function recordPropertyTypeIsWeak(rc) {
+  if (!rc || !rc.propertyType) return true;
+  const ev = rc._fieldEvidence?.propertyType;
+  if (!ev) return true;
+  if (ev.fieldVerify) return true;
+  return ['unknown', 'generic'].includes(String(ev.sourceType || '').toLowerCase());
+}
+
+// Surface a satellite-derived townhome/condo as real evidence: overwrite the
+// weak value, record satellite provenance, and KEEP the field-verify nudge so
+// the operator (or a tech on site, whose verify persists forever) confirms
+// townhome vs single-family before it sticks. Recomputes the aggregate quality
+// summary so the "unknown source" flag is replaced by the verify nudge.
+function applyVisionPropertyTypeEvidence(rc, propertyType, ai) {
+  if (!rc) return;
+  rc.propertyType = propertyType;
+  const conf = Number(ai?.confidenceScore);
+  const confidence = Number.isFinite(conf) && conf >= 70 ? 'medium' : 'low';
+  rc._fieldEvidence = rc._fieldEvidence || {};
+  rc._fieldEvidence.propertyType = {
+    value: propertyType,
+    confidence,
+    sourceType: 'satellite',
+    sourceLabel: 'satellite imagery',
+    winningSource: null,
+    winningProvider: 'satellite',
+    score: 50,
+    disagreement: false,
+    fieldVerify: true,
+    evidence: [{
+      field: 'propertyType',
+      value: propertyType,
+      provider: 'satellite',
+      url: null,
+      sourceType: 'satellite',
+      sourceQuality: 50,
+      confidence,
+    }],
+  };
+  rc._propertyTypeSource = 'satellite';
+  if (rc._raw) rc._raw._propertyTypeSource = 'satellite';
+  try {
+    rc._dataQuality = buildPropertyDataQuality(rc._fieldEvidence, rc._aiProviders || []);
+    if (rc._raw) rc._raw._dataQuality = rc._dataQuality;
+  } catch (_) { /* keep the prior quality summary on any recompute error */ }
+}
+
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
@@ -1065,6 +1136,22 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
   const category = detectCategory(rc, ai);
   const commercialProfile = category === 'COMMERCIAL';
   const commercialSubtype = commercialProfile ? resolveCommercialSubtype(rc, ai) : null;
+
+  // New-construction / weak-record fallback: when no authoritative source
+  // pinned the residential type, let a confident satellite attachment read
+  // surface a townhome/condo instead of silently defaulting to Single Family.
+  // Mutates rc (value + evidence + quality) so the response, flags, and pricing
+  // all see it; only fires when the record's type is weak (never overrides
+  // county/cadastral/verified data).
+  let visionPropertyType = null;
+  if (!commercialProfile) {
+    const candidate = propertyTypeFromAttachment(ai);
+    if (candidate && recordPropertyTypeIsWeak(rc)) {
+      visionPropertyType = candidate;
+      applyVisionPropertyTypeEvidence(rc, candidate, ai);
+    }
+  }
+
   const profile = {
     // ── ADDRESS ──
     address: rc?.formattedAddress || '',
@@ -1075,7 +1162,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
 
     // ── CATEGORY / TYPE ──
     category,
-    propertyType: commercialProfile ? 'Commercial' : (rc?.propertyType || 'Single Family'),
+    propertyType: commercialProfile ? 'Commercial' : (rc?.propertyType || visionPropertyType || 'Single Family'),
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
@@ -1987,11 +2074,22 @@ function buildFieldVerifyFlags(rc, ai) {
 
   for (const [field, evidence] of Object.entries(rc?._fieldEvidence || {})) {
     if (!evidence?.fieldVerify) continue;
+    let reason;
+    if (field === 'propertyType' && evidence.sourceType === 'satellite') {
+      const attach = String(ai?.structureAttachment || '').toUpperCase();
+      const detail = attach === 'ATTACHED_INTERIOR' ? 'interior row unit, two shared walls'
+        : attach === 'ATTACHED_END' ? 'end unit, one shared wall'
+        : attach === 'STACKED' ? 'stacked/condo building'
+        : 'an attached structure';
+      reason = `Satellite imagery suggests ${rc.propertyType} (${detail}) — confirm townhome vs single-family before pricing`;
+    } else if (evidence.disagreement) {
+      reason = `${field} has conflicting AI/source evidence — verify before pricing`;
+    } else {
+      reason = `${field} came from ${evidence.sourceLabel || 'a weak source'} with ${evidence.confidence || 'low'} confidence`;
+    }
     flags.push({
       field,
-      reason: evidence.disagreement
-        ? `${field} has conflicting AI/source evidence — verify before pricing`
-        : `${field} came from ${evidence.sourceLabel || 'a weak source'} with ${evidence.confidence || 'low'} confidence`,
+      reason,
       priority: ['squareFootage', 'lotSize', 'stories'].includes(field) ? 'HIGH' : 'MEDIUM',
     });
   }
@@ -2806,7 +2904,7 @@ function mergeAiAnalyses(providerResults) {
   const merged = { ...primary.analysis };
 
   // Use higher confidence for key fields when models disagree
-  const fieldsToValidate = ['propertyUse', 'commercialUseType', 'pool', 'poolCage', 'poolCageSize', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'nearWater', 'waterDistance', 'overallPestPressureEstimate'];
+  const fieldsToValidate = ['propertyUse', 'commercialUseType', 'structureAttachment', 'pool', 'poolCage', 'poolCageSize', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'nearWater', 'waterDistance', 'overallPestPressureEstimate'];
 
   const divergences = [];
   for (const { provider, analysis } of sorted.slice(1)) {
@@ -2859,6 +2957,7 @@ function normalizeSatelliteAnalysis(analysis = {}) {
   if (!normalized.waterDistance) normalized.waterDistance = 'NONE';
   if (normalized.propertyUse) normalized.propertyUse = String(normalized.propertyUse).toUpperCase();
   if (normalized.commercialUseType) normalized.commercialUseType = String(normalized.commercialUseType).toUpperCase();
+  if (normalized.structureAttachment) normalized.structureAttachment = String(normalized.structureAttachment).toUpperCase();
   return normalized;
 }
 
@@ -2868,10 +2967,15 @@ function buildSatelliteVisionPrompt(address, propertyRecord, visionContext = nul
 
 For pool cages, classify the visible screen enclosure service burden. SMALL is a compact lanai/cage under roughly 300 sq ft, MEDIUM is a typical 300-600 sq ft enclosure, LARGE is roughly 600-900 sq ft or clearly larger than a standard cage, and OVERSIZED is a very large or multi-section enclosure. If poolCage is not YES, return poolCageSize as NONE.
 
+For structureAttachment, judge whether THIS home shares walls with neighbors: a free-standing home with gaps on both sides is DETACHED; an end unit on a continuous shared roofline is ATTACHED_END; a unit boxed between two others in that row is ATTACHED_INTERIOR; an apartment/condo building with stacked floors is STACKED. New SWFL communities mix detached homes and attached townhomes/villas on one street — judge the structure, not the community. Return UNKNOWN if you truly cannot tell.
+
 Return ONLY valid JSON with these fields:
 {
   "propertyUse": "RESIDENTIAL" | "COMMERCIAL" | "MIXED" | "UNKNOWN",
   "commercialUseType": "OFFICE_RETAIL" | "WAREHOUSE_LIGHT" | "RESTAURANT_FOOD_SERVICE" | "MEDICAL_OFFICE" | "INDUSTRIAL" | "SCHOOL_DAYCARE" | "GOVERNMENT_MUNICIPAL" | "HOA_COMMON_AREA" | "MULTIFAMILY_COMMON_AREA" | "OTHER" | "NONE",
+  "structureAttachment": "DETACHED" | "ATTACHED_END" | "ATTACHED_INTERIOR" | "STACKED" | "UNKNOWN",
+  "sharedWallCount": number (0 free-standing, 1 end unit, 2 interior row unit),
+  "structureAttachmentNotes": "string — continuous shared roofline / party walls / row of identical units / stacked floors with separate entries",
   "pool": "YES" | "NO" | "POSSIBLE",
   "poolCage": "YES" | "NO" | "POSSIBLE",
   "poolCageSize": "NONE" | "SMALL" | "MEDIUM" | "LARGE" | "OVERSIZED",
@@ -2936,17 +3040,22 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyParcelTurfBound,
+  applyVisionPropertyTypeEvidence,
   computeFootprintTurf,
+  buildFieldVerifyFlags,
   buildParcelOverlayParam,
   buildSatelliteVisionPrompt,
   buildVisionContext,
   classifyPoolCageSize,
   imageWidthFt,
+  mergeAiAnalyses,
   mergePool,
   parcelTurfBoundSqft,
   parseGeocodeResult,
   poolRecordContext,
   poolSource,
+  propertyTypeFromAttachment,
+  recordPropertyTypeIsWeak,
   turfRiskReasons,
   visionContextPromptBlock,
 };
