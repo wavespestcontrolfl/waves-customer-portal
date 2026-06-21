@@ -160,15 +160,24 @@ async function harvest(db, args) {
   for (const s of scored) {
     for (const comp of s.candidate.links_to_competitors) {
       const exists = await db('seo_competitor_backlinks').where({ competitor_domain: comp, source_domain: s.candidate.domain }).first();
-      const row = {
-        competitor_domain: comp, source_domain: s.candidate.domain, source_domain_rating: s.candidate.domain_rating,
-        // referring_domains is domain-level — no specific URL — but source_url is
-        // NOT NULL, so record the domain root as the source page.
-        source_url: `https://${s.candidate.domain}/`,
-        link_type: s.intent_class, waves_has_link: false, prospect_priority: s.priority, last_checked: etDateString(),
-      };
-      if (exists) await db('seo_competitor_backlinks').where({ id: exists.id }).update({ ...row, updated_at: new Date() });
-      else await db('seo_competitor_backlinks').insert({ ...row, first_seen: etDateString() });
+      if (exists) {
+        // A scanCompetitorGaps row may already hold the EXACT source_url/anchor/
+        // link_type (URL-level). The referring-domain harvest is only domain-level,
+        // so refresh the rank/priority signals but DON'T degrade that evidence.
+        await db('seo_competitor_backlinks').where({ id: exists.id }).update({
+          source_domain_rating: s.candidate.domain_rating, waves_has_link: false,
+          prospect_priority: s.priority, last_checked: etDateString(), updated_at: new Date(),
+        });
+      } else {
+        await db('seo_competitor_backlinks').insert({
+          competitor_domain: comp, source_domain: s.candidate.domain, source_domain_rating: s.candidate.domain_rating,
+          // referring_domains is domain-level — no specific URL — but source_url is
+          // NOT NULL, so record the domain root as the source page.
+          source_url: `https://${s.candidate.domain}/`,
+          link_type: s.intent_class, waves_has_link: false, prospect_priority: s.priority,
+          first_seen: etDateString(), last_checked: etDateString(),
+        });
+      }
       intelWrites++;
     }
   }
@@ -217,7 +226,12 @@ async function rescore(db, args) {
     // Only HARO platforms demote regardless; no-contact/low-score demotes apply
     // only when the row has no stored contact either.
     const hadContact = !!(r.contact_email || r.contact_url);
-    const demote = r.status === 'prospect' && !inFlight && isOutreachIntent && (
+    // The scorer re-classifies from the domain alone (it isn't given r.link_type),
+    // so an existing directory/citation/social row can come back unknown/resource.
+    // Its STORED link_type is authoritative — never demote a signup-lane row (it's
+    // worked by the signup worker, not outreach).
+    const existingSignup = scorer.SIGNUP_INTENTS.has(r.link_type);
+    const demote = r.status === 'prospect' && !inFlight && !existingSignup && isOutreachIntent && (
       s.gate.lane === 'haro_platform' || (!hadContact && (!s.gate.ok || s.score < 40))
     );
     updates.push({ r, s, demote });
