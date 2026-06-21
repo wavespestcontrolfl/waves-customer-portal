@@ -2804,6 +2804,10 @@ function canMarkEstimateWon(estimate) {
 }
 
 function canMarkEstimateAnnualPrepay(estimate) {
+  // Commercial proposals are won-eligible (above) but the server rejects
+  // annualPrepaySelected for them, so never expose the Annual Prepay action for
+  // a proposal — it would be a guaranteed-fail button.
+  if (estimate.isCommercialProposal) return false;
   return canMarkEstimateWon(estimate) && Number(estimate.monthlyTotal || 0) > 0;
 }
 
