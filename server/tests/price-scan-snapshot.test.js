@@ -94,6 +94,14 @@ describe('bestMatchingLink (scored result selection)', () => {
     // "Taurus SC" shares "sc" with "termidor-sc"; brand (taurus) is mandatory, so no grab.
     expect(bestMatchingLink(['https://www.domyown.com/termidor-sc-p-184.html'], product)).toBeNull();
   });
+  test('a single-digit pack size still steers to the right size variant (5 lb, not 25 lb)', () => {
+    const prod = { vendorProductName: 'Prodiamine 65 WDG', quantity: '5 lb' };
+    const got = bestMatchingLink([
+      'https://www.domyown.com/prodiamine-65-wdg-25-lb-p-1.html', // ties on name+lb without the digit
+      'https://www.domyown.com/prodiamine-65-wdg-5-lb-p-2.html',
+    ], prod);
+    expect(got).toBe('https://www.domyown.com/prodiamine-65-wdg-5-lb-p-2.html');
+  });
   test('terse slug that omits the category word still matches (Bifen I/T -> bifen-it, beats bifen-xts)', () => {
     const bifen = { vendorProductName: 'Bifen I/T Insecticide', quantity: '96 oz' };
     const got = bestMatchingLink([

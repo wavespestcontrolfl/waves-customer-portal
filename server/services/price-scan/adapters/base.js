@@ -188,8 +188,11 @@ function bestMatchingLink(hrefs, product) {
   if (!nameToks.length) return list[0]; // no product context -> legacy first-link
   const brand = nameToks.find((t) => t.length >= 3) || nameToks[0];
   const scoreToks = nameToks.filter((t) => !GENERIC_NAME_TOKENS.has(t));
+  // Keep numeric size tokens of ANY length (a single-digit pack like "5 lb" or the
+  // "2"/"5" of "2.5 gal" is the differentiator between size variants); only single
+  // LETTERS are dropped as noise.
   const sizeToks = [...new Set((String((product && product.quantity) || '').toLowerCase().match(/[a-z0-9]+/g) || [])
-    .filter((t) => t.length >= 2 && !nameToks.includes(t)))];
+    .filter((t) => !nameToks.includes(t) && (t.length >= 2 || /\d/.test(t))))];
   let best = null;
   let bestScore = -1;
   for (const href of list) {
