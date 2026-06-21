@@ -675,8 +675,23 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
     });
     logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
   } else if (eventType === 'processing') {
-    const moved = await Settle.markStatementProcessing(statementId, piId);
-    if (moved) logger.info(`[stripe-webhook] statement S-${statementId} → processing (ACH in flight) via PI ${piId}`);
+    // Re-read the CURRENT PI status before marking processing — a stale/retried
+    // processing event can arrive AFTER payment_failed/canceled, and re-marking
+    // processing would strand the statement (blocks online pay + admin reconcile).
+    // Only honor it if Stripe still shows the PI processing (when unreachable,
+    // trust the event; a later failed/canceled re-delivery would revert it).
+    const stripeClient = getStripe();
+    let current = null;
+    if (stripeClient) {
+      try { current = await stripeClient.paymentIntents.retrieve(piId); }
+      catch (e) { logger.warn(`[stripe-webhook] could not re-read statement PI ${piId} on processing: ${e.message}`); }
+    }
+    if (current && current.status !== 'processing') {
+      logger.warn(`[stripe-webhook] stale processing event for statement S-${statementId} PI ${piId} (now ${current.status}) — skipping`);
+    } else {
+      const moved = await Settle.markStatementProcessing(statementId, piId);
+      if (moved) logger.info(`[stripe-webhook] statement S-${statementId} → processing (ACH in flight) via PI ${piId}`);
+    }
   } else if (eventType === 'failed' || eventType === 'canceled') {
     await db.transaction((trx) => Settle.revertStatementProcessing(statementId, piId, { database: trx }));
   }
@@ -2046,8 +2061,8 @@ async function findInvoiceForPayment(payment) {
 // leave payer_statements + every child invoice silently `paid` after a clawback.
 // Reverse the cascade so AR/dunning see it owed again; restore on a won dispute.
 // Both idempotent + run under the statement row lock.
-async function reverseStatementCascadeForDispute(statementId, disputedPi, reason) {
-  await db.transaction(async (trx) => {
+async function reverseStatementCascadeForDispute(statementId, disputedPi, reason, { database = db } = {}) {
+  const run = async (trx) => {
     const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
     if (!stmt) return;
     const piMatches = String(stmt.stripe_payment_intent_id || '') === String(disputedPi || '');
@@ -2095,7 +2110,10 @@ async function reverseStatementCascadeForDispute(statementId, disputedPi, reason
       await trx('payer_statements').where({ id: statementId }).update(patch);
       logger.warn(`[stripe-webhook] statement S-${statementId} dispute (${reason}) BEFORE settlement — ${patch.status ? `reset ${stmt.status}→${patch.status}, ` : ''}cleared active PI ${disputedPi} to block settle`);
     }
-  });
+  };
+  // Run in the caller's txn when given (so reversal + the durable disputed
+  // payments-row upsert commit atomically); else open our own.
+  return database === db ? db.transaction(run) : run(database);
 }
 
 async function restoreStatementCascadeForDispute(statementId, disputedPi) {
@@ -2141,31 +2159,33 @@ async function handleDisputeCreated(dispute) {
   if (dispute.payment_intent) {
     const disputedStmt = await db('payer_statements').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
     if (disputedStmt) {
-      await reverseStatementCascadeForDispute(disputedStmt.id, dispute.payment_intent, `dispute.created (${reason})`);
-      // Persist a durable disputed `payments` row keyed to the statement. If the
-      // settlement already wrote one, mark it disputed; if the dispute PRECEDED
-      // settlement (no row, PI now cleared above to block the racing succeeded),
-      // insert one so dispute.closed(won) can still find the statement and
-      // restore/settle the reinstated funds.
-      const existingRow = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
-      if (existingRow) {
-        await db('payments').where({ id: existingRow.id }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}` });
-      } else {
-        await db('payments').insert({
-          customer_id: null,
-          payer_id: disputedStmt.payer_id,
-          statement_id: disputedStmt.id,
-          processor: 'stripe',
-          stripe_payment_intent_id: dispute.payment_intent,
-          stripe_charge_id: chargeId,
-          payment_date: etDateString(),
-          amount: Number(amount),
-          status: 'disputed',
-          failure_reason: `Dispute: ${reason}`,
-          description: `Payer statement S-${disputedStmt.id} disputed charge (pre-settlement)`,
-          metadata: JSON.stringify({ statement_id: disputedStmt.id, payer_id: disputedStmt.payer_id, source: 'statement_dispute' }),
-        });
-      }
+      // ATOMIC: reverse/clear the statement AND upsert the durable disputed
+      // payments row in ONE transaction. If the row write fails, the PI-clear
+      // rolls back too, so the Stripe retry's PI lookup still finds the statement
+      // (otherwise the event could be marked processed with the PI link gone and
+      // no durable row for dispute.closed(won) to restore from).
+      await db.transaction(async (trx) => {
+        await reverseStatementCascadeForDispute(disputedStmt.id, dispute.payment_intent, `dispute.created (${reason})`, { database: trx });
+        const existingRow = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
+        if (existingRow) {
+          await trx('payments').where({ id: existingRow.id }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}` });
+        } else {
+          await trx('payments').insert({
+            customer_id: null,
+            payer_id: disputedStmt.payer_id,
+            statement_id: disputedStmt.id,
+            processor: 'stripe',
+            stripe_payment_intent_id: dispute.payment_intent,
+            stripe_charge_id: chargeId,
+            payment_date: etDateString(),
+            amount: Number(amount),
+            status: 'disputed',
+            failure_reason: `Dispute: ${reason}`,
+            description: `Payer statement S-${disputedStmt.id} disputed charge (pre-settlement)`,
+            metadata: JSON.stringify({ statement_id: disputedStmt.id, payer_id: disputedStmt.payer_id, source: 'statement_dispute' }),
+          });
+        }
+      });
       try {
         await db('notifications').insert({
           recipient_type: 'admin',
@@ -2274,6 +2294,39 @@ async function handleDisputeClosed(dispute) {
   const { handleDepositDisputeClosed } = require('../services/estimate-deposits');
   const depositDispute = await handleDepositDisputeClosed(dispute.payment_intent, status);
   if (depositDispute.handled) return;
+
+  // Statement disputes: if `dispute.closed` is REORDERED ahead of dispute.created
+  // / payment_intent.succeeded, no `payments` row exists yet, so the charge-id
+  // lookup below would no-op and a `lost` clawback would leave the active PI free
+  // to settle later. Resolve by PI (mirrors dispute.created) and handle when no
+  // payments row exists.
+  if (dispute.payment_intent) {
+    const rowExists = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
+    if (!rowExists) {
+      const stmtByPi = await db('payer_statements').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
+      if (stmtByPi) {
+        if (status === 'lost') {
+          // Funds returned — reverse/block the statement AND persist the durable
+          // disputed row atomically (so a later won could still restore).
+          await db.transaction(async (trx) => {
+            await reverseStatementCascadeForDispute(stmtByPi.id, dispute.payment_intent, 'dispute.lost (pre-settlement)', { database: trx });
+            await trx('payments').insert({
+              customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
+              processor: 'stripe', stripe_payment_intent_id: dispute.payment_intent, stripe_charge_id: chargeId,
+              payment_date: etDateString(), amount: (dispute.amount / 100), status: 'disputed',
+              failure_reason: `Dispute lost — $${amount} returned to customer`,
+              description: `Payer statement S-${stmtByPi.id} disputed charge (pre-settlement)`,
+              metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, dispute_id: dispute.id, dispute_final: status, source: 'statement_dispute' }),
+            });
+          });
+        }
+        // `won`/`warning_closed` before settlement: funds stand — leave the active
+        // PI so the eventual payment_intent.succeeded settles normally.
+        logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} dispute.closed (${status}) before settlement via PI ${dispute.payment_intent}`);
+        return;
+      }
+    }
+  }
 
   // Critical ledger writes: no .catch — failures must propagate so the
   // event is NOT marked processed and Stripe retries.
