@@ -148,7 +148,7 @@ describe('invoice-prepay helpers', () => {
       expect(visits.map((v) => v.amount)).toEqual([132, 132, 132, 132]);
     });
 
-    it('splits the total across rendered visits when a partial term truncates the schedule', () => {
+    it('splits visit dollars by the sold count so shares match the coverage ledger on a truncated term', () => {
       // term_end before the 3rd quarterly date truncates a 4-visit schedule to 2.
       const visits = buildCoverageVisits(
         {
@@ -161,9 +161,10 @@ describe('invoice-prepay helpers', () => {
         528,
       );
       expect(visits.map((v) => v.date)).toEqual(['2026-06-20', '2026-09-20']);
-      // Amounts split by the 2 rendered visits, reconciling to the prepay total.
-      expect(visits.map((v) => v.amount)).toEqual([264, 264]);
-      expect(visits.reduce((sum, v) => sum + v.amount, 0)).toBe(528);
+      // Each share = total / sold count (528 / 4 = 132), matching the prepaid_amount
+      // applyPrepaidCoverageForTerm stamps per covered visit. The rendered rows
+      // intentionally sum to less than the prepay total on a truncated term.
+      expect(visits.map((v) => v.amount)).toEqual([132, 132]);
     });
 
     it('returns an empty array when coverage is not configured', () => {
