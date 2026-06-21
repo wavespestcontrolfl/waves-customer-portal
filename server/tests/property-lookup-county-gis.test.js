@@ -24,7 +24,7 @@ const {
   _private: { paoParcelIdFrom },
 } = countyGis;
 
-const { buildCadastralRecord } = aiPrivate;
+const { buildCadastralRecord, applyCountyGisTypeOverride, mergePropertyRecords } = aiPrivate;
 
 // A square ring (WGS84 lng/lat) around the test point, so pickParcelFeature's
 // point-in-polygon test matches and polygonAreaSqft is > 0.
@@ -204,6 +204,48 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     expect(record._fieldEvidence.propertyType[0].sourceType).toBe('county');
     expect(record._fieldEvidence.propertyType[0].sourceQuality).toBe(100);
     expect(record._aiProviders).toEqual(['manatee_gis']);
+  });
+
+  test('the use-description type wins a same-weight PAO merge tie (codex P1)', () => {
+    // PAO address search reports generic "Single Family"; county GIS reports a
+    // paired villa. Both are county/100, so the merge ties to PAO by order —
+    // the override lets the authoritative land-use description win the type.
+    const gisParcel = {
+      county: 'Manatee', parcelId: '1', situsAddress: '17742 LUCAYA DR', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 7200, livingAreaSqft: 2450, stories: 2, yearBuilt: 2020, dorUseCode: '01',
+      landUseDescription: 'Half Duplex/Paired Villa (1554)',
+      sourceUrl: 'https://gis.manateepao.gov/arcgis/rest/services/Website/WebLayers/MapServer/0',
+      gisProvider: 'manatee_gis',
+    };
+    const cadastralRecord = buildCadastralRecord(gisParcel, 'addr');
+    const fdorParcel = {
+      county: 'Manatee', parcelId: '1', situsAddress: '17742 LUCAYA DR', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 7200, livingAreaSqft: 2500, yearBuilt: 2020, dorUseCode: '01',
+      sourceUrl: 'https://www.manateepao.gov/x', // classifies as county (PAO)
+    };
+    // Stand in for the PAO record: a county-weighted record reporting SFR.
+    const paoRecord = buildCadastralRecord(fdorParcel, 'addr');
+    paoRecord.propertyType = 'Single Family';
+    paoRecord._fieldEvidence.propertyType = [{ field: 'propertyType', value: 'Single Family', provider: 'manatee_pao', url: 'https://www.manateepao.gov/x', sourceType: 'county', sourceQuality: 100, providerConfidence: 'high' }];
+
+    const merged = mergePropertyRecords([paoRecord, cadastralRecord], 'addr');
+    expect(merged.propertyType).toBe('Single Family'); // tie went to PAO order...
+    applyCountyGisTypeOverride(merged, cadastralRecord);
+    expect(merged.propertyType).toBe('Townhome'); // ...override lets the description win
+    expect(merged._fieldEvidence.propertyType.fieldVerify).toBe(false);
+  });
+
+  test('override never downgrades an already-specific type and skips DOR-only types', () => {
+    // GIS type came from the DOR code (not the description) → no override flag.
+    const dorOnly = buildCadastralRecord({
+      county: 'Sarasota', parcelId: '9', situsAddress: '1 A ST', situsCity: 'VENICE', situsZip: '34285',
+      lotSqft: 8000, livingAreaSqft: 1800, yearBuilt: 2001, dorUseCode: '01',
+      sourceUrl: 'https://ags3.scgov.net/x', gisProvider: 'sarasota_gis',
+    }, 'addr');
+    expect(dorOnly._typeFromUseDesc).toBe(false);
+    const merged = { propertyType: 'Condo', _fieldEvidence: { propertyType: { value: 'Condo' } } };
+    applyCountyGisTypeOverride(merged, dorOnly);
+    expect(merged.propertyType).toBe('Condo'); // untouched — not description-derived
   });
 
   test('FDOR cadastral parcel (no gisProvider) still labels as cadastral', () => {

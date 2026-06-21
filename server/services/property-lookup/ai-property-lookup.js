@@ -761,12 +761,13 @@ function buildCadastralRecord(parcel, address) {
   if (!parcel) return null;
   const isCountyGis = Boolean(parcel.gisProvider);
   const provider = parcel.gisProvider || 'fdor_cadastral';
+  const useDescType = countyUseDescToPropertyType(parcel.landUseDescription);
   const parsed = {
     squareFootage: coerceInt(parcel.livingAreaSqft, 500, 15000),
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
     stories: coerceInt(parcel.stories, 1, 4),
-    propertyType: countyUseDescToPropertyType(parcel.landUseDescription) || dorUcPropertyType(parcel.dorUseCode),
+    propertyType: useDescType || dorUcPropertyType(parcel.dorUseCode),
     source: parcel.sourceUrl || null,
     confidence: 'high',
     county: parcel.county,
@@ -776,6 +777,12 @@ function buildCadastralRecord(parcel, address) {
 
   const record = shapeAsPropertyRecord(parsed, address, provider);
   record._source = isCountyGis ? 'county' : 'cadastral';
+  // The county land-use DESCRIPTION (not the numeric DOR code) produced the
+  // type — the authoritative classification that splits paired villas / condos
+  // from the generic "Single Family" the PAO building-type text and DOR code
+  // both report. applyCountyGisTypeOverride uses this to let it win the type
+  // field on a same-weight county-vs-county merge tie.
+  record._typeFromUseDesc = Boolean(useDescType);
   record._raw = {
     ...(record._raw || {}),
     _source: record._source,
@@ -829,6 +836,51 @@ function attachParcelMeta(merged, parcel) {
     residentialUnits: parcel.residentialUnits,
     vintage: parcel.assessmentYear,
   };
+  return merged;
+}
+
+// Non-detached residential types the county land-use description captures but
+// the PAO building-type text / numeric DOR code flatten to "Single Family".
+const COUNTY_GIS_SPECIFIC_TYPES = new Set(['Townhome', 'Interior Townhome', 'Condo', 'Duplex', 'Multifamily']);
+
+// Field-specific override for propertyType only. The merge caps every county
+// source at the same score, so a same-weight PAO record (generic "Single
+// Family") wins the tie over the county GIS record by input order — losing the
+// paired-villa/condo classification the GIS land-use description uniquely
+// carries. When the GIS type came from that description, let it win the TYPE
+// field (every other field keeps the normal merge, so PAO's live sqft/year are
+// untouched). Only UPGRADES specificity (villa/condo/duplex/multifamily) or
+// fills a blank — never downgrades an already-specific merged type to generic.
+function applyCountyGisTypeOverride(merged, cadastralRecord) {
+  if (!merged || !cadastralRecord?._typeFromUseDesc) return merged;
+  const gisType = cadastralRecord.propertyType;
+  if (isMissingPropertyValue(gisType)) return merged;
+  const mergedMissing = isMissingPropertyValue(merged.propertyType);
+  if (!mergedMissing && !COUNTY_GIS_SPECIFIC_TYPES.has(gisType)) return merged;
+  if (!mergedMissing && normalizeEvidenceValue(merged.propertyType) === normalizeEvidenceValue(gisType)) return merged;
+
+  merged.propertyType = gisType;
+  const gisEvidence = cadastralRecord._fieldEvidence?.propertyType?.[0];
+  if (merged._fieldEvidence) {
+    const prior = merged._fieldEvidence.propertyType;
+    merged._fieldEvidence.propertyType = {
+      value: gisType,
+      confidence: 'high',
+      sourceType: 'county',
+      sourceLabel: SOURCE_TYPE_LABELS.county,
+      winningSource: gisEvidence?.url || null,
+      winningProvider: gisEvidence?.provider || cadastralRecord._provider || null,
+      score: SOURCE_TYPE_WEIGHTS.county,
+      disagreement: Boolean(prior && !isMissingPropertyValue(prior.value)
+        && normalizeEvidenceValue(prior.value) !== normalizeEvidenceValue(gisType)),
+      fieldVerify: false,
+      evidence: [
+        { field: 'propertyType', value: gisType, provider: gisEvidence?.provider || cadastralRecord._provider || null, url: gisEvidence?.url || null, sourceType: 'county', sourceQuality: SOURCE_TYPE_WEIGHTS.county, confidence: 'high' },
+        ...((prior?.evidence) || []),
+      ],
+    };
+    merged._dataQuality = buildPropertyDataQuality(merged._fieldEvidence, merged._aiProviders || []);
+  }
   return merged;
 }
 
@@ -1187,7 +1239,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
 
   if (countyRecord && hasCountyPricingCore(countyRecord)) {
     const merged = mergePropertyRecords([countyRecord, cadastralRecord].filter(Boolean), searchAddress);
-    return attachParcelMeta(merged, parcel);
+    return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
   const results = await Promise.allSettled([
@@ -1204,7 +1256,10 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   ].filter(Boolean);
 
   if (!records.length) return null;
-  return attachParcelMeta(mergePropertyRecords(records, searchAddress), parcel);
+  return attachParcelMeta(
+    applyCountyGisTypeOverride(mergePropertyRecords(records, searchAddress), cadastralRecord),
+    parcel,
+  );
 }
 
 async function searchManateeParcel(address, timeoutMs, startedAt = Date.now()) {
@@ -3091,6 +3146,7 @@ module.exports = {
   lookupPropertyFromAITrio,
   lookupPropertyFromCountyByParcel,
   _private: {
+    applyCountyGisTypeOverride,
     attachParcelMeta,
     buildCadastralRecord,
     buildPropertyDataQuality,
