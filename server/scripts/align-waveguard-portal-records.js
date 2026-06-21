@@ -1,4 +1,21 @@
 #!/usr/bin/env node
+//
+// WaveGuard portal customer-field backfill.
+//
+// Re-aligns CUSTOMER-TABLE fields (waveguard_tier, monthly_rate, member_since,
+// active, pipeline_stage) for already-enrolled WaveGuard members, inferring the
+// plan from their active recurring scheduled_services. It is READ-ONLY against
+// scheduled_services — it never inserts or updates visits. (An earlier version
+// also seeded future visits; that over-scheduled members who already had a
+// recurring schedule on a different anchor, so visit-seeding was removed. If
+// future-visit seeding is ever re-added it must reconcile generated dates with a
+// customer's EXISTING visits first.)
+//
+// Dry-run by default. `--apply` (or `--apply=true`) enables the customer writes.
+//   --include-inactive   also align inactive customers
+//   --limit N            cap the number of customers processed
+//   --customer-id <uuid> process a single customer
+//
 require('dotenv').config();
 
 const db = require('../models/db');
@@ -7,9 +24,7 @@ const {
   isMembershipCustomerRow,
 } = require('../services/waveguard-existing-services');
 const {
-  ONE_TIME_BOOKING_SOURCE_VALUES,
   SELF_BOOKING_RECURRING_PLANS,
-  buildRecurringOccurrenceDates,
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,
   resolvePestControlRecurringPlan,
@@ -18,13 +33,9 @@ const {
   serviceRowCountsTowardWaveGuard,
 } = require('../services/self-booking-plan-sync');
 const { etDateString } = require('../utils/datetime-et');
-const AppointmentReminders = require('../services/appointment-reminders');
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const TIER_ORDER_LOWER = TIER_ORDER.map(tier => tier.toLowerCase());
-const DEFAULT_WINDOW_START = '08:00';
-const DEFAULT_WINDOW_END = '10:00';
-const DEFAULT_TARGET_FUTURE_VISITS = 4;
 
 const SERVICE_PLANS = { ...SELF_BOOKING_RECURRING_PLANS };
 
@@ -48,7 +59,6 @@ const APPLY = parseBooleanFlag(ARGS.apply);
 const LIMIT = ARGS.limit ? Math.max(1, Number.parseInt(ARGS.limit, 10) || 0) : null;
 const CUSTOMER_ID = ARGS['customer-id'] || null;
 const INCLUDE_INACTIVE = parseBooleanFlag(ARGS['include-inactive']);
-const TARGET_FUTURE_VISITS = Math.max(1, Math.min(12, Number.parseInt(ARGS['future-visits'] || DEFAULT_TARGET_FUTURE_VISITS, 10) || DEFAULT_TARGET_FUTURE_VISITS));
 
 function moneyNumber(value) {
   const num = Number(value || 0);
@@ -59,9 +69,8 @@ function dateKey(value) {
   if (!value) return null;
   if (typeof value === 'string') return value.split('T')[0];
   // pg/Knex DATE columns (scheduled_date, member_since) arrive as midnight Date objects;
-  // on a UTC server etDateString() would shift them to the previous ET day, corrupting
-  // anchors, future-date dedupe, inserted child dates, and member_since. Read the stored
-  // calendar date directly (repo DATE-column convention).
+  // on a UTC server etDateString() would shift them to the previous ET day. Read the
+  // stored calendar date directly (repo DATE-column convention).
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return etDateString(value);
 }
@@ -167,8 +176,8 @@ function setIfColumn(target, columns, column, value) {
 function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   const updates = {};
   // Owner policy: re-align already-enrolled WaveGuard members only; never enroll a
-  // per-visit recurring customer (incl. pending public self-bookings). Use the shared
-  // membership predicate, which rejects explicit non-member tier sentinels.
+  // per-visit recurring customer. Use the shared membership predicate, which rejects
+  // explicit non-member tier sentinels (none/onetime/na/...).
   if (!isMembershipCustomerRow(customer)) return updates;
   const existingRate = moneyNumber(customer.monthly_rate);
   const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
@@ -178,9 +187,7 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
 
   // Mirror the runtime sync helper (buildCustomerWaveGuardAlignmentUpdates): with no
   // recurring-service evidence we cannot infer a tier, so we make NO customer-state
-  // mutations. Without this gate a default-Bronze lead/non-member with no qualifying
-  // scheduled services would be promoted to active_customer (and reactivated under
-  // --include-inactive) just by running the alignment script.
+  // mutations — a member with no detectable recurring service is left untouched.
   if (!inferredTier) return updates;
 
   if (columnPresent(columns, 'active') && customer.active !== true) updates.active = true;
@@ -209,138 +216,6 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   return updates;
 }
 
-function buildParentUpdates(service, plan, serviceId, columns) {
-  const updates = {};
-
-  if (columnPresent(columns, 'is_recurring') && service.is_recurring !== true) updates.is_recurring = true;
-  // Correct a missing OR stale cadence: the detected plan (from service_key/name) is
-  // authoritative, so e.g. a lawn_care_monthly row left as recurring_pattern='quarterly'
-  // is realigned to 'monthly'. The resolved pattern is then used for date planning and
-  // child rows below so we never seed from the stale anchor cadence.
-  if (
-    columnPresent(columns, 'recurring_pattern')
-    && plan.recurringPattern
-    && String(service.recurring_pattern || '').trim().toLowerCase() !== String(plan.recurringPattern).trim().toLowerCase()
-  ) {
-    updates.recurring_pattern = plan.recurringPattern;
-  }
-  if (
-    columnPresent(columns, 'recurring_interval_days')
-    && plan.recurringIntervalDays
-    && Number(service.recurring_interval_days || 0) !== Number(plan.recurringIntervalDays)
-  ) {
-    updates.recurring_interval_days = plan.recurringIntervalDays;
-  }
-  if (columnPresent(columns, 'recurring_ongoing') && service.recurring_ongoing !== true) updates.recurring_ongoing = true;
-  if (columnPresent(columns, 'service_id') && !service.service_id && serviceId) updates.service_id = serviceId;
-  if (columnPresent(columns, 'create_invoice_on_complete') && service.create_invoice_on_complete !== false) {
-    updates.create_invoice_on_complete = false;
-  }
-
-  return updates;
-}
-
-function buildChildRow({ customerId, parent, plan, serviceId, columns, scheduledDate }) {
-  const row = {
-    customer_id: customerId,
-    scheduled_date: scheduledDate,
-    service_type: parent.service_type || plan.serviceType,
-    status: 'pending',
-    notes: `Auto-scheduled by WaveGuard portal alignment from ${plan.label}.`,
-  };
-
-  setIfColumn(row, columns, 'technician_id', parent.technician_id || null);
-  setIfColumn(row, columns, 'window_start', parent.window_start || DEFAULT_WINDOW_START);
-  setIfColumn(row, columns, 'window_end', parent.window_end || DEFAULT_WINDOW_END);
-  setIfColumn(row, columns, 'zone', parent.zone || null);
-  setIfColumn(row, columns, 'estimated_duration_minutes', parent.estimated_duration_minutes || null);
-  setIfColumn(row, columns, 'source', 'waveguard_portal_alignment');
-  setIfColumn(row, columns, 'is_recurring', true);
-  setIfColumn(row, columns, 'recurring_pattern', parent.recurring_pattern || plan.recurringPattern);
-  if (plan.recurringIntervalDays) {
-    setIfColumn(row, columns, 'recurring_interval_days', parent.recurring_interval_days || plan.recurringIntervalDays);
-  }
-  setIfColumn(row, columns, 'recurring_parent_id', parent.recurring_parent_id || parent.id);
-  setIfColumn(row, columns, 'recurring_ongoing', true);
-  setIfColumn(row, columns, 'service_id', serviceId || parent.service_id || null);
-  setIfColumn(row, columns, 'create_invoice_on_complete', false);
-
-  return row;
-}
-
-function chooseAnchor(rows, serviceKey, today) {
-  const matching = rows
-    .filter(serviceRowCountsTowardWaveGuard)
-    .filter((row) => detectServiceKeys(row).includes(serviceKey))
-    .sort((a, b) => String(dateKey(a.scheduled_date)).localeCompare(String(dateKey(b.scheduled_date))));
-  if (!matching.length) return null;
-
-  const futureParent = matching.find((row) => dateKey(row.scheduled_date) >= today && !row.recurring_parent_id);
-  if (futureParent) return futureParent;
-
-  const recurringParent = matching.find((row) => (row.is_recurring || row.recurring_pattern) && !row.recurring_parent_id);
-  if (recurringParent) return recurringParent;
-
-  const latest = [...matching].reverse().find(Boolean);
-  return latest || matching[0];
-}
-
-function futureDatesForService(rows, serviceKey, today) {
-  return new Set(rows
-    .filter(serviceRowCountsTowardWaveGuard)
-    .filter((row) => detectServiceKeys(row).includes(serviceKey))
-    .filter((row) => dateKey(row.scheduled_date) >= today)
-    .map((row) => dateKey(row.scheduled_date))
-    .filter(Boolean));
-}
-
-function dateInSeason(dateStr, seasonMonths) {
-  if (!Array.isArray(seasonMonths) || !seasonMonths.length) return true;
-  const month = Number(String(dateStr).slice(5, 7));
-  return seasonMonths.includes(month);
-}
-
-function plannedFutureDates(anchor, plan, today, targetCount) {
-  const base = dateKey(anchor.scheduled_date) || today;
-  const pattern = anchor.recurring_pattern || plan.recurringPattern;
-  const intervalDays = anchor.recurring_interval_days || plan.recurringIntervalDays || null;
-  // Seasonal plans (e.g. seasonal mosquito) keep a monthly cadence but only generate
-  // in-season visits, so an Oct anchor does not seed Nov–Jan plan-covered rows.
-  const seasonMonths = plan.seasonMonths || null;
-  const inWindow = (date) => date >= today && dateInSeason(date, seasonMonths);
-
-  // Always generate occurrences from the ORIGINAL anchor base (never an intermediate
-  // date), growing the count until enough future in-window dates are found. This both
-  // walks a far-past anchor (anchored years ago) forward to today's window — so --apply
-  // doesn't silently no-op for long-running members — AND preserves the original
-  // nth-weekday ordinal across the whole series: restarting a chunk from a month that
-  // fell back to the 4th weekday would shift every later visit. The guard bounds growth.
-  let futureDates = [];
-  let lastGenerated = null;
-  for (let count = targetCount + 12, guard = 0; guard < 200; guard += 1, count += targetCount + 12) {
-    const generated = buildRecurringOccurrenceDates(base, pattern, count, { intervalDays });
-    futureDates = generated.filter(inWindow);
-    if (futureDates.length >= targetCount) break;
-    const last = generated[generated.length - 1];
-    if (!last || last === lastGenerated) break; // no forward progress — stop
-    lastGenerated = last;
-  }
-  return futureDates.slice(0, targetCount);
-}
-
-async function serviceIdMap() {
-  const map = {};
-  try {
-    const rows = await db('services')
-      .whereIn('service_key', Object.values(SERVICE_PLANS).map((plan) => plan.serviceKey))
-      .select('id', 'service_key');
-    for (const row of rows) map[row.service_key] = row.id;
-  } catch (_err) {
-    // Service library is optional in older environments; service_type remains enough for the portal.
-  }
-  return map;
-}
-
 function applyCustomerFilters(query, customerColumns) {
   if (!INCLUDE_INACTIVE && columnPresent(customerColumns, 'active')) query = query.where('c.active', true);
   if (columnPresent(customerColumns, 'deleted_at')) query = query.whereNull('c.deleted_at');
@@ -361,8 +236,10 @@ function customerSelect(query) {
   );
 }
 
+// Candidate set = enrolled WaveGuard members (carry a Bronze/Silver/Gold/Platinum
+// tier). Non-enrolled customers are skipped — buildCustomerUpdates additionally
+// fail-closes via isMembershipCustomerRow, so a sentinel-tier row is never mutated.
 async function candidateCustomers(customerColumns) {
-  const byId = new Map();
   let query = db('customers as c')
     .whereRaw(
       `LOWER(c.waveguard_tier) IN (${TIER_ORDER_LOWER.map(() => '?').join(', ')})`,
@@ -373,47 +250,14 @@ async function candidateCustomers(customerColumns) {
   if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
   query = customerSelect(applyCustomerFilters(query, customerColumns));
   if (LIMIT) query = query.limit(LIMIT);
-  for (const customer of await query) {
-    byId.set(customer.id, { ...customer, candidate_reason: 'bronze_plus' });
-  }
 
-  if (!CUSTOMER_ID || !byId.has(CUSTOMER_ID)) {
-    let selfBooked = db('customers as c')
-      .join('scheduled_services as s', 's.customer_id', 'c.id')
-      .where(function selfBookedSource() {
-        this.where('s.source', 'self_booked').orWhereNotNull('s.self_booking_id');
-      })
-      .where(function nonOneTimeSource() {
-        this.whereNull('s.source').orWhereNotIn('s.source', ONE_TIME_BOOKING_SOURCE_VALUES);
-      })
-      .whereNotIn('s.status', TERMINAL_STATUSES)
-      .where(function missingPortalFields() {
-        this.whereNull('c.waveguard_tier')
-          .orWhereNull('c.monthly_rate')
-          .orWhere('c.monthly_rate', '<=', 0)
-          .orWhereNull('c.member_since');
-      })
-      .distinct();
-
-    if (CUSTOMER_ID) selfBooked = selfBooked.where('c.id', CUSTOMER_ID);
-    selfBooked = customerSelect(applyCustomerFilters(selfBooked, customerColumns));
-    for (const customer of await selfBooked) {
-      const existing = byId.get(customer.id);
-      byId.set(customer.id, {
-        ...customer,
-        candidate_reason: existing ? `${existing.candidate_reason},self_booked_missing_portal_fields` : 'self_booked_missing_portal_fields',
-      });
-    }
-  }
-
-  return Array.from(byId.values()).slice(0, LIMIT || undefined);
+  return (await query).map((customer) => ({ ...customer, candidate_reason: 'bronze_plus' }));
 }
 
 async function scheduledRowsForCustomer(customerId) {
-  // Mirror syncCustomerWaveGuardPlanFromScheduledServices(): join the services
-  // catalog so detectServiceKeys() sees svc.service_key / svc.name for rows whose
-  // cadence lives in service_id while service_type is generic (e.g. a
-  // lawn_care_monthly service recorded as "Lawn Care"). Falls back to the plain
+  // READ-ONLY. Join the services catalog so detectServiceKeys() sees svc.service_key /
+  // svc.name for rows whose cadence lives in service_id while service_type is generic
+  // (e.g. a lawn_care_monthly service recorded as "Lawn Care"). Falls back to the plain
   // select where the catalog is absent (older environments).
   try {
     return await db('scheduled_services as s')
@@ -431,7 +275,7 @@ async function scheduledRowsForCustomer(customerId) {
   }
 }
 
-async function analyzeCustomer(customer, serviceColumns, customerColumns, serviceIds, today) {
+async function analyzeCustomer(customer, customerColumns, today) {
   const rows = await scheduledRowsForCustomer(customer.id);
   const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
   const detectedKeys = [];
@@ -451,116 +295,22 @@ async function analyzeCustomer(customer, serviceColumns, customerColumns, servic
     ? { current: currentTier, inferred: inferredTier, serviceCount: detectedFamilyKeys.length }
     : null;
 
-  // Re-align enrolled members only: never seed plan-covered recurring rows (which set
-  // create_invoice_on_complete=false) for a per-visit customer who is not WaveGuard-enrolled.
-  const serviceRepairs = [];
-  const scheduledAnchorIds = new Set();
-  for (const key of (isMembershipCustomerRow(customer) ? detectedKeys : [])) {
-    const plan = SERVICE_PLANS[key];
-    const anchor = chooseAnchor(rows, key, today);
-    if (!anchor) continue;
-    // A combined/bundle row (e.g. "Pest + Lawn + Mosquito") detects multiple plan keys
-    // that all resolve to the SAME anchor row; schedule only one future series per anchor
-    // occurrence so --apply does not insert duplicate scheduled_services/reminders.
-    if (scheduledAnchorIds.has(anchor.id)) continue;
-    scheduledAnchorIds.add(anchor.id);
-
-    const serviceId = serviceIds[plan.serviceKey] || null;
-    const parentUpdates = buildParentUpdates(anchor, plan, serviceId, serviceColumns);
-    // Plan future dates and child rows from the RESOLVED cadence (parentUpdates may have
-    // corrected a stale recurring_pattern/interval), not the stale anchor values.
-    const resolvedAnchor = {
-      ...anchor,
-      recurring_pattern: parentUpdates.recurring_pattern || anchor.recurring_pattern,
-      recurring_interval_days: parentUpdates.recurring_interval_days || anchor.recurring_interval_days,
-    };
-    const existingFutureDates = futureDatesForService(rows, key, today);
-    const targetDates = plannedFutureDates(resolvedAnchor, plan, today, TARGET_FUTURE_VISITS);
-    const missingDates = targetDates.filter((date) => !existingFutureDates.has(date));
-    const childRows = missingDates.map((scheduledDate) => buildChildRow({
-      customerId: customer.id,
-      parent: resolvedAnchor,
-      plan,
-      serviceId,
-      columns: serviceColumns,
-      scheduledDate,
-    }));
-
-    if (Object.keys(parentUpdates).length || childRows.length) {
-      serviceRepairs.push({
-        serviceKey: key,
-        serviceType: anchor.service_type || plan.serviceType,
-        anchorId: anchor.id,
-        parentUpdates,
-        childRows,
-      });
-    }
-  }
-
   return {
     customer,
     detectedKeys,
     detectedFamilyKeys,
     tierMismatch,
     customerUpdates,
-    serviceRepairs,
   };
 }
 
 async function applyCustomerRepair(repair) {
-  const insertedVisits = [];
-  await db.transaction(async (trx) => {
-    // childRows were computed from a pre-transaction snapshot. Serialize concurrent
-    // --apply runs for this customer with an advisory lock, and re-check each target
-    // date inside the lock, so two runs can't both insert the same missing visit.
-    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`waveguard-align:${repair.customer.id}`]);
-
-    if (Object.keys(repair.customerUpdates).length) {
-      await trx('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
-    }
-
-    for (const serviceRepair of repair.serviceRepairs) {
-      if (Object.keys(serviceRepair.parentUpdates).length) {
-        await trx('scheduled_services').where({ id: serviceRepair.anchorId }).update(serviceRepair.parentUpdates);
-      }
-      for (const row of serviceRepair.childRows) {
-        const existing = await trx('scheduled_services')
-          .where({ customer_id: row.customer_id, scheduled_date: row.scheduled_date })
-          .modify((qb) => { if (row.service_type) qb.where('service_type', row.service_type); })
-          .whereNotIn('status', TERMINAL_STATUSES)
-          .first('id');
-        if (existing) continue; // already present (pre-existing or a concurrent run) — skip
-        const [inserted] = await trx('scheduled_services').insert(row).returning('*');
-        if (inserted?.id) insertedVisits.push(inserted);
-      }
-    }
-  });
-
-  // Register 72h/24h reminders for the inserted visits — the reminder cron only scans
-  // appointment_reminders, so without this, backfilled plan visits would get none.
-  // After the repair commits, each in its own sub-transaction (idempotent per
-  // scheduled_service_id) so a reminder failure never rolls back the inserted visit.
-  for (const visit of insertedVisits) {
-    const startHHMM = visit.window_start ? String(visit.window_start).slice(0, 5) : '08:00';
-    try {
-      await db.transaction((sp) =>
-        AppointmentReminders.registerVisitReminderInTx(sp, {
-          scheduledServiceId: visit.id,
-          customerId: repair.customer.id,
-          appointmentTime: `${dateKey(visit.scheduled_date)}T${startHHMM}`,
-          serviceType: visit.service_type,
-          source: 'waveguard_portal_alignment',
-        }),
-      );
-    } catch (err) {
-      console.error(`[align] reminder registration skipped for service ${visit.id}: ${err.message}`);
-    }
+  if (Object.keys(repair.customerUpdates).length) {
+    await db('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
   }
 }
 
 function summarizeRepair(repair) {
-  const childInsertCount = repair.serviceRepairs.reduce((sum, item) => sum + item.childRows.length, 0);
-  const parentUpdateCount = repair.serviceRepairs.filter((item) => Object.keys(item.parentUpdates).length > 0).length;
   return {
     customerId: repair.customer.id,
     tier: repair.customer.waveguard_tier,
@@ -568,39 +318,23 @@ function summarizeRepair(repair) {
     detectedServices: repair.detectedKeys,
     detectedServiceFamilies: repair.detectedFamilyKeys,
     customerUpdates: repair.customerUpdates,
-    parentUpdateCount,
-    childInsertCount,
     tierMismatch: repair.tierMismatch,
-    services: repair.serviceRepairs.map((item) => ({
-      serviceKey: item.serviceKey,
-      serviceType: item.serviceType,
-      anchorId: item.anchorId,
-      parentUpdates: item.parentUpdates,
-      childDates: item.childRows.map((row) => row.scheduled_date),
-    })),
   };
 }
 
 async function main() {
   const today = etDateString();
   const customerColumns = await db('customers').columnInfo();
-  const serviceColumns = await db('scheduled_services').columnInfo();
-  const serviceIds = await serviceIdMap();
   const customers = await candidateCustomers(customerColumns);
   const repairs = [];
   const noServiceEvidence = [];
   const tierMismatches = [];
 
   for (const customer of customers) {
-    const repair = await analyzeCustomer(customer, serviceColumns, customerColumns, serviceIds, today);
+    const repair = await analyzeCustomer(customer, customerColumns, today);
     if (!repair.detectedKeys.length) noServiceEvidence.push(customer.id);
     if (repair.tierMismatch) tierMismatches.push(repair.tierMismatch);
-
-    const hasCustomerUpdates = Object.keys(repair.customerUpdates).length > 0;
-    const hasServiceUpdates = repair.serviceRepairs.some((item) => (
-      Object.keys(item.parentUpdates).length > 0 || item.childRows.length > 0
-    ));
-    if (!hasCustomerUpdates && !hasServiceUpdates) continue;
+    if (!Object.keys(repair.customerUpdates).length) continue;
 
     repairs.push(repair);
     if (APPLY) await applyCustomerRepair(repair);
@@ -611,12 +345,7 @@ async function main() {
     mode: APPLY ? 'apply' : 'dry-run',
     checkedCustomers: customers.length,
     customersNeedingRepair: repairs.length,
-    customerFieldUpdates: repairs.filter((repair) => Object.keys(repair.customerUpdates).length > 0).length,
-    parentServiceUpdates: repairs.reduce((sum, repair) => sum + repair.serviceRepairs.filter((item) => Object.keys(item.parentUpdates).length > 0).length, 0),
-    childServicesInserted: APPLY
-      ? repairs.reduce((sum, repair) => sum + repair.serviceRepairs.reduce((inner, item) => inner + item.childRows.length, 0), 0)
-      : 0,
-    childServicesWouldInsert: repairs.reduce((sum, repair) => sum + repair.serviceRepairs.reduce((inner, item) => inner + item.childRows.length, 0), 0),
+    customerFieldUpdates: repairs.length,
     noServiceEvidenceCount: noServiceEvidence.length,
     tierMismatchCount: tierMismatches.length,
     limit: LIMIT,
@@ -638,15 +367,12 @@ if (require.main === module) {
 }
 
 module.exports = {
-  buildChildRow,
   buildCustomerUpdates,
-  buildParentUpdates,
   dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
   parseBooleanFlag,
-  plannedFutureDates,
   representativePlanKeys,
   serviceFamilyKey,
   uniqueServiceFamilies,

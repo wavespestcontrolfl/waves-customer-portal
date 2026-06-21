@@ -1,17 +1,14 @@
 const {
   buildCustomerUpdates,
-  buildParentUpdates,
   dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
   parseBooleanFlag,
-  plannedFutureDates,
   representativePlanKeys,
   serviceFamilyKey,
   uniqueServiceFamilies,
 } = require('../scripts/align-waveguard-portal-records');
-const { buildRecurringOccurrenceDates } = require('../services/self-booking-plan-sync');
 
 describe('WaveGuard portal alignment script helpers', () => {
   const customerColumns = {
@@ -257,78 +254,6 @@ describe('WaveGuard portal alignment script helpers', () => {
     );
 
     expect(updates).toEqual({ waveguard_tier: 'Gold' });
-  });
-
-  test('plans future dates from an older recurring anchor', () => {
-    expect(plannedFutureDates(
-      { scheduled_date: '2026-06-19', recurring_pattern: 'quarterly' },
-      { recurringPattern: 'quarterly' },
-      '2026-06-20',
-      3,
-    )).toEqual(['2026-09-18', '2026-12-18', '2027-03-19']);
-
-    expect(plannedFutureDates(
-      { scheduled_date: '2026-06-19', recurring_pattern: 'custom', recurring_interval_days: 42 },
-      { recurringPattern: 'custom', recurringIntervalDays: 42 },
-      '2026-06-20',
-      3,
-    )).toEqual(['2026-07-31', '2026-09-11', '2026-10-23']);
-  });
-
-  test('realigns a missing or stale recurring_pattern to the detected plan cadence', () => {
-    const cols = { is_recurring: {}, recurring_pattern: {}, recurring_interval_days: {}, recurring_ongoing: {}, service_id: {}, create_invoice_on_complete: {} };
-    // Stale cadence -> corrected.
-    expect(buildParentUpdates({ recurring_pattern: 'quarterly' }, { recurringPattern: 'monthly' }, null, cols).recurring_pattern).toBe('monthly');
-    // Missing cadence -> filled.
-    expect(buildParentUpdates({ recurring_pattern: null }, { recurringPattern: 'monthly' }, null, cols).recurring_pattern).toBe('monthly');
-    // Already correct -> no pattern update.
-    expect(buildParentUpdates({ recurring_pattern: 'Monthly' }, { recurringPattern: 'monthly' }, null, cols)).not.toHaveProperty('recurring_pattern');
-  });
-
-  test('advances a far-past anchor to the current window instead of repairing nothing', () => {
-    // A monthly series anchored years ago is many chunks behind today; the planner must
-    // walk forward to today's window rather than returning [] (silent no-op repair).
-    const dates = plannedFutureDates(
-      { scheduled_date: '2020-03-10', recurring_pattern: 'monthly' },
-      { recurringPattern: 'monthly' },
-      '2026-06-20',
-      4,
-    );
-    expect(dates).toHaveLength(4);
-    expect(dates.every((d) => d >= '2026-06-20')).toBe(true);
-  });
-
-  test('preserves the original nth-weekday ordinal for a far-past 5th-weekday anchor', () => {
-    // 2020-09-29 is the 5th Tuesday of Sep 2020. The planned future visits must match
-    // generating the series straight from the original base (ordinal preserved), not
-    // drift onto a 4th-weekday cadence after an intermediate ordinal-fallback month.
-    const today = '2026-06-20';
-    const planned = plannedFutureDates(
-      { scheduled_date: '2020-09-29', recurring_pattern: 'monthly' },
-      { recurringPattern: 'monthly' },
-      today,
-      4,
-    );
-    const groundTruth = buildRecurringOccurrenceDates('2020-09-29', 'monthly', 120)
-      .filter((d) => d >= today)
-      .slice(0, 4);
-    expect(planned).toEqual(groundTruth);
-    expect(planned).toHaveLength(4);
-  });
-
-  test('seasonal plans only generate in-season planned dates', () => {
-    // Seasonal mosquito (monthly cadence, Feb–Oct) anchored in October must skip
-    // Nov/Dec/Jan instead of seeding out-of-season plan-covered visits.
-    const dates = plannedFutureDates(
-      { scheduled_date: '2026-10-15', recurring_pattern: 'monthly' },
-      { recurringPattern: 'monthly', seasonMonths: [2, 3, 4, 5, 6, 7, 8, 9, 10] },
-      '2026-10-01',
-      4,
-    );
-    expect(dates).toHaveLength(4);
-    const months = dates.map((d) => Number(d.slice(5, 7)));
-    expect(months.every((m) => m >= 2 && m <= 10)).toBe(true);
-    expect(months.some((m) => [11, 12, 1].includes(m))).toBe(false);
   });
 
   test('reads pg DATE columns as the stored calendar day without an ET shift', () => {
