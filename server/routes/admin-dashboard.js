@@ -528,7 +528,12 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
         // is still collected. A PARTIAL refund keeps status='paid' + paid_at and
         // records payments.refund_amount (dollars, same units as total), so the
         // full-refund NOT EXISTS above doesn't catch it — net those out so a
-        // $100 invoice refunded $90 contributes $10, not $100.
+        // $100 invoice refunded $90 contributes $10, not $100. Detect partials by
+        // a POSITIVE refund_amount (excluding any full-refund row), NOT by
+        // refund_status='partial': the app path (services/stripe.js) stamps
+        // refund_amount immediately but leaves refund_status as Stripe's value
+        // (e.g. 'succeeded') until the charge.refunded webhook normalizes it to
+        // 'partial' — same dual-signal reason as the full-refund exclusion above.
         .select(
           db.raw("COUNT(*) as issued"),
           db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
@@ -536,7 +541,9 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
           db.raw("SUM(total) FILTER (WHERE status = 'paid') as collected_gross"),
           db.raw(`COALESCE(SUM(
             (SELECT COALESCE(SUM(p.refund_amount), 0) FROM payments p
-               WHERE p.refund_status = 'partial'
+               WHERE COALESCE(p.refund_amount, 0) > 0
+                 AND p.status <> 'refunded'
+                 AND COALESCE(p.refund_status, '') <> 'full'
                  AND (
                    (invoices.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = invoices.stripe_charge_id)
                    OR (invoices.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = invoices.stripe_payment_intent_id)
