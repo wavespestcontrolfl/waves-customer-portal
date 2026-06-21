@@ -236,22 +236,29 @@ function customerSelect(query) {
   );
 }
 
-// Candidate set = enrolled WaveGuard members (carry a Bronze/Silver/Gold/Platinum
-// tier). Non-enrolled customers are skipped — buildCustomerUpdates additionally
-// fail-closes via isMembershipCustomerRow, so a sentinel-tier row is never mutated.
+// Candidate set = enrolled WaveGuard members: a recognized Bronze/Silver/Gold/Platinum
+// tier, OR a positive monthly_rate (legacy members whose tier column was never
+// populated). This matches isMembershipCustomerRow so legacy-rate members still get
+// their missing tier/member_since fields backfilled. buildCustomerUpdates additionally
+// fail-closes via that same predicate, so a sentinel-tier row is never mutated.
 async function candidateCustomers(customerColumns) {
   let query = db('customers as c')
-    .whereRaw(
-      `LOWER(c.waveguard_tier) IN (${TIER_ORDER_LOWER.map(() => '?').join(', ')})`,
-      TIER_ORDER_LOWER,
-    )
+    .where(function enrolled() {
+      this.whereRaw(
+        `LOWER(c.waveguard_tier) IN (${TIER_ORDER_LOWER.map(() => '?').join(', ')})`,
+        TIER_ORDER_LOWER,
+      ).orWhere('c.monthly_rate', '>', 0);
+    })
     .orderBy('c.created_at', 'asc');
 
   if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
   query = customerSelect(applyCustomerFilters(query, customerColumns));
   if (LIMIT) query = query.limit(LIMIT);
 
-  return (await query).map((customer) => ({ ...customer, candidate_reason: 'bronze_plus' }));
+  return (await query).map((customer) => ({
+    ...customer,
+    candidate_reason: normalizeTierName(customer.waveguard_tier) ? 'enrolled_tier' : 'enrolled_legacy_rate',
+  }));
 }
 
 async function scheduledRowsForCustomer(customerId) {
