@@ -14,6 +14,8 @@ function makeFakeDb(rows) {
   const builder = {
     where: () => builder,
     whereNull: () => builder,
+    whereNotIn: () => builder,
+    modify: (fn) => { fn(builder); return builder; },
     select: () => builder,
     then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
   };

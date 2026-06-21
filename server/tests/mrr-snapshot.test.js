@@ -9,6 +9,8 @@ function makeFakeDb({ tierRows = [], capture = {} } = {}) {
   const customers = {
     where: () => customers,
     whereNull: () => customers,
+    whereNotIn: (col, list) => { capture.tierExcluded = list; return customers; },
+    modify: (fn) => { fn(customers); return customers; },
     select: () => customers,
     groupBy: () => customers,
     then: (res, rej) => Promise.resolve(tierRows).then(res, rej),
@@ -18,7 +20,7 @@ function makeFakeDb({ tierRows = [], capture = {} } = {}) {
     onConflict: (col) => { capture.conflict = col; return snapshots; },
     merge: () => { capture.merged = true; return Promise.resolve(); },
   };
-  const db = (table) => (table === 'mrr_snapshots' ? snapshots : customers);
+  const db = (table) => (String(table).startsWith('mrr_snapshots') ? snapshots : customers);
   db.raw = (sql) => ({ sql });
   return db;
 }
@@ -34,6 +36,14 @@ describe('tierBreakdown', () => {
       { tier: 'Gold', mrr: 600, count: 15 },
       { tier: 'None', mrr: 400, count: 10 },
     ]);
+  });
+
+  test('excludes internal/test accounts (same population as the live trend)', async () => {
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    const capture = {};
+    const db = makeFakeDb({ tierRows: [], capture });
+    await tierBreakdown(db);
+    expect(capture.tierExcluded).toEqual(INTERNAL_TEST_CUSTOMERS);
   });
 });
 

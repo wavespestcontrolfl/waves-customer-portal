@@ -344,6 +344,15 @@ function initScheduledJobs() {
       // runExclusive: a deploy overlap must not double-write the same month.
       await runExclusive('mrr-monthly-snapshot', async () => {
         const { recordMrrSnapshot } = require('./mrr-snapshot');
+        const { etMonthStart, etDateString } = require('./../utils/datetime-et');
+        // On the 1st of the ET month, finalize the just-ended month before
+        // refreshing the current one. Its last in-month write was at 6:05am on
+        // its final day, so any conversion/churn/rate change later that day was
+        // missed; today's MRR reflects the full final day, so record it under
+        // the prior month (etMonthStart offset -1) as that month's end value.
+        if (etDateString().endsWith('-01')) {
+          await recordMrrSnapshot(etMonthStart(new Date(), -1));
+        }
         await recordMrrSnapshot();
       });
     } catch (err) {

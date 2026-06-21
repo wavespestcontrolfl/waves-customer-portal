@@ -15,7 +15,8 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // matched lowercase against both estimates.customer_name (denormalized
 // string) and the joined customers row, so a misspelled denormalization
 // can't sneak past. Add new names here as they come up.
-const INTERNAL_TEST_CUSTOMERS = ['adam martinez'];
+// Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
+const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
 
 // Returns a Knex builder with the standard exclusion applied to a
 // query against the `estimates` table aliased as `e`. Use this on every
