@@ -1,0 +1,275 @@
+const {
+  LAWN_CARE_RECURRING_PLANS,
+  MOSQUITO_RECURRING_PLANS,
+  PEST_CONTROL_RECURRING_PLANS,
+  SELF_BOOKING_RECURRING_PLANS,
+  TERMITE_BAIT_RECURRING_PLANS,
+  TREE_SHRUB_RECURRING_PLANS,
+  buildCustomerWaveGuardAlignmentUpdates,
+  buildRecurringOccurrenceDates,
+  detectWaveGuardPlanKeys,
+  inferTierFromServiceCount,
+  isOneTimeBookingSource,
+  representativePlanKeys,
+  resolveLawnCareRecurringPlan,
+  resolveMosquitoRecurringPlan,
+  resolvePestControlRecurringPlan,
+  resolveSelfBookedRecurringPlan,
+  resolveTermiteBaitRecurringPlan,
+  resolveTreeShrubRecurringPlan,
+  serviceFamilyKey,
+  serviceRowCountsTowardWaveGuard,
+  uniqueServiceFamilies,
+} = require('../services/self-booking-plan-sync');
+
+describe('self-booking plan sync helpers', () => {
+  test('maps recurring Bronze-eligible public booking services', () => {
+    expect(resolveSelfBookedRecurringPlan('Pest Control')).toMatchObject({
+      serviceKey: 'pest_general_quarterly',
+      tier: 'Bronze',
+      monthlyRate: 55,
+      recurringPattern: 'quarterly',
+    });
+    expect(resolveSelfBookedRecurringPlan('Quarterly Pest Control')).toMatchObject({
+      serviceKey: 'pest_general_quarterly',
+    });
+    expect(resolveSelfBookedRecurringPlan('Bi-Monthly Pest Control')).toMatchObject({
+      serviceKey: 'pest_general_bimonthly',
+      recurringPattern: 'bimonthly',
+      visitsPerYear: 6,
+    });
+    expect(resolveSelfBookedRecurringPlan('Monthly Pest Control')).toMatchObject({
+      serviceKey: 'pest_general_monthly',
+      recurringPattern: 'monthly',
+      visitsPerYear: 12,
+    });
+    expect(resolveSelfBookedRecurringPlan('Semi-Annual Pest Control')).toMatchObject({
+      serviceKey: 'pest_general_semiannual',
+      recurringPattern: 'semiannual',
+      visitsPerYear: 2,
+    });
+    expect(resolveSelfBookedRecurringPlan('Lawn Care')).toMatchObject({
+      serviceKey: 'lawn_care_quarterly',
+      monthlyRate: 84,
+    });
+    expect(resolveSelfBookedRecurringPlan('Monthly Lawn Care')).toMatchObject({
+      serviceKey: 'lawn_care_monthly',
+      recurringPattern: 'monthly',
+      monthlyRate: 65,
+    });
+    expect(resolveSelfBookedRecurringPlan('Every 6 Weeks Lawn Care')).toMatchObject({
+      serviceKey: 'lawn_care_6week',
+      recurringPattern: 'custom',
+      recurringIntervalDays: 42,
+      monthlyRate: 55,
+    });
+    expect(resolveSelfBookedRecurringPlan('Bi-Monthly Lawn Care')).toMatchObject({
+      serviceKey: 'lawn_care_recurring',
+      recurringPattern: 'bimonthly',
+      monthlyRate: 46,
+    });
+    expect(resolveSelfBookedRecurringPlan('Quarterly Lawn Care')).toMatchObject({
+      serviceKey: 'lawn_care_quarterly',
+      recurringPattern: 'quarterly',
+      monthlyRate: 35,
+    });
+    expect(resolveSelfBookedRecurringPlan('Mosquito Control')).toMatchObject({
+      serviceKey: 'mosquito_monthly',
+      recurringPattern: 'monthly',
+    });
+    expect(resolveSelfBookedRecurringPlan('Seasonal Mosquito Control')).toMatchObject({
+      serviceKey: 'mosquito_seasonal',
+      recurringPattern: 'monthly',
+      visitsPerYear: 9,
+    });
+    expect(resolveSelfBookedRecurringPlan('Tree & Shrub')).toMatchObject({
+      serviceKey: 'tree_shrub_program',
+      recurringPattern: 'bimonthly',
+      monthlyRate: 50,
+    });
+    expect(resolveSelfBookedRecurringPlan('Tree & Shrub Every 6 Weeks')).toMatchObject({
+      serviceKey: 'tree_shrub_6week',
+      recurringPattern: 'custom',
+      recurringIntervalDays: 42,
+      visitsPerYear: 9,
+    });
+    expect(resolveSelfBookedRecurringPlan('Termite Bait Monitoring')).toMatchObject({
+      serviceKey: 'termite_bait',
+      monthlyRate: 35,
+    });
+    expect(resolveSelfBookedRecurringPlan('Termite Active Annual Bait Station Service')).toMatchObject({
+      serviceKey: 'termite_active_annual',
+      recurringPattern: 'annual',
+      visitsPerYear: 1,
+    });
+    expect(resolveSelfBookedRecurringPlan('Termite Active Bait Station Service Quarterly')).toMatchObject({
+      serviceKey: 'termite_bait',
+      recurringPattern: 'quarterly',
+      visitsPerYear: 4,
+    });
+  });
+
+  test('does not activate one-time termite inspections or non-qualifying services', () => {
+    expect(resolveSelfBookedRecurringPlan('Termite Inspection')).toBeNull();
+    expect(resolveSelfBookedRecurringPlan('Rodent Control')).toBeNull();
+    expect(resolveSelfBookedRecurringPlan('One-Time Cleanout')).toBeNull();
+    expect(resolveSelfBookedRecurringPlan('General Appointment')).toBeNull();
+  });
+
+  test('matches lawn cadence variants before the generic lawn fallback', () => {
+    expect(resolveLawnCareRecurringPlan('lawn_care_monthly')).toBe(LAWN_CARE_RECURRING_PLANS.monthly);
+    expect(resolveLawnCareRecurringPlan('Lawn Care 9 Applications')).toBe(LAWN_CARE_RECURRING_PLANS.every_6_weeks);
+    expect(resolveLawnCareRecurringPlan('Lawn Care 6 Apps')).toBe(LAWN_CARE_RECURRING_PLANS.bimonthly);
+    expect(resolveLawnCareRecurringPlan('Lawn Care 4 Applications')).toBe(LAWN_CARE_RECURRING_PLANS.quarterly);
+    expect(resolveLawnCareRecurringPlan('Bi Monthly Lawn Care')).toBe(LAWN_CARE_RECURRING_PLANS.bimonthly);
+    expect(resolveLawnCareRecurringPlan('Lawn Care')).toBe(SELF_BOOKING_RECURRING_PLANS.lawn_care);
+  });
+
+  test('matches pest, tree/shrub, mosquito, and termite cadence variants', () => {
+    expect(resolvePestControlRecurringPlan('pest_general_semiannual')).toBe(PEST_CONTROL_RECURRING_PLANS.semiannual);
+    expect(resolvePestControlRecurringPlan('Pest Control Every Other Month')).toBe(PEST_CONTROL_RECURRING_PLANS.bimonthly);
+    expect(resolvePestControlRecurringPlan('Monthly General Pest')).toBe(PEST_CONTROL_RECURRING_PLANS.monthly);
+    expect(resolvePestControlRecurringPlan('General Pest')).toBe(PEST_CONTROL_RECURRING_PLANS.quarterly);
+
+    expect(resolveTreeShrubRecurringPlan('tree_shrub_6week')).toBe(TREE_SHRUB_RECURRING_PLANS.every_6_weeks);
+    expect(resolveTreeShrubRecurringPlan('Tree & Shrub')).toBe(TREE_SHRUB_RECURRING_PLANS.bimonthly);
+
+    expect(resolveMosquitoRecurringPlan('mosquito_seasonal')).toBe(MOSQUITO_RECURRING_PLANS.seasonal);
+    expect(resolveMosquitoRecurringPlan('Mosquito Control')).toBe(MOSQUITO_RECURRING_PLANS.monthly);
+    expect(resolveMosquitoRecurringPlan('Mosquito Event Spray')).toBeNull();
+
+    expect(resolveTermiteBaitRecurringPlan('termite_monitoring')).toBe(TERMITE_BAIT_RECURRING_PLANS.quarterly);
+    expect(resolveTermiteBaitRecurringPlan('termite_active_annual')).toBe(TERMITE_BAIT_RECURRING_PLANS.active_annual);
+    expect(resolveTermiteBaitRecurringPlan('termite_active_bait_quarterly')).toBe(TERMITE_BAIT_RECURRING_PLANS.quarterly);
+    expect(resolveTermiteBaitRecurringPlan('Termite Inspection')).toBeNull();
+  });
+
+  test('builds rolling child dates on the same ordinal weekday', () => {
+    expect(buildRecurringOccurrenceDates('2026-06-19', 'quarterly', 4)).toEqual([
+      '2026-06-19',
+      '2026-09-18',
+      '2026-12-18',
+      '2027-03-19',
+    ]);
+    expect(buildRecurringOccurrenceDates('2026-06-19', 'monthly', 4)).toEqual([
+      '2026-06-19',
+      '2026-07-17',
+      '2026-08-21',
+      '2026-09-18',
+    ]);
+    expect(buildRecurringOccurrenceDates('2026-06-19', 'custom', 4, { intervalDays: 42 })).toEqual([
+      '2026-06-19',
+      '2026-07-31',
+      '2026-09-11',
+      '2026-10-23',
+    ]);
+  });
+
+  test('aligns customer tier from unique recurring service families', () => {
+    const customerColumns = {
+      active: {},
+      pipeline_stage: {},
+      pipeline_stage_changed_at: {},
+      waveguard_tier: {},
+      monthly_rate: {},
+      member_since: {},
+    };
+    const detected = [
+      'pest_control_quarterly',
+      'pest_control_monthly',
+      'lawn_care_6week',
+      'mosquito_seasonal',
+      'tree_shrub_bimonthly',
+    ];
+
+    expect(uniqueServiceFamilies(detected)).toEqual(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
+    expect(inferTierFromServiceCount(uniqueServiceFamilies(detected).length)).toBe('Platinum');
+    expect(representativePlanKeys(detected)).toEqual([
+      'pest_control_quarterly',
+      'lawn_care_6week',
+      'mosquito_seasonal',
+      'tree_shrub_bimonthly',
+    ]);
+
+    expect(buildCustomerWaveGuardAlignmentUpdates(
+      {
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
+        member_since: null,
+        earliest_service_date: '2026-06-19',
+      },
+      detected,
+      customerColumns,
+      '2026-06-20',
+    )).toEqual(expect.objectContaining({
+      detectedFamilyKeys: ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub'],
+      inferredTier: 'Platinum',
+      updates: expect.objectContaining({
+        active: true,
+        pipeline_stage: 'active_customer',
+        waveguard_tier: 'Platinum',
+        member_since: '2026-06-19',
+        monthly_rate: 205,
+      }),
+    }));
+
+    const existingGold = buildCustomerWaveGuardAlignmentUpdates(
+      { waveguard_tier: 'Gold', monthly_rate: 149, member_since: '2025-01-01' },
+      ['pest_control_quarterly', 'lawn_care_monthly'],
+      customerColumns,
+      '2026-06-20',
+    );
+    expect(existingGold.updates).not.toHaveProperty('waveguard_tier');
+    expect(existingGold.updates).not.toHaveProperty('monthly_rate');
+  });
+
+  test('detects WaveGuard plan keys only from recurring service rows for sync', () => {
+    expect(detectWaveGuardPlanKeys({ service_type: 'Monthly Pest Control' })).toEqual(['pest_control_monthly']);
+    expect(detectWaveGuardPlanKeys({ service_type: 'Termite Active Bait Station Service Quarterly' })).toEqual(['termite_bait_quarterly']);
+    // Cadence-specific catalog key wins over a stale service_type label...
+    expect(detectWaveGuardPlanKeys({ service_type: 'Quarterly Lawn Care', service_key: 'lawn_care_monthly' })).toEqual(['lawn_care_monthly']);
+    // ...but a GENERIC catalog key must not suppress the cadence in service_type.
+    expect(detectWaveGuardPlanKeys({ service_type: 'Every 6 Weeks Lawn Care', service_key: 'lawn_fertilization', service_name: 'Lawn Fertilization & Weed Control' })).toEqual(['lawn_care_6week']);
+    expect(serviceFamilyKey('pest_control_monthly')).toBe('pest_control');
+    expect(isOneTimeBookingSource('quote-wizard-onetime')).toBe(true);
+    expect(isOneTimeBookingSource('estimate-accept')).toBe(true);
+    expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control' })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: true })).toBe(true);
+    expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', recurring_parent_id: 123 })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 123 })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: true, status: 'completed' })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({ service_type: 'Pest Control', is_recurring: true, is_callback: true })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({
+      service_type: 'Pest Control',
+      source: 'quote-wizard-onetime',
+      self_booking_id: 123,
+    })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({
+      service_type: 'Pest Control',
+      source: 'direct',
+      self_booking_id: 123,
+    })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({
+      service_type: 'Pest Control',
+      source: 'direct',
+      self_booking_id: 123,
+      recurring_pattern: 'quarterly',
+    })).toBe(false);
+    expect(serviceRowCountsTowardWaveGuard({
+      service_type: 'Pest Control',
+      source: 'direct',
+      self_booking_id: 123,
+      is_recurring: true,
+      recurring_pattern: 'quarterly',
+    })).toBe(true);
+  });
+
+  test('normalizes pg DATE base dates without an ET day shift', () => {
+    // buildRecurringOccurrenceDates runs the base through normalizeDateString; a pg DATE
+    // column arrives as a midnight Date and must not be converted as an ET instant
+    // (which would move 2026-06-19 to 2026-06-18 on a UTC server).
+    expect(buildRecurringOccurrenceDates(new Date('2026-06-19T00:00:00.000Z'), 'quarterly', 1)[0]).toBe('2026-06-19');
+    expect(buildRecurringOccurrenceDates('2026-06-19', 'quarterly', 1)[0]).toBe('2026-06-19');
+  });
+
+});

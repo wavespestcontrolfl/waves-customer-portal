@@ -8,12 +8,9 @@ const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
-
-const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime']);
-
-function isOneTimeBookingSource(source) {
-  return ONE_TIME_BOOKING_SOURCES.has(String(source || '').toLowerCase());
-}
+const {
+  isOneTimeBookingSource,
+} = require('../services/self-booking-plan-sync');
 
 function cleanBookingServiceLabel(value) {
   const label = String(value || '').trim().replace(/\s+/g, ' ');
@@ -988,9 +985,16 @@ router.post('/confirm', async (req, res, next) => {
 
     const { booking, serviceRow } = txResult;
 
-    let followUpRows = [];
     const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
     const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
+    let followUpRows = [];
+
+    // Public self-booking books only the single requested visit. It does NOT create a
+    // recurring WaveGuard series or activate a plan (owner policy: a WaveGuard plan is
+    // set up explicitly via admin/estimate/payment, not from a public booking — so we
+    // never seed future visits that would have no plan and no per-visit price to bill).
+    // The quarterly-pest follow-up seeder below is the pre-existing exception and runs
+    // independently of WaveGuard plan state.
     const shouldSeedQuarterlyPestFollowUps =
       !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'

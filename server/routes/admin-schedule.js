@@ -41,6 +41,9 @@ const {
 const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
+const {
+  syncCustomerWaveGuardPlanFromScheduledServices,
+} = require('../services/self-booking-plan-sync');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -1747,6 +1750,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ? await isNewRecurringSignupCandidate(customerId)
       : false;
 
+    let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
@@ -1949,6 +1953,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
           });
         }
       }
+
+      // Re-align the customer's WaveGuard tier from the just-created recurring rows
+      // INSIDE the transaction, so a sync failure rolls back the appointment series
+      // rather than committing recurring rows with a stale tier/monthly_rate/member_since
+      // — the exact split state this is meant to prevent.
+      if (isRecurring) {
+        waveguardPlanSync = await syncCustomerWaveGuardPlanFromScheduledServices({
+          database: trx,
+          customerId,
+        });
+      }
     });
 
     // Register appointment-reminder rows synchronously, BEFORE the response, with
@@ -1990,6 +2005,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       id: svc.id,
       recurringCreated: isRecurring ? (recurringCount || 4) : 1,
       appointments: createdAppointments,
+      waveguardPlanSync,
       warnings: [],
     });
 

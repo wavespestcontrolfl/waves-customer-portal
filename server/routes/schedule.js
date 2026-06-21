@@ -48,6 +48,10 @@ router.get('/', async (req, res, next) => {
         customerConfirmed: s.customer_confirmed,
         confirmedAt: s.confirmed_at,
         notes: s.notes,
+        // Plan-coverage signals so the portal can distinguish recurring WaveGuard
+        // visits from one-time visits and free re-service callbacks.
+        isRecurring: s.is_recurring === true,
+        isCallback: s.is_callback === true,
       })),
     });
   } catch (err) {
@@ -165,6 +169,10 @@ router.get('/next', async (req, res, next) => {
         status: nextService.status,
         technician: nextService.technician_name,
         customerConfirmed: nextService.customer_confirmed,
+        // Plan-coverage signals so the portal can distinguish a recurring WaveGuard
+        // visit from a one-time visit or a free re-service callback.
+        isRecurring: nextService.is_recurring === true,
+        isCallback: nextService.is_callback === true,
       },
     });
   } catch (err) {
