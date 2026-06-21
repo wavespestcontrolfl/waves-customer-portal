@@ -510,6 +510,11 @@ async function analyzeCustomer(customer, serviceColumns, customerColumns, servic
 async function applyCustomerRepair(repair) {
   const insertedVisits = [];
   await db.transaction(async (trx) => {
+    // childRows were computed from a pre-transaction snapshot. Serialize concurrent
+    // --apply runs for this customer with an advisory lock, and re-check each target
+    // date inside the lock, so two runs can't both insert the same missing visit.
+    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`waveguard-align:${repair.customer.id}`]);
+
     if (Object.keys(repair.customerUpdates).length) {
       await trx('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
     }
@@ -519,6 +524,12 @@ async function applyCustomerRepair(repair) {
         await trx('scheduled_services').where({ id: serviceRepair.anchorId }).update(serviceRepair.parentUpdates);
       }
       for (const row of serviceRepair.childRows) {
+        const existing = await trx('scheduled_services')
+          .where({ customer_id: row.customer_id, scheduled_date: row.scheduled_date })
+          .modify((qb) => { if (row.service_type) qb.where('service_type', row.service_type); })
+          .whereNotIn('status', TERMINAL_STATUSES)
+          .first('id');
+        if (existing) continue; // already present (pre-existing or a concurrent run) — skip
         const [inserted] = await trx('scheduled_services').insert(row).returning('*');
         if (inserted?.id) insertedVisits.push(inserted);
       }

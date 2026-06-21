@@ -1745,6 +1745,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ? await isNewRecurringSignupCandidate(customerId)
       : false;
 
+    let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
@@ -1947,18 +1948,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
           });
         }
       }
-    });
 
-    let waveguardPlanSync = null;
-    if (isRecurring) {
-      try {
+      // Re-align the customer's WaveGuard tier from the just-created recurring rows
+      // INSIDE the transaction, so a sync failure rolls back the appointment series
+      // rather than committing recurring rows with a stale tier/monthly_rate/member_since
+      // — the exact split state this is meant to prevent.
+      if (isRecurring) {
         waveguardPlanSync = await syncCustomerWaveGuardPlanFromScheduledServices({
+          database: trx,
           customerId,
         });
-      } catch (e) {
-        logger.error(`[schedule] WaveGuard plan sync failed for customer ${customerId}: ${e.message}`);
       }
-    }
+    });
 
     // Register appointment-reminder rows synchronously, BEFORE the response, with
     // deferConfirmation so the slow Twilio confirmation SMS does NOT run here.
