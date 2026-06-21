@@ -107,7 +107,15 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     .update({ status: 'paid', paid_at: paidAt, updated_at: paidAt });
 
   // ONE payer-scoped ledger row (customer_id NULL — a statement spans many homes).
-  await database('payments').insert({
+  // UPSERT on the PI: an out-of-order dispute.closed can pre-write a durable
+  // marker row for this PI; settling must CONSUME it (update), not insert a
+  // duplicate. Merge any existing dispute_final marker into the metadata.
+  const existingRow = stripePaymentIntentId
+    ? await database('payments').where({ stripe_payment_intent_id: stripePaymentIntentId, statement_id: statementId }).first()
+    : null;
+  let priorMeta = {};
+  try { priorMeta = existingRow?.metadata ? (typeof existingRow.metadata === 'string' ? JSON.parse(existingRow.metadata) : existingRow.metadata) : {}; } catch (e) { /* legacy */ }
+  const rowData = {
     customer_id: null,
     payer_id: stmt.payer_id,
     statement_id: statementId,
@@ -126,8 +134,10 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     description: `Payer statement S-${statementId} settlement (${paymentMethod})`,
     // `payments` has no `payment_method` string column (only payment_method_id FK)
     // — the method rides metadata; payer_statements.payment_method holds it too.
-    metadata: JSON.stringify({ statement_id: statementId, payer_id: stmt.payer_id, payment_method: paymentMethod, source }),
-  });
+    metadata: JSON.stringify({ ...priorMeta, statement_id: statementId, payer_id: stmt.payer_id, payment_method: paymentMethod, source }),
+  };
+  if (existingRow) await database('payments').where({ id: existingRow.id }).update(rowData);
+  else await database('payments').insert(rowData);
 
   logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);
   return { ok: true, statement: { ...stmt, status: 'paid', paid_at: paidAt }, childrenSettled };

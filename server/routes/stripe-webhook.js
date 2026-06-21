@@ -1424,6 +1424,16 @@ async function handleChargeRefunded(charge) {
     });
 
   const refundedPayment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+
+  // Statement settlement refund: a statement payments row has statement_id (no
+  // customer_id). A FULL refund must reverse the statement cascade — otherwise
+  // payer_statements stays `paid` with all child invoices paid and AR never
+  // recollects the refunded money (PI-scoped, like the dispute reversal).
+  if (refundedPayment?.statement_id && isFullRefund) {
+    await reverseStatementCascadeForDispute(refundedPayment.statement_id, refundedPayment.stripe_payment_intent_id, `charge.refunded (full $${cumulativeRefundAmountDollars.toFixed(2)})`);
+    logger.warn(`[stripe-webhook] statement S-${refundedPayment.statement_id} fully refunded — cascade reversed to owed`);
+  }
+
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
@@ -2331,9 +2341,20 @@ async function handleDisputeClosed(dispute) {
               metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, dispute_id: dispute.id, dispute_final: status, source: 'statement_dispute' }),
             });
           });
+        } else {
+          // `won`/`warning_closed` before settlement: funds STOOD, but settlement
+          // hasn't run. Persist a durable dispute-final marker keyed on the PI so a
+          // late/retried dispute.created skips reversal; the eventual succeeded
+          // UPSERTS this row (settleStatementPaid keys on the PI) and settles
+          // normally — no duplicate row. (Leave the active PI in place.)
+          await db('payments').insert({
+            customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
+            processor: 'stripe', stripe_payment_intent_id: dispute.payment_intent, stripe_charge_id: chargeId,
+            payment_date: etDateString(), amount: (dispute.amount / 100), status: 'disputed',
+            description: `Payer statement S-${stmtByPi.id} dispute ${status} before settlement (marker)`,
+            metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, dispute_id: dispute.id, dispute_final: status, source: 'statement_dispute' }),
+          });
         }
-        // `won`/`warning_closed` before settlement: funds stand — leave the active
-        // PI so the eventual payment_intent.succeeded settles normally.
         logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} dispute.closed (${status}) before settlement via PI ${dispute.payment_intent}`);
         return;
       }

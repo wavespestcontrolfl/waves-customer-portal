@@ -51,7 +51,12 @@ function handler(table) {
     };
   }
   if (table === 'payments') {
-    return { async insert(row) { captured.paymentInserts.push(row); return [1]; } };
+    return {
+      where() { return this; },
+      async first() { return undefined; }, // no existing row → settle inserts
+      async insert(row) { captured.paymentInserts.push(row); return [1]; },
+      async update(row) { captured.paymentInserts.push(row); return 1; },
+    };
   }
   throw new Error(`unexpected table ${table}`);
 }
