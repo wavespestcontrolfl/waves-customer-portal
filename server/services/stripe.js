@@ -1928,8 +1928,17 @@ const StripeService = {
           }
           if (activeIntent.status !== 'canceled') {
             if (REPLACEABLE_PI_STATUSES.has(activeIntent.status)) {
-              try { await stripe.paymentIntents.cancel(activeIntent.id); } catch (e) {
+              // FAIL CLOSED: if the cancel fails, the old PI may have raced into
+              // processing/succeeded — minting a replacement while its client
+              // secret can still collect would double-charge. Refuse instead of
+              // repointing the statement at a new PI.
+              try {
+                await stripe.paymentIntents.cancel(activeIntent.id);
+              } catch (e) {
                 logger.warn(`[stripe] could not cancel replaceable statement PI ${activeIntent.id}: ${e.message}`);
+                const err = new Error('Could not replace the existing payment — please try again in a moment');
+                err.statusCode = 409;
+                throw err;
               }
             } else {
               const err = new Error('A payment is already in progress for this statement');
