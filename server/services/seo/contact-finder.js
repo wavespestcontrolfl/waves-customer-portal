@@ -14,7 +14,48 @@
  * bad domain can't crash a harvest of hundreds.
  */
 
+const net = require('net');
+const dns = require('dns').promises;
 const logger = require('../logger');
+
+// ── SSRF guards ───────────────────────────────────────────────────────────────
+// The prospect domain is untrusted and fetched server-side, so a malicious domain
+// (or a redirect to one) must not let us probe internal/cloud-metadata hosts.
+
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127
+      || (a === 169 && b === 254)              // link-local / cloud metadata
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 100 && b >= 64 && b <= 127);   // CGNAT
+  }
+  const h = String(ip).toLowerCase();
+  if (h.startsWith('::ffff:') && net.isIPv4(h.slice(7))) return isPrivateIp(h.slice(7));
+  return h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80');
+}
+
+// Synchronous, no-network reject of obviously-unsafe hostnames.
+function isBlockedHostname(host) {
+  if (!host) return true;
+  const h = host.toLowerCase().replace(/\.$/, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan')) return true;
+  if (net.isIP(h)) return isPrivateIp(h);     // IP literal → only block private ones
+  if (!h.includes('.')) return true;          // single-label / intranet name
+  return false;
+}
+
+// Resolve the host and reject if it (or any A/AAAA record) is a private address.
+async function hostResolvesPublic(host) {
+  if (net.isIP(host)) return !isPrivateIp(host);
+  try {
+    const addrs = await dns.lookup(host, { all: true });
+    return addrs.length > 0 && addrs.every((a) => !isPrivateIp(a.address));
+  } catch {
+    return false;
+  }
+}
 
 // Probed in order; we stop early once we have an email.
 const CONTACT_PATHS = ['/', '/contact', '/contact-us', '/write-for-us', '/contribute', '/advertise', '/about'];
@@ -76,23 +117,40 @@ function extractEmails(html, domain) {
   return [...found].sort((a, b) => scoreEmail(a, domain) - scoreEmail(b, domain));
 }
 
-async function fetchText(url, { fetchFn, timeoutMs }) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetchFn(url, {
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' },
-    });
-    if (!res || !res.ok) return null;
-    const html = await res.text();
-    return typeof html === 'string' ? html.slice(0, 600000) : null; // cap pathological pages
-  } catch {
-    return null; // timeout / DNS / TLS / abort — treated as "no signal"
-  } finally {
-    clearTimeout(timer);
+// Fetch with manual redirect handling so EVERY hop's host is SSRF-revalidated
+// (a public domain can 30x to an internal one). Bounded redirects; fail-soft.
+async function fetchText(url, { fetchFn, timeoutMs, resolveHostFn = hostResolvesPublic, maxRedirects = 2 }) {
+  let current = url;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    let u;
+    try { u = new URL(current); } catch { return null; }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    if (isBlockedHostname(u.hostname) || !(await resolveHostFn(u.hostname))) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetchFn(current, {
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' },
+      });
+      if (res && res.status >= 300 && res.status < 400 && res.headers && typeof res.headers.get === 'function') {
+        const loc = res.headers.get('location');
+        if (!loc) return null;
+        current = new URL(loc, current).toString(); // re-validated on next loop
+        continue;
+      }
+      if (!res || !res.ok) return null;
+      const html = await res.text();
+      return typeof html === 'string' ? html.slice(0, 600000) : null; // cap pathological pages
+    } catch {
+      return null; // timeout / DNS / TLS / abort — treated as "no signal"
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return null; // redirect budget exhausted
 }
 
 /**
@@ -100,7 +158,7 @@ async function fetchText(url, { fetchFn, timeoutMs }) {
  *                         contributor_path, checked_at }
  * Never throws.
  */
-async function findContact(domain, { fetchFn = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, maxFetches = MAX_FETCHES } = {}) {
+async function findContact(domain, { fetchFn = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, maxFetches = MAX_FETCHES, resolveHostFn = hostResolvesPublic } = {}) {
   const host = normalizeDomain(domain);
   const result = {
     domain: host,
@@ -110,14 +168,15 @@ async function findContact(domain, { fetchFn = fetch, timeoutMs = DEFAULT_TIMEOU
     contributor_path: null,
     checked_at: new Date().toISOString(),
   };
-  if (!host) return result;
+  // SSRF gate: never probe an internal/private/literal host (cheap, no network).
+  if (!host || isBlockedHostname(host)) return result;
 
   let fetches = 0;
   for (const path of CONTACT_PATHS) {
     if (fetches >= maxFetches) break;
     const url = `https://${host}${path}`;
     fetches++;
-    const html = await fetchText(url, { fetchFn, timeoutMs });
+    const html = await fetchText(url, { fetchFn, timeoutMs, resolveHostFn });
     if (!html) continue;
 
     if (path !== '/' && FORM_RE.test(html)) {
@@ -144,4 +203,4 @@ async function findContact(domain, { fetchFn = fetch, timeoutMs = DEFAULT_TIMEOU
 }
 
 module.exports = { findContact };
-module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, CONTACT_PATHS };
+module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, isBlockedHostname, isPrivateIp, hostResolvesPublic, CONTACT_PATHS };

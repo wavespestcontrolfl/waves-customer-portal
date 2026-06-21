@@ -339,6 +339,7 @@ module.exports = {
   heuristicPriority,
   OUTREACH_INTENTS,
   SIGNUP_INTENTS,
+  CLAIMABLE_LINK_TYPES,
   HARO_PLATFORMS,
   WEIGHTS,
   _internals: { parseJsonArray, tierFor, contactScoreOf, mapPool },

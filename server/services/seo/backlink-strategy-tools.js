@@ -251,7 +251,10 @@ async function executeBacklinkTool(toolName, input) {
           target_url: p.target_url || null,
           target_page: p.target_page,
           anchor_planned: p.anchor_planned || scored?.suggested_anchor || null,
-          link_type: p.link_type || scored?.intent_class || null,
+          // Only honor an agent-supplied link_type if the worker can claim it;
+          // otherwise use the scorer's coerced (claimable) type so the row
+          // never strands in 'prospect'.
+          link_type: (p.link_type && scorer.CLAIMABLE_LINK_TYPES.has(p.link_type)) ? p.link_type : (scored?.intent_class || null),
           priority: p.priority || scored?.priority || null,
           domain_rating: p.domain_rating || null,
           notes: p.notes || null,
