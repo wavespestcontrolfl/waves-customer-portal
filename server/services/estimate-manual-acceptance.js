@@ -227,14 +227,6 @@ async function markEstimateManuallyAccepted({
       throw httpError('Estimate is no longer active.', 409);
     }
 
-    await logManualAcceptance(trx, {
-      estimate,
-      updatedEstimate,
-      adminUserId,
-      source,
-      billingTerm: normalizedBillingTerm,
-    });
-
     // A commercial proposal's pricing lives in estimate_data.proposal.buildings,
     // which EstimateConverter does not read — it converts from the legacy
     // result/recurring service mix. Auto-converting here would activate the
@@ -316,6 +308,19 @@ async function markEstimateManuallyAccepted({
         throw httpError('Customer conversion did not complete; estimate was not marked accepted.', 500);
       }
     }
+
+    // Audit the win AFTER the customer is created/linked so a newly-created
+    // no-customer proposal customer gets the acceptance event in its timeline
+    // (activity_log is keyed on customer_id). updatedEstimate.customer_id is now
+    // final for every path: created/linked above for proposals, already set for
+    // non-proposals. A throw above rolls back this same trx, so no orphan log.
+    await logManualAcceptance(trx, {
+      estimate,
+      updatedEstimate,
+      adminUserId,
+      source,
+      billingTerm: normalizedBillingTerm,
+    });
 
     return {
       acceptedEstimate: updatedEstimate,

@@ -745,7 +745,7 @@ describe('commercial proposal win paths (#1917)', () => {
       id: 'prop-lead', customer_id: null,
       customer_name: 'Siesta Key HOA', customer_phone: '9415551234',
     });
-    const { database, updates } = makeDb(estimate);
+    const { database, updates, inserts } = makeDb(estimate);
     const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
     const estimateConverter = { convertEstimate: jest.fn() };
     proposalWin.ensureCustomerForProposalWin.mockResolvedValue({ customerId: 'new-cust', created: true });
@@ -767,6 +767,11 @@ describe('commercial proposal win paths (#1917)', () => {
     expect(result.createdCustomer).toEqual({ id: 'new-cust' });
     expect(leadLinkService.markLinkedLeadEstimateAccepted)
       .toHaveBeenCalledWith(expect.objectContaining({ customerId: 'new-cust' }));
+    // Codex P3: the win audit is written AFTER the customer is created/linked, so
+    // the new customer's timeline includes the acceptance (activity_log is keyed
+    // on customer_id) — not the pre-creation customer_id=null it had before.
+    const auditRow = inserts.find((i) => i.table === 'activity_log');
+    expect(auditRow?.row).toMatchObject({ customer_id: 'new-cust', action: 'estimate_manual_accept' });
   });
 
   test('invoice-mode win: builds the proposal invoice and surfaces it', async () => {
