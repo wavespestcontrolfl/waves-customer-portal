@@ -38,26 +38,26 @@ function parseMatches(m) {
   return [];
 }
 
-// Order-independent content signature of a set of opportunity matches — product +
-// competitor URL + both prices. Two runs that surface the SAME opportunities at the
-// SAME prices share a signature; a changed price yields a new one (a fresh draft).
-function matchSignature(matches) {
-  return (matches || [])
-    .map((m) => [
-      String((m && m.product) || '').toLowerCase().trim(),
-      String((m && m.competitor && m.competitor.source_url) || ''),
-      Number(m && m.competitor && m.competitor.price) || 0,
-      Number(m && m.baseline && m.baseline.price) || 0,
-    ].join('|'))
-    .sort()
-    .join('::');
+// Content key for ONE opportunity line — product + competitor URL + both prices. A
+// changed price yields a new key (a genuinely new ask). Dedup is PER-MATCH, not
+// per-draft, so a later {A,B} scan when {A} is already pending re-stages only B.
+function matchKey(m) {
+  return [
+    String((m && m.product) || '').toLowerCase().trim(),
+    String((m && m.competitor && m.competitor.source_url) || ''),
+    Number(m && m.competitor && m.competitor.price) || 0,
+    Number(m && m.baseline && m.baseline.price) || 0,
+  ].join('|');
 }
 
-// Signatures of every draft still awaiting review/send — used to avoid staging a
-// duplicate the operator could send to the rep twice.
-async function activeDraftSignatures(db) {
+// Every per-match key currently awaiting review/send — so we never re-stage an ask
+// the operator could send to the rep twice. (Runs serialized by runExclusive, so
+// there's no concurrent-insert race against this read.)
+async function activeMatchKeys(db) {
   const rows = await db('price_match_drafts').whereIn('status', ['pending', 'sending']).select('matches');
-  return new Set(rows.map((r) => matchSignature(parseMatches(r.matches))));
+  const keys = new Set();
+  for (const r of rows) for (const m of parseMatches(r.matches)) keys.add(matchKey(m));
+  return keys;
 }
 
 // Look up a vendor row by case-insensitive name.
@@ -237,22 +237,24 @@ async function runWeeklyScan(opts = {}) {
 
   let draftId = null;
   let includedCount = 0;
-  let duplicate = false;
+  summary.duplicates = 0;
   if (matches.length) {
-    // Don't stage a draft identical to one already awaiting review/send — a retry or
-    // next week's run would otherwise create a dup the operator could send twice.
-    const seen = opts.activeSignatures || await activeDraftSignatures(db);
-    if (seen.has(matchSignature(matches))) {
-      duplicate = true;
-      logger.info('[price-scan] weekly scan: an equivalent draft is already pending/sending — skipping duplicate');
+    // Drop any opportunity already covered by a pending/sending draft (PER-MATCH, so
+    // {A} pending + a new {A,B} scan stages only B) — a retry or next week's run
+    // can't re-stage an ask the operator could send to the rep twice.
+    const seen = opts.activeMatchKeys || await activeMatchKeys(db);
+    const fresh = matches.filter((m) => !seen.has(matchKey(m)));
+    summary.duplicates = matches.length - fresh.length;
+    if (!fresh.length) {
+      logger.info('[price-scan] weekly scan: all opportunities already covered by an active draft — nothing new to stage');
     } else {
-      const row = await create(db, matches);
+      const row = await create(db, fresh);
       draftId = row ? row.id : null;
       includedCount = row ? row.included_count : 0;
     }
   }
-  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.opportunities} opps, ${summary.errors} err -> draft ${draftId || (duplicate ? 'duplicate-skipped' : 'none')} (${includedCount} items)`);
-  return { ok: true, ...summary, draftId, includedCount, duplicate };
+  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.opportunities} opps, ${summary.duplicates} dup, ${summary.errors} err -> draft ${draftId || 'none'} (${includedCount} items)`);
+  return { ok: true, ...summary, draftId, includedCount };
 }
 
 module.exports = {
@@ -263,8 +265,8 @@ module.exports = {
   opportunityToMatch,
   isBrowserUnavailable,
   isDomyownUrl,
-  matchSignature,
-  activeDraftSignatures,
+  matchKey,
+  activeMatchKeys,
   parseMatches,
   vendorByName,
   APPROVED_STATES,
