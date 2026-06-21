@@ -138,7 +138,8 @@ async function findContact(domain, { fetchFn = fetch, timeoutMs = DEFAULT_TIMEOU
     }
   }
 
-  logger?.debug?.(`[contact-finder] ${host}: email=${result.contact_email || '-'} path=${result.has_contact_path}`);
+  // Never log the address itself — emails in logs are treated as PII.
+  logger?.debug?.(`[contact-finder] ${host}: contactable=${result.has_contact_path} hasEmail=${!!result.contact_email}`);
   return result;
 }
 

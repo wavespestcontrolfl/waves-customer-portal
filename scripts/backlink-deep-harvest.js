@@ -161,6 +161,9 @@ async function harvest(db, args) {
       const exists = await db('seo_competitor_backlinks').where({ competitor_domain: comp, source_domain: s.candidate.domain }).first();
       const row = {
         competitor_domain: comp, source_domain: s.candidate.domain, source_domain_rating: s.candidate.domain_rating,
+        // referring_domains is domain-level — no specific URL — but source_url is
+        // NOT NULL, so record the domain root as the source page.
+        source_url: `https://${s.candidate.domain}/`,
         link_type: s.intent_class, waves_has_link: false, prospect_priority: s.priority, last_checked: new Date().toISOString().slice(0, 10),
       };
       if (exists) await db('seo_competitor_backlinks').where({ id: exists.id }).update({ ...row, updated_at: new Date() });
@@ -217,13 +220,20 @@ async function rescore(db, args) {
 
   let updated = 0, demoted = 0;
   for (const { r, s, demote } of updates) {
-    const patch = {
-      score: s.score, tier: s.tier,
-      contact_email: s.contact?.contact_email || null, contact_url: s.contact?.contact_url || null,
-      contact_checked_at: s.contact ? new Date() : null,
-      quality_signals: JSON.stringify({ relevance: s.relevance_0_100, lead_value_tier: s.lead_value_tier, is_local_swfl: s.is_local_swfl, intent_class: s.intent_class, scored_by: 'rescore' }),
-      updated_at: new Date(),
-    };
+    // MERGE scorer keys into existing quality_signals — that JSONB also holds
+    // verifier/indexer state (target_indexed, omega_*, pending); don't wipe it.
+    let qs = {};
+    try { qs = typeof r.quality_signals === 'string' ? JSON.parse(r.quality_signals) : (r.quality_signals || {}); } catch { qs = {}; }
+    Object.assign(qs, { relevance: s.relevance_0_100, lead_value_tier: s.lead_value_tier, is_local_swfl: s.is_local_swfl, intent_class: s.intent_class, scored_by: 'rescore' });
+
+    const patch = { score: s.score, tier: s.tier, quality_signals: JSON.stringify(qs), updated_at: new Date() };
+    // Only write contact fields when this probe actually found something — never
+    // null out a previously-captured contact (signup-lane rows aren't probed).
+    if (s.contact && (s.contact.contact_email || s.contact.has_contact_path)) {
+      patch.contact_email = s.contact.contact_email || r.contact_email || null;
+      patch.contact_url = s.contact.contact_url || r.contact_url || null;
+      patch.contact_checked_at = new Date();
+    }
     if (demote) {
       patch.status = 'rejected';
       patch.notes = `${r.notes ? r.notes + ' | ' : ''}rescored ${todayTag()}: ${s.gate.reason || (s.gate.lane === 'haro_platform' ? 'HARO platform (join, not email)' : 'low relevance/no contact')}`;
