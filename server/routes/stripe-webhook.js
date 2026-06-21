@@ -617,6 +617,9 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
     const actualTotalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
 
     await db.transaction(async (trx) => {
+      // Same per-statement money lock as disputes/refunds — serialize settlement
+      // against any concurrent/out-of-order clawback on this statement.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
       const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
       if (!stmt) { logger.warn(`[stripe-webhook] statement ${statementId} not found for PI ${piId}`); return; }
 
@@ -1420,24 +1423,32 @@ async function handleChargeRefunded(charge) {
   // the active-PI binding and never settles refunded money) + persist a durable
   // refunded marker. Mirrors the dispute pre-settlement guard.
   if (charge.payment_intent && isFullRefund) {
-    const rowExists = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
-    if (!rowExists) {
-      const stmtByPi = await db('payer_statements').where({ stripe_payment_intent_id: charge.payment_intent }).first();
-      if (stmtByPi) {
-        await db.transaction(async (trx) => {
-          await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, `charge.refunded (full, pre-settlement)`, { database: trx });
+    const stmtByPi = await db('payer_statements').where({ stripe_payment_intent_id: charge.payment_intent }).first();
+    const preRow = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
+    if (stmtByPi && !preRow) {
+      const { withStatementMoneyLock } = require('../services/payer-statement-settle');
+      // Under the per-statement money lock, RE-CHECK the row: settle may have
+      // inserted the paid row between the pre-check and the lock. Reverse the
+      // cascade either way, then mark the (now-existing) paid row refunded or
+      // insert a durable refunded marker.
+      await withStatementMoneyLock(stmtByPi.id, async (trx) => {
+        const rowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first();
+        await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, 'charge.refunded (full)', { database: trx });
+        if (rowInLock) {
+          await trx('payments').where({ id: rowInLock.id }).update({ status: 'refunded', refund_amount: cumulativeRefundAmountDollars, refund_status: 'full', stripe_refund_id: refundId });
+        } else {
           await trx('payments').insert({
             customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
             processor: 'stripe', stripe_payment_intent_id: charge.payment_intent, stripe_charge_id: chargeId,
             payment_date: etDateString(), amount: (charge.amount || refundAmountCents) / 100,
             status: 'refunded', refund_amount: cumulativeRefundAmountDollars, refund_status: 'full', stripe_refund_id: refundId,
-            description: `Payer statement S-${stmtByPi.id} fully refunded (pre-settlement)`,
+            description: `Payer statement S-${stmtByPi.id} fully refunded`,
             metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, source: 'statement_refund' }),
           });
-        });
-        logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} full refund before settlement — cascade reversed, active PI cleared`);
-        return;
-      }
+        }
+      });
+      logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} full refund — cascade reversed (in-lock recheck)`);
+      return;
     }
   }
 
@@ -2100,6 +2111,7 @@ async function findInvoiceForPayment(payment) {
 // Both idempotent + run under the statement row lock.
 async function reverseStatementCascadeForDispute(statementId, disputedPi, reason, { database = db } = {}) {
   const run = async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
     const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
     if (!stmt) return;
     const piMatches = String(stmt.stripe_payment_intent_id || '') === String(disputedPi || '');
@@ -2155,6 +2167,7 @@ async function reverseStatementCascadeForDispute(statementId, disputedPi, reason
 
 async function restoreStatementCascadeForDispute(statementId, disputedPi) {
   await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
     const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
     // Skip if already paid (re-collected after the reversal) or void.
     if (!stmt || stmt.status === 'paid' || stmt.status === 'void') return;
@@ -2350,31 +2363,37 @@ async function handleDisputeClosed(dispute) {
   // to settle later. Resolve by PI (mirrors dispute.created) and handle when no
   // payments row exists.
   if (dispute.payment_intent) {
-    const rowExists = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
-    if (!rowExists) {
-      const stmtByPi = await db('payer_statements').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
-      if (stmtByPi) {
+    const stmtByPi = await db('payer_statements').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
+    const preRow = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
+    if (stmtByPi && !preRow) {
+      const { withStatementMoneyLock } = require('../services/payer-statement-settle');
+      let handled = false;
+      await withStatementMoneyLock(stmtByPi.id, async (trx) => {
+        // RE-CHECK under the lock — settle may have inserted the paid row between
+        // the pre-check and the lock. If so, fall through to the normal
+        // payments-row path (handled stays false).
+        const rowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
+        if (rowInLock) return;
         if (status === 'lost') {
-          // Funds returned — reverse/block the statement AND persist the durable
-          // disputed row atomically (so a later won could still restore).
-          await db.transaction(async (trx) => {
-            await reverseStatementCascadeForDispute(stmtByPi.id, dispute.payment_intent, 'dispute.lost (pre-settlement)', { database: trx });
-            await trx('payments').insert({
-              customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
-              processor: 'stripe', stripe_payment_intent_id: dispute.payment_intent, stripe_charge_id: chargeId,
-              payment_date: etDateString(), amount: (dispute.amount / 100), status: 'disputed',
-              failure_reason: `Dispute lost — $${amount} returned to customer`,
-              description: `Payer statement S-${stmtByPi.id} disputed charge (pre-settlement)`,
-              metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, dispute_id: dispute.id, dispute_final: status, source: 'statement_dispute' }),
-            });
+          // Funds returned — reverse/block the statement + persist a durable
+          // disputed-lost marker (atomic under the lock).
+          await reverseStatementCascadeForDispute(stmtByPi.id, dispute.payment_intent, 'dispute.lost (pre-settlement)', { database: trx });
+          await trx('payments').insert({
+            customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
+            processor: 'stripe', stripe_payment_intent_id: dispute.payment_intent, stripe_charge_id: chargeId,
+            payment_date: etDateString(), amount: (dispute.amount / 100), status: 'disputed',
+            failure_reason: `Dispute lost — $${amount} returned to customer`,
+            description: `Payer statement S-${stmtByPi.id} disputed charge (pre-settlement)`,
+            metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, dispute_id: dispute.id, dispute_final: status, source: 'statement_dispute' }),
           });
         } else {
-          // `won`/`warning_closed` before settlement: funds STOOD, but settlement
-          // hasn't run. Persist a durable dispute-final marker keyed on the PI so a
-          // late/retried dispute.created skips reversal; the eventual succeeded
-          // UPSERTS this row (settleStatementPaid keys on the PI) and settles
-          // normally — no duplicate row. (Leave the active PI in place.)
-          await db('payments').insert({
+          // `won`/`warning_closed` before settlement: funds STOOD but nothing
+          // settled. Persist a dispute-final marker so a late created skips
+          // reversal; the eventual succeeded UPSERTS this row and settles with
+          // validation. (Leave the active PI in place. If no succeeded ever
+          // arrives — created→succeeded→won — the marker stays for operator
+          // reconcile; we do NOT mark the ledger paid without validation.)
+          await trx('payments').insert({
             customer_id: null, payer_id: stmtByPi.payer_id, statement_id: stmtByPi.id,
             processor: 'stripe', stripe_payment_intent_id: dispute.payment_intent, stripe_charge_id: chargeId,
             payment_date: etDateString(), amount: (dispute.amount / 100), status: 'disputed',
@@ -2382,6 +2401,9 @@ async function handleDisputeClosed(dispute) {
             metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, dispute_id: dispute.id, dispute_final: status, source: 'statement_dispute' }),
           });
         }
+        handled = true;
+      });
+      if (handled) {
         logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} dispute.closed (${status}) before settlement via PI ${dispute.payment_intent}`);
         return;
       }
@@ -2408,25 +2430,21 @@ async function handleDisputeClosed(dispute) {
     });
 
     if (status === 'won' || status === 'warning_closed') {
-      // Funds reinstated — restore paid status
+      // Statement PRE-settlement dispute MARKER (base_amount_cents null ⇒ never
+      // validated through settleStatementPaid). A won here may have NO future
+      // succeeded to settle (created→succeeded→won leaves the succeeded event
+      // orphaned), so do NOT mark the ledger paid or settle without validation —
+      // record the final outcome and leave it for operator reconcile.
+      if (payment.statement_id && payment.base_amount_cents == null) {
+        await db('payments').where({ id: payment.id }).update({ metadata: finalMeta });
+        logger.warn(`[stripe-webhook] statement S-${payment.statement_id} dispute won on a pre-settlement marker (no validated settlement) — left for manual reconcile`);
+        return;
+      }
+      // Funds reinstated — restore paid status (a VALIDATED statement settlement,
+      // or an invoice payment).
       await db('payments').where({ id: payment.id }).update({ status: 'paid', metadata: finalMeta });
-      // Statement won: only RE-APPLY a settlement that was already validated
-      // (base_amount_cents present ⇒ settleStatementPaid ran the
-      // computeChargeAmount/funding checks). If this row is a PRE-settlement
-      // dispute MARKER (never validated), do NOT mark the statement paid directly
-      // — restore the active PI and let the eventual payment_intent.succeeded
-      // settle it through the canonical surcharge/amount validation.
       if (payment.statement_id) {
-        if (payment.base_amount_cents != null) {
-          await restoreStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id);
-        } else {
-          await db('payer_statements')
-            .where({ id: payment.statement_id })
-            .whereIn('status', ['finalized', 'sent', 'viewed'])
-            .whereNull('stripe_payment_intent_id')
-            .update({ stripe_payment_intent_id: payment.stripe_payment_intent_id, updated_at: new Date() });
-          logger.warn(`[stripe-webhook] statement S-${payment.statement_id} dispute won (pre-settlement marker) — restored active PI, awaiting succeeded for validated settlement`);
-        }
+        await restoreStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id);
       }
       const invoice = await findInvoiceForPayment(payment);
       const wonInvoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;

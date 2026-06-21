@@ -10,6 +10,7 @@ let mockDbHandler = () => { throw new Error('db handler not configured'); };
 jest.mock('../models/db', () => {
   const fn = jest.fn((...args) => mockDbHandler(...args));
   fn.fn = { now: () => 'NOW' };
+  fn.raw = jest.fn(async () => ({})); // pg_advisory_xact_lock (statement money lock)
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

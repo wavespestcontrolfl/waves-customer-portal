@@ -48,6 +48,22 @@ function priorPayableStatus(stmt) {
 }
 
 /**
+ * Serialize ALL statement money mutations (settle / dispute / refund) on a
+ * per-statement advisory lock so out-of-order Stripe webhook events can't race
+ * each other (TOCTOU on the existence/state of the settlement row). Runs `fn(trx)`
+ * inside a transaction that holds the lock; `settleStatementPaid` takes the SAME
+ * lock, so a settlement and a dispute/refund for the same statement are
+ * strictly serialized and each re-reads state under the lock.
+ */
+async function withStatementMoneyLock(statementId, fn, { database = db } = {}) {
+  const run = async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
+    return fn(trx);
+  };
+  return database === db ? db.transaction(run) : run(database);
+}
+
+/**
  * Cascade-settle a statement to `paid`. MUST run inside the caller's transaction
  * (webhook or admin reconcile). Idempotent: a statement already `paid` is a
  * no-op (duplicate/late webhook). Throws if settled from a non-settleable status.
@@ -56,6 +72,9 @@ function priorPayableStatus(stmt) {
  * for ACH/offline). The base/surcharge split rides the `*_cents` columns.
  */
 async function settleStatementPaid(statementId, settlement = {}, { database = db, allowedStatuses = SETTLEABLE_STATEMENT_STATUSES } = {}) {
+  // Serialize against concurrent/out-of-order dispute & refund events on the same
+  // statement (they take the same advisory lock) — see withStatementMoneyLock.
+  await database.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
   const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first();
   if (!stmt) throw new Error(`settleStatementPaid: statement ${statementId} not found`);
   if (stmt.status === 'paid') {
@@ -190,6 +209,7 @@ module.exports = {
   SETTLEABLE_STATEMENT_STATUSES,
   isPayableStatementStatus,
   priorPayableStatus,
+  withStatementMoneyLock,
   settleStatementPaid,
   markStatementProcessing,
   revertStatementProcessing,
