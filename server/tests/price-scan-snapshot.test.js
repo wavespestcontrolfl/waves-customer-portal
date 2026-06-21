@@ -67,6 +67,11 @@ describe('searchTokens', () => {
   test('merges a slashed single-letter formulation code: I/T -> it', () => {
     expect(searchTokens({ searchQuery: 'Bifen I/T Insecticide', name: 'X' })).toEqual(['bifen', 'it', 'insecticide']);
   });
+  test('does NOT merge digits — "2,4-D Amine" keeps separate tokens (no synthetic 24d)', () => {
+    const toks = searchTokens({ vendorProductName: '2,4-D Amine' });
+    expect(toks).not.toContain('24d');
+    expect(toks).toContain('amine');
+  });
 });
 
 describe('bestMatchingLink (scored result selection)', () => {
@@ -128,6 +133,14 @@ describe('rankedMatchingLinks (try same-brand variants in turn)', () => {
     ], { vendorProductName: 'Talstar P', quantity: '1 gallon' });
     expect(ranked).toHaveLength(2);
     expect(ranked.every((h) => /talstar/.test(h))).toBe(true);
+  });
+  test('a numeric-active-ingredient product (2,4-D Amine) is not filtered out', () => {
+    // Regression: digit-merge used to make brand "24d" (no real slug has that), so the
+    // product was dropped. Letters-only merge -> brand "amine", which the slug carries.
+    const ranked = rankedMatchingLinks([
+      'https://www.domyown.com/southern-ag-2-4-d-amine-weed-killer-p-1.html',
+    ], { vendorProductName: '2,4-D Amine Weed Killer' });
+    expect(ranked).toHaveLength(1);
   });
   test('excludes non-brand links entirely (never opened/verified)', () => {
     expect(rankedMatchingLinks([

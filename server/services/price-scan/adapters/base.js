@@ -152,7 +152,7 @@ function searchTokens(product) {
   const merged = [];
   let run = '';
   for (const t of raw) {
-    if (t.length === 1) { run += t; continue; } // collapse i / t -> it
+    if (t.length === 1 && /[a-z]/.test(t)) { run += t; continue; } // merge consecutive single LETTERS (I/T -> it); never digits, so "2,4-D" stays 2,4,d
     if (run) { merged.push(run); run = ''; }
     merged.push(t);
   }
@@ -310,20 +310,29 @@ function makeAdapter(config) {
     // one — returning the first that VERIFIES rather than betting on a single link.
     const ranked = rankedMatchingLinks(await collectResultLinks(page, config), product);
     const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
-    let fallback = null;
+    const wantsEpa = !!(product && product.epaReg);
+    let fallback = null; // best-ranked priced page, if nothing verifies
+    let firstMatch = null; // first name+size match, used only if no EPA-confirmed one
     for (const url of ranked.slice(0, cap)) {
       const cand = await scrapeCandidate(page, vendor, product, url);
       if (!cand) continue;
-      if (!fallback) fallback = cand; // best-ranked priced page, if nothing verifies
+      if (!fallback) fallback = cand;
       const verdict = verifyMatch(
         { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
         product,
       );
-      if (verdict.matched) return cand;
+      if (verdict.matched) {
+        // Prefer an EPA-confirmed match. A single-letter formulation suffix the slug
+        // can't encode (catalog "Talstar P" vs page "Talstar Professional") means a
+        // sibling like "Talstar XTRA" can satisfy name+size on brand overlap alone —
+        // so don't stop on the first name+size hit; keep looking for the page whose
+        // EPA reg actually matches. (No EPA to disambiguate -> first match is best.)
+        if (!wantsEpa || verdict.signals.epa) return cand;
+        if (!firstMatch) firstMatch = cand;
+      }
     }
-    // Nothing verified — return the top priced page so the scanner reports a precise
-    // 'unverified' (with signals) rather than a blunt 'no_candidate'.
-    return fallback;
+    // EPA-confirmed > first name+size match > top priced page (-> precise 'unverified').
+    return firstMatch || fallback;
   }
 
   return { key: config.key, config, fetchCandidate };
