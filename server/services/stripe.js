@@ -1990,8 +1990,13 @@ const StripeService = {
     try {
       intent = await stripe.paymentIntents.retrieve(statement.stripe_payment_intent_id);
     } catch (e) {
+      // FAIL CLOSED: if we can't verify/cancel the existing PI, the AP's client
+      // secret may still be confirmable — recording an offline payment now risks
+      // double collection once Stripe recovers. Refuse the reconcile.
       logger.warn(`[stripe] could not retrieve statement PI ${statement.stripe_payment_intent_id}: ${e.message}`);
-      return { canceled: false, reason: 'retrieve_failed' };
+      const err = new Error('Could not verify the existing online payment intent — try the reconcile again shortly');
+      err.statusCode = 409;
+      throw err;
     }
     if (intent.status === 'canceled') return { canceled: false, reason: 'already_canceled' };
     if (!REPLACEABLE_PI_STATUSES.has(intent.status)) {

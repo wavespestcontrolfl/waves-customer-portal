@@ -13,6 +13,7 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 
 const router = express.Router();
 const db = require('../models/db');
@@ -24,11 +25,23 @@ const { loadStatementLines } = require('../services/payer-statements');
 const { markStatementViewed, isPayableStatementStatus } = require('../services/payer-statement-settle');
 const { CONFIGURED_COST_BPS } = require('../services/stripe-pricing');
 
-// Gate every route — off ⇒ the public statement-pay surface does not exist.
-router.use((req, res, next) => {
+// Public-route rate limit (per IP) — this is an unauthenticated by-token surface.
+const statementPayLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests — please slow down.' },
+});
+
+// Gate every route — off ⇒ the public statement-pay surface does not exist —
+// and rate-limit. A 64-hex token format gate lives in loadStatementByToken.
+router.use(statementPayLimiter, (req, res, next) => {
   if (!isEnabled('payerStatements')) return res.status(404).json({ error: 'Not found' });
   next();
 });
+
+const TOKEN_RE = /^[0-9a-f]{64}$/i; // payer_statements.token = randomBytes(32).hex
 
 function parseSnapshot(value) {
   if (!value) return null;
@@ -37,7 +50,7 @@ function parseSnapshot(value) {
 }
 
 async function loadStatementByToken(token) {
-  if (!token) return null;
+  if (!token || !TOKEN_RE.test(token)) return null; // format gate → generic 404
   return db('payer_statements').where({ token }).first();
 }
 

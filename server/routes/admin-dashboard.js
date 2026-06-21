@@ -90,6 +90,7 @@ async function paidRevenueTotal(from, to) {
   const [ledger, paidInvoiceGaps] = await Promise.all([
     db('payments')
       .where({ status: 'paid' })
+      .whereNull('payer_id') // exclude payer-scoped statement settlements (not homeowner revenue)
       .where('payment_date', '>=', from)
       .where('payment_date', '<=', to)
       .sum('amount as total')
@@ -118,6 +119,7 @@ async function paidRevenueDaily(from, to) {
   const [ledgerRows, paidInvoiceGapRows] = await Promise.all([
     db('payments')
       .where({ status: 'paid' })
+      .whereNull('payer_id') // exclude payer-scoped statement settlements (not homeowner revenue)
       .where('payment_date', '>=', from)
       .where('payment_date', '<=', to)
       .select(db.raw("payment_date::date as date"), db.raw("SUM(amount) as total"))
