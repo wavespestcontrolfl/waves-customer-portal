@@ -61,10 +61,13 @@ function classifyLinkType(domain = '', url = '') {
   const directories = ['yelp.com', 'bbb.org', 'angi.com', 'thumbtack.com', 'yellowpages.com', 'mapquest.com', 'manta.com', 'hotfrog.com', 'homeadvisor.com', 'houzz.com', 'porch.com', 'nextdoor.com', 'expertise.com', 'threebestrated.com', 'clutch.co', 'provenexpert.com'];
   const citations = ['fpma.org', 'npma.org', 'qualitypro.org', 'pestworld.org', 'fdacs.gov'];
   const social = ['facebook.com', 'linkedin.com', 'instagram.com', 'alignable.com', 'twitter.com', 'x.com', 'youtube.com', 'tiktok.com'];
+  // Exact host or subdomain match — NOT substring (else 'x.com' would match
+  // 'phoenix.com', sending unrelated domains down the wrong worker lane).
+  const hostMatches = (x) => d === x || d.endsWith('.' + x);
   if (HARO_PLATFORMS.has(d)) return 'haro';
-  if (directories.some((x) => d.includes(x)) || /\/directory|\/listing|\/business/i.test(u)) return 'directory';
-  if (citations.some((x) => d.includes(x))) return 'citation';
-  if (social.some((x) => d.includes(x))) return 'social';
+  if (directories.some(hostMatches) || /\/directory|\/listing|\/business/i.test(u)) return 'directory';
+  if (citations.some(hostMatches)) return 'citation';
+  if (social.some(hostMatches)) return 'social';
   if (/\/resources|\/partners|\/links|\/preferred|\/vendor/i.test(u)) return 'resource';
   if (/herald|tribune|patch\.com|gondolier|magazine|news|wwsb|abc7/i.test(d)) return 'editorial';
   if (/\/blog/i.test(u)) return 'editorial';
@@ -122,6 +125,9 @@ async function classifyChunk(chunk, { anthropic }) {
   const list = chunk.map((c, i) => ({
     i,
     domain: c.domain,
+    // The page the link sits on — a strong intent signal (/partners, /resources,
+    // /directory, /blog) the model would otherwise miss.
+    source_url: c.source_url || c.target_url || null,
     domain_rating: c.domain_rating ?? null,
     sample_anchors: (c.sample_anchors || []).slice(0, 3),
     links_to_competitors: c.links_to_competitors || [],
@@ -136,6 +142,7 @@ Scoring guidance:
 - relevance_0_100: topical/geographic fit to a SWFL pest & lawn company. A local realtor or home-services site = high; a generic national directory or unrelated tech site = low.
 - lead_value_tier: 1 = local referral partner (realtor/brokerage, property/HOA management, home inspector, complementary local home service). 2 = local media/PR/editorial. 3 = civic/chamber/sponsorship. 4 = industry/national directory. 5 = social/citation baseline. 0 = none/irrelevant.
 - is_haro_platform: true for HARO-style query services you JOIN (helpareporter, featured, qwoted, sourcebottle) — NOT a cold-email target.
+- intent_class: use source_url when present — /partners,/resources,/preferred,/vendor → resource; /blog or news/magazine host → editorial; /directory,/listing,/business → directory.
 
 Candidates:
 ${JSON.stringify(list)}`;
@@ -205,7 +212,11 @@ function contactScoreOf(contact) {
 
 function tierFor(classification) {
   const t = Number(classification.lead_value_tier);
-  if (t >= 1 && t <= 5) return t;
+  if (Number.isFinite(t) && t >= 1 && t <= 5) return t;
+  // An explicit 0 means "none/irrelevant" — keep it at the baseline tier, do NOT
+  // promote it to the intent-implied tier (which would hand it 80 lead points).
+  if (Number.isFinite(t) && t === 0) return 5;
+  // Missing/invalid only → infer from intent.
   switch (classification.intent_class) {
     case 'editorial': case 'resource': case 'guest_post': case 'haro': return 2;
     case 'directory': case 'citation': return 4;

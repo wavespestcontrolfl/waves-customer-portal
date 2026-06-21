@@ -22,6 +22,23 @@ describe('heuristicClassify', () => {
     expect(c.intent_class).toBe('directory');
     expect(c.lead_value_tier).toBe(4);
   });
+
+  test('exact host match — phoenix.com is NOT social, x.com is', () => {
+    expect(scorer.classifyLinkType('phoenix.com', '')).not.toBe('social');
+    expect(scorer.classifyLinkType('matrix.com', '')).not.toBe('social');
+    expect(scorer.classifyLinkType('x.com', '')).toBe('social');
+    expect(scorer.classifyLinkType('m.facebook.com', '')).toBe('social'); // subdomain still matches
+  });
+});
+
+describe('lead_value_tier handling', () => {
+  const base = (o) => ({ intent_class: 'editorial', relevance_0_100: 30, ...o });
+  test('explicit 0 stays at baseline tier 5 (not promoted to intent tier 2)', () => {
+    expect(scorer.scoreProspect({ domain_rating: 50 }, base({ lead_value_tier: 0 }), { has_contact_path: true, contact_email: 'a@b.com' }).tier).toBe(5);
+  });
+  test('missing tier falls back to the intent-implied tier', () => {
+    expect(scorer.scoreProspect({ domain_rating: 50 }, base({}), { has_contact_path: true }).tier).toBe(2);
+  });
 });
 
 describe('contactGate', () => {
