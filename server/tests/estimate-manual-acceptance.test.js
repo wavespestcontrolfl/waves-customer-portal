@@ -8,6 +8,7 @@ jest.mock('../services/account-membership-email', () => ({
 jest.mock('../services/proposal-win', () => ({
   ensureCustomerForProposalWin: jest.fn(),
   promoteLinkedCustomerForProposalWin: jest.fn(),
+  flagProposalCustomerCommercialIfTaxable: jest.fn(),
   createProposalAcceptanceInvoice: jest.fn(),
 }));
 
@@ -719,6 +720,7 @@ describe('commercial proposal win paths (#1917)', () => {
   beforeEach(() => {
     proposalWin.ensureCustomerForProposalWin.mockReset();
     proposalWin.promoteLinkedCustomerForProposalWin.mockReset();
+    proposalWin.flagProposalCustomerCommercialIfTaxable.mockReset();
     proposalWin.createProposalAcceptanceInvoice.mockReset();
   });
 
@@ -792,6 +794,25 @@ describe('commercial proposal win paths (#1917)', () => {
     // Bailed right after the claim, before routing — neither billing path ran.
     expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(proposalWin.ensureCustomerForProposalWin).not.toHaveBeenCalled();
+  });
+
+  test('pre-linked non-invoice-mode win flags the customer commercial for a taxable proposal', async () => {
+    // A taxable proposal pre-linked to an existing (e.g. residential/lead)
+    // customer, won WITHOUT invoice mode, skips createProposalAcceptanceInvoice —
+    // so it must still flag the customer commercial, or later invoices for this
+    // taxable commercial work would be forced to $0 tax (underbilling).
+    const estimate = baseProposalEstimate({ id: 'prop-prelinked', customer_id: 'cust-existing', bill_by_invoice: false });
+    const { database } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    });
+
+    expect(proposalWin.promoteLinkedCustomerForProposalWin).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-existing' }));
+    expect(proposalWin.flagProposalCustomerCommercialIfTaxable).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-existing' }));
+    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled(); // not invoice-mode
   });
 
   test('invoice-mode win: builds the proposal invoice and surfaces it', async () => {

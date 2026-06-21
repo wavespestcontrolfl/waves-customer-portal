@@ -270,6 +270,16 @@ async function markEstimateManuallyAccepted({
           customerId: updatedEstimate.customer_id,
         });
       }
+      // Flag the (created or pre-linked) customer commercial for a TAXABLE
+      // proposal even when we're not building the first invoice now — otherwise a
+      // pre-linked residential/lead customer stays non-commercial and any later
+      // invoice for this taxable commercial work would be forced to $0 tax,
+      // underbilling. Idempotent (a new lead-win customer is already commercial).
+      await proposalWin.flagProposalCustomerCommercialIfTaxable({
+        trx,
+        customerId: updatedEstimate.customer_id,
+        proposal: normalizeProposal(updatedEstimate),
+      });
       // Invoice-mode win: build the first invoice from the proposal line items.
       if (updatedEstimate.bill_by_invoice) {
         try {

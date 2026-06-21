@@ -250,6 +250,25 @@ async function ensureCustomerForProposalWin({ trx, estimate, proposal, today = e
 
 // Create the acceptance invoice for a bill-by-invoice commercial proposal.
 // Returns the invoice row, or null when the proposal has no billable lines.
+// Flag the proposal's customer commercial when the proposal has taxable lines.
+// InvoiceService forces residential invoices to $0 tax (operator policy keyed on
+// customers.property_type), so ANY invoice for a taxable commercial proposal — the
+// first invoice OR a later one created through the normal invoice path — would
+// silently drop tax unless the customer is commercial. Run on EVERY proposal win
+// (incl. non-invoice-mode + operator-pre-linked customers), not just when we build
+// the first invoice. Idempotent: no-op when there are no taxable lines or the
+// customer is already commercial/business.
+async function flagProposalCustomerCommercialIfTaxable({ trx, customerId, proposal }) {
+  if (!customerId) return;
+  const built = buildProposalFirstInvoice(proposal);
+  if (!(built.taxableSubtotal > 0)) return;
+  const cust = await trx('customers').where({ id: customerId }).first('property_type');
+  if (cust && cust.property_type !== 'commercial' && cust.property_type !== 'business') {
+    await trx('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+    logger.info(`[proposal-win] flagged customer ${customerId} commercial for taxable proposal`);
+  }
+}
+
 async function createProposalAcceptanceInvoice({ trx, estimate, proposal, customerId }) {
   if (!customerId) throw winError('A customer is required to invoice a proposal win.', 400);
   const built = buildProposalFirstInvoice(proposal);
@@ -258,19 +277,9 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     return null;
   }
 
-  // InvoiceService forces residential invoices to $0 tax (operator policy keyed
-  // on customers.property_type). When the proposal has taxable lines, the
-  // billed customer must be commercial or the tax silently drops to $0 and the
-  // board is underbilled — so ensure the flag before invoicing. (A new
-  // proposal-win customer is already inserted commercial; this covers a
-  // phone-matched or operator-pre-linked customer.)
-  if (built.taxableSubtotal > 0) {
-    const cust = await trx('customers').where({ id: customerId }).first('property_type');
-    if (cust && cust.property_type !== 'commercial' && cust.property_type !== 'business') {
-      await trx('customers').where({ id: customerId }).update({ property_type: 'commercial' });
-      logger.info(`[proposal-win] flagged customer ${customerId} commercial so taxable proposal estimate ${estimate.id} bills tax`);
-    }
-  }
+  // Ensure the billed customer is commercial for a taxable proposal (else
+  // InvoiceService forces $0 tax). Defensive — the win flow also flags it upstream.
+  await flagProposalCustomerCommercialIfTaxable({ trx, customerId, proposal });
 
   const invoice = await InvoiceService.create({
     database: trx,
@@ -294,5 +303,6 @@ module.exports = {
   commercialWinPromotionStamps,
   promoteLinkedCustomerForProposalWin,
   ensureCustomerForProposalWin,
+  flagProposalCustomerCommercialIfTaxable,
   createProposalAcceptanceInvoice,
 };
