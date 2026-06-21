@@ -11,6 +11,7 @@ const {
   serviceFamilyKey,
   uniqueServiceFamilies,
 } = require('../scripts/align-waveguard-portal-records');
+const { buildRecurringOccurrenceDates } = require('../services/self-booking-plan-sync');
 
 describe('WaveGuard portal alignment script helpers', () => {
   const customerColumns = {
@@ -280,6 +281,24 @@ describe('WaveGuard portal alignment script helpers', () => {
     );
     expect(dates).toHaveLength(4);
     expect(dates.every((d) => d >= '2026-06-20')).toBe(true);
+  });
+
+  test('preserves the original nth-weekday ordinal for a far-past 5th-weekday anchor', () => {
+    // 2020-09-29 is the 5th Tuesday of Sep 2020. The planned future visits must match
+    // generating the series straight from the original base (ordinal preserved), not
+    // drift onto a 4th-weekday cadence after an intermediate ordinal-fallback month.
+    const today = '2026-06-20';
+    const planned = plannedFutureDates(
+      { scheduled_date: '2020-09-29', recurring_pattern: 'monthly' },
+      { recurringPattern: 'monthly' },
+      today,
+      4,
+    );
+    const groundTruth = buildRecurringOccurrenceDates('2020-09-29', 'monthly', 120)
+      .filter((d) => d >= today)
+      .slice(0, 4);
+    expect(planned).toEqual(groundTruth);
+    expect(planned).toHaveLength(4);
   });
 
   test('seasonal plans only generate in-season planned dates', () => {

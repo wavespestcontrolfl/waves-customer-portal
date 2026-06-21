@@ -291,21 +291,21 @@ function plannedFutureDates(anchor, plan, today, targetCount) {
   const seasonMonths = plan.seasonMonths || null;
   const inWindow = (date) => date >= today && dateInSeason(date, seasonMonths);
 
-  // Keep advancing the cadence forward (from the end of each generated chunk) until we
-  // collect enough future in-window dates. A far-past anchor — e.g. a monthly series
-  // anchored years ago, more than one chunk behind today — must walk forward to the
-  // current window rather than restarting from `base`, or --apply would silently insert
-  // no missing visits for long-running members. The guard bounds the walk.
-  const futureDates = [];
-  let cursor = base;
-  for (let guard = 0; futureDates.length < targetCount && guard < 200; guard += 1) {
-    const chunk = buildRecurringOccurrenceDates(cursor, pattern, targetCount + 12, { intervalDays });
-    for (const date of chunk) {
-      if (inWindow(date) && !futureDates.includes(date)) futureDates.push(date);
-    }
-    const last = chunk[chunk.length - 1];
-    if (!last || last <= cursor) break; // no forward progress — stop
-    cursor = last;
+  // Always generate occurrences from the ORIGINAL anchor base (never an intermediate
+  // date), growing the count until enough future in-window dates are found. This both
+  // walks a far-past anchor (anchored years ago) forward to today's window — so --apply
+  // doesn't silently no-op for long-running members — AND preserves the original
+  // nth-weekday ordinal across the whole series: restarting a chunk from a month that
+  // fell back to the 4th weekday would shift every later visit. The guard bounds growth.
+  let futureDates = [];
+  let lastGenerated = null;
+  for (let count = targetCount + 12, guard = 0; guard < 200; guard += 1, count += targetCount + 12) {
+    const generated = buildRecurringOccurrenceDates(base, pattern, count, { intervalDays });
+    futureDates = generated.filter(inWindow);
+    if (futureDates.length >= targetCount) break;
+    const last = generated[generated.length - 1];
+    if (!last || last === lastGenerated) break; // no forward progress — stop
+    lastGenerated = last;
   }
   return futureDates.slice(0, targetCount);
 }
