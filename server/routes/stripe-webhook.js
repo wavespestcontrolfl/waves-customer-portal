@@ -633,6 +633,18 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
       }
       if (stmt.status === 'paid') return; // idempotent — THIS PI already settled
 
+      // Fail closed on UNVERIFIED card funding: surcharge must derive from the
+      // ACTUAL confirmed funding, but paymentDetailsFromIntent swallows Stripe
+      // charge/PM lookup failures and leaves funding null. For a card-family PI
+      // (created at base) a credit card confirmed without /finalize would then
+      // recompute against funding:null (no surcharge) and settle undercharged.
+      // Record for manual review instead of settling the wrong amount.
+      if (methodType !== 'us_bank_account' && !funding) {
+        await recordStatementPaymentIssue(paymentIntent, statementId, `unverified card funding (lookup failed) for PI ${piId} — surcharge can't be validated, manual review`);
+        logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} unverified card funding — not settling`);
+        return;
+      }
+
       // Surcharge correctness: recompute the expected total for the ACTUAL
       // confirmed funding and require the charged amount to match (binds surcharge
       // to the real tender, not stale finalization metadata). A credit card
