@@ -187,6 +187,17 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
     expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com'] })).toBe('sarasotaflpestcontrol.com');
   });
 
+  test('hub-only merge guard short-circuits when the network is re-enabled (toggle is coherent end-to-end)', async () => {
+    // With the lane explicitly re-enabled, spoke-targeted PRs are intended, so
+    // the merge guard must NOT reject them — otherwise the seed -> publish ->
+    // merge chain is half-enabled (spoke PRs created but un-mergeable). The
+    // enabled path returns before any GitHub IO, so no network mock is needed.
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    await expect(
+      _internals.assertOpenPublishPrIsHubOnly({ slug: '/pest-control/x-sarasota/', astro_branch_name: 'content/x' }, { number: 1 }),
+    ).resolves.toBeUndefined();
+  });
+
   test('blogOriginForSpoke: spoke www origin vs hub origin', () => {
     expect(_internals.blogOriginForSpoke('sarasotaflpestcontrol.com')).toBe('https://www.sarasotaflpestcontrol.com');
     expect(_internals.blogOriginForSpoke(null)).toBe('https://www.wavespestcontrol.com');

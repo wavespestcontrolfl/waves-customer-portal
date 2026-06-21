@@ -1608,6 +1608,13 @@ async function mergeAstro(postId) {
 }
 
 async function assertOpenPublishPrIsHubOnly(post, pr) {
+  // Hub-only merge guard. Enforced whenever the spoke blog network is disabled
+  // (the default) — a post can only carry non-hub domains here if it slipped
+  // past the publish-time routing, so reject it. When an operator has EXPLICITLY
+  // re-enabled the lane (SPOKE_BLOG_NETWORK_ENABLED=true), spoke-targeted PRs are
+  // intended, so skip the assertion — otherwise the seed -> publish -> merge
+  // chain is half-enabled (spoke PRs would be created but could never merge).
+  if (spokeBlogNetworkEnabled()) return;
   const ref = post.astro_branch_name || pr?.head?.ref;
   const slug = post.slug || slugify(post.title);
   const resolved = await resolveExistingAstroFileAtRef(`${ASTRO_BLOG_DIR}/${slug}`, ref);
@@ -2424,6 +2431,7 @@ module.exports = {
     blogOriginForSpoke,
     stampBlogDomains,
     stampHubOnlyBlogDomains,
+    assertOpenPublishPrIsHubOnly,
     syncDraftPublishTarget,
     mdxBreakingToken,
   },
