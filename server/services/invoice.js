@@ -1666,10 +1666,11 @@ const InvoiceService = {
     // full year of prepaid visits as a single completed service. Resolve the
     // term up front; a cancelled/refunded term reverts to the standard copy.
     const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
-    const prepayActive = !!annualPrepay
-      && !["cancelled", "canceled", "refunded"].includes(
-        String(annualPrepay.status || "").toLowerCase(),
-      );
+    // coverageActive is the descriptor's single source of truth for "is this
+    // term still covered" — it keeps a renewal lapse (cancelled +
+    // renewal_decision='cancel', still covered through term_end) active while
+    // excluding true void/refund terms, matching the billing guard.
+    const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
     const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
 
     // Body comes from the editable invoice_sent template (or its annual-prepay

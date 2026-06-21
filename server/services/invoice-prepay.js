@@ -187,7 +187,8 @@ async function loadInvoiceAnnualPrepay(invoice) {
   const term = await db('annual_prepay_terms')
     .where({ id: invoice.annual_prepay_term_id })
     .first(
-      'id', 'status', 'plan_label', 'monthly_rate', 'prepay_amount', 'term_start', 'term_end',
+      'id', 'status', 'renewal_decision', 'plan_label', 'monthly_rate', 'prepay_amount',
+      'term_start', 'term_end',
       ...coverageCols,
     )
     .catch(() => null);
@@ -195,14 +196,21 @@ async function loadInvoiceAnnualPrepay(invoice) {
   const prepayAmount = term.prepay_amount != null ? Number(term.prepay_amount) : null;
   // A voided/refunded invoice flips its term to a terminal status but keeps the
   // link on the invoice, so an old pay link / PDF would otherwise still list the
-  // covered visits as "Included". Drop them for terminal terms (same set the SMS
-  // path excludes) so a cancelled/refunded term never promises future visits.
-  const termTerminal = ['cancelled', 'canceled', 'refunded'].includes(
-    String(term.status || '').toLowerCase(),
-  );
+  // covered visits as "Included". Drop them for terminal terms so a void/refund
+  // never promises future visits — but NOT for a renewal lapse, which the
+  // billing guard (annual-prepay-renewals.js coveredTermCustomerIds) treats as
+  // still-active coverage: status='cancelled' WITH renewal_decision='cancel'
+  // stays covered through term_end (a true refund has a NULL renewal_decision).
+  const status = String(term.status || '').toLowerCase();
+  const renewalDecision = String(term.renewal_decision || '').toLowerCase();
+  const renewalLapseStillCovered = status === 'cancelled' && renewalDecision === 'cancel';
+  const coverageActive = renewalLapseStillCovered
+    || !['cancelled', 'canceled', 'refunded'].includes(status);
   return {
     id: term.id,
     status: term.status,
+    renewalDecision: term.renewal_decision || null,
+    coverageActive,
     planLabel: term.plan_label || null,
     monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
     prepayAmount,
@@ -212,7 +220,7 @@ async function loadInvoiceAnnualPrepay(invoice) {
     coverageServiceType: term.coverage_service_type || null,
     coverageVisitCount: term.coverage_visit_count != null ? Number(term.coverage_visit_count) : null,
     coverageCadence: term.coverage_cadence || null,
-    coverageVisits: termTerminal ? [] : buildCoverageVisits(term, prepayAmount),
+    coverageVisits: coverageActive ? buildCoverageVisits(term, prepayAmount) : [],
     setupFeeWaived: annualPrepaySetupFeeWaived(invoice),
   };
 }
