@@ -2430,3 +2430,91 @@ describe('newsletter quiz — config, rendering, tag resolution', () => {
       .resolves.toEqual({ ok: false, reason: 'bad-answer' });
   });
 });
+
+describe('newsletter quiz — multi-quiz tokens + picker/results helpers (Phase 2b)', () => {
+  const quiz = require('../services/newsletter-quiz');
+  const T = '11111111-2222-3333-4444-555555555555';
+
+  test('listQuizzes returns lawn/pest/mosquito with answers + tags', () => {
+    const ids = quiz.listQuizzes().map((q) => q.id);
+    expect(ids).toEqual(expect.arrayContaining(['lawn-headache-v1', 'pest-pressure-v1', 'mosquito-v1']));
+    const pest = quiz.listQuizzes().find((q) => q.id === 'pest-pressure-v1');
+    expect(pest.answers.find((a) => a.key === 'ants').tags).toContain('pest:ants');
+  });
+
+  test('parseQuizTokens extracts default + id + text variants, deduped', () => {
+    const parsed = quiz.parseQuizTokens('a {{quiz}} b {{quiz:pest-pressure-v1}} c {{quiz-text}} d {{quiz}}');
+    expect(parsed).toEqual([
+      { raw: '{{quiz}}', isText: false, quizId: 'lawn-headache-v1' },
+      { raw: '{{quiz:pest-pressure-v1}}', isText: false, quizId: 'pest-pressure-v1' },
+      { raw: '{{quiz-text}}', isText: true, quizId: 'lawn-headache-v1' },
+    ]);
+  });
+
+  test('hasQuizToken matches id form and rejects near-misses', () => {
+    expect(quiz.hasQuizToken('x {{quiz:mosquito-v1}} y')).toBe(true);
+    expect(quiz.hasQuizToken('x {{quizfoo}} y')).toBe(false);
+    expect(quiz.hasQuizToken('x {{quiz-textfoo}} y')).toBe(false);
+  });
+
+  test('buildQuizSubstitutions keys each token with its correct html/text render', () => {
+    const subs = quiz.buildQuizSubstitutions('{{quiz:pest-pressure-v1}} {{quiz-text:pest-pressure-v1}}', { token: T });
+    expect(Object.keys(subs).sort()).toEqual(['{{quiz-text:pest-pressure-v1}}', '{{quiz:pest-pressure-v1}}']);
+    expect(subs['{{quiz:pest-pressure-v1}}']).toContain('/pest-pressure-v1/ants');
+    expect(subs['{{quiz:pest-pressure-v1}}']).toContain(T);
+    expect(subs['{{quiz-text:pest-pressure-v1}}']).toContain('https://'); // text links
+  });
+
+  test('neutralizeQuizTokens handles id tokens and drops unknown quizzes', () => {
+    const out = quiz.neutralizeQuizTokens('a {{quiz:mosquito-v1}} b {{quiz:nope}} c');
+    expect(out).not.toContain('{{quiz');
+    expect(out).toContain('running you off'); // mosquito question rendered
+  });
+
+  test('an answer with no tags (mosquito "We\'re good") records but writes no tag', async () => {
+    // resolveAnswer present, tags empty → recordQuizResponse short-circuits the
+    // tag merge. We only assert the config here (DB path needs a live row).
+    expect(quiz.resolveAnswer('mosquito-v1', 'were-good').tags).toEqual([]);
+  });
+});
+
+describe('newsletter quiz — aggregateQuizResults (results dashboard)', () => {
+  const { aggregateQuizResults } = require('../services/newsletter-quiz');
+
+  test('groups by quiz, labels answers, orders by config, computes rate', () => {
+    const rows = [
+      { quiz_id: 'lawn-headache-v1', quiz_answer: 'weeds', n: '5' },
+      { quiz_id: 'lawn-headache-v1', quiz_answer: 'brown-patch', n: 17 },
+      { quiz_id: 'lawn-headache-v1', quiz_answer: 'bugs', n: 6 },
+    ];
+    const out = aggregateQuizResults({ rows, totalRecipients: 100 });
+    expect(out.totalResponses).toBe(28);
+    expect(out.responseRate).toBe(28);
+    expect(out.quizzes).toHaveLength(1);
+    const q = out.quizzes[0];
+    expect(q.question).toMatch(/biggest headache/);
+    expect(q.responses).toBe(28);
+    // config order: brown-patch, weeds, bugs, not-sure → brown-patch first
+    expect(q.answers.map((a) => a.key)).toEqual(['brown-patch', 'weeds', 'bugs']);
+    expect(q.answers[0]).toMatchObject({ key: 'brown-patch', label: 'Brown patches', count: 17 });
+  });
+
+  test('empty rows → zero responses, zero rate, no quizzes', () => {
+    expect(aggregateQuizResults({ rows: [], totalRecipients: 50 })).toEqual({
+      totalRecipients: 50, totalResponses: 0, responseRate: 0, quizzes: [],
+    });
+  });
+
+  test('handles multiple quizzes and legacy/unknown answer keys (sorted last, raw label)', () => {
+    const rows = [
+      { quiz_id: 'pest-pressure-v1', quiz_answer: 'ants', n: 3 },
+      { quiz_id: 'pest-pressure-v1', quiz_answer: 'legacy-x', n: 1 },
+      { quiz_id: 'mosquito-v1', quiz_answer: 'every-night', n: 2 },
+    ];
+    const out = aggregateQuizResults({ rows, totalRecipients: 0 });
+    expect(out.responseRate).toBe(0); // no divide-by-zero
+    const pest = out.quizzes.find((q) => q.quizId === 'pest-pressure-v1');
+    expect(pest.answers.map((a) => a.key)).toEqual(['ants', 'legacy-x']); // unknown last
+    expect(pest.answers.find((a) => a.key === 'legacy-x').label).toBe('legacy-x'); // raw fallback
+  });
+});

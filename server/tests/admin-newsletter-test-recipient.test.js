@@ -127,3 +127,24 @@ describe('admin newsletter test recipient guardrails', () => {
     });
   });
 });
+
+describe('admin newsletter quiz endpoints', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // /quizzes touches no table; throw if it unexpectedly queries.
+    db.mockImplementation((table) => { throw new Error(`Unexpected table ${table}`); });
+  });
+
+  test('GET /quizzes returns the server quiz config (lawn/pest/mosquito)', async () => {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/newsletter/quizzes`);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const ids = (body.quizzes || []).map((q) => q.id);
+      expect(ids).toEqual(expect.arrayContaining(['lawn-headache-v1', 'pest-pressure-v1', 'mosquito-v1']));
+      const lawn = body.quizzes.find((q) => q.id === 'lawn-headache-v1');
+      expect(lawn.label).toBe('Lawn headache');
+      expect(lawn.answers.find((a) => a.key === 'brown-patch').tags).toContain('lawn:brown-patch');
+    });
+  });
+});
