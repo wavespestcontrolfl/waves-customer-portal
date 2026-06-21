@@ -53,6 +53,13 @@ describe('scoreProspect composite', () => {
     expect(s.priority).toBe('high');
     expect(s.tier).toBe(1);
   });
+  test('coerces a non-claimable intent (unknown) to a worker-claimable type', () => {
+    const s = scorer.scoreProspect({ domain_rating: 30 }, cls({ intent_class: 'unknown' }), { has_contact_path: true, contact_email: 'a@b.com' });
+    expect(['editorial', 'resource', 'guest_post', 'haro', 'directory', 'citation', 'social']).toContain(s.intent_class);
+    expect(s.intent_class).toBe('resource'); // contactable outreach default
+    expect(s.raw_intent_class).toBe('unknown');
+  });
+
   test('high-DR national directory scores BELOW a relevant local partner', () => {
     const local = scorer.scoreProspect({ domain_rating: 25 }, cls(), { has_contact_path: true, contact_email: 'a@b.com' });
     const natl = scorer.scoreProspect({ domain_rating: 90 }, cls({ intent_class: 'directory', relevance_0_100: 25, is_local_swfl: false, lead_value_tier: 4 }), null);

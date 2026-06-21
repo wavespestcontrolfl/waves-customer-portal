@@ -33,6 +33,10 @@ const OUTREACH_INTENTS = new Set(['editorial', 'resource', 'guest_post']);
 // Signup/aggregator lane — no email needed (the worker signs up), so exempt.
 const SIGNUP_INTENTS = new Set(['directory', 'citation', 'social']);
 
+// The only link_types link-prospect-worker can claim. A stored prospect MUST use
+// one of these or it strands in 'prospect' forever.
+const CLAIMABLE_LINK_TYPES = new Set(['editorial', 'resource', 'guest_post', 'haro', 'directory', 'citation', 'social']);
+
 // HARO-class platforms: you JOIN them, you don't cold-email them. Flagged so the
 // drafter never wastes a send pitching helpareporter.com itself.
 const HARO_PLATFORMS = new Set([
@@ -244,11 +248,20 @@ function scoreProspect(candidate, classification, contact) {
   const priority = score >= 68 ? 'high' : score >= 45 ? 'medium' : 'low';
   const gate = contactGate(classification, contact);
 
+  // The stored link_type MUST be one the worker can claim. classifyLinkType (or
+  // the model) can return 'unknown'/'forum'/'comment'; persisting that as
+  // link_type would strand a high-scoring prospect forever, since
+  // link-prospect-worker only claims the 7 canonical types. Coerce: a passing
+  // outreach target becomes 'resource' (a partner/resource link), signup → 'directory'.
+  let linkType = classification.intent_class;
+  if (!CLAIMABLE_LINK_TYPES.has(linkType)) linkType = gate.lane === 'signup' ? 'directory' : 'resource';
+
   return {
     score,
     tier,
     priority,
-    intent_class: classification.intent_class,
+    intent_class: linkType,
+    raw_intent_class: classification.intent_class,
     target_topic: classification.target_topic || 'general',
     suggested_anchor: classification.suggested_anchor || null,
     relevance_0_100: relevance,
