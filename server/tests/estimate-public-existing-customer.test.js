@@ -78,14 +78,16 @@ function donMembership(overrides = {}) {
 }
 
 describe('existing-customer public estimate page', () => {
-  test('waives the WaveGuard setup and removes the annual prepay option', () => {
+  test('existing-customer lawn estimate has no setup fee and no prepay option', () => {
     const html = renderPage('existing-token', lawnEstimate(), lawnEstimateData(), donMembership());
 
-    expect(html).toContain('<s>$99</s> $0');
-    expect(html).toContain("you're already a Waves customer");
-    // No prepay payment column and no prepay pick button. (The static page
-    // JS still carries prepay strings for other estimates, so assert on the
-    // rendered elements, not the raw copy.)
+    // Lawn carries no WaveGuard setup fee under the unified model — nothing to
+    // charge, nothing to strike through as waived.
+    expect(html).not.toContain('WaveGuard Membership Setup');
+    expect(html).not.toContain('<s>$99</s> $0');
+    // Existing members stay pay-per-application only — no prepay column/button.
+    // (The static page JS still carries prepay strings for other estimates, so
+    // assert on the rendered elements, not the raw copy.)
     expect(html).not.toContain('<h3>Pay the 12-month plan in full</h3>');
     expect(html).not.toContain('data-payment-setup="prepay_annual"');
     expect(html).not.toContain('data-pay-pref="prepay_annual" data-pay-pref-prepay');
@@ -136,9 +138,9 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('Welcome back');
     expect(html).not.toContain('Member pricing');
     expect(html).not.toContain('save $0.00');
-    // The snapshot still drives the existing-customer billing treatment.
-    expect(html).toContain('<s>$99</s> $0');
-    expect(html).toContain("you're already a Waves customer");
+    // Lawn carries no setup fee, so there is no waived-setup billing treatment.
+    expect(html).not.toContain('<s>$99</s> $0');
+    expect(html).not.toContain('WaveGuard Membership Setup');
   });
 
   test('Silver re-quote with no upgrade and no rows renders no member card', () => {
@@ -151,7 +153,8 @@ describe('existing-customer public estimate page', () => {
 
     expect(html).not.toContain('<section class="card wg-member-card">');
     expect(html).not.toContain('Welcome back');
-    expect(html).toContain("you're already a Waves customer");
+    // Lawn has no setup fee; existing members get no prepay option either.
+    expect(html).not.toContain('data-payment-setup="prepay_annual"');
   });
 
   test('Silver+ with the applied discount margin-guarded to 0 renders no member card', () => {
@@ -201,13 +204,15 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('Add Seasonal Mosquito and save more');
   });
 
-  test('leads keep the original page: $99 setup, annual prepay, pest-control cross-sell', () => {
+  test('leads on a lawn estimate: no setup fee, 5% prepay discount, pest-control cross-sell', () => {
     const html = renderPage('lead-token', lawnEstimate(), lawnEstimateData(), null);
 
+    // New customers still get the annual prepay option — now a 5% discount in
+    // place of the setup waiver, since lawn carries no $99 setup.
     expect(html).toContain('<h3>Pay the 12-month plan in full</h3>');
     expect(html).toContain('data-payment-setup="prepay_annual"');
-    // $99 setup charged (not waived) in the pay-per-application column.
-    expect(html).toContain('<span>WaveGuard Membership Setup</span><strong>$99</strong>');
+    expect(html).toContain('Prepay discount (5%)');
+    expect(html).not.toContain('<span>WaveGuard Membership Setup</span><strong>$99</strong>');
     expect(html).not.toContain("you're already a Waves customer");
     expect(html).toContain('Add Pest Control for bundled pricing');
   });
@@ -246,13 +251,15 @@ describe('existing-customer public estimate page', () => {
   });
 
   test('estimate-converter never bills the setup fee for existing customers', () => {
-    const recurringServices = [{ name: 'Lawn Care', mo: 69.75 }];
+    const recurringServices = [{ service: 'pest_control', name: 'Pest Control', mo: 69.75 }];
 
+    // Existing pest members never pay the setup again.
     expect(shouldIncludeWaveGuardSetupFeeForRecurring({
       recurringServices,
       estimateData: { membershipSnapshot: { isExistingCustomer: true }, result: { oneTime: { items: [] } } },
     })).toBe(false);
 
+    // New pest customers do.
     expect(shouldIncludeWaveGuardSetupFeeForRecurring({
       recurringServices,
       estimateData: { result: { oneTime: { items: [] } } },
