@@ -1140,7 +1140,11 @@ function applyVisionPropertyTypeEvidence(rc, propertyType, ai) {
 // confidence band.
 const SATELLITE_TYPE_MIN_CONFIDENCE = (() => {
   const n = Number(process.env.SATELLITE_TYPE_MIN_CONFIDENCE);
-  return Number.isFinite(n) && n >= 0 ? n : 70;
+  // Must be a real positive percentage. Number('') and Number('  ') are 0, so a
+  // blank/whitespace env var would otherwise set the bar to 0 and silently
+  // disable the guard (every read "confident") — reject 0/blank/out-of-range
+  // and fall back to the 70 default.
+  return Number.isFinite(n) && n > 0 && n <= 100 ? n : 70;
 })();
 
 // A satellite attachment read is trustworthy enough to reprice on only when the
