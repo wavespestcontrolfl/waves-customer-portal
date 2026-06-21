@@ -269,6 +269,19 @@ describe('WaveGuard portal alignment script helpers', () => {
     expect(buildParentUpdates({ recurring_pattern: 'Monthly' }, { recurringPattern: 'monthly' }, null, cols)).not.toHaveProperty('recurring_pattern');
   });
 
+  test('advances a far-past anchor to the current window instead of repairing nothing', () => {
+    // A monthly series anchored years ago is many chunks behind today; the planner must
+    // walk forward to today's window rather than returning [] (silent no-op repair).
+    const dates = plannedFutureDates(
+      { scheduled_date: '2020-03-10', recurring_pattern: 'monthly' },
+      { recurringPattern: 'monthly' },
+      '2026-06-20',
+      4,
+    );
+    expect(dates).toHaveLength(4);
+    expect(dates.every((d) => d >= '2026-06-20')).toBe(true);
+  });
+
   test('seasonal plans only generate in-season planned dates', () => {
     // Seasonal mosquito (monthly cadence, Feb–Oct) anchored in October must skip
     // Nov/Dec/Jan instead of seeding out-of-season plan-covered visits.

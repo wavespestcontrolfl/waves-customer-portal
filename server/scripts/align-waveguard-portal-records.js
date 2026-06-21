@@ -290,14 +290,24 @@ function plannedFutureDates(anchor, plan, today, targetCount) {
   // in-season visits, so an Oct anchor does not seed Nov–Jan plan-covered rows.
   const seasonMonths = plan.seasonMonths || null;
   const inWindow = (date) => date >= today && dateInSeason(date, seasonMonths);
-  const generated = buildRecurringOccurrenceDates(base, pattern, 36, { intervalDays });
-  const future = generated.filter(inWindow);
-  if (future.length >= targetCount) return future.slice(0, targetCount);
 
-  const extendedBase = future[future.length - 1] || base;
-  const extended = buildRecurringOccurrenceDates(extendedBase, pattern, targetCount + 12, { intervalDays })
-    .filter(inWindow);
-  return Array.from(new Set([...future, ...extended])).slice(0, targetCount);
+  // Keep advancing the cadence forward (from the end of each generated chunk) until we
+  // collect enough future in-window dates. A far-past anchor — e.g. a monthly series
+  // anchored years ago, more than one chunk behind today — must walk forward to the
+  // current window rather than restarting from `base`, or --apply would silently insert
+  // no missing visits for long-running members. The guard bounds the walk.
+  const futureDates = [];
+  let cursor = base;
+  for (let guard = 0; futureDates.length < targetCount && guard < 200; guard += 1) {
+    const chunk = buildRecurringOccurrenceDates(cursor, pattern, targetCount + 12, { intervalDays });
+    for (const date of chunk) {
+      if (inWindow(date) && !futureDates.includes(date)) futureDates.push(date);
+    }
+    const last = chunk[chunk.length - 1];
+    if (!last || last <= cursor) break; // no forward progress — stop
+    cursor = last;
+  }
+  return futureDates.slice(0, targetCount);
 }
 
 async function serviceIdMap() {
