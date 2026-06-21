@@ -719,7 +719,11 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   }
 
   if (alignment.inferredTier && Object.keys(alignment.updates).length) {
-    database('activity_log').insert({
+    // Best-effort audit row written on the real pool connection (NOT `database`, which
+    // may be a caller's transaction). A fire-and-forget insert on a passed-in trx could
+    // run after that transaction commits ("transaction already complete") or poison it,
+    // so it must use an independent connection.
+    void db('activity_log').insert({
       customer_id: customerId,
       action: 'waveguard_plan_aligned',
       description: `Aligned WaveGuard ${alignment.inferredTier} from recurring service families`,
