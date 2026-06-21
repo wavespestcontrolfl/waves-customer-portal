@@ -122,10 +122,11 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     surcharge_policy_version: surchargePolicyVersion,
     card_funding: cardFunding,
     card_brand: cardBrand,
-    payment_method: paymentMethod,
     status: 'paid',
     description: `Payer statement S-${statementId} settlement (${paymentMethod})`,
-    metadata: JSON.stringify({ statement_id: statementId, payer_id: stmt.payer_id, source }),
+    // `payments` has no `payment_method` string column (only payment_method_id FK)
+    // — the method rides metadata; payer_statements.payment_method holds it too.
+    metadata: JSON.stringify({ statement_id: statementId, payer_id: stmt.payer_id, payment_method: paymentMethod, source }),
   });
 
   logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);

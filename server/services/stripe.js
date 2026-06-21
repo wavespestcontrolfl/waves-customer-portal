@@ -1989,10 +1989,17 @@ const StripeService = {
    * canceled / Stripe unconfigured.
    */
   async cancelStatementPaymentIntentIfUnconfirmed(statementId) {
-    const stripe = getStripe();
-    if (!stripe) return { canceled: false, reason: 'stripe_unconfigured' };
+    // Load the statement FIRST — only no-op when there is genuinely no PI to
+    // verify. If a PI exists but Stripe is unconfigured we CANNOT confirm it's
+    // dead, so fail closed (the AP could still confirm the live client secret).
     const statement = await db('payer_statements').where({ id: statementId }).first();
     if (!statement?.stripe_payment_intent_id) return { canceled: false, reason: 'no_pi' };
+    const stripe = getStripe();
+    if (!stripe) {
+      const err = new Error('Cannot verify the existing online payment intent (Stripe unavailable) — try the reconcile again shortly');
+      err.statusCode = 409;
+      throw err;
+    }
 
     let intent;
     try {

@@ -2027,6 +2027,40 @@ async function findInvoiceForPayment(payment) {
  * charge.dispute.created — ACH return or chargeback. ~60 days to respond.
  * Flip invoice back to overdue, log dispute, alert admin.
  */
+// Statement chargeback (P3): a statement settlement's `payments` row is keyed by
+// statement_id (no invoice_id), so the invoice-keyed dispute path no-ops and would
+// leave payer_statements + every child invoice silently `paid` after a clawback.
+// Reverse the cascade so AR/dunning see it owed again; restore on a won dispute.
+// Both idempotent + run under the statement row lock.
+async function reverseStatementCascadeForDispute(statementId, reason) {
+  await db.transaction(async (trx) => {
+    const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
+    if (!stmt || stmt.status !== 'paid') return; // only a paid statement reverses
+    const { priorPayableStatus } = require('../services/payer-statement-settle');
+    const now = new Date();
+    await trx('payer_statements').where({ id: statementId })
+      .update({ status: priorPayableStatus(stmt), paid_at: null, updated_at: now });
+    // Reopen the children the cascade settled (paid → draft = accrued again).
+    await trx('invoices').where({ payer_statement_id: statementId }).where('status', 'paid')
+      .update({ status: 'draft', paid_at: null, updated_at: now });
+  });
+  logger.warn(`[stripe-webhook] statement S-${statementId} chargeback (${reason}) — reverted to owed; child invoices reopened`);
+}
+
+async function restoreStatementCascadeForDispute(statementId) {
+  await db.transaction(async (trx) => {
+    const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
+    // Skip if already paid (re-collected after the reversal) or void.
+    if (!stmt || stmt.status === 'paid' || stmt.status === 'void') return;
+    const now = new Date();
+    await trx('payer_statements').where({ id: statementId })
+      .update({ status: 'paid', paid_at: now, updated_at: now });
+    await trx('invoices').where({ payer_statement_id: statementId }).whereNotIn('status', ['void', 'paid'])
+      .update({ status: 'paid', paid_at: now, updated_at: now });
+  });
+  logger.info(`[stripe-webhook] statement S-${statementId} dispute won — cascade restored to paid`);
+}
+
 async function handleDisputeCreated(dispute) {
   const chargeId = dispute.charge;
   const reason = dispute.reason || 'unknown';
@@ -2063,6 +2097,11 @@ async function handleDisputeCreated(dispute) {
       failure_reason: `Dispute: ${reason}`,
     });
 
+    if (payment.statement_id) {
+      // Statement chargeback — reverse the cascade (the invoice path below
+      // no-ops on a statement settlement and would leave it silently paid).
+      await reverseStatementCascadeForDispute(payment.statement_id, `dispute.created (${reason})`);
+    } else {
     // payments has no invoice_id column — the linkage lives in the
     // metadata JSON and on invoices.stripe_payment_intent_id. 'overdue'
     // (not 'unpaid', which no open-invoice query matches) puts the
@@ -2098,6 +2137,7 @@ async function handleDisputeCreated(dispute) {
         stripe_payment_intent_id: null,
         stripe_charge_id: null,
       });
+    }
     }
     }
   }
@@ -2155,6 +2195,9 @@ async function handleDisputeClosed(dispute) {
     if (status === 'won' || status === 'warning_closed') {
       // Funds reinstated — restore paid status
       await db('payments').where({ id: payment.id }).update({ status: 'paid', metadata: finalMeta });
+      // Statement: restore the cascade (unless re-collected meanwhile). The
+      // invoice path below no-ops for a statement payment.
+      if (payment.statement_id) await restoreStatementCascadeForDispute(payment.statement_id);
       const invoice = await findInvoiceForPayment(payment);
       const wonInvoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
       const wonDisputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
@@ -2188,6 +2231,9 @@ async function handleDisputeClosed(dispute) {
         failure_reason: `Dispute lost — $${amount} returned to customer`,
         metadata: finalMeta,
       });
+      // Statement: ensure the cascade is reversed (idempotent — created already
+      // did it, but closed(lost) can arrive without a created event).
+      if (payment.statement_id) await reverseStatementCascadeForDispute(payment.statement_id, 'dispute.lost');
       const lostInvoice = await findInvoiceForPayment(payment);
       const lostInvoicePi = lostInvoice?.stripe_payment_intent_id ? String(lostInvoice.stripe_payment_intent_id) : null;
       const lostDisputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
