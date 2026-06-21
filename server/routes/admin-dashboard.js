@@ -483,14 +483,19 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     // the UTC-midnight boundary; created_at (creation, not issuance) is only a
     // last-resort fallback the issued-filter never actually reaches.
     const issueDateET = "(COALESCE(sent_at, paid_at, created_at) AT TIME ZONE 'America/New_York')::date";
-    // Terminal/uncollectible invoice statuses kept out of both numerator and
-    // denominator: drafts (never issued), void + both canceled/cancelled spellings
-    // (never owed), and refunded (collected then given back → net not collected).
-    const UNCOLLECTIBLE_STATUSES = ['void', 'cancelled', 'canceled', 'refunded', 'draft'];
+    // Statuses kept out of BOTH numerator and denominator, for two reasons:
+    //  - never-collected cash: draft (never issued), void + canceled/cancelled
+    //    spellings (never owed), refunded (collected then given back → net not collected);
+    //  - settled by non-cash account credit: prepaid. The credit close-out stamps
+    //    paid_at (so AR/annual-prepay paths see it closed) but keeps status='prepaid'
+    //    precisely so collected-revenue stats don't count the non-cash credit
+    //    (admin-invoices.js / customer-credit.js). Annual prepays paid in CASH stay
+    //    status='paid' and remain counted as collected — this only drops credit closures.
+    const EXCLUDED_STATUSES = ['void', 'cancelled', 'canceled', 'refunded', 'draft', 'prepaid'];
     let collectionRate = null, collectedCount = 0, issuedCount = 0, collectedTotal = 0, billedTotal = 0;
     try {
       const cAgg = await db('invoices')
-        .whereNotIn('status', UNCOLLECTIBLE_STATUSES)
+        .whereNotIn('status', EXCLUDED_STATUSES)
         .where(function issued() {
           this.whereNotNull('sent_at').orWhereNotNull('paid_at');
         })
