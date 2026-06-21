@@ -496,8 +496,12 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     try {
       const cAgg = await db('invoices')
         .whereNotIn('status', EXCLUDED_STATUSES)
+        // Issued = sent OR has paid_at OR status='paid'. The status='paid' arm
+        // keeps a paid invoice with a null paid_at (a valid active/paid state per
+        // annual-prepay-renewals.invoiceTermStatus) in the denominator even if it
+        // was never e-sent — otherwise it'd be dropped from billed entirely.
         .where(function issued() {
-          this.whereNotNull('sent_at').orWhereNotNull('paid_at');
+          this.whereNotNull('sent_at').orWhereNotNull('paid_at').orWhere('status', 'paid');
         })
         // A Stripe refund leaves the invoice status='paid'/paid_at set, so a
         // fully-refunded invoice would still read as collected. Exclude any
@@ -518,16 +522,31 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
         )`)
         .whereRaw(`${issueDateET} >= ?`, [start])
         .whereRaw(`${issueDateET} <= ?`, [todayStr])
+        // Collected keys on status='paid' (cash), NOT paid_at IS NOT NULL:
+        // prepaid credit closures stamp paid_at but stay status='prepaid'
+        // (already excluded above), and a status='paid' invoice with null paid_at
+        // is still collected. A PARTIAL refund keeps status='paid' + paid_at and
+        // records payments.refund_amount (dollars, same units as total), so the
+        // full-refund NOT EXISTS above doesn't catch it — net those out so a
+        // $100 invoice refunded $90 contributes $10, not $100.
         .select(
           db.raw("COUNT(*) as issued"),
-          db.raw("COUNT(*) FILTER (WHERE paid_at IS NOT NULL) as paid"),
+          db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
           db.raw("SUM(total) as billed"),
-          db.raw("SUM(total) FILTER (WHERE paid_at IS NOT NULL) as collected")
+          db.raw("SUM(total) FILTER (WHERE status = 'paid') as collected_gross"),
+          db.raw(`COALESCE(SUM(
+            (SELECT COALESCE(SUM(p.refund_amount), 0) FROM payments p
+               WHERE p.refund_status = 'partial'
+                 AND (
+                   (invoices.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = invoices.stripe_charge_id)
+                   OR (invoices.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = invoices.stripe_payment_intent_id)
+                 )
+            )) FILTER (WHERE status = 'paid'), 0) as partial_refunds`)
         ).first();
       issuedCount = parseInt(cAgg?.issued || 0);
       collectedCount = parseInt(cAgg?.paid || 0);
       billedTotal = parseFloat(cAgg?.billed || 0);
-      collectedTotal = parseFloat(cAgg?.collected || 0);
+      collectedTotal = Math.max(0, parseFloat(cAgg?.collected_gross || 0) - parseFloat(cAgg?.partial_refunds || 0));
       // Dollar-based ($ collected / $ billed), NOT a count ratio — cash collection
       // is what matters, and a count ratio would let one small paid invoice mask a
       // large unpaid one. The paid/issued counts are kept for the tile sub only.
