@@ -2083,10 +2083,17 @@ async function reverseStatementCascadeForDispute(statementId, disputedPi, reason
       // NOT yet settled, but the disputed PI is the statement's active PI — the
       // dispute raced ahead of payment_intent.succeeded. Clear the active PI so
       // the racing/late succeeded fails the active-PI binding and never settles
-      // the clawed-back charge (it records a stripe_orphan_charges review item).
-      await trx('payer_statements').where({ id: statementId })
-        .update({ stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: now });
-      logger.warn(`[stripe-webhook] statement S-${statementId} dispute (${reason}) BEFORE settlement — cleared active PI ${disputedPi} to block settle`);
+      // the clawed-back charge. ALSO reset a `processing` ACH statement back to
+      // its prior payable status — a disputed in-flight payment is no longer
+      // collecting, and leaving it `processing` with no PI would strand it (setup
+      // / reconcile / the later failed|canceled revert would all refuse).
+      const patch = { stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: now };
+      if (stmt.status === 'processing') {
+        const { priorPayableStatus } = require('../services/payer-statement-settle');
+        patch.status = priorPayableStatus(stmt);
+      }
+      await trx('payer_statements').where({ id: statementId }).update(patch);
+      logger.warn(`[stripe-webhook] statement S-${statementId} dispute (${reason}) BEFORE settlement — ${patch.status ? `reset ${stmt.status}→${patch.status}, ` : ''}cleared active PI ${disputedPi} to block settle`);
     }
   });
 }
@@ -2135,8 +2142,30 @@ async function handleDisputeCreated(dispute) {
     const disputedStmt = await db('payer_statements').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
     if (disputedStmt) {
       await reverseStatementCascadeForDispute(disputedStmt.id, dispute.payment_intent, `dispute.created (${reason})`);
-      // If settlement already wrote the payments row, mark it disputed for audit.
-      await db('payments').where({ stripe_charge_id: chargeId }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}` });
+      // Persist a durable disputed `payments` row keyed to the statement. If the
+      // settlement already wrote one, mark it disputed; if the dispute PRECEDED
+      // settlement (no row, PI now cleared above to block the racing succeeded),
+      // insert one so dispute.closed(won) can still find the statement and
+      // restore/settle the reinstated funds.
+      const existingRow = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
+      if (existingRow) {
+        await db('payments').where({ id: existingRow.id }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}` });
+      } else {
+        await db('payments').insert({
+          customer_id: null,
+          payer_id: disputedStmt.payer_id,
+          statement_id: disputedStmt.id,
+          processor: 'stripe',
+          stripe_payment_intent_id: dispute.payment_intent,
+          stripe_charge_id: chargeId,
+          payment_date: etDateString(),
+          amount: Number(amount),
+          status: 'disputed',
+          failure_reason: `Dispute: ${reason}`,
+          description: `Payer statement S-${disputedStmt.id} disputed charge (pre-settlement)`,
+          metadata: JSON.stringify({ statement_id: disputedStmt.id, payer_id: disputedStmt.payer_id, source: 'statement_dispute' }),
+        });
+      }
       try {
         await db('notifications').insert({
           recipient_type: 'admin',
