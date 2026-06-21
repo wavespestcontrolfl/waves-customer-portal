@@ -15,7 +15,8 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // matched lowercase against both estimates.customer_name (denormalized
 // string) and the joined customers row, so a misspelled denormalization
 // can't sneak past. Add new names here as they come up.
-const INTERNAL_TEST_CUSTOMERS = ['adam martinez'];
+// Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
+const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
 
 // Returns a Knex builder with the standard exclusion applied to a
 // query against the `estimates` table aliased as `e`. Use this on every
@@ -441,6 +442,31 @@ async function getMrrTrend(months) {
     });
   }
 
+  // Real recorded MRR per month (point-in-time snapshots). A past month reads
+  // its snapshot's actual MRR; the current (in-progress) month and any month
+  // recorded before snapshots existed fall back to the live recompute below
+  // (which dates the right customers but at today's prices — the limitation
+  // snapshots replace going forward).
+  const currentMonthStart = etMonthStart(now);
+  const snapshotsByMonth = {};
+  try {
+    const snaps = await db('mrr_snapshots').whereIn('period_month', windows.map(w => w.startDay));
+    for (const s of snaps) {
+      const key = s.period_month instanceof Date
+        ? s.period_month.toISOString().slice(0, 10)
+        : String(s.period_month).slice(0, 10);
+      snapshotsByMonth[key] = s;
+    }
+  } catch (err) {
+    logger.warn(`[mrr-trend] snapshot read failed, using live recompute: ${err.message}`);
+  }
+
+  function parseTier(v) {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') { try { return JSON.parse(v); } catch { return []; } }
+    return [];
+  }
+
   function customersActiveAsOf(endIso) {
     return excludeInternalCustomers(
       db({ c: 'customers' })
@@ -460,6 +486,21 @@ async function getMrrTrend(months) {
 
   // Batch: one query per month, all in parallel (instead of sequential awaits)
   const settled = await Promise.all(windows.map(async w => {
+    // Use the snapshot for any COMPLETED month that has one; recompute the
+    // current month live (snapshots only freeze at month rollover).
+    const snap = w.startDay !== currentMonthStart ? snapshotsByMonth[w.startDay] : null;
+    if (snap) {
+      return {
+        month: w.label,
+        date: w.startDay,
+        mrr: parseFloat(snap.total_mrr || 0),
+        committed_mrr: parseFloat(snap.committed_mrr || 0),
+        at_risk_mrr: parseFloat(snap.at_risk_mrr || 0),
+        customer_count: parseInt(snap.customer_count || 0),
+        by_tier: parseTier(snap.by_tier),
+        source: 'snapshot',
+      };
+    }
     const endIso = w.end.toISOString();
     const [mrrRow, byTier] = await Promise.all([
       customersActiveAsOf(endIso)
@@ -475,8 +516,11 @@ async function getMrrTrend(months) {
       month: w.label,
       date: w.startDay,
       mrr: parseFloat(mrrRow?.mrr || 0),
+      committed_mrr: null,
+      at_risk_mrr: null,
       customer_count: parseInt(mrrRow?.customer_count || 0),
       by_tier: byTier.map(t => ({ tier: t.waveguard_tier || 'None', mrr: parseFloat(t.mrr || 0), count: parseInt(t.count) })),
+      source: 'computed',
     };
   }));
 

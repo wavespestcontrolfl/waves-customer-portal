@@ -1,4 +1,5 @@
 const { etDateString } = require('../utils/datetime-et');
+const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 
 // An active recurring account is "at risk" — i.e. its next monthly charge is
 // NOT something the business can count on landing — when any of these is
@@ -89,6 +90,16 @@ async function computeMrrBreakdown(dbConn, asOf = etDateString()) {
       .where('c.active', true)
       .whereNull('c.deleted_at')
       .where('c.monthly_rate', '>', 0)
+      // Exclude internal/test accounts so they never inflate MRR — the same
+      // population the live trend (excludeInternalCustomers) and the snapshot use.
+      .modify((qb) => {
+        if (INTERNAL_TEST_CUSTOMERS.length) {
+          qb.whereNotIn(
+            conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+            INTERNAL_TEST_CUSTOMERS,
+          );
+        }
+      })
       .select(
         'c.id as id',
         'c.monthly_rate as monthly_rate',
