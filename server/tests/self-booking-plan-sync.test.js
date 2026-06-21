@@ -226,6 +226,10 @@ describe('self-booking plan sync helpers', () => {
   test('detects WaveGuard plan keys only from recurring service rows for sync', () => {
     expect(detectWaveGuardPlanKeys({ service_type: 'Monthly Pest Control' })).toEqual(['pest_control_monthly']);
     expect(detectWaveGuardPlanKeys({ service_type: 'Termite Active Bait Station Service Quarterly' })).toEqual(['termite_bait_quarterly']);
+    // Cadence-specific catalog key wins over a stale service_type label...
+    expect(detectWaveGuardPlanKeys({ service_type: 'Quarterly Lawn Care', service_key: 'lawn_care_monthly' })).toEqual(['lawn_care_monthly']);
+    // ...but a GENERIC catalog key must not suppress the cadence in service_type.
+    expect(detectWaveGuardPlanKeys({ service_type: 'Every 6 Weeks Lawn Care', service_key: 'lawn_fertilization', service_name: 'Lawn Fertilization & Weed Control' })).toEqual(['lawn_care_6week']);
     expect(serviceFamilyKey('pest_control_monthly')).toBe('pest_control');
     expect(isOneTimeBookingSource('quote-wizard-onetime')).toBe(true);
     expect(isOneTimeBookingSource('estimate-accept')).toBe(true);

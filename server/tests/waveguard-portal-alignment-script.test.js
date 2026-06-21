@@ -84,6 +84,12 @@ describe('WaveGuard portal alignment script helpers', () => {
     expect(detectServiceKeys({ service_type: 'Monthly Pest Control', service_key: 'pest_general_quarterly' })).toEqual(['pest_control_quarterly']);
     // No catalog key -> fall back to service_type cadence.
     expect(detectServiceKeys({ service_type: 'Quarterly Lawn Care' })).toEqual(['lawn_care_quarterly']);
+    // Generic (non-cadence) catalog key -> the cadence in service_type still wins.
+    expect(detectServiceKeys({
+      service_type: 'Every 6 Weeks Lawn Care',
+      service_key: 'lawn_fertilization',
+      service_name: 'Lawn Fertilization & Weed Control',
+    })).toEqual(['lawn_care_6week']);
   });
 
   test('does not treat one-time termite or rodent work as WaveGuard portal services', () => {

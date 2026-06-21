@@ -90,14 +90,22 @@ function catalogTextForService(row = {}) {
   ].filter(Boolean).join(' ')).toLowerCase();
 }
 
+// Catalog fields are authoritative for cadence only when cadence-specific (e.g.
+// lawn_care_monthly); a generic catalog FK (lawn_fertilization) has no cadence, so
+// detection must fall through to service_type rather than short-circuit on it.
+const CADENCE_SIGNAL_RE = /weekly|monthly|quarterly|annual|yearly|seasonal|\d+\s*weeks?|\d+\s*months?|\d+week/;
+
 function detectServiceKeys(row = {}) {
   const fullText = rawTextForService(row);
   const catalogText = catalogTextForService(row);
+  const catalogHasCadence = CADENCE_SIGNAL_RE.test(catalogText);
   const keys = [];
   const add = (key) => {
     if (SERVICE_PLANS[key] && !keys.includes(key)) keys.push(key);
   };
-  const resolvePlan = (resolver) => resolver(catalogText) || resolver(fullText);
+  // Trust the catalog cadence only when the catalog text is cadence-specific; otherwise
+  // fall through to the full text so a real cadence in service_type still wins.
+  const resolvePlan = (resolver) => (catalogHasCadence && resolver(catalogText)) || resolver(fullText);
 
   const pestPlan = resolvePlan(resolvePestControlRecurringPlan);
   if (pestPlan) add(pestPlan.planKey || 'pest_control');

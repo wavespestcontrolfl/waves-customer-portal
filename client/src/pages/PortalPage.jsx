@@ -6774,8 +6774,12 @@ function MyPlanTab({ customer }) {
   // server classifier (toQualifyingKey), so e.g. a recurring palm row never shows as
   // Tree & Shrub coverage. When nothing qualifies we fall back to the tier defaults.
   const PLAN_NON_QUALIFIER_RE = /palm|rodent|one[\s_-]?time|onetime/;
+  const PLAN_TERMINAL_STATUSES = new Set(['rescheduled', 'cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
   const isPlanCoverageRow = (s) => {
     if (!s || s.isRecurring !== true || s.isCallback === true) return false;
+    // A rescheduled/terminal recurring row is a phantom for coverage — it must not be
+    // detected and, under the tier-limit slice, displace the customer's real plan.
+    if (PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase())) return false;
     const text = (s.serviceType || s.service_type || s.type || '').toLowerCase();
     return !PLAN_NON_QUALIFIER_RE.test(text);
   };

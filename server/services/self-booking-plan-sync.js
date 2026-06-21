@@ -267,6 +267,12 @@ function normalizeServiceText(value) {
 // as plan coverage and (mis)set tier/monthly_rate. The pest resolver already inlines
 // this exclusion.
 const NON_PLAN_RECURRING_SERVICE_RE = /\b(re[-\s]?service|callback)\b/;
+
+// Whether a text carries an explicit cadence signal. Catalog fields (service_key/name)
+// are only authoritative for cadence when cadence-specific (e.g. lawn_care_monthly,
+// tree_shrub_6week); a generic catalog FK (e.g. lawn_fertilization) has no cadence, so
+// detection must fall through to service_type instead of short-circuiting on it.
+const CADENCE_SIGNAL_RE = /weekly|monthly|quarterly|annual|yearly|seasonal|\d+\s*weeks?|\d+\s*months?|\d+week/;
 function isNonPlanRecurringServiceText(value) {
   return NON_PLAN_RECURRING_SERVICE_RE.test(normalizeServiceText(value));
 }
@@ -507,11 +513,14 @@ function catalogTextForServiceRow(row = {}) {
 function detectWaveGuardPlanKeys(row = {}) {
   const fullText = rawTextForServiceRow(row);
   const catalogText = catalogTextForServiceRow(row);
+  const catalogHasCadence = CADENCE_SIGNAL_RE.test(catalogText);
   const keys = [];
   const add = (key) => {
     if (SELF_BOOKING_RECURRING_PLANS[key] && !keys.includes(key)) keys.push(key);
   };
-  const resolvePlan = (resolver) => resolver(catalogText) || resolver(fullText);
+  // Trust the catalog cadence only when the catalog text is cadence-specific; otherwise
+  // fall through to the full text so a real cadence in service_type still wins.
+  const resolvePlan = (resolver) => (catalogHasCadence && resolver(catalogText)) || resolver(fullText);
 
   const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
