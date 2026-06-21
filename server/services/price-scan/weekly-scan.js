@@ -16,6 +16,50 @@ const { createDraft } = require('./price-match-draft');
 // How many top-spend products to scan per run. Kept modest — each is a live scrape.
 const DEFAULT_LIMIT = Number(process.env.PRICE_SCAN_MAX_PRODUCTS) || 25;
 
+// The codebase's canonical "live price" gate (see price_sync_control_layer): only
+// operator-approved, active vendor_pricing rows. Critically this EXCLUDES the
+// Hermes worker's `pending` rows, so an unapproved/auto-ingested URL never feeds the
+// live browser and an unapproved price never becomes a SiteOne baseline.
+const APPROVED_STATES = ['approved', 'auto_approved'];
+
+// Only navigate a competitor URL we can confirm is on the expected host — a
+// mis-mapped/foreign URL is dropped (the adapter then searches DoMyOwn by name).
+function isDomyownUrl(url) {
+  try {
+    const host = new URL(String(url)).hostname.toLowerCase();
+    return host === 'domyown.com' || host.endsWith('.domyown.com');
+  } catch { return false; }
+}
+
+// Tolerant parse of a draft's `matches` (jsonb -> array, but accept a string too).
+function parseMatches(m) {
+  if (Array.isArray(m)) return m;
+  if (typeof m === 'string') { try { return JSON.parse(m); } catch { return []; } }
+  return [];
+}
+
+// Order-independent content signature of a set of opportunity matches — product +
+// competitor URL + both prices. Two runs that surface the SAME opportunities at the
+// SAME prices share a signature; a changed price yields a new one (a fresh draft).
+function matchSignature(matches) {
+  return (matches || [])
+    .map((m) => [
+      String((m && m.product) || '').toLowerCase().trim(),
+      String((m && m.competitor && m.competitor.source_url) || ''),
+      Number(m && m.competitor && m.competitor.price) || 0,
+      Number(m && m.baseline && m.baseline.price) || 0,
+    ].join('|'))
+    .sort()
+    .join('::');
+}
+
+// Signatures of every draft still awaiting review/send — used to avoid staging a
+// duplicate the operator could send to the rep twice.
+async function activeDraftSignatures(db) {
+  const rows = await db('price_match_drafts').whereIn('status', ['pending', 'sending']).select('matches');
+  return new Set(rows.map((r) => matchSignature(parseMatches(r.matches))));
+}
+
 // Look up a vendor row by case-insensitive name.
 async function vendorByName(db, name) {
   return db('vendors').whereRaw('lower(name) = lower(?)', [name]).first();
@@ -78,6 +122,8 @@ async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, domyow
       .join('vendor_pricing as so', 'so.product_id', 'pc.id')
       .where('so.vendor_id', siteoneId)
       .andWhere('so.price', '>', 0)
+      .andWhere('so.is_active', true)
+      .whereIn('so.approval_status', APPROVED_STATES) // never baseline off an unapproved/pending price
       .andWhere((b) => b.where('pc.active', true).orWhereNull('pc.active'))
       .select(
         'pc.id', 'pc.name', 'pc.epa_reg_number', 'pc.formulation',
@@ -91,10 +137,17 @@ async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, domyow
     if (domyownId && ids.length) {
       const dmoRows = await db('vendor_pricing')
         .where('vendor_id', domyownId)
+        .andWhere('is_active', true)
+        .whereIn('approval_status', APPROVED_STATES) // never hand a pending/unapproved URL to the browser
         .whereIn('product_id', ids)
         .whereNotNull('vendor_product_url')
         .select('product_id', 'vendor_product_url');
-      for (const d of dmoRows) if (!urlByProductId.has(d.product_id)) urlByProductId.set(d.product_id, d.vendor_product_url);
+      // ...and only an on-host URL is navigated; anything else falls back to search.
+      for (const d of dmoRows) {
+        if (!urlByProductId.has(d.product_id) && isDomyownUrl(d.vendor_product_url)) {
+          urlByProductId.set(d.product_id, d.vendor_product_url);
+        }
+      }
     }
     return assembleScanSpecs(baselineRows, urlByProductId, { limit, domyownId, domyownName });
   } catch (err) {
@@ -184,13 +237,22 @@ async function runWeeklyScan(opts = {}) {
 
   let draftId = null;
   let includedCount = 0;
+  let duplicate = false;
   if (matches.length) {
-    const row = await create(db, matches);
-    draftId = row ? row.id : null;
-    includedCount = row ? row.included_count : 0;
+    // Don't stage a draft identical to one already awaiting review/send — a retry or
+    // next week's run would otherwise create a dup the operator could send twice.
+    const seen = opts.activeSignatures || await activeDraftSignatures(db);
+    if (seen.has(matchSignature(matches))) {
+      duplicate = true;
+      logger.info('[price-scan] weekly scan: an equivalent draft is already pending/sending — skipping duplicate');
+    } else {
+      const row = await create(db, matches);
+      draftId = row ? row.id : null;
+      includedCount = row ? row.included_count : 0;
+    }
   }
-  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.opportunities} opps, ${summary.errors} err -> draft ${draftId || 'none'} (${includedCount} items)`);
-  return { ok: true, ...summary, draftId, includedCount };
+  logger.info(`[price-scan] weekly scan: ${summary.evaluated} eval, ${summary.scanned} scanned, ${summary.opportunities} opps, ${summary.errors} err -> draft ${draftId || (duplicate ? 'duplicate-skipped' : 'none')} (${includedCount} items)`);
+  return { ok: true, ...summary, draftId, includedCount, duplicate };
 }
 
 module.exports = {
@@ -200,6 +262,11 @@ module.exports = {
   toScanSpec,
   opportunityToMatch,
   isBrowserUnavailable,
+  isDomyownUrl,
+  matchSignature,
+  activeDraftSignatures,
+  parseMatches,
   vendorByName,
+  APPROVED_STATES,
   DEFAULT_LIMIT,
 };

@@ -3,6 +3,8 @@ const {
   assembleScanSpecs,
   opportunityToMatch,
   isBrowserUnavailable,
+  isDomyownUrl,
+  matchSignature,
   runWeeklyScan,
 } = require('../services/price-scan/weekly-scan');
 
@@ -92,6 +94,29 @@ describe('isBrowserUnavailable', () => {
   });
 });
 
+describe('isDomyownUrl', () => {
+  test('accepts domyown.com hosts, rejects foreign/garbage', () => {
+    expect(isDomyownUrl('https://www.domyown.com/taurus-sc-p-1817.html')).toBe(true);
+    expect(isDomyownUrl('https://domyown.com/p')).toBe(true);
+    expect(isDomyownUrl('https://evil.example.com/p')).toBe(false);
+    expect(isDomyownUrl('https://notdomyown.com.evil.com/p')).toBe(false);
+    expect(isDomyownUrl('not a url')).toBe(false);
+    expect(isDomyownUrl(null)).toBe(false);
+  });
+});
+
+describe('matchSignature', () => {
+  const a = { product: 'Taurus SC', competitor: { source_url: 'https://d/a', price: 89 }, baseline: { price: 95 } };
+  const b = { product: 'Bifen', competitor: { source_url: 'https://d/b', price: 34 }, baseline: { price: 40 } };
+  test('order-independent + stable for the same opportunities', () => {
+    expect(matchSignature([a, b])).toBe(matchSignature([b, a]));
+  });
+  test('a changed competitor price yields a different signature (new draft)', () => {
+    const a2 = { ...a, competitor: { ...a.competitor, price: 80 } };
+    expect(matchSignature([a])).not.toBe(matchSignature([a2]));
+  });
+});
+
 describe('runWeeklyScan (injected deps)', () => {
   const vendors = (db, name) => Promise.resolve({ id: name === 'SiteOne' ? 'so' : 'dmo', name });
   const specs = [
@@ -119,7 +144,7 @@ describe('runWeeklyScan (injected deps)', () => {
       { product: specs[2].product, error: new Error('timeout') },
     ]);
     const createDraft = jest.fn(async () => ({ id: 7, included_count: 1 }));
-    const r = await runWeeklyScan({ vendorByName: vendors, specs, scanMany, createDraft });
+    const r = await runWeeklyScan({ vendorByName: vendors, specs, scanMany, createDraft, activeSignatures: new Set() });
     expect(createDraft).toHaveBeenCalledTimes(1);
     expect(createDraft.mock.calls[0][1]).toHaveLength(1); // only the 1 opportunity
     expect(createDraft.mock.calls[0][1][0].product).toBe('A');
@@ -132,6 +157,20 @@ describe('runWeeklyScan (injected deps)', () => {
     const r = await runWeeklyScan({ vendorByName: vendors, specs: [specs[0]], scanMany, createDraft });
     expect(createDraft).not.toHaveBeenCalled();
     expect(r).toMatchObject({ ok: true, opportunities: 0, draftId: null });
+  });
+
+  test('skips creating a draft that duplicates one already pending/sending', async () => {
+    const scanMany = jest.fn(async () => [
+      { product: specs[0].product, scan: { opportunity: { isOpportunity: true, baseline: { vendor: 'SiteOne', price: 95, quantity: '78 oz' }, best: { vendor: 'DoMyOwn', price: 89, quantity: '78 oz', source_url: 'https://d/a' } } } },
+    ]);
+    const createDraft = jest.fn(async () => ({ id: 9, included_count: 1 }));
+    // Pre-seed the active-draft signature set with the exact opportunity this run finds.
+    const activeSignatures = new Set([matchSignature([
+      { product: 'A', competitor: { source_url: 'https://d/a', price: 89 }, baseline: { price: 95 } },
+    ])]);
+    const r = await runWeeklyScan({ vendorByName: vendors, specs: [specs[0]], scanMany, createDraft, activeSignatures });
+    expect(createDraft).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ ok: true, opportunities: 1, draftId: null, duplicate: true });
   });
 
   test('a browser-unavailable batch failure is a clean skip, not a throw', async () => {
