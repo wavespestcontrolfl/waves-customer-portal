@@ -55,14 +55,19 @@ function priorPayableStatus(stmt) {
  * `settlement.amountCents` = the CHARGED total (surcharged for a card; bare total
  * for ACH/offline). The base/surcharge split rides the `*_cents` columns.
  */
-async function settleStatementPaid(statementId, settlement = {}, { database = db } = {}) {
+async function settleStatementPaid(statementId, settlement = {}, { database = db, allowedStatuses = SETTLEABLE_STATEMENT_STATUSES } = {}) {
   const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first();
   if (!stmt) throw new Error(`settleStatementPaid: statement ${statementId} not found`);
   if (stmt.status === 'paid') {
     return { ok: true, alreadyPaid: true, statement: stmt };
   }
-  if (!SETTLEABLE_STATEMENT_STATUSES.has(stmt.status)) {
-    throw new Error(`settleStatementPaid: statement ${statementId} not settleable from '${stmt.status}'`);
+  // Webhook settles from any payable status OR `processing` (ACH confirmed);
+  // an offline reconcile passes the PAYABLE-only set so it can't settle a
+  // statement whose online payment is already in flight (double collection).
+  if (!allowedStatuses.has(stmt.status)) {
+    const err = new Error(`statement ${statementId} not settleable from '${stmt.status}'`);
+    err.statusCode = (stmt.status === 'processing') ? 409 : 400;
+    throw err;
   }
 
   const {

@@ -401,6 +401,9 @@ app.use('/api/admin/job-forms', require('./routes/admin-job-forms'));
 app.use('/api/admin/job-costs', require('./routes/admin-job-costs'));
 app.use('/api/admin/job-expenses', require('./routes/admin-job-expenses'));
 app.use('/api/admin/projects', require('./routes/admin-projects'));
+// Statement pay (P3) mounts BEFORE /api/pay so its two-segment paths aren't
+// shadowed by the invoice router's `/:token`. Gated behind GATE_PAYER_STATEMENTS.
+app.use('/api/pay/statement', require('./routes/pay-statement'));
 app.use('/api/pay', require('./routes/pay-v2'));
 app.use('/api/receipt', require('./routes/receipt-v2'));
 app.use('/api/contracts', require('./routes/contracts-public'));

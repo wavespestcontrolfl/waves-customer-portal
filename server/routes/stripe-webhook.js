@@ -568,9 +568,60 @@ router.post(
 /**
  * payment_intent.succeeded — Update payment/invoice to paid
  */
+// P3 — payer statement PaymentIntents (metadata.waves_statement_id) settle the
+// CONSOLIDATED statement, never an individual invoice. Isolated from the invoice
+// PI lifecycle so legacy invoice_id intents are unchanged. Idempotent: succeeded
+// on an already-paid statement is a no-op; processing/revert are conditional on
+// the statement's ACTIVE PI, so a stale/replaced PI's events match nothing. NOT
+// feature-gated — a confirmed money event must settle regardless of the flag.
+async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
+  const statementId = Number(paymentIntent.metadata?.waves_statement_id);
+  if (!Number.isInteger(statementId) || statementId <= 0) return;
+  const piId = paymentIntent.id;
+  const Settle = require('../services/payer-statement-settle');
+
+  if (eventType === 'succeeded') {
+    const meta = paymentIntent.metadata || {};
+    const baseCents = meta.base_amount != null ? Math.round(parseFloat(meta.base_amount) * 100) : null;
+    const totalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
+    const surchargeCents = baseCents != null ? Math.max(0, totalCents - baseCents) : 0;
+    const cardFunding = meta.card_funding && meta.card_funding !== 'unknown' ? meta.card_funding : null;
+    const paymentMethod = (surchargeCents > 0 || cardFunding)
+      ? 'card'
+      : (paymentIntent.payment_method_types || []).includes('us_bank_account') ? 'ach' : 'card';
+    await db.transaction((trx) => Settle.settleStatementPaid(statementId, {
+      paymentMethod,
+      processor: 'stripe',
+      stripePaymentIntentId: piId,
+      stripeChargeId: paymentIntent.latest_charge || null,
+      amountCents: totalCents,
+      baseAmountCents: baseCents,
+      surchargeAmountCents: surchargeCents,
+      surchargeRateBps: meta.surcharge_rate_bps != null ? Number(meta.surcharge_rate_bps) : 0,
+      surchargePolicyVersion: meta.surcharge_policy_version || null,
+      cardFunding,
+      source: 'stripe_webhook',
+      database: trx,
+    }));
+    logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+  } else if (eventType === 'processing') {
+    const moved = await Settle.markStatementProcessing(statementId, piId);
+    if (moved) logger.info(`[stripe-webhook] statement S-${statementId} → processing (ACH in flight) via PI ${piId}`);
+  } else if (eventType === 'failed' || eventType === 'canceled') {
+    await db.transaction((trx) => Settle.revertStatementProcessing(statementId, piId, { database: trx }));
+  }
+}
+
 async function handlePaymentIntentSucceeded(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
+
+  // P3: a payer-statement PI settles the consolidated statement (cascade), not an
+  // invoice — route it before any invoice/tender logic and return.
+  if (paymentIntent.metadata?.waves_statement_id) {
+    await handleStatementPaymentIntentEvent(paymentIntent, 'succeeded');
+    return;
+  }
 
   // Estimate-acceptance deposits are not invoice payments — route them to
   // the deposit ledger BEFORE any invoice/tender logic runs against them.
@@ -1095,6 +1146,10 @@ async function notifyPaymentSuccess(paymentIntent) {
  */
 async function handlePaymentIntentFailed(paymentIntent, eventId) {
   const piId = paymentIntent.id;
+  if (paymentIntent.metadata?.waves_statement_id) {
+    await handleStatementPaymentIntentEvent(paymentIntent, 'failed');
+    return;
+  }
   const failureMessage = paymentIntent.last_payment_error?.message || 'Unknown failure';
   const failureCode = paymentIntent.last_payment_error?.code || null;
   // Friendly version for human-facing surfaces (bell + push). Raw Stripe
@@ -1558,6 +1613,10 @@ async function handleAchFailure(paymentIntent, failureReason) {
 async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null, eventId = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
+  if (paymentIntent.metadata?.waves_statement_id) {
+    await handleStatementPaymentIntentEvent(paymentIntent, 'processing');
+    return;
+  }
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
   const isAch = isAchPaymentIntent(paymentIntent, paymentIntent.metadata?.selected_method_category);
   if (!isAch) {
@@ -1862,6 +1921,10 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
 async function handlePaymentIntentCanceled(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent canceled: ${piId}`);
+  if (paymentIntent.metadata?.waves_statement_id) {
+    await handleStatementPaymentIntentEvent(paymentIntent, 'canceled');
+    return;
+  }
 
   // Deposit PIs have no payments row — mark the pending ledger row terminal
   // instead (which advances the retry generation so the next deposit

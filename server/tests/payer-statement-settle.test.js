@@ -109,6 +109,15 @@ describe('settleStatementPaid (cascade)', () => {
     stmtRow = { id: 7, payer_id: 9, status: 'finalized' };
     await expect(settleStatementPaid(7, {})).rejects.toThrow(/amountCents/);
   });
+
+  test('offline reconcile (PAYABLE-only) refuses to settle a statement whose online payment is processing', async () => {
+    const { PAYABLE_STATEMENT_STATUSES } = require('../services/payer-statement-settle');
+    stmtRow = { id: 7, payer_id: 9, status: 'processing' };
+    const p = settleStatementPaid(7, { amountCents: 100 }, { allowedStatuses: PAYABLE_STATEMENT_STATUSES });
+    await expect(p).rejects.toThrow(/not settleable/);
+    await expect(p.catch((e) => e.statusCode)).resolves.toBe(409);
+    expect(captured.paymentInserts).toHaveLength(0); // no double-collection
+  });
 });
 
 describe('processing transitions', () => {

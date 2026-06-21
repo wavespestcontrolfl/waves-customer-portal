@@ -18,6 +18,8 @@ const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { finalizeStatement, loadStatementLines } = require('../services/payer-statements');
 const { sendStatementEmail } = require('../services/payer-statement-email');
+const StripeService = require('../services/stripe');
+const { settleStatementPaid, PAYABLE_STATEMENT_STATUSES } = require('../services/payer-statement-settle');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -176,6 +178,51 @@ router.post('/:id/statements/:statementId/send', async (req, res, next) => {
     if (!delivery.ok) return res.status(422).json({ error: delivery.error || 'send_failed', delivery });
     res.json({ delivery });
   } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/payers/:id/statements/:statementId/reconcile — record an
+// OFFLINE settlement (check/ACH/wire) against a statement and cascade. The common
+// AP path. Refuses while `processing` (online payment in flight) or `paid`, and
+// CANCELS any unconfirmed online PI first so the AP can't also pay online after
+// the operator records the check. Body { method?, amount? }. Gated.
+router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => {
+  if (!isEnabled('payerStatements')) return res.status(403).json({ error: 'Payer statements are not enabled' });
+  try {
+    const statement = await loadOwnedStatement(req.params.id, req.params.statementId);
+    if (!statement) return res.status(404).json({ error: 'Statement not found' });
+    if (statement.status === 'paid') return res.status(409).json({ error: 'Statement is already paid' });
+    if (statement.status === 'processing') return res.status(409).json({ error: 'An online payment is in flight — wait for it to resolve before reconciling' });
+    if (!PAYABLE_STATEMENT_STATUSES.has(statement.status)) {
+      return res.status(400).json({ error: 'Close the statement before reconciling' });
+    }
+
+    const method = String(req.body?.method || 'check').toLowerCase(); // check | ach | wire | offline
+    const total = Number(statement.total);
+    const amount = req.body?.amount != null ? Number(req.body.amount) : total;
+    // Mirror the invoice reconcile's $1 tolerance — recording a materially
+    // different amount would drift the ledger from the statement.
+    if (!Number.isFinite(amount) || Math.abs(amount - total) > 1) {
+      return res.status(400).json({ error: `Amount mismatch — recorded $${(Number(amount) || 0).toFixed(2)} but statement is $${total.toFixed(2)}. Edit the statement first if it changed.` });
+    }
+
+    // Cancel any unconfirmed online PI first (throws 409 if money is truly in
+    // flight), then cascade-settle from a PAYABLE status only (so a concurrent
+    // online confirm can't be double-collected).
+    await StripeService.cancelStatementPaymentIntentIfUnconfirmed(statement.id);
+    const result = await db.transaction((trx) => settleStatementPaid(statement.id, {
+      paymentMethod: method,
+      amountCents: Math.round(amount * 100),
+      source: 'admin_reconcile',
+      database: trx,
+    }, { database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES }));
+
+    logger.info(`[payers] statement ${statement.id} reconciled offline via ${method} ($${amount.toFixed(2)})`);
+    res.json({ ok: true, statement: result.statement, alreadyPaid: !!result.alreadyPaid, childrenSettled: result.childrenSettled || 0 });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
     next(err);
   }
 });
