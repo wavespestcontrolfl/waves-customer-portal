@@ -7,7 +7,11 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice', () => ({ createFromService: jest.fn() }));
-jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn() }));
+jest.mock('../services/autopay-eligibility', () => ({
+  customerOnAutopay: jest.fn(),
+  // SQL is ignored by the chain mock; just needs the { sql, binding } shape.
+  autopayActivePredicate: jest.fn(() => ({ sql: '(true)', binding: '2026-01-01' })),
+}));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async () => 'https://short/pay'),
   invoiceShortCodePrefix: jest.fn(() => 'INV'),

@@ -11,6 +11,7 @@ const {
 } = require('../services/intelligence-bar/dashboard-tools');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
+const { autopayActivePredicate } = require('../services/autopay-eligibility');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -114,7 +115,12 @@ async function paidRevenueTotal(from, to) {
 }
 
 async function paidRevenueDaily(from, to) {
-  const paidInvoiceGapDateExpr = "((i.paid_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/New_York')::date";
+  // i.paid_at is timestamptz — a single AT TIME ZONE converts the stored UTC
+  // instant to ET wall-clock, so ::date is the true ET bucket (matches the
+  // applyETTimestampWindow filter below and the collection-rate issueDateET).
+  // Double-converting via AT TIME ZONE 'UTC' first re-shifts and misbuckets
+  // gap invoices by a day at the ET/UTC midnight boundary.
+  const paidInvoiceGapDateExpr = "(i.paid_at AT TIME ZONE 'America/New_York')::date";
   const [ledgerRows, paidInvoiceGapRows] = await Promise.all([
     db('payments')
       .where({ status: 'paid' })
@@ -467,6 +473,120 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] AR metrics failed: ${err.message}`);
     }
 
+    // Collection rate — of invoices actually ISSUED in the window, paid vs issued.
+    // "Issued" = presented to the customer as a bill: sent (sent_at stamped) OR
+    // paid (paid_at — covers in-person card_present/cash/check that are never
+    // electronically "sent"; ~22% of paid invoices). This excludes drafts and
+    // scheduled-but-unsent invoices (sent_at + paid_at both null) from the
+    // denominator, and void/cancelled (never owed). The window is anchored on the
+    // real issue date — sent_at, else paid_at — ET-anchored so it can't drift at
+    // the UTC-midnight boundary; created_at (creation, not issuance) is only a
+    // last-resort fallback the issued-filter never actually reaches.
+    const issueDateET = "(COALESCE(sent_at, paid_at, created_at) AT TIME ZONE 'America/New_York')::date";
+    // Statuses kept out of BOTH numerator and denominator, for two reasons:
+    //  - never-collected cash: draft (never issued), void + canceled/cancelled
+    //    spellings (never owed), refunded (collected then given back → net not collected);
+    //  - settled by non-cash account credit: prepaid. The credit close-out stamps
+    //    paid_at (so AR/annual-prepay paths see it closed) but keeps status='prepaid'
+    //    precisely so collected-revenue stats don't count the non-cash credit
+    //    (admin-invoices.js / customer-credit.js). Annual prepays paid in CASH stay
+    //    status='paid' and remain counted as collected — this only drops credit closures.
+    const EXCLUDED_STATUSES = ['void', 'cancelled', 'canceled', 'refunded', 'draft', 'prepaid'];
+    let collectionRate = null, collectedCount = 0, issuedCount = 0, collectedTotal = 0, billedTotal = 0;
+    try {
+      const cAgg = await db('invoices')
+        .whereNotIn('status', EXCLUDED_STATUSES)
+        // Issued = sent OR has paid_at OR status='paid'. The status='paid' arm
+        // keeps a paid invoice with a null paid_at (a valid active/paid state per
+        // annual-prepay-renewals.invoiceTermStatus) in the denominator even if it
+        // was never e-sent — otherwise it'd be dropped from billed entirely.
+        .where(function issued() {
+          this.whereNotNull('sent_at').orWhereNotNull('paid_at').orWhere('status', 'paid');
+        })
+        // A Stripe refund leaves the invoice status='paid'/paid_at set, so a
+        // fully-refunded invoice would still read as collected. Exclude any
+        // invoice whose linked payment (by charge, else PI) is fully refunded.
+        // BOTH full-refund signals count, because the two refund paths stamp the
+        // payment differently: the app path (services/stripe.js) sets
+        // status='refunded' immediately but refund_status to Stripe's value
+        // (e.g. 'succeeded'), while the charge.refunded webhook later sets
+        // refund_status='full'. Checking only one would miss the window between
+        // them — or permanently if the webhook never arrives.
+        .whereRaw(`NOT EXISTS (
+          SELECT 1 FROM payments p
+          WHERE (p.status = 'refunded' OR p.refund_status = 'full')
+            AND (
+              (invoices.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = invoices.stripe_charge_id)
+              OR (invoices.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = invoices.stripe_payment_intent_id)
+            )
+        )`)
+        .whereRaw(`${issueDateET} >= ?`, [start])
+        .whereRaw(`${issueDateET} <= ?`, [todayStr])
+        // Collected keys on status='paid' (cash), NOT paid_at IS NOT NULL:
+        // prepaid credit closures stamp paid_at but stay status='prepaid'
+        // (already excluded above), and a status='paid' invoice with null paid_at
+        // is still collected. A PARTIAL refund keeps status='paid' + paid_at and
+        // records payments.refund_amount (dollars, same units as total), so the
+        // full-refund NOT EXISTS above doesn't catch it — net those out so a
+        // $100 invoice refunded $90 contributes $10, not $100. Detect partials by
+        // a POSITIVE refund_amount (excluding any full-refund row), NOT by
+        // refund_status='partial': the app path (services/stripe.js) stamps
+        // refund_amount immediately but leaves refund_status as Stripe's value
+        // (e.g. 'succeeded') until the charge.refunded webhook normalizes it to
+        // 'partial' — same dual-signal reason as the full-refund exclusion above.
+        .select(
+          db.raw("COUNT(*) as issued"),
+          db.raw("COUNT(*) FILTER (WHERE status = 'paid') as paid"),
+          db.raw("SUM(total) as billed"),
+          db.raw("SUM(total) FILTER (WHERE status = 'paid') as collected_gross"),
+          db.raw(`COALESCE(SUM(
+            (SELECT COALESCE(SUM(p.refund_amount), 0) FROM payments p
+               WHERE COALESCE(p.refund_amount, 0) > 0
+                 AND p.status <> 'refunded'
+                 AND COALESCE(p.refund_status, '') <> 'full'
+                 AND (
+                   (invoices.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = invoices.stripe_charge_id)
+                   OR (invoices.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = invoices.stripe_payment_intent_id)
+                 )
+            )) FILTER (WHERE status = 'paid'), 0) as partial_refunds`)
+        ).first();
+      issuedCount = parseInt(cAgg?.issued || 0);
+      collectedCount = parseInt(cAgg?.paid || 0);
+      billedTotal = parseFloat(cAgg?.billed || 0);
+      collectedTotal = Math.max(0, parseFloat(cAgg?.collected_gross || 0) - parseFloat(cAgg?.partial_refunds || 0));
+      // Dollar-based ($ collected / $ billed), NOT a count ratio — cash collection
+      // is what matters, and a count ratio would let one small paid invoice mask a
+      // large unpaid one. The paid/issued counts are kept for the tile sub only.
+      collectionRate = billedTotal > 0 ? Math.round((collectedTotal / billedTotal) * 1000) / 10 : null;
+    } catch (err) {
+      logger.error(`[admin-dashboard] collection rate failed: ${err.message}`);
+    }
+
+    // Autopay coverage — share of LIVE customers (CUSTOMER_STAGES, real customers
+    // not leads) actually on CHARGEABLE autopay, NOT the raw autopay_enabled flag.
+    // Uses the shared autopayActivePredicate() (services/autopay-eligibility.js) —
+    // the single source of truth also used by Billing Recovery — so the coverage
+    // count can't drift from the "would we actually charge them" definition (not
+    // disabled, not paused, default Stripe autopay method present, ACH-active or
+    // card). Set form so it's one aggregate query, not one per customer.
+    // Point-in-time, not windowed.
+    let autopayPct = null, autopayCount = 0, customerBase = 0;
+    try {
+      const liveBase = (qb) => qb
+        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES);
+      const baseRow = await liveBase(db('customers')).count({ c: '*' }).first();
+      customerBase = parseInt(baseRow?.c || 0);
+
+      const { sql: autopaySql, binding: autopayBinding } = autopayActivePredicate();
+      const coveredRow = await liveBase(db('customers as c'))
+        .whereRaw(autopaySql, [autopayBinding])
+        .count({ c: '*' }).first();
+      autopayCount = parseInt(coveredRow?.c || 0);
+      autopayPct = customerBase > 0 ? Math.round((autopayCount / customerBase) * 1000) / 10 : null;
+    } catch (err) {
+      logger.error(`[admin-dashboard] autopay coverage failed: ${err.message}`);
+    }
+
     // Retention — of the customers who were LIVE at the START of the window, how
     // many are STILL live now. "Retained" is read from current state (active +
     // not-deleted + a customer stage), so churn (stage→churned), going dormant,
@@ -596,6 +716,16 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       },
       sales: leadMetrics,
       ar: { days: arDays, open: arOpen, overdueCount: arOverdue },
+      billing: {
+        collectionRate,
+        collected: collectedTotal,
+        billed: billedTotal,
+        collectedCount,
+        issuedCount,
+        autopayPct,
+        autopayCount,
+        customerBase,
+      },
       retention: { pct: retentionPct, lost },
       leaderboard,
     });

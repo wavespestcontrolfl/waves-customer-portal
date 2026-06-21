@@ -632,6 +632,41 @@ export default function DashboardPageV2() {
                   alert={kpis.retention.pct != null && kpis.retention.pct < 85}
                 />{" "}
               </KpiGrid>{" "}
+              <SectionLabel>Billing</SectionLabel>{" "}
+              <KpiGrid>
+                {" "}
+                <KpiTile
+                  label="Collection Rate"
+                  value={
+                    kpis.billing?.collectionRate != null
+                      ? `${kpis.billing.collectionRate}%`
+                      : "—"
+                  }
+                  sub={
+                    kpis.billing?.issuedCount
+                      ? `${fmtMoneyCompact(kpis.billing.collected)} / ${fmtMoneyCompact(kpis.billing.billed)} · ${kpis.billing.collectedCount}/${kpis.billing.issuedCount} paid`
+                      : "no invoices issued"
+                  }
+                  alert={
+                    kpis.billing?.collectionRate != null &&
+                    kpis.billing.issuedCount >= 5 &&
+                    kpis.billing.collectionRate < 70
+                  }
+                />{" "}
+                <KpiTile
+                  label="Autopay Coverage"
+                  value={
+                    kpis.billing?.autopayPct != null
+                      ? `${kpis.billing.autopayPct}%`
+                      : "—"
+                  }
+                  sub={
+                    kpis.billing?.customerBase
+                      ? `${kpis.billing.autopayCount} of ${kpis.billing.customerBase} customers`
+                      : "no customers"
+                  }
+                />{" "}
+              </KpiGrid>{" "}
             </>
           )}
         </CardBody>{" "}
