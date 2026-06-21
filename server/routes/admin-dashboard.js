@@ -115,7 +115,12 @@ async function paidRevenueTotal(from, to) {
 }
 
 async function paidRevenueDaily(from, to) {
-  const paidInvoiceGapDateExpr = "((i.paid_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/New_York')::date";
+  // i.paid_at is timestamptz — a single AT TIME ZONE converts the stored UTC
+  // instant to ET wall-clock, so ::date is the true ET bucket (matches the
+  // applyETTimestampWindow filter below and the collection-rate issueDateET).
+  // Double-converting via AT TIME ZONE 'UTC' first re-shifts and misbuckets
+  // gap invoices by a day at the ET/UTC midnight boundary.
+  const paidInvoiceGapDateExpr = "(i.paid_at AT TIME ZONE 'America/New_York')::date";
   const [ledgerRows, paidInvoiceGapRows] = await Promise.all([
     db('payments')
       .where({ status: 'paid' })
