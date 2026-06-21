@@ -277,7 +277,7 @@ async function alertSurchargeBypass(paymentIntent, invoice, alertType, severity,
   }
 }
 
-async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, invoice, { exemptWallets = true } = {}) {
+async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, invoice) {
   const piMeta = paymentIntent.metadata || {};
   if (piMeta.surcharge_policy_version || !paymentIntent.payment_method) return null;
 
@@ -302,7 +302,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
   const terminalSurchargeBypass = isCardPresent;
 
   if (details.cardFunding) {
-    if (details.cardFunding === 'credit' && (!details.isWallet || !exemptWallets)) {
+    if (details.cardFunding === 'credit' && !details.isWallet) {
       return {
         reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
         alertType: 'wh_surcharge_under_collection',
@@ -338,7 +338,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
     const pmObj = await stripe.paymentMethods.retrieve(pmId);
     const funding = pmObj.card?.funding || pmObj.card_present?.funding || null;
     const isWallet = !!pmObj.card?.wallet;
-    if (funding === 'credit' && (!isWallet || !exemptWallets)) {
+    if (funding === 'credit' && !isWallet) {
       return {
         reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
         alertType: 'wh_surcharge_under_collection',
@@ -605,44 +605,43 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
   const Settle = require('../services/payer-statement-settle');
 
   if (eventType === 'succeeded') {
-    const meta = paymentIntent.metadata || {};
-    const baseCents = meta.base_amount != null ? Math.round(parseFloat(meta.base_amount) * 100) : null;
-    const totalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
-    const surchargeCents = baseCents != null ? Math.max(0, totalCents - baseCents) : 0;
-    const cardFunding = meta.card_funding && meta.card_funding !== 'unknown' ? meta.card_funding : null;
-
-    // Settled method from the ACTUAL attached PaymentMethod (not the PI's
-    // allowed-types list — statement PIs allow BOTH card + us_bank_account, so a
-    // base-amount debit/prepaid card would otherwise be misrecorded as ACH).
+    const { computeChargeAmount } = require('../services/stripe-pricing');
+    // Funding + method from the ACTUAL confirmed payment — never trust PI
+    // metadata (a failed /finalize can leave a stale surcharge_policy_version on
+    // a reused PI; the same client secret could then be confirmed with a
+    // different tender).
     const details = await paymentDetailsFromIntent(paymentIntent);
-    const paymentMethod = details.paymentMethod === 'us_bank_account' ? 'ach' : 'card';
-
-    // Surcharge-bypass guard (mirrors the invoice path): setup mints a BASE,
-    // client-confirmable PI, so a credit-card payer could skip /quote+/finalize
-    // and confirm at base. If a card succeeded WITHOUT surcharge finalization,
-    // quarantine + alert — do NOT settle base-only (under-collection).
-    // exemptWallets:false — a credit Apple/Google Pay confirmed at base must also
-    // be quarantined (statements surcharge the full card family, no wallet exempt).
-    const quarantine = await shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, { invoice_number: `S-${statementId}` }, { exemptWallets: false });
-    if (quarantine) {
-      await recordStatementPaymentIssue(paymentIntent, statementId, `surcharge bypass: ${quarantine.reason}`);
-      logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} quarantined (surcharge bypass): ${quarantine.reason}`);
-      return;
-    }
+    const methodType = details.paymentMethod || 'card';
+    const funding = details.cardFunding || null;
+    const paymentMethod = methodType === 'us_bank_account' ? 'ach' : 'card';
+    const actualTotalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
 
     await db.transaction(async (trx) => {
       const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
       if (!stmt) { logger.warn(`[stripe-webhook] statement ${statementId} not found for PI ${piId}`); return; }
+      if (stmt.status === 'paid') return; // idempotent (duplicate/late)
 
-      // Active-PI binding: only the statement's CURRENT PI may settle it. A
-      // stale/replaced PI that nonetheless collected money is an over-collection
-      // (e.g. the AP confirmed an old client secret) — alert for manual refund,
-      // never settle/cascade on it. settleStatementPaid is idempotent on
-      // already-paid, but a non-active success must not be treated as the
-      // settling charge.
-      if (stmt.stripe_payment_intent_id && String(stmt.stripe_payment_intent_id) !== String(piId)) {
-        await recordStatementPaymentIssue(paymentIntent, statementId, `orphan payment: succeeded PI ${piId} but active PI is ${stmt.stripe_payment_intent_id} (status ${stmt.status}) — manual refund/review`);
-        logger.warn(`[stripe-webhook] statement S-${statementId} orphan success on PI ${piId} (active ${stmt.stripe_payment_intent_id})`);
+      // Active-PI binding: settle ONLY when the statement's stored PI is exactly
+      // this PI (NON-NULL match). A null/different stored PI means this success is
+      // stale/orphan/replaced (or the statement was reconciled offline / a dispute
+      // cleared the PI) — record a manual-refund/review item and never settle.
+      if (String(stmt.stripe_payment_intent_id || '') !== String(piId)) {
+        await recordStatementPaymentIssue(paymentIntent, statementId, `orphan/stale success: PI ${piId}, active ${stmt.stripe_payment_intent_id || 'none'} (status ${stmt.status}) — manual refund/review`);
+        logger.warn(`[stripe-webhook] statement S-${statementId} non-active-PI success ${piId} (active ${stmt.stripe_payment_intent_id || 'none'})`);
+        return;
+      }
+
+      // Surcharge correctness: recompute the expected total for the ACTUAL
+      // confirmed funding and require the charged amount to match (binds surcharge
+      // to the real tender, not stale finalization metadata). A credit card
+      // confirmed at base, a stale-credit-surcharge on a debit, a wallet bypass —
+      // all mismatch here → quarantine, never settle the wrong amount.
+      const base = parseFloat(stmt.total);
+      const { baseCents, surchargeCents, totalCents: expectedTotalCents, rateBps, policyVersion } =
+        computeChargeAmount(base, methodType, { funding });
+      if (Math.abs(actualTotalCents - expectedTotalCents) > 1) {
+        await recordStatementPaymentIssue(paymentIntent, statementId, `surcharge mismatch: charged ${actualTotalCents}c, expected ${expectedTotalCents}c for ${methodType}/${funding || 'n/a'} — manual review`);
+        logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} surcharge mismatch (charged ${actualTotalCents}c, expected ${expectedTotalCents}c) — not settling`);
         return;
       }
 
@@ -651,12 +650,12 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
         processor: 'stripe',
         stripePaymentIntentId: piId,
         stripeChargeId: paymentIntent.latest_charge || null,
-        amountCents: totalCents,
+        amountCents: actualTotalCents,
         baseAmountCents: baseCents,
         surchargeAmountCents: surchargeCents,
-        surchargeRateBps: meta.surcharge_rate_bps != null ? Number(meta.surcharge_rate_bps) : 0,
-        surchargePolicyVersion: meta.surcharge_policy_version || null,
-        cardFunding,
+        surchargeRateBps: rateBps,
+        surchargePolicyVersion: policyVersion,
+        cardFunding: funding,
         source: 'stripe_webhook',
         database: trx,
       });
