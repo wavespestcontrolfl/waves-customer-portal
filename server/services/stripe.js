@@ -1895,6 +1895,14 @@ const StripeService = {
             card_surcharge: '0',
             save_card_opt_in: saveCard ? 'true' : 'false',
             selected_method_category: 'card',
+            // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+            // MERGE) so a reused PI that was previously finalized can't carry a
+            // stale surcharge_policy_version — which the webhook guard reads as
+            // "finalized" and would settle a later base-only card confirm without
+            // surcharge. Empty string deletes the key on update.
+            surcharge_policy_version: '',
+            surcharge_rate_bps: '',
+            card_funding: '',
           },
           payment_method_types: ['card', 'us_bank_account'],
         };

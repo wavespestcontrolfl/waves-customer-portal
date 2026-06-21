@@ -229,6 +229,30 @@ async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason)
   }
 }
 
+// Durable record for a statement PI that collected money but was NOT settled
+// (surcharge bypass or stale/orphan PI). customer_health_alerts.customer_id is
+// NOT NULL so a statement (no homeowner) alert there silently fails; the orphan-
+// charges queue tolerates a null customer and is the operator's manual
+// refund/reconcile list. Throws on failure so the webhook retries until durable;
+// onConflict-ignore keeps it idempotent on redelivery.
+async function recordStatementPaymentIssue(paymentIntent, statementId, reason) {
+  const latestCharge = paymentIntent.latest_charge;
+  const stripeChargeId = typeof latestCharge === 'string' ? latestCharge : latestCharge?.id || null;
+  const amount = (paymentIntent.amount_received || paymentIntent.amount || 0) / 100;
+  await db('stripe_orphan_charges')
+    .insert({
+      stripe_payment_intent_id: paymentIntent.id,
+      stripe_charge_id: stripeChargeId,
+      customer_id: null,
+      invoice_id: null,
+      amount,
+      source: 'statement_pay_webhook',
+      original_db_error: `statement S-${statementId}: ${String(reason).slice(0, 960)}`,
+    })
+    .onConflict('stripe_payment_intent_id')
+    .ignore();
+}
+
 // NOTE: customer_health_alerts.alert_type is varchar(30) — keep alertType
 // values at 30 chars or fewer. The old '*_webhook'-suffixed names (34 and 40
 // chars) overflowed the column and every insert silently failed.
@@ -253,7 +277,7 @@ async function alertSurchargeBypass(paymentIntent, invoice, alertType, severity,
   }
 }
 
-async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, invoice) {
+async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, invoice, { exemptWallets = true } = {}) {
   const piMeta = paymentIntent.metadata || {};
   if (piMeta.surcharge_policy_version || !paymentIntent.payment_method) return null;
 
@@ -278,7 +302,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
   const terminalSurchargeBypass = isCardPresent;
 
   if (details.cardFunding) {
-    if (details.cardFunding === 'credit' && !details.isWallet) {
+    if (details.cardFunding === 'credit' && (!details.isWallet || !exemptWallets)) {
       return {
         reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
         alertType: 'wh_surcharge_under_collection',
@@ -314,7 +338,7 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
     const pmObj = await stripe.paymentMethods.retrieve(pmId);
     const funding = pmObj.card?.funding || pmObj.card_present?.funding || null;
     const isWallet = !!pmObj.card?.wallet;
-    if (funding === 'credit' && !isWallet) {
+    if (funding === 'credit' && (!isWallet || !exemptWallets)) {
       return {
         reason: `Credit card PI ${paymentIntent.id} succeeded without surcharge finalization`,
         alertType: 'wh_surcharge_under_collection',
@@ -595,9 +619,11 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
     // and confirm at base. If a card succeeded WITHOUT surcharge finalization,
     // quarantine + alert — do NOT settle base-only (under-collection).
     const details = await paymentDetailsFromIntent(paymentIntent);
-    const quarantine = await shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, { invoice_number: `S-${statementId}` });
+    // exemptWallets:false — a credit Apple/Google Pay confirmed at base must also
+    // be quarantined (statements surcharge the full card family, no wallet exempt).
+    const quarantine = await shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, { invoice_number: `S-${statementId}` }, { exemptWallets: false });
     if (quarantine) {
-      await alertSurchargeBypass(paymentIntent, null, quarantine.alertType, quarantine.severity, quarantine.title, quarantine.description, { ...quarantine.metadata, statement_id: statementId });
+      await recordStatementPaymentIssue(paymentIntent, statementId, `surcharge bypass: ${quarantine.reason}`);
       logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} quarantined (surcharge bypass): ${quarantine.reason}`);
       return;
     }
@@ -613,12 +639,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
       // already-paid, but a non-active success must not be treated as the
       // settling charge.
       if (stmt.stripe_payment_intent_id && String(stmt.stripe_payment_intent_id) !== String(piId)) {
-        await alertSurchargeBypass(
-          paymentIntent, null, 'wh_statement_orphan_payment', 'high',
-          `Orphan statement payment — S-${statementId}`,
-          `PI ${piId} succeeded but the statement's active PI is ${stmt.stripe_payment_intent_id} (status ${stmt.status}). Money collected on a stale/replaced intent — needs manual refund/review; not settled locally.`,
-          { statement_id: statementId, succeeded_pi: piId, active_pi: stmt.stripe_payment_intent_id },
-        );
+        await recordStatementPaymentIssue(paymentIntent, statementId, `orphan payment: succeeded PI ${piId} but active PI is ${stmt.stripe_payment_intent_id} (status ${stmt.status}) — manual refund/review`);
         logger.warn(`[stripe-webhook] statement S-${statementId} orphan success on PI ${piId} (active ${stmt.stripe_payment_intent_id})`);
         return;
       }

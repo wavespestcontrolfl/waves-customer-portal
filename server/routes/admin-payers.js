@@ -190,16 +190,11 @@ router.post('/:id/statements/:statementId/send', async (req, res, next) => {
 router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => {
   if (!isEnabled('payerStatements')) return res.status(403).json({ error: 'Payer statements are not enabled' });
   try {
-    const statement = await loadOwnedStatement(req.params.id, req.params.statementId);
-    if (!statement) return res.status(404).json({ error: 'Statement not found' });
-    if (statement.status === 'paid') return res.status(409).json({ error: 'Statement is already paid' });
-    if (statement.status === 'processing') return res.status(409).json({ error: 'An online payment is in flight — wait for it to resolve before reconciling' });
-    if (!PAYABLE_STATEMENT_STATUSES.has(statement.status)) {
-      return res.status(400).json({ error: 'Close the statement before reconciling' });
-    }
+    const owned = await loadOwnedStatement(req.params.id, req.params.statementId);
+    if (!owned) return res.status(404).json({ error: 'Statement not found' });
 
     const method = String(req.body?.method || 'check').toLowerCase(); // check | ach | wire | offline
-    const total = Number(statement.total);
+    const total = Number(owned.total);
     const amount = req.body?.amount != null ? Number(req.body.amount) : total;
     // Mirror the invoice reconcile's $1 tolerance — recording a materially
     // different amount would drift the ledger from the statement.
@@ -207,18 +202,32 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
       return res.status(400).json({ error: `Amount mismatch — recorded $${(Number(amount) || 0).toFixed(2)} but statement is $${total.toFixed(2)}. Edit the statement first if it changed.` });
     }
 
-    // Cancel any unconfirmed online PI first (throws 409 if money is truly in
-    // flight), then cascade-settle from a PAYABLE status only (so a concurrent
-    // online confirm can't be double-collected).
-    await StripeService.cancelStatementPaymentIntentIfUnconfirmed(statement.id);
-    const result = await db.transaction((trx) => settleStatementPaid(statement.id, {
-      paymentMethod: method,
-      amountCents: Math.round(amount * 100),
-      source: 'admin_reconcile',
-      database: trx,
-    }, { database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES }));
+    // Cancel + settle UNDER ONE LOCK: a concurrent /pay/statement/:token/setup
+    // also takes `forUpdate` on the statement, so holding the lock across the PI
+    // cancel and the settle prevents it from minting + storing a new confirmable
+    // PI between the two (which would let the AP confirm online after the check is
+    // recorded — double collection). The status re-check inside the lock is
+    // authoritative; cancelStatementPaymentIntentIfUnconfirmed throws 409 if money
+    // is truly in flight (and fails closed if the PI can't be verified).
+    const result = await db.transaction(async (trx) => {
+      const locked = await trx('payer_statements').where({ id: owned.id }).forUpdate().first();
+      if (!locked) { const e = new Error('Statement not found'); e.statusCode = 404; throw e; }
+      if (locked.status === 'paid') { const e = new Error('Statement is already paid'); e.statusCode = 409; throw e; }
+      if (locked.status === 'processing') { const e = new Error('An online payment is in flight — wait for it to resolve before reconciling'); e.statusCode = 409; throw e; }
+      if (!PAYABLE_STATEMENT_STATUSES.has(locked.status)) { const e = new Error('Close the statement before reconciling'); e.statusCode = 400; throw e; }
 
-    logger.info(`[payers] statement ${statement.id} reconciled offline via ${method} ($${amount.toFixed(2)})`);
+      if (locked.stripe_payment_intent_id) {
+        await StripeService.cancelStatementPaymentIntentIfUnconfirmed(owned.id);
+      }
+      return settleStatementPaid(owned.id, {
+        paymentMethod: method,
+        amountCents: Math.round(amount * 100),
+        source: 'admin_reconcile',
+        database: trx,
+      }, { database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });
+    });
+
+    logger.info(`[payers] statement ${owned.id} reconciled offline via ${method} ($${amount.toFixed(2)})`);
     res.json({ ok: true, statement: result.statement, alreadyPaid: !!result.alreadyPaid, childrenSettled: result.childrenSettled || 0 });
   } catch (err) {
     if (err.statusCode === 409) return res.status(409).json({ error: err.message });

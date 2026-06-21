@@ -65,7 +65,18 @@ router.get('/:token', async (req, res, next) => {
     // First open: sent → viewed (a fact, not a dunning exit). Best-effort.
     try { await markStatementViewed(statement.id); } catch (e) { logger.warn(`[pay-statement] view stamp failed S-${statement.id}: ${e.message}`); }
 
-    const lines = await loadStatementLines(statement.id);
+    // Public payload: serviced ADDRESS + visit metadata only — NEVER the
+    // homeowner name (AGENTS public-route contract). loadStatementLines is the
+    // admin/PDF shape; whitelist fields here.
+    const lines = (await loadStatementLines(statement.id)).map((l) => ({
+      invoice_number: l.invoice_number,
+      service_date: l.service_date,
+      service_type: l.service_type,
+      service_address: l.service_address,
+      subtotal: l.subtotal,
+      tax_amount: l.tax_amount,
+      total: l.total,
+    }));
     const snap = parseSnapshot(statement.payer_snapshot) || {};
     res.json({
       statement: {
