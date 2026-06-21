@@ -157,6 +157,15 @@ describe('MDX {{token}} crash guard (proof-caught bug)', () => {
 describe('astro-publisher: spoke domain + canonical routing', () => {
   const { _internals } = require('../services/content-astro/astro-publisher');
 
+  // The spoke network is OFF by default (kill switch); routing only applies when
+  // it is explicitly enabled, so these routing assertions enable it.
+  const ORIG_FLAG = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+  beforeEach(() => { process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true'; });
+  afterEach(() => {
+    if (ORIG_FLAG === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    else process.env.SPOKE_BLOG_NETWORK_ENABLED = ORIG_FLAG;
+  });
+
   test('resolveSpokeTarget: exactly one non-hub spoke routes; hub/empty/multi do not', () => {
     expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com'] })).toBe('sarasotaflpestcontrol.com');
     expect(_internals.resolveSpokeTarget({ target_sites: [] })).toBeNull();
@@ -164,6 +173,18 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
     expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com', 'veniceflpestcontrol.com'] })).toBeNull();
     // falls back to the persisted operator_brief copy
     expect(_internals.resolveSpokeTarget({ voice_constraints: { operator_brief: { target_sites: ['veniceflpestcontrol.com'] } } })).toBe('veniceflpestcontrol.com');
+  });
+
+  test('kill switch: a queued spoke target does NOT fan out when the network is disabled (publishes hub-only)', () => {
+    // Owner directive 2026-06-16: blogs are hub-only. Even if a spoke-seed row is
+    // already queued (or was seeded during a temporary re-enable), the publishing
+    // path must refuse to route it to a spoke when the flag is off.
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com'] })).toBeNull();
+    expect(_internals.resolveSpokeTarget({ voice_constraints: { operator_brief: { target_sites: ['veniceflpestcontrol.com'] } } })).toBeNull();
+    // re-enable → routes again (logic intact)
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com'] })).toBe('sarasotaflpestcontrol.com');
   });
 
   test('blogOriginForSpoke: spoke www origin vs hub origin', () => {
