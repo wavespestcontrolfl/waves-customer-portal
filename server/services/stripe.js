@@ -137,6 +137,55 @@ const StripeService = {
     }
   },
 
+  /**
+   * Create or retrieve the PAYER's Stripe customer, persisting stripe_customer_id
+   * on the payers row. Kept SEPARATE from ensureStripeCustomer (homeowner) so a
+   * payer and a homeowner Stripe customer never cross — a NET-terms statement
+   * charges the payer's AP card, never the resident's. Returns the Stripe
+   * customer ID. (Phase-1 left payers.stripe_customer_id nullable + stored-only;
+   * this is the first writer.)
+   */
+  async ensureStripePayerCustomer(payerId) {
+    const payer = await db('payers').where({ id: payerId }).first();
+    if (!payer) throw new Error('Payer not found');
+    if (payer.stripe_customer_id) return payer.stripe_customer_id;
+
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    try {
+      const stripeCustomer = await stripe.customers.create({
+        name: payer.company_name || payer.display_name,
+        email: payer.ap_email || undefined,
+        phone: payer.ap_phone || undefined,
+        address: payer.billing_address_line1 ? {
+          line1: payer.billing_address_line1,
+          city: payer.billing_city || undefined,
+          state: payer.billing_state || undefined,
+          postal_code: payer.billing_zip || undefined,
+          country: 'US',
+        } : undefined,
+        metadata: {
+          waves_payer_id: String(payerId),
+          payer_billing: 'true',
+        },
+      }, {
+        idempotencyKey: `payer-cust-create-${payerId}`,
+      });
+
+      const stripeCustomerId = stripeCustomer.id;
+      await db('payers')
+        .where({ id: payerId })
+        .update({ stripe_customer_id: stripeCustomerId, updated_at: db.fn.now() });
+
+      logger.info(`[stripe] Payer Stripe customer created: ${stripeCustomerId} for payer ${payerId}`);
+      return stripeCustomerId;
+    } catch (err) {
+      logger.error(`[stripe] Payer Stripe customer creation failed: ${err.message}`);
+      throw new Error('Failed to create payer Stripe customer');
+    }
+  },
+
   // =========================================================================
   // SETUP INTENT (Card / ACH Save)
   // =========================================================================
