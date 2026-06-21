@@ -180,18 +180,7 @@ async function promoteLinkedCustomerForProposalWin({ trx, customerId, today = et
   }
 }
 
-// A no-customer commercial proposal reuses an existing phone-matched customer
-// ONLY when that customer is itself commercial (the same commercial entity being
-// re-quoted). A residential phone match — e.g. an HOA board member's personal
-// account — must NEVER receive the proposal's customer link/invoice: it would
-// bill the wrong account, and the taxable-invoice path would flip that row to
-// commercial. Residential/other matches get a fresh commercial profile instead.
-const COMMERCIAL_PROPERTY_TYPES = new Set(['commercial', 'business']);
-function isCommercialCustomerMatch(customer) {
-  return COMMERCIAL_PROPERTY_TYPES.has(String(customer?.property_type || '').toLowerCase());
-}
-
-// Auto-create (or link + promote) the customer for a no-customer proposal win.
+// Create a NEW commercial customer for a no-customer proposal win.
 // Returns { customerId, created }.
 async function ensureCustomerForProposalWin({ trx, estimate, proposal, today = etDateString() }) {
   const contact = resolveProposalWinContact(estimate, proposal);
@@ -203,42 +192,6 @@ async function ensureCustomerForProposalWin({ trx, estimate, proposal, today = e
       'Add a phone number to the estimate before winning it as a new customer.',
       400,
     );
-  }
-
-  // ensureCustomerAccount's phone match (findAccountByContact) only sees LIVE
-  // customers (whereNull deleted_at), so a phone belonging to an ARCHIVED
-  // (soft-deleted) customer would fall through to a duplicate insert. When there
-  // is no live match but an archived one exists, reactivate that row instead
-  // (commercialWinPromotionStamps clears deleted_at + promotes). Checked BEFORE
-  // ensureCustomerAccount so no orphan account is created; live matches still
-  // win (handled by ensureCustomerAccount below).
-  const allDigits = String(contact.phone || '').replace(/\D/g, '');
-  const phoneDigits = allDigits.length >= 10 ? allDigits.slice(-10) : '';
-  if (phoneDigits) {
-    const phoneLike = `%${phoneDigits}`;
-    const liveMatch = await trx('customers')
-      .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [phoneLike])
-      .whereNull('deleted_at')
-      .first('id');
-    if (!liveMatch) {
-      const archived = await trx('customers')
-        .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [phoneLike])
-        .whereNotNull('deleted_at')
-        .orderBy('created_at', 'asc')
-        .first('id', 'property_type', 'pipeline_stage', 'member_since', 'active', 'churned_at', 'deleted_at');
-      // Only reactivate a COMMERCIAL archived match — a residential archived
-      // account (a board member's personal record) must not be revived to carry
-      // the commercial proposal's customer/invoice. Non-commercial archived
-      // matches fall through to a fresh commercial customer.
-      if (archived && isCommercialCustomerMatch(archived)) {
-        const stamps = commercialWinPromotionStamps(archived, today);
-        if (Object.keys(stamps).length) {
-          await trx('customers').where({ id: archived.id }).update(stamps);
-        }
-        logger.info(`[proposal-win] reactivated archived commercial customer ${archived.id} on proposal win (phone match) for estimate ${estimate.id}`);
-        return { customerId: archived.id, created: false };
-      }
-    }
   }
 
   // Reuse the canonical account de-dup + customer-create primitives (same path
@@ -256,29 +209,22 @@ async function ensureCustomerForProposalWin({ trx, estimate, proposal, today = e
     companyName: contact.companyName,
   });
 
-  // A customer already exists for this contact (phone match). Reuse it ONLY when
-  // it is itself commercial (the same commercial entity being re-quoted) —
-  // promote/reactivate rather than duplicating. A residential phone match (e.g.
-  // an HOA board member's personal account) is NOT reused: fall through to a
-  // fresh commercial profile so we never bill the wrong account or flip it to
-  // commercial.
-  if (account.existingCustomer?.id && isCommercialCustomerMatch(account.existingCustomer)) {
-    const existing = account.existingCustomer;
-    const stamps = commercialWinPromotionStamps(existing, today);
-    if (Object.keys(stamps).length) {
-      await trx('customers').where({ id: existing.id }).update(stamps);
-    }
-    logger.info(`[proposal-win] linked proposal estimate ${estimate.id} to existing commercial customer ${existing.id}`);
-    return { customerId: existing.id, created: false };
-  }
+  // NEVER reuse a phone-matched existing customer for the proposal — always
+  // create a new commercial profile. A phone identifies a contact/account, not a
+  // property: a property manager or HOA contact can hold multiple commercial
+  // profiles, so reusing one by phone could link + invoice this proposal to the
+  // WRONG property/payer (money-correctness). ensureCustomerAccount still de-dups
+  // the ACCOUNT by phone (a grouping, not a billing target); the new profile is
+  // created under that matched account (secondary) or under a fresh account. The
+  // operator can merge profiles later if it really is an existing commercial customer.
   if (account.existingCustomer?.id) {
-    logger.info(`[proposal-win] phone match ${account.existingCustomer.id} is ${account.existingCustomer.property_type || 'non-commercial'} — creating a separate commercial profile for proposal estimate ${estimate.id} rather than billing it`);
+    logger.info(`[proposal-win] phone matched account ${account.accountId} for proposal estimate ${estimate.id} — creating a NEW commercial profile under it (not reusing customer ${account.existingCustomer.id})`);
   }
 
   const [created] = await trx('customers').insert({
     account_id: account.accountId,
-    // Secondary profile when attaching under a phone-matched (e.g. residential)
-    // account, so we don't create a second is_primary_profile on that account.
+    // Secondary profile when attaching under a phone-matched account, so we don't
+    // create a second is_primary_profile on it.
     is_primary_profile: !account.existingCustomer,
     profile_label: 'Commercial property',
     first_name: firstName,

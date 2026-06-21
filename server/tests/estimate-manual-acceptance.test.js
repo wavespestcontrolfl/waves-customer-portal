@@ -19,7 +19,7 @@ const {
   markEstimateManuallyAccepted,
 } = require('../services/estimate-manual-acceptance');
 
-function makeDb(estimate) {
+function makeDb(estimate, claimedOverrides = null) {
   const updates = [];
   const inserts = [];
   const database = jest.fn((table) => {
@@ -51,7 +51,9 @@ function makeDb(estimate) {
           rawClause: this.rawClause,
           patch,
         });
-        const updated = { ...estimate, ...patch };
+        // claimedOverrides simulates the row mutating between the pre-claim SELECT
+        // and this guarded UPDATE (e.g. a concurrent proposal-mode toggle).
+        const updated = { ...estimate, ...patch, ...(claimedOverrides || {}) };
         return {
           returning: async () => [updated],
         };
@@ -772,6 +774,24 @@ describe('commercial proposal win paths (#1917)', () => {
     // on customer_id) — not the pre-creation customer_id=null it had before.
     const auditRow = inserts.find((i) => i.table === 'activity_log');
     expect(auditRow?.row).toMatchObject({ customer_id: 'new-cust', action: 'estimate_manual_accept' });
+  });
+
+  test('race guard: a proposal-mode toggle between read and claim is rejected (no mis-route)', async () => {
+    // Pre-claim read is a NON-proposal estimate; a concurrent save flips it to
+    // proposal mode before this txn claims the row. The win must NOT proceed on
+    // the stale mode (which would route a now-proposal through the legacy converter).
+    const estimate = { id: 'race-toggle', status: 'sent', customer_id: 'customer-race', estimate_data: {} };
+    const { database } = makeDb(estimate, { estimate_data: { proposal: { enabled: true } } });
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    })).rejects.toThrow(/changed while it was being accepted/i);
+
+    // Bailed right after the claim, before routing — neither billing path ran.
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(proposalWin.ensureCustomerForProposalWin).not.toHaveBeenCalled();
   });
 
   test('invoice-mode win: builds the proposal invoice and surfaces it', async () => {

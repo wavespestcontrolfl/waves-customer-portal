@@ -2792,6 +2792,10 @@ function mobileStatusClass(status) {
 
 function canMarkEstimateWon(estimate) {
   if (!["sent", "viewed"].includes(estimate.status)) return false;
+  // The server rejects any estimate with a one-time option from manual accept
+  // (recurring-vs-one-time must be recorded via the customer link) — proposals
+  // included. Don't offer a Mark Won that always 400s.
+  if (estimate.showOneTimeOption) return false;
   // Commercial proposals are won manually even with no linked customer or in
   // invoice mode — the win auto-creates/promotes the customer and (in invoice
   // mode) builds the first invoice from the proposal lines (#1917).

@@ -170,23 +170,12 @@ describe('createProposalAcceptanceInvoice', () => {
   });
 });
 
-function makeTrx({ liveMatch = null, archivedMatch = null } = {}) {
+function makeTrx() {
   const ops = { updates: [], inserts: [] };
   const trx = jest.fn(() => {
     const builder = {
-      _table: null,
       _clause: null,
-      _deletedFilter: null,
       where(clause) { this._clause = clause; return this; },
-      whereRaw() { return this; },
-      whereNull() { this._deletedFilter = 'live'; return this; },
-      whereNotNull() { this._deletedFilter = 'archived'; return this; },
-      orderBy() { return this; },
-      first() {
-        if (this._deletedFilter === 'live') return Promise.resolve(liveMatch);
-        if (this._deletedFilter === 'archived') return Promise.resolve(archivedMatch);
-        return Promise.resolve(null);
-      },
       update(patch) { ops.updates.push({ clause: this._clause, patch }); return Promise.resolve(1); },
       insert(row) {
         ops.inserts.push({ row });
@@ -204,7 +193,7 @@ describe('ensureCustomerForProposalWin', () => {
     adminCustomers.createDefaultCustomerRows.mockClear();
   });
 
-  test('creates and promotes a new customer when none exists', async () => {
+  test('creates a new commercial customer when no account matches', async () => {
     adminCustomers.ensureCustomerAccount.mockResolvedValue({ accountId: 'acct-1', existingCustomer: null });
     const { trx, ops } = makeTrx();
     const estimate = { id: 5, customer_name: 'Siesta Key HOA', customer_phone: '9415551234', customer_email: 'BOARD@example.com', address: '100 Beach Rd' };
@@ -215,6 +204,7 @@ describe('ensureCustomerForProposalWin', () => {
     expect(ops.inserts).toHaveLength(1);
     expect(ops.inserts[0].row).toMatchObject({
       account_id: 'acct-1',
+      is_primary_profile: true,
       pipeline_stage: 'active_customer',
       member_since: '2026-06-20',
       lead_source: 'commercial_proposal',
@@ -225,87 +215,24 @@ describe('ensureCustomerForProposalWin', () => {
     expect(adminCustomers.createDefaultCustomerRows).toHaveBeenCalledWith(trx, 'new-cust');
   });
 
-  test('links + promotes an existing COMMERCIAL lead-stage customer instead of duplicating', async () => {
+  test('NEVER reuses a phone-matched customer — creates a new commercial profile under the matched account (phone != property; money-correctness)', async () => {
+    // Even a COMMERCIAL phone match (e.g. a property manager's OTHER property)
+    // must not be reused — reusing it could invoice this proposal to the wrong
+    // property/payer. We create a distinct commercial profile under the matched
+    // account instead; the existing customer row is left untouched.
     adminCustomers.ensureCustomerAccount.mockResolvedValue({
       accountId: 'acct-1',
-      existingCustomer: { id: 'cust-9', pipeline_stage: 'new_lead', member_since: null, churned_at: null, property_type: 'commercial' },
-    });
-    const { trx, ops } = makeTrx();
-    const res = await ensureCustomerForProposalWin({
-      trx, estimate: { id: 5, customer_phone: '9415551234' }, proposal: SIESTA_PROPOSAL,
-    });
-
-    expect(res).toEqual({ customerId: 'cust-9', created: false });
-    expect(ops.inserts).toHaveLength(0);
-    expect(ops.updates).toHaveLength(1);
-    expect(ops.updates[0].patch).toMatchObject({ pipeline_stage: 'active_customer', member_since: '2026-06-20' });
-  });
-
-  test('does not re-stamp an already-real, active commercial customer', async () => {
-    adminCustomers.ensureCustomerAccount.mockResolvedValue({
-      accountId: 'acct-1',
-      existingCustomer: { id: 'cust-9', pipeline_stage: 'active_customer', member_since: '2025-01-01', property_type: 'commercial' },
-    });
-    const { trx, ops } = makeTrx();
-    const res = await ensureCustomerForProposalWin({
-      trx, estimate: { id: 5, customer_phone: '9415551234' }, proposal: SIESTA_PROPOSAL,
-    });
-    expect(res).toEqual({ customerId: 'cust-9', created: false });
-    expect(ops.updates).toHaveLength(0);
-  });
-
-  test('reactivates a phone-matched COMMERCIAL real-stage customer that is inactive/churned', async () => {
-    adminCustomers.ensureCustomerAccount.mockResolvedValue({
-      accountId: 'acct-1',
-      existingCustomer: {
-        id: 'cust-9', pipeline_stage: 'won', member_since: '2025-01-01',
-        active: false, churned_at: '2025-12-01', property_type: 'commercial',
-      },
-    });
-    const { trx, ops } = makeTrx();
-    const res = await ensureCustomerForProposalWin({
-      trx, estimate: { id: 5, customer_phone: '9415551234' }, proposal: SIESTA_PROPOSAL,
-    });
-    expect(res).toEqual({ customerId: 'cust-9', created: false });
-    expect(ops.updates).toHaveLength(1);
-    expect(ops.updates[0].patch).toMatchObject({ active: true, churned_at: null, churn_reason: null });
-    // already a real stage → pipeline_stage is not rewritten
-    expect(ops.updates[0].patch).not.toHaveProperty('pipeline_stage');
-  });
-
-  test('reactivates an ARCHIVED commercial phone-matched customer instead of inserting a duplicate', async () => {
-    // No live match, but an archived (soft-deleted) COMMERCIAL customer shares the
-    // phone — findAccountByContact only sees live rows, so without this we'd duplicate.
-    const { trx, ops } = makeTrx({
-      liveMatch: null,
-      archivedMatch: { id: 'arch-7', pipeline_stage: 'won', member_since: '2025-01-01', active: false, churned_at: '2025-12-01', deleted_at: '2025-06-01', property_type: 'commercial' },
-    });
-    const res = await ensureCustomerForProposalWin({
-      trx, estimate: { id: 5, customer_phone: '9415551234' }, proposal: SIESTA_PROPOSAL,
-    });
-    expect(res).toEqual({ customerId: 'arch-7', created: false });
-    expect(ops.inserts).toHaveLength(0); // no duplicate
-    expect(ops.updates).toHaveLength(1);
-    expect(ops.updates[0].patch).toMatchObject({ deleted_at: null, active: true, churned_at: null });
-    expect(adminCustomers.ensureCustomerAccount).not.toHaveBeenCalled(); // intercepted before account create
-  });
-
-  test('does NOT reuse a residential phone match — creates a separate commercial profile (no wrong-customer billing)', async () => {
-    // A board member's personal RESIDENTIAL account shares the proposal phone.
-    // Reusing it would bill the wrong customer + flip it to commercial, so we
-    // create a fresh commercial profile under the matched account instead.
-    adminCustomers.ensureCustomerAccount.mockResolvedValue({
-      accountId: 'acct-1',
-      existingCustomer: { id: 'cust-res', pipeline_stage: 'active_customer', member_since: '2025-01-01', property_type: 'residential' },
+      existingCustomer: { id: 'cust-other', pipeline_stage: 'active_customer', property_type: 'commercial' },
     });
     const { trx, ops } = makeTrx();
     const res = await ensureCustomerForProposalWin({
       trx, estimate: { id: 5, customer_phone: '9415551234' }, proposal: SIESTA_PROPOSAL,
     });
     expect(res).toEqual({ customerId: 'new-cust', created: true });
-    expect(ops.updates).toHaveLength(0); // residential row untouched (not billed, not flipped)
+    expect(ops.updates).toHaveLength(0); // existing customer untouched (never billed/flipped)
     expect(ops.inserts).toHaveLength(1);
-    expect(ops.inserts[0].row).toMatchObject({ property_type: 'commercial', is_primary_profile: false });
+    // Secondary profile under the matched account (its own primary is the existing row).
+    expect(ops.inserts[0].row).toMatchObject({ account_id: 'acct-1', is_primary_profile: false, property_type: 'commercial' });
   });
 
   test('throws a controlled error when the estimate has no phone', async () => {

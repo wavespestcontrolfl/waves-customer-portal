@@ -227,6 +227,17 @@ async function markEstimateManuallyAccepted({
       throw httpError('Estimate is no longer active.', 409);
     }
 
+    // Race guard: re-derive proposal mode from the CLAIMED row. The validity
+    // guards above ran on the pre-claim SELECT; if a proposal-mode toggle
+    // committed between that read and this guarded UPDATE, the guards + the
+    // branch below would act on the wrong mode — routing a now-proposal through
+    // the legacy EstimateConverter (dropping its pricing/tax/cadence), or
+    // vice-versa. Bail so the operator retries against fresh state rather than
+    // mis-billing. (No-toggle is the norm, so this never fires in practice.)
+    if (isCommercialProposalEstimate(updatedEstimate) !== isCommercialProposal) {
+      throw httpError('This estimate changed while it was being accepted. Refresh and try again.', 409);
+    }
+
     // A commercial proposal's pricing lives in estimate_data.proposal.buildings,
     // which EstimateConverter does not read — it converts from the legacy
     // result/recurring service mix. Auto-converting here would activate the
