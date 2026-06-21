@@ -791,6 +791,12 @@ function buildCadastralRecord(parcel, address) {
     county: parcel.county,
     dorUseCode: parcel.dorUseCode,
     landUseDescription: parcel.landUseDescription || null,
+    // `landUse` is the key commercialSignalText/detectCategory read: surface the
+    // county description here so a county-GIS-only record whose use is
+    // commercial / municipal / common-area routes to the manual commercial
+    // quote path instead of defaulting to Single Family pricing — even when
+    // countyUseDescToPropertyType returned null for it (codex P1).
+    landUse: parcel.landUseDescription || null,
     subdivision: parcel.subdivision || null,
     assessmentYear: parcel.assessmentYear ?? parcel.rollYear ?? null,
   };

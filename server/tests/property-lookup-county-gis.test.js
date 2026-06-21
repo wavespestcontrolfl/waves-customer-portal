@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({
 
 const countyGis = require('../services/property-lookup/county-parcel-gis');
 const { _private: aiPrivate } = require('../services/property-lookup/ai-property-lookup');
+const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
 
 const {
   lookupCountyParcelByPoint,
@@ -246,6 +247,35 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     const merged = { propertyType: 'Condo', _fieldEvidence: { propertyType: { value: 'Condo' } } };
     applyCountyGisTypeOverride(merged, dorOnly);
     expect(merged.propertyType).toBe('Condo'); // untouched — not description-derived
+  });
+
+  test('commercial/municipal land-use routes to the commercial path, not Single Family (codex P1)', () => {
+    const mk = (desc) => buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '500 MAIN ST', situsCity: 'BRADENTON', situsZip: '34205',
+      lotSqft: 20000, dorUseCode: '11', landUseDescription: desc,
+      sourceUrl: 'https://gis.manateepao.gov/x', gisProvider: 'manatee_gis',
+    }, 'addr');
+
+    for (const desc of ['Commercial Retail (1100)', 'Municipal (1555)', 'Improved Residential Common Area (1554)']) {
+      const record = mk(desc);
+      expect(record._raw.landUse).toBe(desc); // surfaced where detectCategory reads it
+      const profile = buildEnrichedProfile(record, {}, 27.4, -82.4);
+      expect(profile.category).toBe('COMMERCIAL');
+      expect(profile.isCommercial).toBe(true);
+      expect(profile.propertyType).toBe('Commercial');
+    }
+  });
+
+  test('a residential paired villa is NOT misrouted to commercial', () => {
+    const record = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '17742 LUCAYA DR', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 7200, livingAreaSqft: 2450, stories: 2, yearBuilt: 2020, dorUseCode: '01',
+      landUseDescription: 'Half Duplex/Paired Villa (1554)',
+      sourceUrl: 'https://gis.manateepao.gov/x', gisProvider: 'manatee_gis',
+    }, 'addr');
+    const profile = buildEnrichedProfile(record, {}, 27.4, -82.4);
+    expect(profile.category).toBe('RESIDENTIAL');
+    expect(profile.propertyType).toBe('Townhome');
   });
 
   test('FDOR cadastral parcel (no gisProvider) still labels as cadastral', () => {
