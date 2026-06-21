@@ -490,22 +490,38 @@ function rawTextForServiceRow(row = {}) {
   ].filter(Boolean).join(' ')).toLowerCase();
 }
 
+// Catalog-only text (service_key / service_name) — the authoritative cadence source.
+// service_type labels can be stale (a lawn_care_monthly row still labeled "Quarterly
+// Lawn Care"), so detection resolves from this first and only falls back to the full
+// text when the catalog fields do not resolve.
+function catalogTextForServiceRow(row = {}) {
+  return String([
+    row.service_key,
+    row.serviceKey,
+    row.service_name,
+    row.serviceName,
+    row.name,
+  ].filter(Boolean).join(' ')).toLowerCase();
+}
+
 function detectWaveGuardPlanKeys(row = {}) {
-  const rawText = rawTextForServiceRow(row);
+  const fullText = rawTextForServiceRow(row);
+  const catalogText = catalogTextForServiceRow(row);
   const keys = [];
   const add = (key) => {
     if (SELF_BOOKING_RECURRING_PLANS[key] && !keys.includes(key)) keys.push(key);
   };
+  const resolvePlan = (resolver) => resolver(catalogText) || resolver(fullText);
 
-  const termitePlan = resolveTermiteBaitRecurringPlan(rawText);
+  const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
-  const mosquitoPlan = resolveMosquitoRecurringPlan(rawText);
+  const mosquitoPlan = resolvePlan(resolveMosquitoRecurringPlan);
   if (mosquitoPlan) add(mosquitoPlan.planKey || 'mosquito');
-  const treeShrubPlan = resolveTreeShrubRecurringPlan(rawText);
+  const treeShrubPlan = resolvePlan(resolveTreeShrubRecurringPlan);
   if (treeShrubPlan) add(treeShrubPlan.planKey || 'tree_shrub');
-  const lawnPlan = resolveLawnCareRecurringPlan(rawText);
+  const lawnPlan = resolvePlan(resolveLawnCareRecurringPlan);
   if (lawnPlan) add(lawnPlan.planKey || 'lawn_care');
-  const pestPlan = resolvePestControlRecurringPlan(rawText);
+  const pestPlan = resolvePlan(resolvePestControlRecurringPlan);
   if (pestPlan) add(pestPlan.planKey || 'pest_control');
 
   return keys;

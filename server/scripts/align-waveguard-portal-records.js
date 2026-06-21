@@ -77,27 +77,37 @@ function rawTextForService(row = {}) {
   ].filter(Boolean).join(' ')).toLowerCase();
 }
 
-function textForService(row = {}) {
-  return rawTextForService(row).replace(/[_-]+/g, ' ');
+// Catalog-only text (service_key / service_name) — the authoritative cadence source.
+// service_type labels can be stale (a lawn_care_monthly row still labeled "Quarterly
+// Lawn Care"), so resolve from this first and fall back to the full text only when the
+// catalog fields do not resolve.
+function catalogTextForService(row = {}) {
+  return String([
+    row.service_key,
+    row.serviceKey,
+    row.service_name,
+    row.name,
+  ].filter(Boolean).join(' ')).toLowerCase();
 }
 
 function detectServiceKeys(row = {}) {
-  const text = textForService(row);
-  const rawText = rawTextForService(row);
+  const fullText = rawTextForService(row);
+  const catalogText = catalogTextForService(row);
   const keys = [];
   const add = (key) => {
     if (SERVICE_PLANS[key] && !keys.includes(key)) keys.push(key);
   };
+  const resolvePlan = (resolver) => resolver(catalogText) || resolver(fullText);
 
-  const pestPlan = resolvePestControlRecurringPlan(rawText);
+  const pestPlan = resolvePlan(resolvePestControlRecurringPlan);
   if (pestPlan) add(pestPlan.planKey || 'pest_control');
-  const lawnPlan = resolveLawnCareRecurringPlan(rawText);
+  const lawnPlan = resolvePlan(resolveLawnCareRecurringPlan);
   if (lawnPlan) add(lawnPlan.planKey || 'lawn_care');
-  const mosquitoPlan = resolveMosquitoRecurringPlan(rawText);
+  const mosquitoPlan = resolvePlan(resolveMosquitoRecurringPlan);
   if (mosquitoPlan) add(mosquitoPlan.planKey || 'mosquito');
-  const treeShrubPlan = resolveTreeShrubRecurringPlan(rawText);
+  const treeShrubPlan = resolvePlan(resolveTreeShrubRecurringPlan);
   if (treeShrubPlan) add(treeShrubPlan.planKey || 'tree_shrub');
-  const termitePlan = resolveTermiteBaitRecurringPlan(rawText);
+  const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
 
   return keys;
