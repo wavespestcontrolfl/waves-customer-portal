@@ -229,8 +229,8 @@ async function getKpiSnapshot() {
   const r = dateRange();
 
   const [revMTD, revLastMonth, activeCount, newCount, pendingEst, servicesWeek, mrr, balances, healthDist] = await Promise.all([
-    db('payments').where({ status: 'paid' }).whereBetween('payment_date', [r.month_start, r.month_end]).sum('amount as total').first(),
-    db('payments').where({ status: 'paid' }).whereBetween('payment_date', [r.last_month_start, r.last_month_end]).sum('amount as total').first(),
+    db('payments').where({ status: 'paid' }).whereNull('payer_id').whereBetween('payment_date', [r.month_start, r.month_end]).sum('amount as total').first(),
+    db('payments').where({ status: 'paid' }).whereNull('payer_id').whereBetween('payment_date', [r.last_month_start, r.last_month_end]).sum('amount as total').first(),
     // Real customers only — active=true defaults true for leads, so match the
     // dashboard tile's pipeline_stage filter (whereLiveCustomer) instead of
     // counting prospects. Keeps the IB answer consistent with the tile.
@@ -529,7 +529,7 @@ async function getRevenueBreakdown(input) {
   }
 
   if (group_by === 'customer') {
-    const rows = await db('payments').where({ status: 'paid' }).whereBetween('payment_date', [from, to])
+    const rows = await db('payments').where({ status: 'paid' }).whereNull('payer_id').whereBetween('payment_date', [from, to])
       .leftJoin('customers', 'payments.customer_id', 'customers.id')
       .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         db.raw('SUM(payments.amount) as total'), db.raw('COUNT(*) as payments'))
@@ -539,7 +539,7 @@ async function getRevenueBreakdown(input) {
   }
 
   if (group_by === 'month') {
-    const rows = await db('payments').where({ status: 'paid' }).whereBetween('payment_date', [from, to])
+    const rows = await db('payments').where({ status: 'paid' }).whereNull('payer_id').whereBetween('payment_date', [from, to])
       .select(db.raw("TO_CHAR(payment_date, 'YYYY-MM') as month"), db.raw('SUM(amount) as total'), db.raw('COUNT(*) as payments'))
       .groupByRaw("TO_CHAR(payment_date, 'YYYY-MM')").orderByRaw("TO_CHAR(payment_date, 'YYYY-MM')");
     return { group_by, rows: rows.map(r => ({ month: r.month, total: parseFloat(r.total || 0), payments: parseInt(r.payments) })) };

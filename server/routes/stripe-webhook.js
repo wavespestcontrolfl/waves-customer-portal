@@ -610,15 +610,17 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
     const totalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
     const surchargeCents = baseCents != null ? Math.max(0, totalCents - baseCents) : 0;
     const cardFunding = meta.card_funding && meta.card_funding !== 'unknown' ? meta.card_funding : null;
-    const paymentMethod = (surchargeCents > 0 || cardFunding)
-      ? 'card'
-      : (paymentIntent.payment_method_types || []).includes('us_bank_account') ? 'ach' : 'card';
+
+    // Settled method from the ACTUAL attached PaymentMethod (not the PI's
+    // allowed-types list — statement PIs allow BOTH card + us_bank_account, so a
+    // base-amount debit/prepaid card would otherwise be misrecorded as ACH).
+    const details = await paymentDetailsFromIntent(paymentIntent);
+    const paymentMethod = details.paymentMethod === 'us_bank_account' ? 'ach' : 'card';
 
     // Surcharge-bypass guard (mirrors the invoice path): setup mints a BASE,
     // client-confirmable PI, so a credit-card payer could skip /quote+/finalize
     // and confirm at base. If a card succeeded WITHOUT surcharge finalization,
     // quarantine + alert — do NOT settle base-only (under-collection).
-    const details = await paymentDetailsFromIntent(paymentIntent);
     // exemptWallets:false — a credit Apple/Google Pay confirmed at base must also
     // be quarantined (statements surcharge the full card family, no wallet exempt).
     const quarantine = await shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, { invoice_number: `S-${statementId}` }, { exemptWallets: false });
@@ -2039,7 +2041,17 @@ async function reverseStatementCascadeForDispute(statementId, reason) {
     const { priorPayableStatus } = require('../services/payer-statement-settle');
     const now = new Date();
     await trx('payer_statements').where({ id: statementId })
-      .update({ status: priorPayableStatus(stmt), paid_at: null, updated_at: now });
+      .update({
+        status: priorPayableStatus(stmt),
+        paid_at: null,
+        // Clear the settled PI/charge: /setup + reconcile treat a lingering
+        // succeeded PI as the active payment and 409, so the reopened AR could
+        // never be re-collected. The disputed `payments` row keeps the PI/charge
+        // for the audit trail.
+        stripe_payment_intent_id: null,
+        stripe_charge_id: null,
+        updated_at: now,
+      });
     // Reopen the children the cascade settled (paid → draft = accrued again).
     await trx('invoices').where({ payer_statement_id: statementId }).where('status', 'paid')
       .update({ status: 'draft', paid_at: null, updated_at: now });
