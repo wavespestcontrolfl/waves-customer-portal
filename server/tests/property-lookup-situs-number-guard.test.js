@@ -24,6 +24,12 @@ jest.mock('../services/property-lookup/parcel-gis', () => ({
   lookupParcelByPoint: jest.fn(),
   parcelGisTimeoutMs: jest.fn(() => 4000),
 }));
+// County GIS layer is tried first; return null so the FDOR mock parcel above is
+// the one the situs guard sees (this suite targets that guard, not county GIS).
+jest.mock('../services/property-lookup/county-parcel-gis', () => ({
+  lookupCountyParcelByPoint: jest.fn().mockResolvedValue(null),
+  countyUseDescToPropertyType: jest.fn(() => null),
+}));
 
 const logger = require('../services/logger');
 const { lookupParcelByPoint } = require('../services/property-lookup/parcel-gis');

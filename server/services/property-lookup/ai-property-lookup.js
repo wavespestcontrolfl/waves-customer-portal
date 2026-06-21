@@ -21,6 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
+const { lookupCountyParcelByPoint, countyUseDescToPropertyType } = require('./county-parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -749,13 +750,23 @@ function dorUcPropertyType(code) {
 // Weight 97 (cadastral): county-grade data on an annual vintage — it joins
 // the merge as supporting evidence but never short-circuits live PAO / AI
 // lookups (new construction outruns the roll).
+// Shapes a parcel-GIS match (county roll layer OR FDOR statewide cadastral) as
+// a merge-ready evidence record. A county GIS parcel (parcel.gisProvider set)
+// carries the county land-use DESCRIPTION — "Half Duplex/Paired Villa",
+// "Condominia" — which the conservative numeric DOR-code map can't split from a
+// detached home, so the description wins the propertyType when present. The
+// per-field weight comes from the source URL via classifyPropertySource: county
+// GIS hosts score `county` (100), the FDOR statewide layer `cadastral` (97).
 function buildCadastralRecord(parcel, address) {
   if (!parcel) return null;
+  const isCountyGis = Boolean(parcel.gisProvider);
+  const provider = parcel.gisProvider || 'fdor_cadastral';
   const parsed = {
     squareFootage: coerceInt(parcel.livingAreaSqft, 500, 15000),
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
-    propertyType: dorUcPropertyType(parcel.dorUseCode),
+    stories: coerceInt(parcel.stories, 1, 4),
+    propertyType: countyUseDescToPropertyType(parcel.landUseDescription) || dorUcPropertyType(parcel.dorUseCode),
     source: parcel.sourceUrl || null,
     confidence: 'high',
     county: parcel.county,
@@ -763,23 +774,25 @@ function buildCadastralRecord(parcel, address) {
   };
   if (!hasAnyPropertyFact(parsed)) return null;
 
-  const record = shapeAsPropertyRecord(parsed, address, 'fdor_cadastral');
-  record._source = 'cadastral';
+  const record = shapeAsPropertyRecord(parsed, address, provider);
+  record._source = isCountyGis ? 'county' : 'cadastral';
   record._raw = {
     ...(record._raw || {}),
-    _source: 'cadastral',
-    _provider: 'fdor_cadastral',
+    _source: record._source,
+    _provider: provider,
     parcelId: parcel.parcelId,
     county: parcel.county,
     dorUseCode: parcel.dorUseCode,
-    assessmentYear: parcel.assessmentYear,
+    landUseDescription: parcel.landUseDescription || null,
+    subdivision: parcel.subdivision || null,
+    assessmentYear: parcel.assessmentYear ?? parcel.rollYear ?? null,
   };
   record.addressLine1 = parcel.situsAddress || '';
   record.city = parcel.situsCity || '';
   record.state = 'FL';
   record.zipCode = parcel.situsZip || '';
   record.county = parcel.county;
-  record._aiProviders = ['fdor_cadastral'];
+  record._aiProviders = [provider];
   return record;
 }
 
@@ -1109,8 +1122,21 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   let parcel = null;
   if (canUseParcelGis(geoContext)) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
-    parcel = await lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: gisTimeoutMs })
-      .catch(() => null);
+    // County roll layer first: fresher than the annual FDOR statewide roll (new
+    // plats appear sooner) and it carries the land-use description that splits
+    // paired villas / condos from detached homes. FDOR statewide is the
+    // fallback, within whatever county budget remains.
+    parcel = await lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
+      county: geoContext.county,
+      timeoutMs: gisTimeoutMs,
+    }).catch(() => null);
+    if (!parcel) {
+      const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
+      if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
+        parcel = await lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })
+          .catch(() => null);
+      }
+    }
     if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
       // The rooftop point landed inside a parcel whose situs is a different
       // building (multi-building complex master parcel). Drop the GIS match
@@ -2911,7 +2937,10 @@ function classifyPropertySource(url) {
   const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
   const path = parsed.pathname.toLowerCase();
 
-  if (host.includes('manateepao.gov') || host.includes('sc-pa.com') || host.includes('ccappraiser.com')) {
+  // County appraiser sites AND each county's own parcel GIS map service
+  // (county-parcel-gis.js) — all county-grade authoritative rolls.
+  if (host.includes('manateepao.gov') || host.includes('sc-pa.com') || host.includes('ccappraiser.com')
+      || host.includes('scgov.net') || host.includes('charlottecountyfl.gov')) {
     return { type: 'county', weight: SOURCE_TYPE_WEIGHTS.county };
   }
   if (host.includes('arcgis.com') && path.includes('florida_statewide_cadastral')) {

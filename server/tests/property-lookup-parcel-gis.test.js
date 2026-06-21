@@ -1,3 +1,11 @@
+// The trio now tries the county parcel GIS layer first; neutralize it here so
+// these tests exercise the FDOR statewide path and by-parcel routing they
+// target (the county-first path is covered by property-lookup-county-gis.test).
+jest.mock('../services/property-lookup/county-parcel-gis', () => ({
+  lookupCountyParcelByPoint: jest.fn().mockResolvedValue(null),
+  countyUseDescToPropertyType: jest.fn(() => null),
+}));
+
 const {
   lookupParcelByPoint,
   countyFromCoNo,
