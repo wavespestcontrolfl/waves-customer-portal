@@ -371,23 +371,28 @@ describe('public estimate one-time breakdown', () => {
     expect(recomputed.monthlyAmount).toBe(7.5); // 90 / 12
   });
 
-  test('manualDiscountForRecurringBase recomputes only the recurring slice for fixed discounts', () => {
-    // $100 fixed split across a 468 recurring base + 720 one-time base — the
-    // recurring card must show only the recurring slice, never the full $100.
-    const saved = {
-      type: 'FIXED',
-      value: 100,
-      amount: 100,
-      recurringAmount: 39.39,
-      oneTimeAmount: 60.61,
-      oneTimeDiscountableBase: 720,
-    };
-    const recomputed = manualDiscountForRecurringBase(saved, 468);
+  test('fixed discount recurring slice + one-time slice sum to the fixed value across cadences', () => {
+    // $100 fixed split into a 39.39 recurring / 60.61 one-time slice. The
+    // recurring card must show only the recurring slice (never the full $100),
+    // and recurring + one-time must keep totaling $100 on every cadence.
+    const saved = { type: 'FIXED', value: 100, amount: 100, recurringAmount: 39.39, oneTimeAmount: 60.61 };
 
-    expect(recomputed.recurringAmount).toBeCloseTo(39.39, 1); // 100 * 468/(468+720)
-    expect(recomputed.amount).toBeCloseTo(39.39, 1);
-    expect(recomputed.oneTimeAmount).toBe(0);
-    expect(recomputed.recurringAmount).toBeLessThan(100);
+    const base = manualDiscountForRecurringBase(saved, 468);
+    expect(base.recurringAmount).toBeCloseTo(39.39, 2);
+    expect(base.oneTimeAmount).toBe(0);
+    expect(base.recurringAmount + saved.oneTimeAmount).toBeCloseTo(100, 2);
+
+    // A different cadence (larger recurring base) keeps the same recurring slice,
+    // because the one-time slice is cadence-invariant — still sums to $100.
+    const larger = manualDiscountForRecurringBase(saved, 900);
+    expect(larger.recurringAmount).toBeCloseTo(39.39, 2);
+    expect(larger.recurringAmount + saved.oneTimeAmount).toBeCloseTo(100, 2);
+
+    // A cadence whose recurring base can't absorb the recurring slice caps to the
+    // base (never over-discounts).
+    const tiny = manualDiscountForRecurringBase(saved, 20);
+    expect(tiny.recurringAmount).toBe(20);
+    expect(tiny.capped).toBe(true);
   });
 
   test('applyManualOneTimeDiscountToChoiceRows nets the one-time slice into preserved choice rows', () => {

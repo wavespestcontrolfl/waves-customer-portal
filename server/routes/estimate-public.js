@@ -1295,21 +1295,18 @@ function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnua
     amount = Math.round(recurringBase * (value / 100) * 100) / 100;
     requestedAmount = amount;
   } else {
-    // FIXED dollar discounts are split proportionally between recurring and
-    // one-time work in generateEstimate. Recompute only the recurring slice for
-    // THIS cadence's base using the saved one-time discountable base (constant
-    // across cadences) — never the full value, or the recurring card would claim
-    // the one-time slice too and underquote recurring accepts. When the one-time
-    // base is absent (legacy recurring-only discounts) this collapses to
-    // min(value, base).
-    const oneTimeBase = Math.max(0, Number(manualDiscount.oneTimeDiscountableBase) || 0);
-    const combinedBase = Math.round((recurringBase + oneTimeBase) * 100) / 100;
+    // FIXED dollar discounts were already split into recurring/one-time slices by
+    // generateEstimate, and the one-time slice is cadence-invariant (one-time
+    // work doesn't change with the recurring cadence). Derive the recurring slice
+    // as (value − one-time slice) capped to THIS cadence's recurring base, so
+    // recurring + one-time always sums back to the fixed value regardless of the
+    // cadence the customer picks — never re-proportion against the recurring base
+    // alone, which would leave the two slices no longer totaling the fixed amount.
     requestedAmount = Math.round(value * 100) / 100;
-    const applied = Math.min(requestedAmount, combinedBase);
-    capped = applied < requestedAmount;
-    amount = combinedBase > 0
-      ? Math.round(applied * (recurringBase / combinedBase) * 100) / 100
-      : 0;
+    const savedOneTime = Math.max(0, Number(manualDiscount.oneTimeAmount) || 0);
+    const recurringSlice = Math.max(0, Math.round((requestedAmount - savedOneTime) * 100) / 100);
+    amount = Math.min(recurringSlice, recurringBase);
+    capped = amount < recurringSlice;
   }
   if (!(amount > 0)) return null;
   return {
@@ -3542,12 +3539,24 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     return `<tr><td>${escapeHtml(it.name || it.label || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
+  // Net the manual/custom one-time discount slice into the legacy (non-React)
+  // HTML card so its itemized total matches the already-discounted hero and
+  // accept totals. The slice never covers the termite install fee (kept at full
+  // price), so capping at the gross row total leaves protected charges intact.
+  const manualOneTimeDiscount = (!quoteRequired && hasRealOneTime)
+    ? Math.min(separatelyBilledOneTimeTotal, Math.max(0, Number(manualDiscount?.oneTimeAmount) || 0))
+    : 0;
+  const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
+    ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">-${fmtMoney(manualOneTimeDiscount)}</td></tr>`
+    : '';
   const oneTimeRows = realOneTimeRows;
-  const oneTimeRowsTotal = hasRealOneTime ? separatelyBilledOneTimeTotal : onetimeTotal;
+  const oneTimeRowsTotal = hasRealOneTime
+    ? Math.max(0, Math.round((separatelyBilledOneTimeTotal - manualOneTimeDiscount) * 100) / 100)
+    : onetimeTotal;
   const oneTimeItemsCardHtml = oneTimeRows ? `
   <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
     <h3>${isOneTimeOnly ? 'Service details' : 'One-time items (billed separately)'}</h3>
-    <table>${oneTimeRows}
+    <table>${oneTimeRows}${manualOneTimeDiscountRowHtml}
       <tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
     </table>
     ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
