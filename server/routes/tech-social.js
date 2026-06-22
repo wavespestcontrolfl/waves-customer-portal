@@ -8,6 +8,7 @@
  *   POST /generate   photo + note + location → Gemini vision + Claude captions
  *                    (no persistence — the tech's eyes, like lawn-diagnostic/analyze)
  *   POST /publish    tech-edited captions → native publish via SocialMediaService
+ *   POST /validate   brand-rule check for one caption (used before TikTok copy)
  *   GET  /locations  the 4 GBP service-area locations for the picker
  *
  * Two-layer gating, both fail-closed:
@@ -17,8 +18,8 @@
  *     the admin pause switch + content validation. Nothing reaches a public
  *     feed until those are deliberately turned on.
  *
- * TikTok has no posting API, so its caption is returned for the tech to copy
- * (clipboard) rather than published.
+ * TikTok has no posting API, so it never goes through /publish — the tech copies
+ * its caption (validated via /validate) and posts it in the app manually.
  */
 
 const express = require('express');
@@ -60,7 +61,7 @@ function selectPublishPlatforms(requested) {
 // `model` is the ACTUAL caption-generation model (carried from /generate, which
 // may fall back VOICE→FLAGSHIP); null when unknown (e.g. manually supplied
 // captions) — never hardcode a tier here, it makes ai_model unreliable.
-function buildPostLogRow({ techNote, captions, results, imageUrl, location, model }) {
+function buildPostLogRow({ techNote, captions, results, imageUrl, location, model, publishId }) {
   const anySuccess = results.some((r) => r && r.success);
   const anyDryRun = results.some((r) => r && r.dryRun);
   // A preflight skip (paused/disabled/no-caption/validation) is NOT a platform
@@ -72,6 +73,7 @@ function buildPostLogRow({ techNote, captions, results, imageUrl, location, mode
     title: (techNote || `Field photo — ${location?.name || 'Waves'}`).slice(0, 200),
     description: String(techNote || captions?.facebook || '').slice(0, 1000),
     source_type: 'tech_field',
+    source_guid: publishId || null, // idempotency key — reused for retry de-dupe
     platforms_posted: JSON.stringify(results),
     image_url: imageUrl || null,
     status,
@@ -80,15 +82,31 @@ function buildPostLogRow({ techNote, captions, results, imageUrl, location, mode
   };
 }
 
-// Validate the TikTok caption before handing it back for manual posting. TikTok
-// has no API so it skips the native publish/validate path — but the brand rules
-// (pricing/safety/phone) still apply, so withhold the clipboard if it fails.
-function buildTiktokClipboard(captions, tiktokRequested) {
-  if (!tiktokRequested) return { clipboard: null, tiktokIssues: [] };
-  const tt = String(captions?.tiktok || '').trim();
-  if (!tt) return { clipboard: null, tiktokIssues: ['No TikTok caption'] };
-  const v = social.validateContent(tt, 'facebook'); // tiktok validates under the facebook ruleset
-  return v.valid ? { clipboard: { tiktok: tt }, tiktokIssues: [] } : { clipboard: null, tiktokIssues: v.issues };
+// Idempotency: which platforms already succeeded across prior /publish rows for
+// the same publishId. Pure helper over social_media_posts.platforms_posted JSON.
+function successfulPlatformsFromRows(rows) {
+  const done = new Set();
+  for (const row of rows || []) {
+    let arr = row && row.platforms_posted;
+    if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { arr = []; } }
+    (Array.isArray(arr) ? arr : []).forEach((r) => { if (r && r.success && r.platform) done.add(r.platform); });
+  }
+  return done;
+}
+
+// A retry sends the same publishId (stored in source_guid). Skip any platform a
+// prior attempt already published so a lost-response retry can't double-post.
+async function alreadyPublishedPlatforms(publishId) {
+  if (!publishId) return new Set();
+  try {
+    const rows = await db('social_media_posts')
+      .where({ source_guid: publishId, source_type: 'tech_field' })
+      .select('platforms_posted');
+    return successfulPlatformsFromRows(rows);
+  } catch (err) {
+    logger.warn(`[tech-social] idempotency check failed: ${err.message}`);
+    return new Set();
+  }
 }
 
 async function logPost(row) {
@@ -109,6 +127,20 @@ router.get('/locations', (req, res) => {
   res.json({ enabled: techSocialEnabled(), locations: WAVES_LOCATIONS.map(pickLocation) });
 });
 
+// POST /api/tech/social/validate — brand-rule check for a single caption.
+// TikTok copy is the delivery path (no API), so the client validates before
+// copying; also a pre-copy check for the publishable platforms.
+router.post('/validate', (req, res) => {
+  if (!techSocialEnabled()) {
+    return res.status(403).json({ error: 'Field social posting is not enabled' });
+  }
+  const { caption, platform } = req.body || {};
+  const known = new Set([...PUBLISHABLE, 'tiktok']);
+  const p = known.has(platform) ? platform : 'facebook';
+  const result = social.validateContent(String(caption || ''), p);
+  res.json({ valid: result.valid, issues: result.issues });
+});
+
 // POST /api/tech/social/generate — vision + captions, no persistence.
 router.post('/generate', async (req, res, next) => {
   try {
@@ -121,6 +153,13 @@ router.post('/generate', async (req, res, next) => {
     }
     if (String(photo.data).length > MAX_PHOTO_BASE64_BYTES) {
       return res.status(413).json({ error: 'Photo is too large — retake or let the app shrink it' });
+    }
+    // The GBP caption is geo-specific. If the tech left the picker on "Auto" but
+    // geolocation is unavailable, we have no signal — don't silently default to the
+    // primary location (would post a wrong-city GBP). Force a manual selection.
+    const hasCoords = Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+    if (!locationId && !hasCoords) {
+      return res.status(422).json({ error: 'Select your service area — location auto-detect is unavailable' });
     }
 
     const image = { data: photo.data, mimeType: photo.mimeType || 'image/jpeg' };
@@ -150,7 +189,7 @@ router.post('/publish', async (req, res, next) => {
     if (!techSocialEnabled()) {
       return res.status(403).json({ error: 'Field social posting is not enabled' });
     }
-    const { photo, captions, platforms, locationId, model } = req.body || {};
+    const { photo, captions, platforms, locationId, model, publishId } = req.body || {};
     if (!captions || typeof captions !== 'object') {
       return res.status(400).json({ error: 'No captions to publish' });
     }
@@ -167,8 +206,10 @@ router.post('/publish', async (req, res, next) => {
     }
 
     const publishPlatforms = selectPublishPlatforms(platforms);
-    const tiktokRequested = Array.isArray(platforms)
-      && platforms.map((p) => String(p || '').toLowerCase()).includes('tiktok');
+
+    // Idempotency — a retry with the same publishId must not re-post a platform a
+    // prior attempt already published (covers a lost /publish response on flaky LTE).
+    const alreadyDone = await alreadyPublishedPlatforms(publishId);
 
     // Preflight BEFORE hosting the photo: a paused/disabled/invalid publish must
     // never leave a public field-photo URL behind. For each requested platform,
@@ -178,6 +219,10 @@ router.post('/publish', async (req, res, next) => {
     const results = [];
     const plan = [];
     for (const platform of publishPlatforms) {
+      if (alreadyDone.has(platform)) {
+        results.push({ platform, skipped: 'Already published (idempotent retry)' });
+        continue;
+      }
       const content = (captions[platform] || '').trim();
       // Preflight non-attempts are recorded as `skipped`, never `success:false` —
       // the shared checkAndRaiseAlert() only counts non-skipped success:false
@@ -242,6 +287,7 @@ router.post('/publish', async (req, res, next) => {
       techNote: typeof req.body.techNote === 'string' ? req.body.techNote : '',
       captions, results, imageUrl, location,
       model: typeof model === 'string' ? model : null,
+      publishId: typeof publishId === 'string' ? publishId : null,
     }));
 
     // Keep the shared consecutive-failure alert current — tech-field posts land
@@ -255,12 +301,11 @@ router.post('/publish', async (req, res, next) => {
       `ok=${results.filter((r) => r.success).length}/${results.length} imageHosted=${!!imageUrl}`
     );
 
-    const { clipboard, tiktokIssues } = buildTiktokClipboard(captions, tiktokRequested);
-    res.json({ results, clipboard, tiktokIssues, imageHosted: !!imageUrl });
+    res.json({ results, imageHosted: !!imageUrl });
   } catch (err) {
     next(err);
   }
 });
 
 module.exports = router;
-module.exports._test = { selectPublishPlatforms, buildPostLogRow, buildTiktokClipboard, techSocialEnabled, PUBLISHABLE };
+module.exports._test = { selectPublishPlatforms, buildPostLogRow, successfulPlatformsFromRows, techSocialEnabled, PUBLISHABLE };

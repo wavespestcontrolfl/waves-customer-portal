@@ -107,7 +107,8 @@ export default function TechSocialPostPage() {
   const [validation, setValidation] = useState({});
   const [resolvedLocation, setResolvedLocation] = useState(null);
   const [genModel, setGenModel] = useState(null); // actual caption model, for the audit row
-  const [selected, setSelected] = useState(() => new Set(PLATFORMS.map((p) => p.key)));
+  const [publishId, setPublishId] = useState(null); // idempotency key per generated caption set
+  const [selected, setSelected] = useState(() => new Set(PLATFORMS.filter((p) => p.publish).map((p) => p.key)));
   const [posted, setPosted] = useState(() => new Set()); // platforms already published — never re-send
   const [publishResults, setPublishResults] = useState(null);
   const [enabled, setEnabled] = useState(null); // backend readiness (TECH_SOCIAL_ENABLED); null = loading
@@ -163,6 +164,10 @@ export default function TechSocialPostPage() {
       setValidation(data.validation || {});
       setResolvedLocation(data.location || null);
       setGenModel(data.model || null);
+      // Fresh idempotency key for this caption set — reused across publish retries.
+      setPublishId((typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `pub-${Date.now()}-${Math.round(Math.random() * 1e9)}`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -179,7 +184,7 @@ export default function TechSocialPostPage() {
         method: 'POST',
         body: JSON.stringify({
           photo: { data: photo.base64, mimeType: photo.mimeType },
-          captions, platforms, locationId: resolvedLocation?.id, techNote, model: genModel,
+          captions, platforms, locationId: resolvedLocation?.id, techNote, model: genModel, publishId,
         }),
       });
       setPublishResults(data);
@@ -201,13 +206,26 @@ export default function TechSocialPostPage() {
   };
 
   const copyCaption = async (key) => {
-    try { await navigator.clipboard.writeText(captions[key] || ''); setNotice(`${key} caption copied.`); }
-    catch { setNotice('Copy failed — long-press the text to copy.'); }
+    setError(''); setNotice('');
+    try {
+      // Validate before copying — for TikTok the copy IS the delivery path, so the
+      // brand rules (pricing/safety/phone/length) must gate it like a native publish.
+      const v = await techRequest('/tech/social/validate', {
+        method: 'POST',
+        body: JSON.stringify({ caption: captions[key] || '', platform: key }),
+      });
+      if (!v.valid) { setError(`${key}: ${(v.issues || []).join('; ') || 'caption needs a fix before copying'}`); return; }
+      await navigator.clipboard.writeText(captions[key] || '');
+      setNotice(`${key} caption copied.`);
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
   const reset = () => {
     setPhoto(null); setTechNote(''); setLocationId(''); setCaptions(null); setValidation({});
-    setResolvedLocation(null); setGenModel(null); setSelected(new Set(PLATFORMS.map((p) => p.key)));
+    setResolvedLocation(null); setGenModel(null); setPublishId(null);
+    setSelected(new Set(PLATFORMS.filter((p) => p.publish).map((p) => p.key)));
     setPosted(new Set()); setPublishResults(null); setError(''); setNotice('');
   };
 
@@ -292,7 +310,9 @@ export default function TechSocialPostPage() {
               <Card key={p.key}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: HEAD, fontWeight: 700, color: D.white, fontSize: 15 }}>
-                    <input type="checkbox" checked={selected.has(p.key)} disabled={posted.has(p.key)} onChange={() => toggle(p.key)} style={{ width: 18, height: 18 }} />
+                    {p.publish ? (
+                      <input type="checkbox" checked={selected.has(p.key)} disabled={posted.has(p.key)} onChange={() => toggle(p.key)} style={{ width: 18, height: 18 }} />
+                    ) : null}
                     {p.label}
                     {!p.publish ? <span style={{ color: D.amber, fontSize: 11, fontWeight: 600 }}>{p.note}</span> : null}
                   </label>
@@ -317,19 +337,6 @@ export default function TechSocialPostPage() {
               </Card>
             );
           })}
-
-          {publishResults?.clipboard?.tiktok ? (
-            <Card style={{ borderColor: D.amber }}>
-              <div style={{ fontFamily: HEAD, fontWeight: 700, color: D.white, marginBottom: 6 }}>TikTok — paste it in</div>
-              <div style={{ color: D.muted, fontSize: 12, marginBottom: 8 }}>TikTok has no posting API. Copy the caption and post your photo/video in the app.</div>
-              <button onClick={() => copyCaption('tiktok')} style={btn(D.amber, '#1a1205')}>Copy TikTok caption</button>
-            </Card>
-          ) : publishResults?.tiktokIssues?.length ? (
-            <Card style={{ borderColor: D.red, background: '#2a1416' }}>
-              <div style={{ fontFamily: HEAD, fontWeight: 700, color: D.white, marginBottom: 6 }}>TikTok caption needs a fix</div>
-              <div style={{ color: D.red, fontSize: 12 }}>⚠ {publishResults.tiktokIssues.join('; ')} — edit it above, then publish again.</div>
-            </Card>
-          ) : null}
 
           <div style={{ display: 'grid', gap: 8 }}>
             <button onClick={publish} disabled={busy === 'publish' || nativeRemaining === 0} style={btn(D.teal, D.white, busy === 'publish' || nativeRemaining === 0)}>

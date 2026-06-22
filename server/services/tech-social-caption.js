@@ -179,10 +179,9 @@ function normalizeCaptions(json) {
 function validateCaptions(captions) {
   const out = {};
   for (const platform of CAPTION_PLATFORMS) {
-    // social-media.js validates facebook/instagram/gbp; tiktok reuses the
-    // facebook ruleset (pricing/safety/phone) since it has no dedicated limit there.
-    const checkPlatform = platform === 'tiktok' ? 'facebook' : platform;
-    const result = validateContent(captions[platform] || '', checkPlatform);
+    // Each platform validates under its own rules — tiktok has its own 2200 limit
+    // in social-media.js PLATFORM_LENGTH_LIMITS, so it no longer borrows facebook's.
+    const result = validateContent(captions[platform] || '', platform);
     out[platform] = result.valid ? [] : result.issues;
   }
   return out;

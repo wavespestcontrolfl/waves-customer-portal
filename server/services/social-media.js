@@ -280,7 +280,7 @@ try {
   if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
 } catch { /* twilio config not available */ }
 
-const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500 };
+const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200 };
 
 function validateContent(text, platform) {
   const issues = [];

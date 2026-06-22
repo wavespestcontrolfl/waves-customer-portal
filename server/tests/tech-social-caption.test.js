@@ -3,7 +3,8 @@ const techSocial = require('../routes/tech-social');
 
 const { normalizeVision, normalizeCaptions, validateCaptions } = captionService._test;
 const { resolveCaptionLocation, PLATFORM_LIMITS } = captionService;
-const { selectPublishPlatforms, buildPostLogRow, buildTiktokClipboard, PUBLISHABLE } = techSocial._test;
+const social = require('../services/social-media');
+const { selectPublishPlatforms, buildPostLogRow, successfulPlatformsFromRows, PUBLISHABLE } = techSocial._test;
 
 describe('resolveCaptionLocation', () => {
   test('explicit valid locationId wins', () => {
@@ -105,25 +106,30 @@ describe('selectPublishPlatforms', () => {
   });
 });
 
-describe('buildTiktokClipboard', () => {
-  test('not requested → null clipboard, no issues', () => {
-    expect(buildTiktokClipboard({ tiktok: 'whatever' }, false)).toEqual({ clipboard: null, tiktokIssues: [] });
+describe('successfulPlatformsFromRows (idempotency)', () => {
+  test('unions succeeded platforms across rows; ignores failures/skips', () => {
+    const done = successfulPlatformsFromRows([
+      { platforms_posted: JSON.stringify([{ platform: 'facebook', success: true }, { platform: 'instagram', success: false }]) },
+      { platforms_posted: [{ platform: 'gbp', success: true }, { platform: 'facebook', skipped: 'x' }] },
+    ]);
+    expect([...done].sort()).toEqual(['facebook', 'gbp']);
   });
 
-  test('valid edited caption → returned for clipboard', () => {
-    const r = buildTiktokClipboard({ tiktok: 'Chinch bugs love Venice lawns in June — check the blade base.' }, true);
-    expect(r.clipboard.tiktok).toContain('Chinch');
-    expect(r.tiktokIssues).toEqual([]);
+  test('empty / malformed rows → empty set (never throws)', () => {
+    expect(successfulPlatformsFromRows([]).size).toBe(0);
+    expect(successfulPlatformsFromRows([{ platforms_posted: 'not json' }, { platforms_posted: null }, {}]).size).toBe(0);
+  });
+});
+
+describe('TikTok validation uses its own length limit', () => {
+  test('a long clean TikTok caption is valid (no facebook 500 cap)', () => {
+    const long = 'Chinch bug damage shows up fast in Venice lawns. '.repeat(15).slice(0, 600);
+    expect(social.validateContent(long, 'tiktok').valid).toBe(true);
+    expect(social.validateContent(long, 'facebook').valid).toBe(false); // facebook caps at 500
   });
 
-  test('caption with pricing is withheld (brand rules still apply to manual copy)', () => {
-    const r = buildTiktokClipboard({ tiktok: 'DM us — only $49/visit!' }, true);
-    expect(r.clipboard).toBeNull();
-    expect(r.tiktokIssues.length).toBeGreaterThan(0);
-  });
-
-  test('empty caption → withheld', () => {
-    expect(buildTiktokClipboard({}, true).clipboard).toBeNull();
+  test('still flags pricing on TikTok', () => {
+    expect(social.validateContent('grab it for only $49/visit', 'tiktok').valid).toBe(false);
   });
 });
 
