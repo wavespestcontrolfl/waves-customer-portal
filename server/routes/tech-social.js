@@ -11,8 +11,11 @@
  *   POST /validate   brand-rule check for one caption (used before TikTok copy)
  *   GET  /locations  the 4 GBP service-area locations for the picker
  *
- * Two-layer gating, both fail-closed:
- *   - TECH_SOCIAL_ENABLED gates this whole feature (default off).
+ * Gating, all fail-closed:
+ *   - TECH_SOCIAL_ENABLED (env) is the global kill-switch (default off).
+ *   - Per-technician feature flag `tech_social_enabled` (user_feature_flags,
+ *     keyed by technicianId) controls per-tech rollout — enforced server-side on
+ *     every route, not just the TechHome tile.
  *   - Publishing still flows through SocialMediaService.postToSingle, which
  *     enforces SOCIAL_AUTOMATION_ENABLED + per-platform SOCIAL_*_ENABLED +
  *     the admin pause switch + content validation. Nothing reaches a public
@@ -30,6 +33,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const captionService = require('../services/tech-social-caption');
 const social = require('../services/social-media');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { WAVES_LOCATIONS } = require('../config/locations');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -37,9 +41,20 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // Platforms we can publish to natively. TikTok intentionally absent — no API.
 const PUBLISHABLE = ['facebook', 'instagram', 'gbp'];
 const MAX_PHOTO_BASE64_BYTES = 12 * 1024 * 1024; // client downscales to ~1600px first
+const TECH_SOCIAL_FLAG = 'tech_social_enabled';
 
+// Env kill-switch — feature off globally unless explicitly enabled.
 function techSocialEnabled() {
   return String(process.env.TECH_SOCIAL_ENABLED || '').toLowerCase() === 'true';
+}
+
+// Authoritative gate: the env kill-switch AND a per-technician feature flag, so
+// the owner can limit rollout to specific techs. The flag is keyed by
+// technicianId — the SAME id the TechHome tile's useFeatureFlag reads — so the
+// tile and the API stay consistent.
+async function techSocialAllowed(req) {
+  if (!techSocialEnabled()) return false;
+  return isUserFeatureEnabled(req.technicianId, TECH_SOCIAL_FLAG, false);
 }
 
 function pickLocation(loc) {
@@ -82,31 +97,32 @@ function buildPostLogRow({ techNote, captions, results, imageUrl, location, mode
   };
 }
 
-// Idempotency: which platforms already succeeded across prior /publish rows for
-// the same publishId. Pure helper over social_media_posts.platforms_posted JSON.
-function successfulPlatformsFromRows(rows) {
-  const done = new Set();
-  for (const row of rows || []) {
-    let arr = row && row.platforms_posted;
-    if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { arr = []; } }
-    (Array.isArray(arr) ? arr : []).forEach((r) => { if (r && r.success && r.platform) done.add(r.platform); });
-  }
-  return done;
+// Atomic per-platform publish claim. system_settings.key is the PRIMARY KEY, so
+// INSERT … ON CONFLICT DO NOTHING serializes concurrent /publish calls with the
+// same publishId — a double tap or in-flight retry can't double-post a platform.
+// Returns true only if WE won the claim.
+function publishClaimKey(publishId, platform) {
+  return `tech_social_claim:${publishId}:${platform}`;
 }
 
-// A retry sends the same publishId (stored in source_guid). Skip any platform a
-// prior attempt already published so a lost-response retry can't double-post.
-async function alreadyPublishedPlatforms(publishId) {
-  if (!publishId) return new Set();
+async function claimPlatformPublish(publishId, platform) {
+  if (!publishId) return true; // no key → can't dedupe; allow (best effort)
   try {
-    const rows = await db('social_media_posts')
-      .where({ source_guid: publishId, source_type: 'tech_field' })
-      .select('platforms_posted');
-    return successfulPlatformsFromRows(rows);
+    const inserted = await db('system_settings')
+      .insert({ key: publishClaimKey(publishId, platform), value: 'claimed', category: 'tech_social', updated_at: new Date() })
+      .onConflict('key').ignore()
+      .returning('key');
+    return Array.isArray(inserted) ? inserted.length > 0 : true;
   } catch (err) {
-    logger.warn(`[tech-social] idempotency check failed: ${err.message}`);
-    return new Set();
+    logger.warn(`[tech-social] publish claim failed: ${err.message}`);
+    return true; // never block a real publish on a claim-store error
   }
+}
+
+// Release the claim when the attempt did NOT post, so a later retry can re-try.
+async function releasePlatformClaim(publishId, platform) {
+  if (!publishId) return;
+  await db('system_settings').where({ key: publishClaimKey(publishId, platform) }).del().catch(() => {});
 }
 
 async function logPost(row) {
@@ -123,28 +139,38 @@ async function logPost(row) {
 }
 
 // GET /api/tech/social/locations — service-area locations for the GBP picker.
-router.get('/locations', (req, res) => {
-  res.json({ enabled: techSocialEnabled(), locations: WAVES_LOCATIONS.map(pickLocation) });
+router.get('/locations', async (req, res, next) => {
+  try {
+    res.json({ enabled: await techSocialAllowed(req), locations: WAVES_LOCATIONS.map(pickLocation) });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // POST /api/tech/social/validate — brand-rule check for a single caption.
 // TikTok copy is the delivery path (no API), so the client validates before
 // copying; also a pre-copy check for the publishable platforms.
-router.post('/validate', (req, res) => {
-  if (!techSocialEnabled()) {
-    return res.status(403).json({ error: 'Field social posting is not enabled' });
+router.post('/validate', async (req, res, next) => {
+  try {
+    if (!(await techSocialAllowed(req))) {
+      return res.status(403).json({ error: 'Field social posting is not enabled' });
+    }
+    const { caption, platform } = req.body || {};
+    const known = new Set([...PUBLISHABLE, 'tiktok']);
+    const p = known.has(platform) ? platform : 'facebook';
+    const text = String(caption || '');
+    const base = social.validateContent(text, p);
+    const issues = [...(base.valid ? [] : base.issues), ...captionService.piiIssues(text)];
+    res.json({ valid: issues.length === 0, issues });
+  } catch (err) {
+    next(err);
   }
-  const { caption, platform } = req.body || {};
-  const known = new Set([...PUBLISHABLE, 'tiktok']);
-  const p = known.has(platform) ? platform : 'facebook';
-  const result = social.validateContent(String(caption || ''), p);
-  res.json({ valid: result.valid, issues: result.issues });
 });
 
 // POST /api/tech/social/generate — vision + captions, no persistence.
 router.post('/generate', async (req, res, next) => {
   try {
-    if (!techSocialEnabled()) {
+    if (!(await techSocialAllowed(req))) {
       return res.status(403).json({ error: 'Field social posting is not enabled' });
     }
     const { photo, techNote, locationId, lat, lng, photoType } = req.body || {};
@@ -186,7 +212,7 @@ router.post('/generate', async (req, res, next) => {
 // POST /api/tech/social/publish — native publish of the (tech-edited) captions.
 router.post('/publish', async (req, res, next) => {
   try {
-    if (!techSocialEnabled()) {
+    if (!(await techSocialAllowed(req))) {
       return res.status(403).json({ error: 'Field social posting is not enabled' });
     }
     const { photo, captions, platforms, locationId, model, publishId } = req.body || {};
@@ -206,23 +232,17 @@ router.post('/publish', async (req, res, next) => {
     }
 
     const publishPlatforms = selectPublishPlatforms(platforms);
-
-    // Idempotency — a retry with the same publishId must not re-post a platform a
-    // prior attempt already published (covers a lost /publish response on flaky LTE).
-    const alreadyDone = await alreadyPublishedPlatforms(publishId);
+    const gbpLocation = WAVES_LOCATIONS.find((l) => l.id === locationId) || null;
+    const dryRun = !!(social.SOCIAL_FLAGS && social.SOCIAL_FLAGS.dryRun);
 
     // Preflight BEFORE hosting the photo: a paused/disabled/invalid publish must
     // never leave a public field-photo URL behind. For each requested platform,
     // check readiness (automation + per-platform flag + creds + admin pause) and
-    // run the same content validation postToSingle will. Only platforms that pass
-    // get attempted; the rest are recorded as skips with the reason.
+    // run the same content + PII validation. Only platforms that pass get
+    // attempted; the rest are recorded as skips with the reason.
     const results = [];
     const plan = [];
     for (const platform of publishPlatforms) {
-      if (alreadyDone.has(platform)) {
-        results.push({ platform, skipped: 'Already published (idempotent retry)' });
-        continue;
-      }
       const content = (captions[platform] || '').trim();
       // Preflight non-attempts are recorded as `skipped`, never `success:false` —
       // the shared checkAndRaiseAlert() only counts non-skipped success:false
@@ -232,14 +252,25 @@ router.post('/publish', async (req, res, next) => {
         results.push({ platform, skipped: 'No caption for this platform' });
         continue;
       }
-      const ready = await social.assertSocialPublishingReady(platform, platform === 'gbp' ? locationId : undefined);
-      if (!ready.ready) {
-        results.push({ platform, skipped: ready.reason });
+      // GBP is geo-specific — never let a missing/unknown locationId fall back to
+      // the default profile (postToGBP would post to the wrong city). Skip instead.
+      if (platform === 'gbp' && !gbpLocation) {
+        results.push({ platform, skipped: 'No valid service area selected for Google Business' });
         continue;
       }
-      const validation = social.validateContent(content, platform);
-      if (!validation.valid) {
-        results.push({ platform, skipped: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues });
+      // Dry-run is for smoke-testing without live creds — skip the credential /
+      // image-hosting readiness gate (postToSingle no-ops), but still validate copy.
+      if (!dryRun) {
+        const ready = await social.assertSocialPublishingReady(platform, platform === 'gbp' ? locationId : undefined);
+        if (!ready.ready) {
+          results.push({ platform, skipped: ready.reason });
+          continue;
+        }
+      }
+      const base = social.validateContent(content, platform);
+      const issues = [...(base.valid ? [] : base.issues), ...captionService.piiIssues(content)];
+      if (issues.length) {
+        results.push({ platform, skipped: `Validation: ${issues[0]}`, validationIssues: issues });
         continue;
       }
       plan.push({ platform, content });
@@ -249,7 +280,6 @@ router.post('/publish', async (req, res, next) => {
     // publish and it isn't a dry run. Instagram requires a public URL; Facebook
     // and GBP attach it when present. Null when image hosting isn't configured.
     let imageUrl = null;
-    const dryRun = !!(social.SOCIAL_FLAGS && social.SOCIAL_FLAGS.dryRun);
     if (plan.length && !dryRun && photo && photo.data) {
       // Unguessable, collision-free key — these are customer field photos.
       imageUrl = await social.uploadImageToS3(photo.data, `tech-field-${crypto.randomUUID()}.jpg`);
@@ -270,14 +300,23 @@ router.post('/publish', async (req, res, next) => {
         results.push({ platform, success: false, error: 'Instagram needs a hosted image (set SOCIAL_MEDIA_CDN_DOMAIN)' });
         continue;
       }
+      // Atomic idempotency claim right before the real post (skip in dry-run —
+      // nothing real to dedupe). If another request already claimed it, skip.
+      if (!dryRun && !(await claimPlatformPublish(publishId, platform))) {
+        results.push({ platform, skipped: 'Already published (idempotent retry)' });
+        continue;
+      }
       try {
         const r = await social.postToSingle(platform, {
           content,
           imageUrl: imageUrl || undefined,
           locationId: platform === 'gbp' ? locationId : undefined,
         });
+        // Release the claim if the attempt did not actually post, so a retry can re-try.
+        if (!dryRun && !(r && r.success)) await releasePlatformClaim(publishId, platform);
         results.push({ platform, ...r });
       } catch (err) {
+        if (!dryRun) await releasePlatformClaim(publishId, platform);
         results.push({ platform, success: false, error: err.message });
       }
     }
@@ -308,4 +347,4 @@ router.post('/publish', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports._test = { selectPublishPlatforms, buildPostLogRow, successfulPlatformsFromRows, techSocialEnabled, PUBLISHABLE };
+module.exports._test = { selectPublishPlatforms, buildPostLogRow, publishClaimKey, techSocialEnabled, PUBLISHABLE };

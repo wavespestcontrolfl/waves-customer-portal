@@ -175,14 +175,30 @@ function normalizeCaptions(json) {
   return out;
 }
 
-/** Per-platform content validation (reuses social-media.js rules). */
+// This flow posts tech-edited text straight to PUBLIC feeds with no admin queue,
+// so it enforces a stricter bar than the shared validator: never leak customer
+// PII (email / street address). Heuristic — false positives are acceptable for a
+// privacy guard (the tech just edits it out).
+const PII_EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const PII_STREET_RE = /\b\d{1,6}\s+(?:[A-Za-z0-9.'-]+\s+){0,3}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|ter|terrace|pl|place|trl|trail|pkwy|parkway|hwy|highway|loop|run|cove|cv|bend)\b/i;
+
+function piiIssues(text) {
+  const issues = [];
+  const t = String(text || '');
+  if (PII_EMAIL_RE.test(t)) issues.push('Looks like an email address — remove customer contact info');
+  if (PII_STREET_RE.test(t)) issues.push('Looks like a street address — keep customer locations private');
+  return issues;
+}
+
+/** Per-platform content validation — shared brand rules + a PII guard for this
+ *  public, no-admin-queue flow. */
 function validateCaptions(captions) {
   const out = {};
   for (const platform of CAPTION_PLATFORMS) {
     // Each platform validates under its own rules — tiktok has its own 2200 limit
     // in social-media.js PLATFORM_LENGTH_LIMITS, so it no longer borrows facebook's.
     const result = validateContent(captions[platform] || '', platform);
-    out[platform] = result.valid ? [] : result.issues;
+    out[platform] = [...(result.valid ? [] : result.issues), ...piiIssues(captions[platform] || '')];
   }
   return out;
 }
@@ -191,6 +207,7 @@ module.exports = {
   analyzePhoto,
   generateCaptions,
   resolveCaptionLocation,
+  piiIssues,
   CAPTION_PLATFORMS,
   PLATFORM_LIMITS,
   _test: {
@@ -198,5 +215,6 @@ module.exports = {
     normalizeCaptions,
     validateCaptions,
     resolveCaptionLocation,
+    piiIssues,
   },
 };

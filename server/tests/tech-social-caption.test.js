@@ -1,10 +1,10 @@
 const captionService = require('../services/tech-social-caption');
 const techSocial = require('../routes/tech-social');
 
-const { normalizeVision, normalizeCaptions, validateCaptions } = captionService._test;
+const { normalizeVision, normalizeCaptions, validateCaptions, piiIssues } = captionService._test;
 const { resolveCaptionLocation, PLATFORM_LIMITS } = captionService;
 const social = require('../services/social-media');
-const { selectPublishPlatforms, buildPostLogRow, successfulPlatformsFromRows, PUBLISHABLE } = techSocial._test;
+const { selectPublishPlatforms, buildPostLogRow, publishClaimKey, PUBLISHABLE } = techSocial._test;
 
 describe('resolveCaptionLocation', () => {
   test('explicit valid locationId wins', () => {
@@ -106,18 +106,23 @@ describe('selectPublishPlatforms', () => {
   });
 });
 
-describe('successfulPlatformsFromRows (idempotency)', () => {
-  test('unions succeeded platforms across rows; ignores failures/skips', () => {
-    const done = successfulPlatformsFromRows([
-      { platforms_posted: JSON.stringify([{ platform: 'facebook', success: true }, { platform: 'instagram', success: false }]) },
-      { platforms_posted: [{ platform: 'gbp', success: true }, { platform: 'facebook', skipped: 'x' }] },
-    ]);
-    expect([...done].sort()).toEqual(['facebook', 'gbp']);
+describe('publishClaimKey (idempotency)', () => {
+  test('namespaced + scoped to publishId + platform', () => {
+    expect(publishClaimKey('abc-123', 'facebook')).toBe('tech_social_claim:abc-123:facebook');
+    expect(publishClaimKey('abc-123', 'gbp')).not.toBe(publishClaimKey('abc-123', 'facebook'));
+    expect(publishClaimKey('x', 'gbp')).not.toBe(publishClaimKey('y', 'gbp'));
   });
+});
 
-  test('empty / malformed rows → empty set (never throws)', () => {
-    expect(successfulPlatformsFromRows([]).size).toBe(0);
-    expect(successfulPlatformsFromRows([{ platforms_posted: 'not json' }, { platforms_posted: null }, {}]).size).toBe(0);
+describe('piiIssues (PII guard for public posts)', () => {
+  test('flags an email address', () => {
+    expect(piiIssues('Reach me at jane@example.com for details').length).toBeGreaterThan(0);
+  });
+  test('flags a street address', () => {
+    expect(piiIssues('We treated 123 Pine Warbler Pl today').length).toBeGreaterThan(0);
+  });
+  test('clean SWFL caption passes', () => {
+    expect(piiIssues('Chinch bugs are chewing up Venice lawns this week — check the blade base.')).toEqual([]);
   });
 });
 
