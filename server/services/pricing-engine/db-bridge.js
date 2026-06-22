@@ -1268,20 +1268,31 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(termiticide, 'equipCost', ps.ps_equip ?? ps.equipCost ?? ps.equip_cost, Number);
       setNumber(termiticide, 'complianceAdminCost', ps.complianceAdminCost ?? ps.compliance_admin_cost, money);
       setNumber(termiticide, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
-      const minimumsOverlay = ps.minimums || ps.minimums_by_context;
-      if (minimumsOverlay && typeof minimumsOverlay === 'object' && !Array.isArray(minimumsOverlay)) {
-        for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
-          const tiers = minimumsOverlay[context];
-          if (!Array.isArray(tiers)) continue;
-          termiticide.minimums[context] = tiers
-            .map((tier) => ({
-              maxSqFt: tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity' || tier.max_sqft === Infinity || tier.max_sqft === 'Infinity'
-                ? 'Infinity'
-                : Number(tier.maxSqFt ?? tier.max_sqft),
-              floor: money(tier.floor ?? tier.minimum),
-            }))
-            .filter((tier) => (Number.isFinite(tier.maxSqFt) || tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity') && Number.isFinite(tier.floor));
-        }
+      // Contextual floors are stored as flat top-level array keys
+      // (minimums_<context>) so the admin panel's inline table editor persists
+      // them; a nested `minimums` / `minimums_by_context` object is still
+      // accepted for back-compat.
+      const flatMinimumKeyByContext = {
+        standalone: 'minimums_standalone',
+        builderBatch: 'minimums_builderBatch',
+        sameTripAddOn: 'minimums_sameTripAddOn',
+      };
+      const nestedMinimumsOverlay = ps.minimums || ps.minimums_by_context;
+      const nestedMinimums = nestedMinimumsOverlay && typeof nestedMinimumsOverlay === 'object' && !Array.isArray(nestedMinimumsOverlay)
+        ? nestedMinimumsOverlay
+        : {};
+      for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+        const flatTiers = ps[flatMinimumKeyByContext[context]];
+        const tiers = Array.isArray(flatTiers) ? flatTiers : nestedMinimums[context];
+        if (!Array.isArray(tiers)) continue;
+        termiticide.minimums[context] = tiers
+          .map((tier) => ({
+            maxSqFt: tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity' || tier.max_sqft === Infinity || tier.max_sqft === 'Infinity'
+              ? 'Infinity'
+              : Number(tier.maxSqFt ?? tier.max_sqft),
+            floor: money(tier.floor ?? tier.minimum),
+          }))
+          .filter((tier) => (Number.isFinite(tier.maxSqFt) || tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity') && Number.isFinite(tier.floor));
       }
       const includeDriveOverlay = ps.includeDriveCostByContext || ps.include_drive_cost_by_context;
       if (includeDriveOverlay && typeof includeDriveOverlay === 'object' && !Array.isArray(includeDriveOverlay)) {

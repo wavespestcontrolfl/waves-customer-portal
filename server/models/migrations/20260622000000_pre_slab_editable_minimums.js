@@ -4,46 +4,52 @@
  *
  * Pre-slab pricing is DB-authoritative (db-bridge.syncConstantsFromDB loads
  * `pricing_config.onetime_preslab` over the in-code constants). The pricing
- * engine's floors come from the contextual `minimums` table
- * (lookupPreSlabMinimum), but that table was never seeded into the config row,
- * so it fell through to the constants.js defaults. Meanwhile each product
- * carried `floor_before_volume_discount` / `floor_after_volume_discount` fields
- * that the engine never reads — they rendered in the admin panel as editable
- * inputs that did nothing.
+ * engine's floors come from the contextual minimums table (lookupPreSlabMinimum),
+ * but that table was never seeded into the config row, so it fell through to the
+ * constants.js defaults. Meanwhile each product carried
+ * `floor_before_volume_discount` / `floor_after_volume_discount` fields that the
+ * engine never reads — they rendered in the admin panel as editable inputs that
+ * did nothing.
+ *
+ * The floors are stored as flat top-level array keys (minimums_standalone /
+ * minimums_builderBatch / minimums_sameTripAddOn) rather than a nested
+ * `minimums` object: the admin panel's inline table editor only persists
+ * top-level keys, so flat keys are genuinely editable inline (a nested object
+ * would render editable cells whose saves silently never reach the engine).
  *
  * This migration read-modify-writes the existing row to:
- *   1. add the `minimums` block (mirroring constants.js) ONLY if absent —
- *      preserving any admin edits already present, and
- *   2. strip the dead per-product floor fields (both snake_case and the
- *      camelCase aliases db-bridge used to accept).
+ *   1. backfill each `minimums_<context>` key independently, only where absent —
+ *      preserving any admin-customized context, and
+ *   2. strip the dead per-product floor fields (snake_case + the camelCase
+ *      aliases db-bridge used to accept).
  *
- * No price values change. `minimums` is nested, so it is edited via the admin
- * panel's "Raw Edit" JSON box (the same as other nested configs such as
- * `onetime_flea` tiers) — the inline cell editor only persists top-level keys.
+ * No price values change.
  *
- * down() is a faithful inverse driven by this migration's audit snapshot: it
- * removes `minimums` only if up() created it (the pre-up snapshot lacked it),
- * and restores each product's floor fields to exactly what the snapshot held —
- * so pre-existing/admin-edited minimums survive a rollback.
+ * down() is a faithful inverse driven by this migration's audit snapshot: for
+ * each context key it removes the floor table only if up() introduced it (the
+ * pre-up snapshot lacked it) AND it still equals the seeded defaults — so a
+ * pre-existing OR post-deploy admin-edited floor table survives rollback. Per-
+ * product floor fields are restored to exactly what the snapshot held.
  */
 const MIGRATION_TAG = 'migration:20260622000000';
-const UP_REASON = 'Pre-slab: seed contextual minimums + drop dead per-product floor fields';
+const UP_REASON = 'Pre-slab: seed contextual minimums (flat keys) + drop dead per-product floor fields';
 const DOWN_REASON = 'Rollback: restore pre-slab per-product floor fields + remove seeded minimums';
 
+// Flat top-level floor tables keyed by job context. Mirrors constants.js.
 const DEFAULT_MINIMUMS = {
-  standalone: [
+  minimums_standalone: [
     { maxSqFt: 250, floor: 225 },
     { maxSqFt: 750, floor: 325 },
     { maxSqFt: 1250, floor: 425 },
     { maxSqFt: 'Infinity', floor: 600 },
   ],
-  builderBatch: [
+  minimums_builderBatch: [
     { maxSqFt: 250, floor: 150 },
     { maxSqFt: 750, floor: 250 },
     { maxSqFt: 1250, floor: 350 },
     { maxSqFt: 'Infinity', floor: 500 },
   ],
-  sameTripAddOn: [
+  minimums_sameTripAddOn: [
     { maxSqFt: 250, floor: 125 },
     { maxSqFt: 750, floor: 225 },
     { maxSqFt: 1250, floor: 325 },
@@ -108,9 +114,12 @@ exports.up = async function up(knex) {
   const { data } = loaded;
 
   const newData = { ...data };
-  // Add the floors table only if absent — never clobber admin edits.
-  if (!newData.minimums || typeof newData.minimums !== 'object') {
-    newData.minimums = JSON.parse(JSON.stringify(DEFAULT_MINIMUMS));
+  // Backfill each context table only where absent — never clobber an
+  // admin-customized context.
+  for (const [key, def] of Object.entries(DEFAULT_MINIMUMS)) {
+    if (!Array.isArray(newData[key])) {
+      newData[key] = JSON.parse(JSON.stringify(def));
+    }
   }
   // Strip the dead per-product floor fields the engine never reads.
   if (newData.products && typeof newData.products === 'object') {
@@ -122,8 +131,8 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // Only revert what this migration created — keyed off our audit row's
-  // pre-up snapshot — so a pre-existing or later-edited `minimums` block, and
+  // Only revert what this migration created — keyed off our audit row's pre-up
+  // snapshot — so a pre-existing or post-deploy admin-edited floor table, and
   // any floor fields we didn't actually add, survive an unrelated rollback.
   // No audit table means no proof of ownership; leave data alone.
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
@@ -139,9 +148,14 @@ exports.down = async function down(knex) {
   const preUpProducts = preUp.products || {};
 
   const newData = { ...data };
-  // Remove `minimums` only if up() is the one that introduced it.
-  if (!preUp.minimums || typeof preUp.minimums !== 'object') {
-    delete newData.minimums;
+  // Remove a context table only if up() introduced it AND it's still the
+  // untouched seeded default. Admin-edited (or pre-existing) tables are kept.
+  for (const [key, def] of Object.entries(DEFAULT_MINIMUMS)) {
+    const addedByUp = !Array.isArray(preUp[key]);
+    const unchanged = JSON.stringify(newData[key]) === JSON.stringify(def);
+    if (addedByUp && unchanged) {
+      delete newData[key];
+    }
   }
   // Restore each product's floor fields to exactly what the pre-up snapshot
   // held (adds nothing back where none existed).

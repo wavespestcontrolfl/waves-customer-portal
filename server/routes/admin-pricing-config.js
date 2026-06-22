@@ -232,29 +232,28 @@ async function ensureTable() {
         ps_equip: 15,
         warranty_extended: 200,
         volume_discounts: { none: 1.00, '5plus': 0.90, '10plus': 0.85 },
-        // Contextual price floors by job context + slab size. These are the
-        // floors the pricing engine actually applies (lookupPreSlabMinimum);
-        // editable here per context. Terminal tier uses 'Infinity'.
-        minimums: {
-          standalone: [
-            { maxSqFt: 250, floor: 225 },
-            { maxSqFt: 750, floor: 325 },
-            { maxSqFt: 1250, floor: 425 },
-            { maxSqFt: 'Infinity', floor: 600 },
-          ],
-          builderBatch: [
-            { maxSqFt: 250, floor: 150 },
-            { maxSqFt: 750, floor: 250 },
-            { maxSqFt: 1250, floor: 350 },
-            { maxSqFt: 'Infinity', floor: 500 },
-          ],
-          sameTripAddOn: [
-            { maxSqFt: 250, floor: 125 },
-            { maxSqFt: 750, floor: 225 },
-            { maxSqFt: 1250, floor: 325 },
-            { maxSqFt: 'Infinity', floor: 500 },
-          ],
-        },
+        // Contextual price floors by job context + slab size — the floors the
+        // pricing engine actually applies (lookupPreSlabMinimum). Stored as flat
+        // top-level array keys (not a nested object) so the admin panel's inline
+        // table editor persists edits. Terminal tier uses 'Infinity'.
+        minimums_standalone: [
+          { maxSqFt: 250, floor: 225 },
+          { maxSqFt: 750, floor: 325 },
+          { maxSqFt: 1250, floor: 425 },
+          { maxSqFt: 'Infinity', floor: 600 },
+        ],
+        minimums_builderBatch: [
+          { maxSqFt: 250, floor: 150 },
+          { maxSqFt: 750, floor: 250 },
+          { maxSqFt: 1250, floor: 350 },
+          { maxSqFt: 'Infinity', floor: 500 },
+        ],
+        minimums_sameTripAddOn: [
+          { maxSqFt: 250, floor: 125 },
+          { maxSqFt: 750, floor: 225 },
+          { maxSqFt: 1250, floor: 325 },
+          { maxSqFt: 'Infinity', floor: 500 },
+        ],
         products: {
           termidor_sc: { container_cost: 174.72, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.45 },
           taurus_sc: { container_cost: 95.00, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.45 },
