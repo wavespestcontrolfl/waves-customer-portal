@@ -383,7 +383,9 @@ function pickVariantOffer(variants, opts = {}) {
   }
   // competingSameSize: more than one variant of our exact size (winner chosen by price),
   // so a page-body EPA can't be assumed to belong to it — same semantics as the JSON-LD path.
-  return best && { ...best, competingSameSize: pool.length > 1 };
+  // fromVariant: marks this as variant-derived so callers never promote PAGE-level stock
+  // text onto it (its availability is per-child, from the salable map, or honestly unknown).
+  return best && { ...best, competingSameSize: pool.length > 1, fromVariant: true };
 }
 
 // Pick the offer from a scraped snapshot { jsonLd, priceTexts, title,

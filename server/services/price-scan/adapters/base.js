@@ -349,9 +349,12 @@ function makeAdapter(config) {
 
     // When JSON-LD priced the offer but didn't state availability, fall back to the
     // DOM availability text — otherwise a sold-out page reports 'unknown' (which
-    // compare does NOT exclude) and can rank as a savings opportunity.
+    // compare does NOT exclude) and can rank as a savings opportunity. EXCEPT for a
+    // variant-derived offer: on a multi-variant page the DOM text is the default
+    // selection's stock, not the matched child's, so its availability must come only
+    // from the per-child salable map (or stay honestly 'unknown') — never page-level.
     let availability = offer.availability || 'unknown';
-    if (availability === 'unknown' && snapshot.availabilityText) {
+    if (availability === 'unknown' && snapshot.availabilityText && !offer.fromVariant) {
       availability = mapAvailability(snapshot.availabilityText);
     }
 

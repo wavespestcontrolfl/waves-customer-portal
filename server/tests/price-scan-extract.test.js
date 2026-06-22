@@ -647,5 +647,12 @@ describe('price-scan extract', () => {
       const snap = { jsonLd: [], priceTexts: ['$89.00'], title: 'Taurus SC 78 oz', variants };
       expect(offerFromSnapshot(snap, { targetOz: 78 }).price).toBe(89);
     });
+    test('a variant offer is flagged fromVariant and does NOT inherit page-level stock text', () => {
+      // availabilityText is the default selection's stock, not the matched child's — the
+      // variant must keep its per-child availability (here unknown), never the page text.
+      const snap = { jsonLd: [], title: 'Primo Maxx', availabilityText: 'Out of stock', variants };
+      const got = offerFromSnapshot(snap, { targetOz: 128 });
+      expect(got).toMatchObject({ price: 318.9, availability: 'unknown', fromVariant: true });
+    });
   });
 });
