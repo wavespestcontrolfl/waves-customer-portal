@@ -318,17 +318,20 @@ function manualDiscountEligibilityWarnings(md = {}, input = {}) {
   const requiresPrepay = !!eligibility.requiresPrepayment;
   const requiresReferral = !!eligibility.requiresReferral;
   const requiresMultiHome = !!eligibility.requiresMultiHome;
+  const requiresWaveGuardTier = !!eligibility.requiresWaveGuardTier;
   const requiresCustomerStatus = !!(
     eligibility.requiresMilitary ||
     eligibility.requiresSenior ||
     eligibility.requiresNewCustomer
   );
-  const requiresAny = requiresPrepay || requiresReferral || requiresMultiHome || requiresCustomerStatus;
+  const requiresAny = requiresPrepay || requiresReferral || requiresMultiHome
+    || requiresCustomerStatus || requiresWaveGuardTier;
 
   if (requiresPrepay && !annualPrepay) add('manual_discount_requires_prepay');
   if (requiresReferral) add('manual_discount_requires_referral');
   if (requiresMultiHome) add('manual_discount_requires_multi_home');
   if (requiresCustomerStatus) add('manual_discount_requires_customer_status');
+  if (requiresWaveGuardTier) add('manual_discount_requires_waveguard_tier');
   if (requiresAny && !confirmed) add('manual_discount_eligibility_not_confirmed');
 
   return uniqueStrings(warnings);

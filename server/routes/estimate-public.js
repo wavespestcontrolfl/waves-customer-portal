@@ -1287,10 +1287,30 @@ function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnua
   const type = manualDiscount.type === 'PERCENT' ? 'PERCENT' : 'FIXED';
   const value = Number(manualDiscount.value);
   if (!Number.isFinite(value) || value <= 0) return null;
-  const requestedAmount = type === 'PERCENT'
-    ? Math.round(discountableAnnualBase * (value / 100) * 100) / 100
-    : Math.round(value * 100) / 100;
-  const amount = Math.min(requestedAmount, Math.round(discountableAnnualBase * 100) / 100);
+  const recurringBase = Math.round(discountableAnnualBase * 100) / 100;
+  let amount;
+  let requestedAmount;
+  let capped = false;
+  if (type === 'PERCENT') {
+    amount = Math.round(recurringBase * (value / 100) * 100) / 100;
+    requestedAmount = amount;
+  } else {
+    // FIXED dollar discounts are split proportionally between recurring and
+    // one-time work in generateEstimate. Recompute only the recurring slice for
+    // THIS cadence's base using the saved one-time discountable base (constant
+    // across cadences) — never the full value, or the recurring card would claim
+    // the one-time slice too and underquote recurring accepts. When the one-time
+    // base is absent (legacy recurring-only discounts) this collapses to
+    // min(value, base).
+    const oneTimeBase = Math.max(0, Number(manualDiscount.oneTimeDiscountableBase) || 0);
+    const combinedBase = Math.round((recurringBase + oneTimeBase) * 100) / 100;
+    requestedAmount = Math.round(value * 100) / 100;
+    const applied = Math.min(requestedAmount, combinedBase);
+    capped = applied < requestedAmount;
+    amount = combinedBase > 0
+      ? Math.round(applied * (recurringBase / combinedBase) * 100) / 100
+      : 0;
+  }
   if (!(amount > 0)) return null;
   return {
     ...manualDiscount,
@@ -1298,16 +1318,15 @@ function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnua
     value,
     requestedAmount,
     amount,
-    // This per-cadence object is recomputed purely against the recurring base,
-    // so its whole amount is the recurring slice. Overwrite the (stale) spread
-    // recurringAmount/oneTimeAmount from the originally generated cadence so the
-    // recurring price cards reconcile with the recomputed amount/monthlyAmount.
+    // This per-cadence object represents only the recurring price card, so its
+    // whole amount is the recurring slice. Overwrite the (stale) spread
+    // recurringAmount/oneTimeAmount from the originally generated cadence.
     recurringAmount: amount,
     oneTimeAmount: 0,
     monthlyAmount: Math.round((amount / 12) * 100) / 100,
-    discountableBase: Math.round(discountableAnnualBase * 100) / 100,
-    capped: requestedAmount > amount,
-    capReason: requestedAmount > amount ? 'discountable_base' : manualDiscount.capReason || null,
+    discountableBase: recurringBase,
+    capped: capped || manualDiscount.capped === true,
+    capReason: capped ? 'discountable_base' : (manualDiscount.capReason || null),
     scope: manualDiscount.scope || 'recurring_annual_after_waveguard',
     stackingOrder: manualDiscount.stackingOrder || 'after_waveguard',
   };
@@ -7646,9 +7665,45 @@ function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricing
     );
 }
 
-function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}) {
+// Distributes the manual one-time discount slice across the discountable
+// preserved specialty rows (net prices), so the one-time choice path — whose
+// total drives the accept/charge amount — never quotes or bills the gross fee.
+// PERCENT recomputes exactly on the carried subtotal; FIXED uses the engine's
+// one-time slice capped to that subtotal. Rows are reduced proportionally with
+// the last row absorbing the rounding remainder.
+function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null) {
+  if (!Array.isArray(rows) || rows.length === 0 || !manualDiscount) return rows;
+  const subtotal = rows.reduce((sum, r) => Math.round((sum + Number(r.price || 0)) * 100) / 100, 0);
+  if (!(subtotal > 0)) return rows;
+  const value = Number(manualDiscount.value);
+  let discount = 0;
+  if (manualDiscount.type === 'PERCENT' && Number.isFinite(value) && value > 0) {
+    discount = Math.round(subtotal * (value / 100) * 100) / 100;
+  } else {
+    const slice = Number(manualDiscount.oneTimeAmount);
+    if (Number.isFinite(slice) && slice > 0) discount = Math.round(slice * 100) / 100;
+  }
+  discount = Math.min(subtotal, discount);
+  if (!(discount > 0)) return rows;
+  let remaining = discount;
+  return rows.map((row, i) => {
+    const price = Number(row.price || 0);
+    const cut = i === rows.length - 1
+      ? remaining
+      : Math.round(discount * (price / subtotal) * 100) / 100;
+    remaining = Math.round((remaining - cut) * 100) / 100;
+    return {
+      ...row,
+      price: Math.round((price - cut) * 100) / 100,
+      grossPrice: price,
+      manualDiscountApplied: Math.round(cut * 100) / 100,
+    };
+  });
+}
+
+function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}, manualDiscount = null) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
-  return items.map((item) => {
+  const rows = items.map((item) => {
     if (!item || typeof item !== 'object') return null;
     if (item.quoteRequired === true) return null;
     if (isWaveGuardSetupOneTimeItem(item)) return null;
@@ -7666,6 +7721,7 @@ function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}) {
       detail: item.detail || null,
     };
   }).filter(Boolean);
+  return applyManualOneTimeDiscountToChoiceRows(rows, manualDiscount);
 }
 
 function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
@@ -7676,7 +7732,7 @@ function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBund
   if (category === 'pest_control') {
     const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
     if (!pestChoiceAmount) return null;
-    const specialtyTotal = preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown)
+    const specialtyTotal = preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))
       .reduce((sum, item) => Math.round((sum + Number(item.price || 0)) * 100) / 100, 0);
     return Math.round((pestChoiceAmount + specialtyTotal) * 100) / 100;
   }
@@ -7697,7 +7753,7 @@ function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, prici
     name: 'One-Time Pest Control',
     label: 'One-Time Pest Control',
     price: Math.round(amount * 100) / 100,
-  }, ...preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown)];
+  }, ...preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))];
 }
 
 function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingBundle = null, choicePrice = null) {
@@ -10689,6 +10745,7 @@ module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;
+module.exports.applyManualOneTimeDiscountToChoiceRows = applyManualOneTimeDiscountToChoiceRows;
 module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;
 module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.detectPestOneTime = detectPestOneTime;

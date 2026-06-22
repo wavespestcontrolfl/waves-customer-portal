@@ -144,6 +144,32 @@ describe('pricing engine manual recurring discount', () => {
     expect(md.oneTimeDiscountableBase).toBeCloseTo(720, 2);
   });
 
+  test('member discounts (requiresWaveGuardTier) require eligibility confirmation', () => {
+    expect(() => generateEstimate(baseInput({
+      manualDiscount: {
+        source: 'catalog_preset',
+        catalogName: 'WaveGuard Member Discount',
+        type: 'PERCENT',
+        value: 15,
+        eligibility: { requiresWaveGuardTier: 'Bronze' },
+      },
+    }))).toThrow('Manual discount eligibility must be confirmed');
+
+    const estimate = generateEstimate(baseInput({
+      manualDiscount: {
+        source: 'catalog_preset',
+        catalogName: 'WaveGuard Member Discount',
+        type: 'PERCENT',
+        value: 15,
+        eligibility: { requiresWaveGuardTier: 'Bronze' },
+        eligibilityConfirmed: true,
+        eligibilityOverrideReason: 'Active WaveGuard member',
+      },
+    }));
+    expect(estimate.summary.manualDiscount.amount).toBeGreaterThan(0);
+    expect(estimate.summary.manualDiscount.warnings).toContain('manual_discount_requires_waveguard_tier');
+  });
+
   test('manual percentage above 100 is rejected server-side', () => {
     expect(() => generateEstimate(baseInput({
       manualDiscount: { type: 'PERCENT', value: 101 },

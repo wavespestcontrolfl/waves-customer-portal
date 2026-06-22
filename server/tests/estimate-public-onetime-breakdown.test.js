@@ -30,6 +30,7 @@ const {
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
   manualDiscountForRecurringBase,
+  applyManualOneTimeDiscountToChoiceRows,
   oneTimeChoiceAmountForEstimate,
   pestMonthlyBaseForFrequency,
   preferenceMonthlyOffForPestVisits,
@@ -368,6 +369,40 @@ describe('public estimate one-time breakdown', () => {
     expect(recomputed.recurringAmount).toBe(90); // tracks amount, not the stale 70.2
     expect(recomputed.oneTimeAmount).toBe(0);
     expect(recomputed.monthlyAmount).toBe(7.5); // 90 / 12
+  });
+
+  test('manualDiscountForRecurringBase recomputes only the recurring slice for fixed discounts', () => {
+    // $100 fixed split across a 468 recurring base + 720 one-time base — the
+    // recurring card must show only the recurring slice, never the full $100.
+    const saved = {
+      type: 'FIXED',
+      value: 100,
+      amount: 100,
+      recurringAmount: 39.39,
+      oneTimeAmount: 60.61,
+      oneTimeDiscountableBase: 720,
+    };
+    const recomputed = manualDiscountForRecurringBase(saved, 468);
+
+    expect(recomputed.recurringAmount).toBeCloseTo(39.39, 1); // 100 * 468/(468+720)
+    expect(recomputed.amount).toBeCloseTo(39.39, 1);
+    expect(recomputed.oneTimeAmount).toBe(0);
+    expect(recomputed.recurringAmount).toBeLessThan(100);
+  });
+
+  test('applyManualOneTimeDiscountToChoiceRows nets the one-time slice into preserved choice rows', () => {
+    const rows = [{ service: 'pest_initial_roach', name: 'Initial Roach Knockdown', label: 'Initial Roach Knockdown', price: 239 }];
+
+    const percent = applyManualOneTimeDiscountToChoiceRows(rows, { type: 'PERCENT', value: 15 });
+    expect(percent[0].price).toBeCloseTo(203.15, 2); // 239 - 15%
+    expect(percent[0].grossPrice).toBe(239);
+    expect(percent[0].manualDiscountApplied).toBeCloseTo(35.85, 2);
+
+    // FIXED uses the engine-computed one-time slice, capped to the carried subtotal.
+    const fixed = applyManualOneTimeDiscountToChoiceRows(rows, { type: 'FIXED', value: 500, oneTimeAmount: 40 });
+    expect(fixed[0].price).toBe(199);
+    const overCap = applyManualOneTimeDiscountToChoiceRows(rows, { type: 'FIXED', value: 500, oneTimeAmount: 999 });
+    expect(overCap[0].price).toBe(0); // never below zero
   });
 
   test('keeps free service-specific inspection rows visible in one-time breakdown', () => {

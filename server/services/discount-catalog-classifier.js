@@ -126,6 +126,13 @@ function classifyDiscountCatalogEntry(discount = {}) {
   ) {
     warnings.push('manual_discount_requires_customer_status');
   }
+  // Member discounts (e.g. WaveGuard Member Discount) ship with
+  // requires_waveguard_tier and are now manually selectable — gate them behind
+  // the operator's eligibility-confirmation checkbox like the other
+  // status-restricted discounts so they can't be applied to a non-member lead.
+  if (eligibility.requiresWaveGuardTier && catalogCategory === 'manual_recurring_estimate_discount') {
+    warnings.push('manual_discount_requires_waveguard_tier');
+  }
 
   const estimatorManualEligible = active && (
     catalogCategory === 'manual_recurring_estimate_discount' ||

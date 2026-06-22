@@ -137,6 +137,9 @@ describe('discount catalog classification', () => {
     expect(result.estimatorManualEligible).toBe(true);
     expect(result.waveGuardTierDiscount).toBe(false);
     expect(result.warnings).not.toContain('waveguard_tier_discount_not_manual_selectable');
+    // Still gated behind the operator's eligibility-confirmation checkbox so it
+    // can't be applied to a non-member lead.
+    expect(result.warnings).toContain('manual_discount_requires_waveguard_tier');
   });
 
   test('a tier-stacked discount with no explicit flag still classifies as tier', () => {
