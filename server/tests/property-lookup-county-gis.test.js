@@ -304,17 +304,48 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     expect(merged.propertyType).toBe('Commercial');
   });
 
-  test('override never downgrades an already-specific type and skips DOR-only types', () => {
-    // GIS type came from the DOR code (not the description) → no override flag.
-    const dorOnly = buildCadastralRecord({
+  test('a generic DOR-derived type (Single Family) does not override a specific merged type', () => {
+    const dorSfr = buildCadastralRecord({
       county: 'Sarasota', parcelId: '9', situsAddress: '1 A ST', situsCity: 'VENICE', situsZip: '34285',
       lotSqft: 8000, livingAreaSqft: 1800, yearBuilt: 2001, dorUseCode: '01',
       sourceUrl: 'https://ags3.scgov.net/x', gisProvider: 'sarasota_gis',
     }, 'addr');
-    expect(dorOnly._typeFromUseDesc).toBe(false);
+    expect(dorSfr.propertyType).toBe('Single Family'); // generic, not promotable
     const merged = { propertyType: 'Condo', _fieldEvidence: { propertyType: { value: 'Condo' } } };
-    applyCountyGisTypeOverride(merged, dorOnly);
-    expect(merged.propertyType).toBe('Condo'); // untouched — not description-derived
+    applyCountyGisTypeOverride(merged, dorSfr);
+    expect(merged.propertyType).toBe('Condo'); // untouched
+  });
+
+  test('a DOR-derived condo/multifamily promotes over a generic PAO tie (codex P2)', () => {
+    // Sarasota has no land-use description, so the type comes from the 4-digit
+    // DOR code — it must still win the same-weight PAO tie like a description.
+    const sarasotaCondo = buildCadastralRecord({
+      county: 'Sarasota', parcelId: '0009112081', situsAddress: '1 BAY ST', situsCity: 'VENICE', situsZip: '34285',
+      lotSqft: 0, livingAreaSqft: 1200, yearBuilt: 2019, dorUseCode: '0405', landUseDescription: null,
+      sourceUrl: 'https://ags3.scgov.net/x', gisProvider: 'sarasota_gis',
+    }, 'addr');
+    expect(sarasotaCondo.propertyType).toBe('Condo');
+    expect(sarasotaCondo._typeFromUseDesc).toBe(false); // from the DOR code, not a description
+    const merged = {
+      propertyType: 'Single Family', _aiProviders: ['sarasota_pao'],
+      _fieldEvidence: { propertyType: { value: 'Single Family', sourceType: 'county', fieldVerify: false, evidence: [] } },
+    };
+    applyCountyGisTypeOverride(merged, sarasotaCondo);
+    expect(merged.propertyType).toBe('Condo'); // DOR-derived specific type wins the generic tie
+    expect(merged._fieldEvidence.propertyType.fieldVerify).toBe(false);
+  });
+
+  test('FDOR cadastral (weight 97) never triggers the override — it loses the merge on score', () => {
+    const fdorCondo = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '1 A ST', situsCity: 'BRADENTON', situsZip: '34205',
+      lotSqft: 8000, livingAreaSqft: 1200, yearBuilt: 2008, dorUseCode: '004', // FDOR 3-digit → Condo
+      sourceUrl: 'https://services9.arcgis.com/x/Florida_Statewide_Cadastral/FeatureServer/0',
+    }, 'addr');
+    expect(fdorCondo.propertyType).toBe('Condo');
+    expect(fdorCondo._source).toBe('cadastral');
+    const merged = { propertyType: 'Single Family', _fieldEvidence: { propertyType: { value: 'Single Family' } } };
+    applyCountyGisTypeOverride(merged, fdorCondo);
+    expect(merged.propertyType).toBe('Single Family'); // cadastral excluded from override
   });
 
   test('commercial/municipal land-use routes to the commercial path, not Single Family (codex P1)', () => {

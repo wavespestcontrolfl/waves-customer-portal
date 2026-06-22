@@ -884,15 +884,18 @@ function isGenericResidentialType(value) {
 // Field-specific override for propertyType only. The merge caps every county
 // source at the same score, so a same-weight PAO record (generic "Single
 // Family") wins the tie over the county GIS record by input order — losing the
-// paired-villa/condo classification the GIS land-use description uniquely
-// carries. When the GIS type came from that description, let it win the TYPE
-// field ONLY when the merged value is blank or generic residential; every other
-// field keeps the normal merge (PAO's live sqft/year untouched). It never
-// overwrites an already-specific merged type (another live county/AI "Condo",
-// "Duplex", "Commercial", …) — that genuine conflict is left as-is but flagged
-// for verification.
+// specific classification the county roll carries, whether from the land-use
+// DESCRIPTION ("Half Duplex/Paired Villa") or the DOR major category (04 condo /
+// 08 multifamily, the only type signal Sarasota's code-only layer has). When the
+// county GIS record (weight 100, the source that ties the PAO) has a specific
+// type, let it win the TYPE field ONLY when the merged value is blank or generic
+// residential; every other field keeps the normal merge (PAO's live sqft/year
+// untouched). It never overwrites an already-specific merged type (another live
+// county/AI "Condo", "Duplex", "Commercial", …) — that genuine conflict is left
+// as-is but flagged for verification. FDOR cadastral (weight 97) is excluded: it
+// loses the merge on score, so it must not override here.
 function applyCountyGisTypeOverride(merged, cadastralRecord) {
-  if (!merged || !cadastralRecord?._typeFromUseDesc) return merged;
+  if (!merged || cadastralRecord?._source !== 'county') return merged;
   const gisType = cadastralRecord.propertyType;
   if (isMissingPropertyValue(gisType) || !COUNTY_GIS_SPECIFIC_TYPES.has(gisType)) return merged;
   if (!isMissingPropertyValue(merged.propertyType)
