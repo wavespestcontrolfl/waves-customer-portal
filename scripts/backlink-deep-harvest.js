@@ -260,7 +260,14 @@ async function rescore(db, args) {
     try { qs = typeof r.quality_signals === 'string' ? JSON.parse(r.quality_signals) : (r.quality_signals || {}); } catch { qs = {}; }
     Object.assign(qs, { relevance: s.relevance_0_100, lead_value_tier: s.lead_value_tier, is_local_swfl: s.is_local_swfl, intent_class: s.intent_class, scored_by: 'rescore' });
 
-    const patch = { score: s.score, tier: s.tier, quality_signals: JSON.stringify(qs), updated_at: new Date() };
+    // Persist the recomputed priority too — the admin board orders by it and
+    // Hermes filters/claims by it; writing only score/tier would leave a raw-DR
+    // row misordered. And make an existing missing/non-claimable link_type
+    // claimable (s.intent_class is coerced), so the worker can actually claim it;
+    // a row whose stored link_type is already claimable keeps it (authoritative
+    // lane, incl. the protected signup lanes).
+    const patch = { score: s.score, tier: s.tier, priority: s.priority, quality_signals: JSON.stringify(qs), updated_at: new Date() };
+    if (!(r.link_type && scorer.CLAIMABLE_LINK_TYPES.has(r.link_type))) patch.link_type = s.intent_class;
     // Only write contact fields when this probe actually found something — never
     // null out a previously-captured contact (signup-lane rows aren't probed).
     if (s.contact && (s.contact.contact_email || s.contact.has_contact_path)) {
