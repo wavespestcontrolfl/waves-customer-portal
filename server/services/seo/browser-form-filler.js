@@ -65,17 +65,50 @@ function requestAllowed({ url, allowedHosts }) {
 const BLOCKED_VALUES = new Set([null, 'account', 'captcha', 'payment', 'phone']);
 
 /**
- * Resolve a host to its PUBLIC IPs for DNS-pinning. Fail-closed: returns [] if the
- * host doesn't resolve or ANY returned address is private/internal (so we never pin —
- * and therefore never launch a browser against — a host that resolves to an internal
- * address). An IP literal is returned only if it is itself public.
+ * Is `ip` a GLOBAL-UNICAST (publicly-routable) address? We pin/allow ONLY these —
+ * an allowlist stance, not merely "not RFC1918". Rejects every IANA special-use range
+ * (private, loopback, link-local, CGNAT, benchmark 198.18/15, the TEST-NETs, protocol-
+ * assignment 192.0.0/24, multicast, reserved/broadcast; IPv6 ULA/link-local/multicast/
+ * unspecified/doc) so a malicious directory DNS record can't point the browser at
+ * special-use infrastructure that routes internally. Builds on ssrf.isPrivateIp.
+ */
+function isGloballyRoutable(ip) {
+  if (net.isIPv4(ip)) {
+    if (ssrf.isPrivateIp(ip)) return false; // 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 100.64/10
+    const [a, b, c] = ip.split('.').map(Number);
+    if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;     // 192.0.0/24 (IETF), 192.0.2/24 (TEST-NET-1)
+    if (a === 198 && (b === 18 || b === 19)) return false;              // 198.18/15 (benchmark)
+    if (a === 198 && b === 51 && c === 100) return false;              // 198.51.100/24 (TEST-NET-2)
+    if (a === 203 && b === 0 && c === 113) return false;               // 203.0.113/24 (TEST-NET-3)
+    if (a === 192 && b === 88 && c === 99) return false;               // 192.88.99/24 (6to4 relay anycast, deprecated)
+    if (a >= 224) return false;                                        // 224/4 multicast + 240/4 reserved + 255.255.255.255
+    return true;
+  }
+  if (net.isIPv6(ip)) {
+    if (ssrf.isPrivateIp(ip)) return false; // ::1, ::, fc/fd (ULA), fe80::/10 (link-local), v4-mapped private
+    const h = ip.toLowerCase();
+    if (h.startsWith('ff')) return false;                              // ff00::/8 multicast
+    if (h.startsWith('2001:db8')) return false;                        // 2001:db8::/32 documentation
+    if (h.startsWith('2001:0db8')) return false;
+    if (h === '::1' || h === '::') return false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve a host to its globally-routable PUBLIC IPs for DNS-pinning. Fail-closed:
+ * returns [] if the host doesn't resolve or ANY returned address is not global-unicast
+ * (so we never pin — and therefore never launch a browser against — a host that
+ * resolves to an internal/special-use address). An IP literal is returned only if it
+ * is itself globally routable.
  */
 async function resolvePublicIps(host) {
   if (!host) return [];
-  if (net.isIP(host)) return ssrf.isPrivateIp(host) ? [] : [host];
+  if (net.isIP(host)) return isGloballyRoutable(host) ? [host] : [];
   let addrs;
   try { addrs = await dns.promises.lookup(host, { all: true }); } catch { return []; }
-  if (!addrs.length || addrs.some((a) => ssrf.isPrivateIp(a.address))) return [];
+  if (!addrs.length || !addrs.every((a) => isGloballyRoutable(a.address))) return [];
   return [...new Set(addrs.map((a) => a.address))];
 }
 
@@ -180,11 +213,18 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   if (!pinned.has(navHost)) return { outcome: 'failed', errorCode: 'host_not_public', notes: `${navHost} did not resolve to a public IP` };
   const hostResolverRules = rules.join(',');
 
-  // Track whether the egress guard aborted the actual SUBMIT request (form POST or the
-  // post-submit navigation). If it did, nothing landed at the directory — we must NOT
-  // report placed (which would strand a row the verifier polls forever).
+  // Submission EVIDENCE tracking (set by the route guard during the submit phase):
+  //  - submitDispatched: an ALLOWED submit/navigation request actually reached the
+  //    pinned host (POST/PUT/PATCH form post, or a navigation incl. a GET form submit
+  //    / confirmation) → positive evidence something landed at the directory.
+  //  - submitAborted: a submit/navigation request went OFF the pinned host and was
+  //    aborted → that attempt reached nothing.
+  // We only take the no-retry placed path on verification OR submitDispatched; with
+  // neither we treat it as "nothing submitted" (retryable / parked), so a no-op or
+  // off-host submit never strands a row as placed.
   let submitPhase = false;
   let submitAborted = false;
+  let submitDispatched = false;
 
   let browser;
   try {
@@ -205,17 +245,18 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     if (typeof context.route === 'function') {
       await context.route('**/*', (route) => {
         const req = route.request();
+        // A "submission request" = a body-bearing method (POST/PUT/PATCH — the form post)
+        // OR a navigation (a full-page form submit, incl. a GET-method form, or a
+        // confirmation redirect). Sub-resource GETs (css/img/xhr fetches) don't count.
+        let isSubmitReq = false;
+        try { isSubmitReq = submitPhase && (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method() || 'GET').toUpperCase()) || req.isNavigationRequest()); } catch { isSubmitReq = false; }
         let ok = false;
         try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
         if (!ok) {
-          // Only an aborted SUBMISSION request (a body-bearing POST/PUT/PATCH — the form
-          // post itself going off-host) means nothing landed. A GET navigation we abort
-          // here is just an off-host CONFIRMATION redirect AFTER the post already
-          // succeeded on the pinned host → that stays on the pending-placement path,
-          // NOT skip (the listing may well have been created).
-          try { if (submitPhase && !['GET', 'HEAD', 'OPTIONS'].includes(String(req.method() || 'GET').toUpperCase())) submitAborted = true; } catch { /* noop */ }
+          if (isSubmitReq) submitAborted = true;   // a submit/nav attempt went off-host → reached nothing
           return route.abort();
         }
+        if (isSubmitReq) submitDispatched = true;  // a submit/nav request reached the pinned host → evidence
         return route.continue();
       });
     }
@@ -307,39 +348,38 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {}); // best-effort settle; never fatal post-dispatch
 
-    // If the egress guard aborted the submit's own POST/navigation, nothing reached the
-    // directory — do NOT report placed. The runner parks it (off-host submit endpoint
-    // can't be auto-submitted) rather than stranding a row the verifier polls forever.
-    if (submitAborted) {
-      return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot1, notes: 'submit POST/navigation went off the pinned host (aborted) — nothing submitted' };
-    }
-
-    // Submit landed → from here ANY error still yields a PENDING placement, never a
-    // retryable failure (a retry could duplicate the listing). Verification is
-    // best-effort: if the wait/screenshot/model call throws, we still report pending
-    // rather than letting it fall to the outer catch (which would report failed).
+    // Verification is best-effort (its own try/catch — a throw here must NOT fall to the
+    // outer catch's retryable engine_error). The verifier also reports a clear REJECTION
+    // (validation error / required-field / login-CAPTCHA-payment wall) distinctly from
+    // a merely-unrecognized confirmation.
     let verify = null;
     let shot2 = null;
     try {
       await page.waitForTimeout(1500);
       shot2 = await page.screenshot({ fullPage: true, type: 'png' });
       verify = await callVision(client, shot2.toString('base64'),
-        'Did the previous business-listing submission SUCCEED? Look for a confirmation/thank-you, a moderation/"pending review" notice, or a created listing URL. Return ONLY JSON: {"success":bool,"pending":bool,"live_url":"url or null","notes":"≤15 words"}');
+        'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection (validation error, "required field", a login/CAPTCHA/payment wall, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}');
     } catch (e) {
-      logger.warn(`[form-filler] post-submit verification failed for ${expectedHost} (still reporting pending): ${e.message}`);
+      logger.warn(`[form-filler] post-submit verification failed for ${expectedHost}: ${e.message}`);
     }
-    // The submit WAS clicked → ALWAYS report a PENDING placement (never failed/retry,
-    // even when the confirmation is unrecognized — a retry could duplicate a listing
-    // that actually succeeded). We do NOT store a model-/page-supplied live_url: the
-    // verifier fetches live_url server-side following redirects, so an open-redirect or
-    // rebinding on the directory could turn it into an SSRF. The verifier's domain
-    // reconcile discovers the real URL; the model's claimed URL is kept only as a
-    // non-fetched evidence note (and only if it's on the allowlisted domain).
+    // We NEVER store a model-/page-supplied live_url (the verifier fetches it server-side
+    // following redirects → SSRF risk); the verifier's domain reconcile finds the real
+    // URL. Keep the model's claimed URL only as a non-fetched, on-host evidence note.
     const claimedLive = verify && typeof verify.live_url === 'string' && /^https?:\/\//.test(verify.live_url) ? verify.live_url : null;
     const onHostClaim = claimedLive && hostMatchesExpected(hostOf(claimedLive), expectedHost) ? claimedLive : null;
     const confirmed = !!(verify && (verify.success || verify.pending));
-    const note = [(verify && verify.notes) || (confirmed ? 'submitted' : 'submitted; unconfirmed'), onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200);
-    return { outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2, notes: note };
+    const rejected = !confirmed && !!(verify && verify.rejected);
+    const placed = (msg) => ({ outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2 || shot1, notes: [(verify && verify.notes) || msg, onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200) });
+
+    // EVIDENCE-based outcome (not "a click happened"). placed (no-retry → no dup) ONLY
+    // when the verifier confirmed OR a submit/nav request actually reached the pinned
+    // host. A clear rejection, an off-host (nothing-sent) submit, or no observed
+    // submission at all → NOT placed (so the verifier never polls a phantom listing).
+    if (confirmed) return placed('submitted');
+    if (rejected) return { outcome: 'failed', errorCode: 'submit_rejected', screenshot: shot2 || shot1, notes: (verify && verify.notes) || 'directory rejected the submission' };
+    if (submitDispatched) return placed('submitted; unconfirmed (request reached host)');
+    if (submitAborted) return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot2 || shot1, notes: 'submit request went off the pinned host (aborted) — nothing submitted' };
+    return { outcome: 'failed', errorCode: 'no_submit_evidence', screenshot: shot2 || shot1, notes: 'submit clicked but no submission request observed and unconfirmed' };
   } catch (err) {
     logger.error(`[form-filler] ${submitUrl}: ${err.message}`);
     return { outcome: 'failed', errorCode: 'engine_error', notes: String(err.message).slice(0, 160) };

@@ -168,6 +168,19 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     }
 
     const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic });
+
+    // Run-level/environment/outage error (no LLM client, no browser, planning-LLM
+    // outage) — same for EVERY prospect and not theirs to pay for. ABORT the batch
+    // BEFORE any ledger write: release this + all remaining claims, no attempts
+    // consumed, and NO seo_signup_attempts row (a misconfigured cron would otherwise
+    // append a failed row for the same released prospect every run, skewing the ledger).
+    if (RUN_LEVEL_ERRORS.has(result.errorCode)) {
+      logger.error(`[signup-runner] run-level error '${result.errorCode}' — aborting batch, releasing ${claimed.length - i} claim(s), no attempts/ledger consumed`);
+      for (let j = i; j < claimed.length; j++) releaseAtEnd.push({ id: claimed[j].id, lease_token: claimed[j].lease_token });
+      counts.aborted = result.errorCode;
+      break;
+    }
+
     const evidenceKey = result.screenshot ? await uploadEvidence(result.screenshot, domain) : null;
     await recordAttempt(p, result, evidenceKey);
 
@@ -197,22 +210,15 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // No submittable form here — mark off-lane so we stop claiming it.
       await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       counts.skipped++;
-    } else if (result.errorCode === 'submit_blocked') {
-      // The submit endpoint is off the pinned host — we can't auto-submit this directory
-      // safely, and retrying is futile. Park it (skip) so we stop re-claiming it.
+    } else if (result.errorCode === 'submit_blocked' || result.errorCode === 'submit_rejected') {
+      // submit_blocked = the submit endpoint is off the pinned host (can't auto-submit);
+      // submit_rejected = the directory returned a rejection/error page. Either way
+      // retrying the same data is futile → park it (skip) so we stop re-claiming it.
       await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       counts.skipped++;
-    } else if (RUN_LEVEL_ERRORS.has(result.errorCode)) {
-      // Environment/config failure (no LLM client, no browser) — same for every
-      // prospect and not theirs to pay for. ABORT the batch: release this row and all
-      // remaining claimed rows WITHOUT reporting failed (no attempts consumed), so a
-      // misconfigured cron can't churn through and reject allowlisted prospects.
-      logger.error(`[signup-runner] run-level error '${result.errorCode}' — aborting batch, releasing ${claimed.length - i} claim(s), no attempts consumed`);
-      for (let j = i; j < claimed.length; j++) releaseAtEnd.push({ id: claimed[j].id, lease_token: claimed[j].lease_token });
-      counts.aborted = result.errorCode;
-      break;
     } else {
-      // Engine error / unconfirmed — retryable via the worker contract (MAX_ATTEMPTS).
+      // Engine error / no_submit_evidence / unconfirmed — retryable via the worker
+      // contract (MAX_ATTEMPTS). Nothing was observably submitted → safe to retry.
       await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: `runner: ${result.errorCode || 'failed'}` });
       counts.failed++;
     }

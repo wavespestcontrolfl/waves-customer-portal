@@ -5,7 +5,20 @@ const { fillCitationForm, _internals } = require('../services/seo/browser-form-f
 // failClickSel: a selector whose click() throws (submit not actionable).
 // ctxOpts: captures newContext(options); wsLog: records routeWebSocket patterns;
 // clickOptsLog: records [selector, options] for clicks that pass options.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null } = {}) {
+// submitReq: {method,url,nav} — a synthetic request fired THROUGH the real route guard
+// when the submit is clicked, so submitDispatched/submitAborted get exercised offline.
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null } = {}) {
+  let routeHandler = null;
+  const fireSubmitReq = async () => {
+    if (!submitReq || !routeHandler) return;
+    const req = {
+      url: () => submitReq.url,
+      method: () => submitReq.method || 'POST',
+      isNavigationRequest: () => !!submitReq.nav,
+      frame: () => ({ parentFrame: () => null }),
+    };
+    await routeHandler({ request: () => req, abort: async () => {}, continue: async () => {} });
+  };
   const page = {
     goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
     url: () => landedUrl,
@@ -13,9 +26,9 @@ function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel 
     fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); },
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
     check: async (sel) => actionsLog.push(['check', sel]),
-    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); actionsLog.push(['click', sel]); },
+    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); actionsLog.push(['click', sel]); await fireSubmitReq(); },
   };
-  const ctx = { newPage: async () => page, route: async () => {} };
+  const ctx = { newPage: async () => page, route: async (_p, handler) => { routeHandler = handler; } };
   if (wsLog) ctx.routeWebSocket = async (pattern) => { wsLog.push(pattern); };
   return { newContext: async (opts) => { if (ctxOpts) Object.assign(ctxOpts, opts || {}); return ctx; }, close: async () => {} };
 }
@@ -82,27 +95,63 @@ describe('fillCitationForm', () => {
     expect(log.find((a) => a[0] === 'click')).toBeUndefined(); // submit never clicked
   });
 
-  test('P1: submit clicked but confirmation UNRECOGNIZED → placed+pending, NOT retryable failed', async () => {
+  test('P1: unconfirmed BUT a submit request reached the pinned host → placed+pending, NOT retryable', async () => {
     const log = [];
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
-      launchBrowser: async () => fakeBrowser(log),
+      launchBrowser: async () => fakeBrowser(log, { submitReq: { method: 'POST', url: 'https://x.com/submit' } }), // on-host POST = evidence it landed
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
-        { success: false, pending: false, live_url: null }, // unconfirmed
+        { success: false, pending: false, rejected: false, live_url: null }, // unconfirmed
       ),
     }));
-    expect(r.outcome).toBe('placed'); // once submit is clicked we never auto-retry (would risk a duplicate)
+    expect(r.outcome).toBe('placed'); // network evidence the POST reached the host → never auto-retry (no dup)
     expect(r.pending).toBe(true);
-    expect(r.notes).toContain('unconfirmed');
-    expect(log).toContainEqual(['click', '#go']); // submit did happen
+    expect(log).toContainEqual(['click', '#go']);
   });
 
-  test('P1: a post-submit verification THROW still yields placed+pending (never falls to retryable failed)', async () => {
+  test('P1: submit clicked but NO submission request observed + unconfirmed → no_submit_evidence (retryable, not stranded as placed)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log), // no submitReq → no request reached the host (no-op/next-step button)
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('no_submit_evidence');
+  });
+
+  test('P2: an off-host submit request → submit_blocked (nothing reached the directory)', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://evil.example/submit' } }), // POST goes off-host → aborted
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_blocked');
+  });
+
+  test('P2: a clear post-submit REJECTION page → submit_rejected, not placed (verifier won’t poll a phantom)', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://x.com/submit' } }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: true, live_url: null }, // directory showed a validation/error page
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_rejected');
+  });
+
+  test('P1: a post-submit verification THROW with a dispatched submit still yields placed+pending (never retryable)', async () => {
     const log = [];
     let n = 0;
     // plan returns on call 1; the verify call (2) throws → must NOT become a retryable failure
     const anthropic = { messages: { create: async () => { n += 1; if (n === 1) return { content: [{ text: JSON.stringify({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }) }] }; throw new Error('anthropic 500'); } } };
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({ launchBrowser: async () => fakeBrowser(log), anthropic }));
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({ launchBrowser: async () => fakeBrowser(log, { submitReq: { method: 'POST', url: 'https://x.com/submit' } }), anthropic }));
     expect(r.outcome).toBe('placed');
     expect(r.pending).toBe(true);
     expect(log).toContainEqual(['click', '#go']); // the submit DID happen → never retry
@@ -366,6 +415,15 @@ describe('resolvePublicIps (DNS pin source, fail-closed)', () => {
     expect(await resolvePublicIps('127.0.0.1')).toEqual([]);
     expect(await resolvePublicIps('169.254.169.254')).toEqual([]);
     expect(await resolvePublicIps('10.0.0.5')).toEqual([]);
+  });
+  test('P2: rejects non-global special-use ranges (benchmark/TEST-NET/multicast/reserved), not just RFC1918', async () => {
+    expect(await resolvePublicIps('198.18.0.1')).toEqual([]);   // 198.18/15 benchmark
+    expect(await resolvePublicIps('198.51.100.7')).toEqual([]); // TEST-NET-2
+    expect(await resolvePublicIps('203.0.113.7')).toEqual([]);  // TEST-NET-3
+    expect(await resolvePublicIps('192.0.2.7')).toEqual([]);    // TEST-NET-1
+    expect(await resolvePublicIps('224.0.0.1')).toEqual([]);    // multicast
+    expect(await resolvePublicIps('240.0.0.1')).toEqual([]);    // reserved
+    expect(await resolvePublicIps('1.1.1.1')).toEqual(['1.1.1.1']); // genuinely global → kept
   });
   test('empty host → []', async () => {
     expect(await resolvePublicIps('')).toEqual([]);
