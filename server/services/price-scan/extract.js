@@ -334,14 +334,84 @@ function extractDomPrice(snapshot = {}) {
   };
 }
 
+// Some storefronts list each purchasable VARIANT with its own size label + price
+// (Magento jsonConfig), while the page-level JSON-LD Offer/title carry no size — so the
+// size-gated JSON-LD path abandons the whole multi-variant page even though the size IS
+// stated, just elsewhere. Variant labels vary ("Pack (4x30gm)", "8 Ounce"); normalize the
+// gram abbreviation "gm"/"gms" -> "gram" so the size parser recognizes it. It must become
+// "gram", NOT bare "g": extractSizeToken intentionally rejects a lone "g" on a SINGLE-size
+// label (pesticide formulation codes like "Dominion 2L", "2G"), so "30 gm" -> "30g" would
+// be dropped, while "30 gram" parses. (Scoped here so the tuned extractSizeToken stays
+// untouched; the multipack path accepts "g" too, but "gram" is correct for both.)
+function normalizeSizeLabel(label) {
+  return String(label == null ? '' : label).replace(/(\d)\s*gms?\b/gi, '$1 gram');
+}
+
+// Pick the variant whose stated size matches the requested pack. These size-explicit
+// variants are AUTHORITATIVE (each price is tied to a size), so we match exactly and
+// never guess a different one. `variants`: [{ size, price, availabilityRaw? }]. Among
+// same-size variants, prefer in-stock then cheapest (mirrors pickBestOffer). Returns a
+// { price, currency, availability, quantity, competingSameSize } offer or null when our
+// size isn't offered.
+function pickVariantOffer(variants, opts = {}) {
+  if (!Array.isArray(variants) || !opts.targetOz || opts.targetOz <= 0) return null;
+  const tol = opts.sizeTolerance ?? 0.05;
+  const pool = [];
+  for (const v of variants) {
+    const price = Number(v && v.price);
+    if (!Number.isFinite(price) || price <= 0) continue;
+    // Store the CANONICAL size token as the quantity, not the raw label: downstream
+    // verifyMatch and the $/oz calc re-parse this string with quantityToOz, which (unlike
+    // extractSizeToken) doesn't normalize a space-less multipack — quantityToOz("Pack
+    // (4x30gm)")=1.06 (drops the 4x) but quantityToOz("4 x 30 g")=4.23. extractSizeToken
+    // yields that canonical "4 x 30 g", so persist it to keep matching + pricing consistent.
+    const token = extractSizeToken(normalizeSizeLabel(v && v.size));
+    const oz = quantityToOz(token);
+    if (!oz || Math.abs(oz - opts.targetOz) / opts.targetOz > tol) continue;
+    pool.push({ price, availabilityRaw: (v && v.availabilityRaw) || null, size: token });
+  }
+  if (!pool.length) return null;
+  let best = null;
+  let bestRank = -1;
+  for (const o of pool) {
+    const availability = mapAvailability(o.availabilityRaw);
+    const rank = AVAIL_RANK[availability] ?? 1;
+    if (!best || rank > bestRank || (rank === bestRank && o.price < best.price)) {
+      best = { price: o.price, currency: 'USD', availability, quantity: o.size };
+      bestRank = rank;
+    }
+  }
+  // competingSameSize: more than one variant of our exact size (winner chosen by price),
+  // so a page-body EPA can't be assumed to belong to it — same semantics as the JSON-LD path.
+  // fromVariant: marks this as variant-derived so callers never promote PAGE-level stock
+  // text onto it (its availability is per-child, from the salable map, or honestly unknown).
+  return best && { ...best, competingSameSize: pool.length > 1, fromVariant: true };
+}
+
 // Pick the offer from a scraped snapshot { jsonLd, priceTexts, title,
-// availabilityText }. Size-aware JSON-LD first; fall back to a DOM price ONLY
-// when the JSON-LD carried NO offers at all. If JSON-LD HAD offers but none
-// substantiate opts.targetOz, return null — the structured data is authoritative
-// and simply doesn't list our size, so a DOM price (almost always a different /
-// default variant) must not be reported as the requested pack.
+// availabilityText, variants }. Size-explicit VARIANTS first (authoritative per-size
+// pricing), then size-aware JSON-LD, then a DOM price ONLY when the JSON-LD carried NO
+// offers at all. If JSON-LD HAD offers but none substantiate opts.targetOz, return null —
+// the structured data is authoritative and simply doesn't list our size, so a DOM price
+// (almost always a different / default variant) must not be reported as the requested pack.
 function offerFromSnapshot(snapshot = {}, opts = {}) {
   const jsonLd = snapshot.jsonLd || [];
+
+  // Variant-explicit offers win on a size-specific scan: a multi-variant page whose
+  // JSON-LD/title omit the size is no longer abandoned. If no variant matches our size we
+  // fall THROUGH to the (conservative) JSON-LD/DOM path rather than returning null, so a
+  // flaky/empty variant scrape can't suppress a legitimate single-offer match.
+  if (opts.targetOz && opts.targetOz > 0 && Array.isArray(snapshot.variants) && snapshot.variants.length) {
+    const variant = pickVariantOffer(snapshot.variants, opts);
+    if (variant) {
+      variant.name = (typeof snapshot.title === 'string' && snapshot.title) || null;
+      // Do NOT promote page-level availabilityText onto a variant: on a multi-variant page
+      // that text is the default selection's stock, not the matched child's. Per-child
+      // availability already came from the jsonConfig salable map (collectSnapshot).
+      return variant;
+    }
+  }
+
   const ldOffer = extractJsonLdOffer(jsonLd, opts);
   if (ldOffer) {
     // When structured data priced the offer but omitted availability, fall back
@@ -540,6 +610,8 @@ module.exports = {
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,
+  pickVariantOffer,
+  normalizeSizeLabel,
   offerFromSnapshot,
   extractSizeToken,
   quantityToOz,

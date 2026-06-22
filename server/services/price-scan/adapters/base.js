@@ -127,7 +127,63 @@ function collectSnapshot(sel) {
   // without serializing the entire page back to Node.
   const body = (document.body && document.body.innerText) || '';
 
-  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000) };
+  // Size-explicit variants (Magento jsonConfig): each purchasable child carries its own
+  // size label + price, which the page-level JSON-LD/title omit. Opt-in (sel.magentoVariants)
+  // so only Magento adapters pay for it. Self-contained — runs in page.evaluate. Pulls
+  // `optionPrices` (price per child) and joins the size label from `optionPrices[id].size`
+  // or, as a fallback, from `attributes[*].options[].label` via the `index` child->option map.
+  let variants = [];
+  if (sel.magentoVariants) {
+    for (const s of document.querySelectorAll('script[type="text/x-magento-init"], script[type="application/json"]')) {
+      let parsed;
+      try { parsed = JSON.parse(s.textContent || ''); } catch (e) { continue; }
+      // Walk to the nested config object that holds optionPrices.
+      let cfg = null;
+      const stack = [parsed];
+      while (stack.length && !cfg) {
+        const cur = stack.pop();
+        if (cur && typeof cur === 'object') {
+          if (cur.optionPrices && typeof cur.optionPrices === 'object') cfg = cur;
+          else for (const k in cur) if (cur[k] && typeof cur[k] === 'object') stack.push(cur[k]);
+        }
+      }
+      if (!cfg) continue;
+      // Per-child stock: Magento lists salable children as salable[attrId][optionId] =
+      // [productIds]. A child is in stock iff its own id appears under its option. Returns
+      // null when the config carries no salable map (unknown), true/false otherwise — so a
+      // sold-out target size is reported out_of_stock, NOT promoted from page-level text.
+      const salableOf = (pid) => {
+        if (!cfg.salable || !cfg.index || !cfg.index[pid]) return null;
+        const idx = cfg.index[pid];
+        for (const aid in idx) {
+          const arr = cfg.salable[aid] && cfg.salable[aid][idx[aid]];
+          if (Array.isArray(arr) && arr.map(String).indexOf(String(pid)) !== -1) return true;
+        }
+        return false;
+      };
+      for (const pid in cfg.optionPrices) {
+        const op = cfg.optionPrices[pid];
+        const price = op && op.finalPrice && op.finalPrice.amount;
+        if (price == null) continue;
+        let size = op && op.size;
+        if (!size && cfg.attributes && cfg.index && cfg.index[pid]) {
+          for (const aid in cfg.attributes) {
+            const optId = cfg.index[pid][aid];
+            const opt = ((cfg.attributes[aid] && cfg.attributes[aid].options) || [])
+              .find((o) => String(o.id) === String(optId));
+            if (opt && opt.label) { size = opt.label; break; }
+          }
+        }
+        if (size == null || !String(size).trim()) continue;
+        const salable = salableOf(pid);
+        const availabilityRaw = salable === true ? 'InStock' : salable === false ? 'OutOfStock' : null;
+        variants.push({ size: String(size), price: Number(price), availabilityRaw });
+      }
+      if (variants.length) break;
+    }
+  }
+
+  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants };
 }
 
 // Find the first product link on a search-results page. Returns an absolute URL
@@ -281,6 +337,7 @@ function makeAdapter(config) {
       titleSelector: config.titleSelector,
       priceSelectors: config.priceSelectors,
       availabilitySelector: config.availabilitySelector,
+      magentoVariants: !!config.magentoVariants, // capture per-variant size+price (Magento jsonConfig)
     };
     const snapshot = await page.evaluate(collectSnapshot, sel);
 
@@ -292,14 +349,20 @@ function makeAdapter(config) {
 
     // When JSON-LD priced the offer but didn't state availability, fall back to the
     // DOM availability text — otherwise a sold-out page reports 'unknown' (which
-    // compare does NOT exclude) and can rank as a savings opportunity.
+    // compare does NOT exclude) and can rank as a savings opportunity. EXCEPT for a
+    // variant-derived offer: on a multi-variant page the DOM text is the default
+    // selection's stock, not the matched child's, so its availability must come only
+    // from the per-child salable map (or stay honestly 'unknown') — never page-level.
     let availability = offer.availability || 'unknown';
-    if (availability === 'unknown' && snapshot.availabilityText) {
+    if (availability === 'unknown' && snapshot.availabilityText && !offer.fromVariant) {
       availability = mapAvailability(snapshot.availabilityText);
     }
 
     const name = offer.name || snapshot.title || null;
-    const quantity = (config.quantityFrom && config.quantityFrom(name, snapshot))
+    // A variant-matched offer already knows its exact pack (offer.quantity = the variant's
+    // size label); trust it over re-parsing the product name/title.
+    const quantity = offer.quantity
+      || (config.quantityFrom && config.quantityFrom(name, snapshot))
       || extractSizeToken(name)
       || extractSizeToken(snapshot.title);
 

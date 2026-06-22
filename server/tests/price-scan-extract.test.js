@@ -4,6 +4,8 @@ const {
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,
+  pickVariantOffer,
+  normalizeSizeLabel,
   offerFromSnapshot,
   extractSizeToken,
   quantityToOz,
@@ -569,6 +571,88 @@ describe('price-scan extract', () => {
       const r = verifyMatch({ name: 'Taurus SC Termiticide', quantity: 'each' }, noSize);
       expect(r.sizeKnown).toBe(false);
       expect(r.matched).toBe(false); // name only, no epa
+    });
+  });
+
+  describe('normalizeSizeLabel', () => {
+    test('normalizes the gram abbreviation "gm"/"gms" to "gram" (NOT bare "g")', () => {
+      // Must be "gram": extractSizeToken rejects a lone "g" on a single-size label, so
+      // "30g" would be dropped — "30 gram" parses. Both single and multipack forms covered.
+      expect(normalizeSizeLabel('Pack (4x30gm)')).toBe('Pack (4x30 gram)');
+      expect(normalizeSizeLabel('30 gm')).toBe('30 gram');
+      expect(normalizeSizeLabel('30gms')).toBe('30 gram');
+      // and the normalized forms actually parse:
+      expect(quantityToOz(extractSizeToken(normalizeSizeLabel('30 gm')))).toBeCloseTo(1.06, 2); // single 30 g
+      expect(quantityToOz(extractSizeToken(normalizeSizeLabel('Pack (4x30gm)')))).toBeCloseTo(4.23, 2); // 4 x 30 g
+    });
+    test('leaves a label with no gram abbreviation untouched', () => {
+      expect(normalizeSizeLabel('1 Gallon')).toBe('1 Gallon');
+      expect(normalizeSizeLabel('32 Ounce')).toBe('32 Ounce');
+    });
+  });
+
+  describe('pickVariantOffer (Magento-style size-explicit variants)', () => {
+    const variants = [
+      { size: '8 Ounce', price: 33.34 },
+      { size: '64 Ounce', price: 98.99 },
+      { size: '1 Gallon', price: 318.9 },
+    ];
+    test('matches the requested pack among multiple variants', () => {
+      const got = pickVariantOffer(variants, { targetOz: 128 }); // 1 gallon
+      expect(got).toMatchObject({ price: 318.9, quantity: '1 Gallon' });
+    });
+    test('returns a CANONICAL size token so downstream quantityToOz agrees with the match', () => {
+      // "Pack (4x30gm)" must become "4 x 30 g" — quantityToOz drops the 4x on the raw label.
+      const got = pickVariantOffer([{ size: 'Pack (4x30gm)', price: 20.36 }], { targetOz: quantityToOz('4 x 30g tubes') });
+      expect(got.price).toBe(20.36);
+      expect(quantityToOz(got.quantity)).toBeCloseTo(quantityToOz('4 x 30g tubes'), 2);
+    });
+    test('size not offered -> null (never substitutes a different variant)', () => {
+      expect(pickVariantOffer(variants, { targetOz: 16 })).toBeNull(); // no 16 oz variant
+    });
+    test('a SINGLE-gram variant label ("30 gm") still matches (codex P1 regression)', () => {
+      const got = pickVariantOffer([{ size: '30 gm', price: 9.5 }], { targetOz: quantityToOz('30 gram') });
+      expect(got).toMatchObject({ price: 9.5 });
+      expect(quantityToOz(got.quantity)).toBeCloseTo(1.06, 2);
+    });
+    test('among same-size variants, prefers in-stock then cheapest, flags competingSameSize', () => {
+      const same = [
+        { size: '32 oz', price: 50, availabilityRaw: 'InStock' },
+        { size: '32 oz', price: 40, availabilityRaw: 'Out of stock' },
+      ];
+      const got = pickVariantOffer(same, { targetOz: 32 });
+      expect(got).toMatchObject({ price: 50, availability: 'in_stock', competingSameSize: true });
+    });
+    test('no targetOz -> null (cannot pick a variant without a target size)', () => {
+      expect(pickVariantOffer(variants, {})).toBeNull();
+    });
+    test('per-child stock (jsonConfig salable) flows through: an OOS variant reports out_of_stock', () => {
+      // collectSnapshot sets availabilityRaw to the schema enum forms from the salable map.
+      const got = pickVariantOffer([{ size: '32 oz', price: 40, availabilityRaw: 'OutOfStock' }], { targetOz: 32 });
+      expect(got).toMatchObject({ price: 40, availability: 'out_of_stock' }); // compare will exclude it
+      const ok = pickVariantOffer([{ size: '32 oz', price: 45, availabilityRaw: 'InStock' }], { targetOz: 32 });
+      expect(ok).toMatchObject({ price: 45, availability: 'in_stock' });
+    });
+  });
+
+  describe('offerFromSnapshot (size-explicit variants)', () => {
+    const variants = [{ size: '8 Ounce', price: 33.34 }, { size: '1 Gallon', price: 318.9 }];
+    test('a matching variant wins and carries its size as the quantity', () => {
+      const snap = { jsonLd: [], title: 'Primo Maxx', variants };
+      const got = offerFromSnapshot(snap, { targetOz: 128 });
+      expect(got).toMatchObject({ price: 318.9, name: 'Primo Maxx', quantity: '1 Gallon' });
+    });
+    test('no variant matches -> FALLS THROUGH to the conservative JSON-LD/DOM path (not a hard null)', () => {
+      // 78 oz isn't a variant, but the DOM title substantiates it -> DOM fallback still applies.
+      const snap = { jsonLd: [], priceTexts: ['$89.00'], title: 'Taurus SC 78 oz', variants };
+      expect(offerFromSnapshot(snap, { targetOz: 78 }).price).toBe(89);
+    });
+    test('a variant offer is flagged fromVariant and does NOT inherit page-level stock text', () => {
+      // availabilityText is the default selection's stock, not the matched child's — the
+      // variant must keep its per-child availability (here unknown), never the page text.
+      const snap = { jsonLd: [], title: 'Primo Maxx', availabilityText: 'Out of stock', variants };
+      const got = offerFromSnapshot(snap, { targetOz: 128 });
+      expect(got).toMatchObject({ price: 318.9, availability: 'unknown', fromVariant: true });
     });
   });
 });
