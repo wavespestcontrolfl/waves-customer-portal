@@ -5802,10 +5802,10 @@ export default function EstimateToolViewV2({
                 </div>
               )}
             </div>
-            {/* Manual Recurring Discount */}
+            {/* Manual / Custom Discount */}
             <div>
               {" "}
-              <PanelTitle>Manual Recurring Discount (optional)</PanelTitle>{" "}
+              <PanelTitle>Manual / Custom Discount (optional)</PanelTitle>{" "}
               <FieldV2 label="Preset">
                 {" "}
                 <select
@@ -5909,8 +5909,8 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <div className="text-11 text-ink-tertiary mt-2">
-                Applies after bundle discount. Re-click Generate Estimate to
-                recalculate.
+                Applies after bundle/WaveGuard discounts to both recurring and
+                one-time services. Re-click Generate Estimate to recalculate.
               </div>{" "}
             </div>
             {serviceCreditPresets.length > 0 && (
@@ -6374,7 +6374,9 @@ export default function EstimateToolViewV2({
                           <div className="text-12 text-ink-secondary mt-1">
                             Recurring monthly
                             {E.recurring.savings > 0 ? " (bundle pricing)" : ""}
-                            {E.manualDiscount && E.manualDiscount.amount > 0
+                            {E.manualDiscount &&
+                            (E.manualDiscount.recurringAmount ??
+                              E.manualDiscount.amount) > 0
                               ? " + manual discount"
                               : ""}
                           </div>{" "}
@@ -7275,20 +7277,27 @@ export default function EstimateToolViewV2({
                               </span>{" "}
                             </div>
                           )}
-                          {E.manualDiscount && E.manualDiscount.amount > 0 && (
-                            <div className="flex justify-between items-center py-1.5 text-14">
-                              {" "}
-                              <span className="text-ink-secondary">
-                                {E.manualDiscount.label ||
-                                  (E.manualDiscount.type === "PERCENT"
-                                    ? `Discount (${E.manualDiscount.value}%)`
-                                    : `Discount`)}
-                              </span>{" "}
-                              <span className="font-medium text-zinc-900 u-nums">
-                                -{fmt(E.manualDiscount.amount)}/yr
-                              </span>{" "}
-                            </div>
-                          )}
+                          {E.manualDiscount &&
+                            (E.manualDiscount.recurringAmount ??
+                              E.manualDiscount.amount) > 0 && (
+                              <div className="flex justify-between items-center py-1.5 text-14">
+                                {" "}
+                                <span className="text-ink-secondary">
+                                  {E.manualDiscount.label ||
+                                    (E.manualDiscount.type === "PERCENT"
+                                      ? `Discount (${E.manualDiscount.value}%)`
+                                      : `Discount`)}
+                                </span>{" "}
+                                <span className="font-medium text-zinc-900 u-nums">
+                                  -
+                                  {fmt(
+                                    E.manualDiscount.recurringAmount ??
+                                      E.manualDiscount.amount,
+                                  )}
+                                  /yr
+                                </span>{" "}
+                              </div>
+                            )}
                           {E.oneTime.tmInstall > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               {" "}
@@ -7313,7 +7322,10 @@ export default function EstimateToolViewV2({
                                   One-Time Services
                                 </span>{" "}
                                 <span className="font-medium text-zinc-900 u-nums">
-                                  {fmtInt(E.oneTime.otSubtotal)}
+                                  {fmtInt(
+                                    E.oneTime.otSubtotal +
+                                      (E.manualDiscount?.oneTimeAmount || 0),
+                                  )}
                                 </span>{" "}
                               </div>
                               {E.oneTime.items.map((item, i) => (
@@ -7364,6 +7376,24 @@ export default function EstimateToolViewV2({
                                   </span>{" "}
                                 </div>
                               ))}
+                              {E.manualDiscount &&
+                                E.manualDiscount.oneTimeAmount > 0 && (
+                                  <div className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary">
+                                    {" "}
+                                    <span>
+                                      {E.manualDiscount.label ||
+                                        (E.manualDiscount.type === "PERCENT"
+                                          ? `Discount (${E.manualDiscount.value}%)`
+                                          : `Discount`)}{" "}
+                                      <span className="text-11 text-ink-tertiary">
+                                        (one-time)
+                                      </span>
+                                    </span>{" "}
+                                    <span className="text-13 u-nums">
+                                      -{fmtInt(E.manualDiscount.oneTimeAmount)}
+                                    </span>{" "}
+                                  </div>
+                                )}
                             </>
                           )}
                           <div className="flex justify-between items-center py-3 text-18 font-medium border-t-2 border-zinc-900 mt-2">

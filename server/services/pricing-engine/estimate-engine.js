@@ -115,6 +115,28 @@ function isManualRecurringDiscountEligible(item) {
   return MANUAL_RECURRING_DISCOUNT_ELIGIBLE.has(resolveDiscountKey(item));
 }
 
+// Effective (post-WaveGuard, post-service-credit) price of a one-time or
+// specialty line, used as the base for the one-time slice of a manual discount.
+function manualOneTimeLinePrice(item = {}) {
+  const value = item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.total ?? 0;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+// One-time / specialty lines a manual or custom discount may reduce. Honors the
+// full set of line-level discount-exclusion flags (e.g. the trap-only retainer
+// is priced as a one-time line but is explicitly discountEligible:false /
+// excludedFromCoupons:true) and skips quote-required / measurement-pending /
+// zero-price lines (no firm price to discount yet).
+function isManualOneTimeDiscountEligible(item) {
+  if (!item) return false;
+  if (item.discountable === false || item.discount?.discountable === false) return false;
+  if (item.discountEligible === false) return false;
+  if (item.excludedFromCoupons === true || item.excludedFromBundleDiscounts === true) return false;
+  if (item.quoteRequired || item.requiresCustomQuote || item.requiresMeasurement) return false;
+  return manualOneTimeLinePrice(item) > 0;
+}
+
 function normalizedDiscountText(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -296,17 +318,20 @@ function manualDiscountEligibilityWarnings(md = {}, input = {}) {
   const requiresPrepay = !!eligibility.requiresPrepayment;
   const requiresReferral = !!eligibility.requiresReferral;
   const requiresMultiHome = !!eligibility.requiresMultiHome;
+  const requiresWaveGuardTier = !!eligibility.requiresWaveGuardTier;
   const requiresCustomerStatus = !!(
     eligibility.requiresMilitary ||
     eligibility.requiresSenior ||
     eligibility.requiresNewCustomer
   );
-  const requiresAny = requiresPrepay || requiresReferral || requiresMultiHome || requiresCustomerStatus;
+  const requiresAny = requiresPrepay || requiresReferral || requiresMultiHome
+    || requiresCustomerStatus || requiresWaveGuardTier;
 
   if (requiresPrepay && !annualPrepay) add('manual_discount_requires_prepay');
   if (requiresReferral) add('manual_discount_requires_referral');
   if (requiresMultiHome) add('manual_discount_requires_multi_home');
   if (requiresCustomerStatus) add('manual_discount_requires_customer_status');
+  if (requiresWaveGuardTier) add('manual_discount_requires_waveguard_tier');
   if (requiresAny && !confirmed) add('manual_discount_eligibility_not_confirmed');
 
   return uniqueStrings(warnings);
@@ -1310,27 +1335,55 @@ function generateEstimate(input) {
   const recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);
   const recurringAnnualAfterWG = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
 
-  // Manual recurring estimate discount. Applies after WaveGuard to explicitly
-  // discountable recurring annual services only. It does not touch one-time,
-  // specialty, palm flat-credit, termite, rodent, or free-service credit paths.
-  let manualDiscountAmount = 0;
+  // Manual / custom estimate discount. Applies after WaveGuard to discountable
+  // recurring annual services AND to one-time + specialty work (owner directive
+  // 2026-06: a manual discount reduces the whole estimate, not just recurring).
+  // It still skips palm flat-credit, termite/rodent recurring add-ons, and
+  // quote-required / free-service-credit lines.
+  let manualDiscountAmount = 0;          // recurring slice (margin logic + recurringAnnualAfter use this)
+  let manualDiscountOneTimeAmount = 0;   // one-time slice
+  let manualDiscountSpecialtyAmount = 0; // specialty slice
   let manualDiscountInfo = null;
   const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
   const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
   const manualDiscountableRecurringAnnual = manualEligibleItems
     .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
+  const manualOneTimeEligibleItems = oneTimeItems.filter(isManualOneTimeDiscountEligible);
+  const manualSpecialtyEligibleItems = specialtyItems.filter(isManualOneTimeDiscountEligible);
+  const manualDiscountableOneTime = manualOneTimeEligibleItems
+    .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
+  const manualDiscountableSpecialty = manualSpecialtyEligibleItems
+    .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
+  const manualDiscountableTotal = roundMoney(
+    manualDiscountableRecurringAnnual + manualDiscountableOneTime + manualDiscountableSpecialty,
+  );
   const md = input.manualDiscount;
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
     const manualWarnings = assertManualDiscountEligibility(md, input);
+    let requestedAmount;
     if (md.type === 'PERCENT') {
       if (v > 100) throw new Error('Manual percentage discount cannot exceed 100');
-      manualDiscountAmount = Math.round(manualDiscountableRecurringAnnual * (v / 100) * 100) / 100;
+      manualDiscountAmount = roundMoney(manualDiscountableRecurringAnnual * (v / 100));
+      manualDiscountOneTimeAmount = roundMoney(manualDiscountableOneTime * (v / 100));
+      manualDiscountSpecialtyAmount = roundMoney(manualDiscountableSpecialty * (v / 100));
+      requestedAmount = roundMoney(manualDiscountableTotal * (v / 100));
     } else {
-      manualDiscountAmount = Math.round(v * 100) / 100;
+      // FIXED: one dollar amount spread across the discountable estimate, capped
+      // at the discountable total and allocated proportionally so each bucket
+      // absorbs its fair share. Specialty takes the rounding remainder.
+      requestedAmount = roundMoney(v);
+      const applied = Math.min(requestedAmount, manualDiscountableTotal);
+      if (manualDiscountableTotal > 0) {
+        manualDiscountAmount = roundMoney(applied * (manualDiscountableRecurringAnnual / manualDiscountableTotal));
+        manualDiscountOneTimeAmount = roundMoney(applied * (manualDiscountableOneTime / manualDiscountableTotal));
+        manualDiscountSpecialtyAmount = roundMoney(applied - manualDiscountAmount - manualDiscountOneTimeAmount);
+      }
     }
-    const requestedAmount = manualDiscountAmount;
-    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual);
+    const appliedTotal = roundMoney(
+      manualDiscountAmount + manualDiscountOneTimeAmount + manualDiscountSpecialtyAmount,
+    );
+    const nonRecurringAmount = roundMoney(manualDiscountOneTimeAmount + manualDiscountSpecialtyAmount);
     manualDiscountInfo = {
       source: md.source || 'legacy_custom',
       presetId: md.presetId || null,
@@ -1340,19 +1393,27 @@ function generateEstimate(input) {
       type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
       value: v,
       requestedAmount,
-      amount: manualDiscountAmount,
+      amount: appliedTotal,
+      recurringAmount: manualDiscountAmount,
+      oneTimeAmount: nonRecurringAmount,
       label: md.label || (md.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
       internalReason: md.internalReason || null,
       eligibility: md.eligibility || null,
       eligibilityConfirmed: md.eligibilityConfirmed === true,
       eligibilityOverrideReason: md.eligibilityOverrideReason || null,
       stack: md.stack || null,
-      discountableBase: manualDiscountableRecurringAnnual,
-      capped: requestedAmount > manualDiscountAmount,
-      capReason: requestedAmount > manualDiscountAmount ? 'discountable_base' : null,
-      scope: 'recurring_annual_after_waveguard',
+      discountableBase: manualDiscountableTotal,
+      recurringDiscountableBase: manualDiscountableRecurringAnnual,
+      oneTimeDiscountableBase: roundMoney(manualDiscountableOneTime + manualDiscountableSpecialty),
+      capped: requestedAmount > appliedTotal,
+      capReason: requestedAmount > appliedTotal ? 'discountable_base' : null,
+      scope: nonRecurringAmount > 0 ? 'recurring_and_one_time_after_waveguard' : 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
-      eligibleServices: manualEligibleItems.map(i => resolveDiscountKey(i)),
+      eligibleServices: [
+        ...manualEligibleItems.map(i => resolveDiscountKey(i)),
+        ...manualOneTimeEligibleItems.map(i => resolveDiscountKey(i)),
+        ...manualSpecialtyEligibleItems.map(i => resolveDiscountKey(i)),
+      ],
       excludedServices: manualExcludedItems.map(i => resolveDiscountKey(i)),
       warnings: manualWarnings,
     };
@@ -1396,8 +1457,10 @@ function generateEstimate(input) {
   const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;
   const recurringMonthlyAfter = Math.round(recurringAnnualAfter / 12 * 100) / 100;
 
-  const oneTimeTotal = oneTimeItems.reduce((sum, i) => sum + (i.priceAfterDiscount ?? i.price ?? 0), 0);
-  const specialtyTotal = specialtyItems.reduce((sum, i) => sum + (i.totalAfterDiscount ?? i.total ?? 0), 0);
+  const oneTimeTotalGross = oneTimeItems.reduce((sum, i) => sum + (i.priceAfterDiscount ?? i.price ?? 0), 0);
+  const specialtyTotalGross = specialtyItems.reduce((sum, i) => sum + (i.totalAfterDiscount ?? i.total ?? 0), 0);
+  const oneTimeTotal = Math.max(0, roundMoney(oneTimeTotalGross - manualDiscountOneTimeAmount));
+  const specialtyTotal = Math.max(0, roundMoney(specialtyTotalGross - manualDiscountSpecialtyAmount));
 
   // Installation costs (termite)
   const installationTotal = recurringItems

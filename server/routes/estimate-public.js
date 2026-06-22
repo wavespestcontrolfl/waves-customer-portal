@@ -1275,7 +1275,11 @@ function normalizeManualDiscountSummary(estData = {}) {
 
 function manualDiscountMonthlyAmount(estData = {}) {
   const manual = normalizeManualDiscountSummary(estData);
-  return manual ? Math.round((manual.amount / 12) * 100) / 100 : 0;
+  if (!manual) return 0;
+  // Monthly figure tracks the recurring slice only; the one-time slice is shown
+  // in the one-time total, not amortized across recurring months.
+  const recurring = Number(manual.recurringAmount ?? manual.amount);
+  return recurring > 0 ? Math.round((recurring / 12) * 100) / 100 : 0;
 }
 
 function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnualBase = 0) {
@@ -1283,10 +1287,27 @@ function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnua
   const type = manualDiscount.type === 'PERCENT' ? 'PERCENT' : 'FIXED';
   const value = Number(manualDiscount.value);
   if (!Number.isFinite(value) || value <= 0) return null;
-  const requestedAmount = type === 'PERCENT'
-    ? Math.round(discountableAnnualBase * (value / 100) * 100) / 100
-    : Math.round(value * 100) / 100;
-  const amount = Math.min(requestedAmount, Math.round(discountableAnnualBase * 100) / 100);
+  const recurringBase = Math.round(discountableAnnualBase * 100) / 100;
+  let amount;
+  let requestedAmount;
+  let capped = false;
+  if (type === 'PERCENT') {
+    amount = Math.round(recurringBase * (value / 100) * 100) / 100;
+    requestedAmount = amount;
+  } else {
+    // FIXED dollar discounts were already split into recurring/one-time slices by
+    // generateEstimate, and the one-time slice is cadence-invariant (one-time
+    // work doesn't change with the recurring cadence). Derive the recurring slice
+    // as (value − one-time slice) capped to THIS cadence's recurring base, so
+    // recurring + one-time always sums back to the fixed value regardless of the
+    // cadence the customer picks — never re-proportion against the recurring base
+    // alone, which would leave the two slices no longer totaling the fixed amount.
+    requestedAmount = Math.round(value * 100) / 100;
+    const savedOneTime = Math.max(0, Number(manualDiscount.oneTimeAmount) || 0);
+    const recurringSlice = Math.max(0, Math.round((requestedAmount - savedOneTime) * 100) / 100);
+    amount = Math.min(recurringSlice, recurringBase);
+    capped = amount < recurringSlice;
+  }
   if (!(amount > 0)) return null;
   return {
     ...manualDiscount,
@@ -1294,10 +1315,15 @@ function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnua
     value,
     requestedAmount,
     amount,
+    // This per-cadence object represents only the recurring price card, so its
+    // whole amount is the recurring slice. Overwrite the (stale) spread
+    // recurringAmount/oneTimeAmount from the originally generated cadence.
+    recurringAmount: amount,
+    oneTimeAmount: 0,
     monthlyAmount: Math.round((amount / 12) * 100) / 100,
-    discountableBase: Math.round(discountableAnnualBase * 100) / 100,
-    capped: requestedAmount > amount,
-    capReason: requestedAmount > amount ? 'discountable_base' : manualDiscount.capReason || null,
+    discountableBase: recurringBase,
+    capped: capped || manualDiscount.capped === true,
+    capReason: capped ? 'discountable_base' : (manualDiscount.capReason || null),
     scope: manualDiscount.scope || 'recurring_annual_after_waveguard',
     stackingOrder: manualDiscount.stackingOrder || 'after_waveguard',
   };
@@ -2824,7 +2850,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const prefs = normalizePrefs(estData?.preferences);
   const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
   const manualDiscount = normalizeManualDiscountSummary(estData);
-  const manualDiscountMonthly = manualDiscount ? Math.round((manualDiscount.amount / 12) * 100) / 100 : 0;
+  const manualDiscountMonthly = manualDiscount
+    ? Math.round((Number(manualDiscount.recurringAmount ?? manualDiscount.amount) / 12) * 100) / 100
+    : 0;
   const hasOnlyLawnCareServices = hasOnlyLawnCareServiceMix(recurring, oneTimeItems);
   const hasOnlyMosquitoServices = hasOnlyMosquitoServiceMix(recurring, oneTimeItems);
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
@@ -3511,12 +3539,24 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     return `<tr><td>${escapeHtml(it.name || it.label || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
+  // Net the manual/custom one-time discount slice into the legacy (non-React)
+  // HTML card so its itemized total matches the already-discounted hero and
+  // accept totals. The slice never covers the termite install fee (kept at full
+  // price), so capping at the gross row total leaves protected charges intact.
+  const manualOneTimeDiscount = (!quoteRequired && hasRealOneTime)
+    ? Math.min(separatelyBilledOneTimeTotal, Math.max(0, Number(manualDiscount?.oneTimeAmount) || 0))
+    : 0;
+  const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
+    ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">-${fmtMoney(manualOneTimeDiscount)}</td></tr>`
+    : '';
   const oneTimeRows = realOneTimeRows;
-  const oneTimeRowsTotal = hasRealOneTime ? separatelyBilledOneTimeTotal : onetimeTotal;
+  const oneTimeRowsTotal = hasRealOneTime
+    ? Math.max(0, Math.round((separatelyBilledOneTimeTotal - manualOneTimeDiscount) * 100) / 100)
+    : onetimeTotal;
   const oneTimeItemsCardHtml = oneTimeRows ? `
   <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
     <h3>${isOneTimeOnly ? 'Service details' : 'One-time items (billed separately)'}</h3>
-    <table>${oneTimeRows}
+    <table>${oneTimeRows}${manualOneTimeDiscountRowHtml}
       <tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
     </table>
     ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
@@ -7370,7 +7410,11 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   const manualDiscount = summary.manualDiscount && Number(summary.manualDiscount.amount) > 0
     ? {
         ...summary.manualDiscount,
-        monthlyAmount: Math.round((Number(summary.manualDiscount.amount) / 12) * 100) / 100,
+        // monthlyAmount is the per-month recurring figure, so it tracks only the
+        // recurring slice; the one-time slice is reflected in the one-time total.
+        monthlyAmount: Math.round(
+          (Number(summary.manualDiscount.recurringAmount ?? summary.manualDiscount.amount) / 12) * 100,
+        ) / 100,
       }
     : null;
 
@@ -7630,9 +7674,45 @@ function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricing
     );
 }
 
-function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}) {
+// Distributes the manual one-time discount slice across the discountable
+// preserved specialty rows (net prices), so the one-time choice path — whose
+// total drives the accept/charge amount — never quotes or bills the gross fee.
+// PERCENT recomputes exactly on the carried subtotal; FIXED uses the engine's
+// one-time slice capped to that subtotal. Rows are reduced proportionally with
+// the last row absorbing the rounding remainder.
+function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null) {
+  if (!Array.isArray(rows) || rows.length === 0 || !manualDiscount) return rows;
+  const subtotal = rows.reduce((sum, r) => Math.round((sum + Number(r.price || 0)) * 100) / 100, 0);
+  if (!(subtotal > 0)) return rows;
+  const value = Number(manualDiscount.value);
+  let discount = 0;
+  if (manualDiscount.type === 'PERCENT' && Number.isFinite(value) && value > 0) {
+    discount = Math.round(subtotal * (value / 100) * 100) / 100;
+  } else {
+    const slice = Number(manualDiscount.oneTimeAmount);
+    if (Number.isFinite(slice) && slice > 0) discount = Math.round(slice * 100) / 100;
+  }
+  discount = Math.min(subtotal, discount);
+  if (!(discount > 0)) return rows;
+  let remaining = discount;
+  return rows.map((row, i) => {
+    const price = Number(row.price || 0);
+    const cut = i === rows.length - 1
+      ? remaining
+      : Math.round(discount * (price / subtotal) * 100) / 100;
+    remaining = Math.round((remaining - cut) * 100) / 100;
+    return {
+      ...row,
+      price: Math.round((price - cut) * 100) / 100,
+      grossPrice: price,
+      manualDiscountApplied: Math.round(cut * 100) / 100,
+    };
+  });
+}
+
+function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}, manualDiscount = null) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
-  return items.map((item) => {
+  const rows = items.map((item) => {
     if (!item || typeof item !== 'object') return null;
     if (item.quoteRequired === true) return null;
     if (isWaveGuardSetupOneTimeItem(item)) return null;
@@ -7650,6 +7730,7 @@ function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}) {
       detail: item.detail || null,
     };
   }).filter(Boolean);
+  return applyManualOneTimeDiscountToChoiceRows(rows, manualDiscount);
 }
 
 function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
@@ -7660,7 +7741,7 @@ function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBund
   if (category === 'pest_control') {
     const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
     if (!pestChoiceAmount) return null;
-    const specialtyTotal = preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown)
+    const specialtyTotal = preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))
       .reduce((sum, item) => Math.round((sum + Number(item.price || 0)) * 100) / 100, 0);
     return Math.round((pestChoiceAmount + specialtyTotal) * 100) / 100;
   }
@@ -7681,7 +7762,7 @@ function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, prici
     name: 'One-Time Pest Control',
     label: 'One-Time Pest Control',
     price: Math.round(amount * 100) / 100,
-  }, ...preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown)];
+  }, ...preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))];
 }
 
 function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingBundle = null, choicePrice = null) {
@@ -7883,6 +7964,34 @@ function normalizeOneTimeBreakdown(estData) {
           : (item.stations ? `${item.stations} stations` : null),
       }));
     addRows(installationRows);
+  }
+
+  // Manual / custom discounts carry a one-time slice that is pooled into the
+  // summary rather than pushed onto individual line prices. Emit it as an
+  // explicit discount row so the breakdown nets out correctly for BOTH shapes:
+  // mapped estimates (whose oneTime.total is already net — difference then
+  // reconciles to 0) and raw engineResult-backed estimates (which have no
+  // oneTime.total and otherwise sum gross line items).
+  const manualOneTimeSlice = [
+    result?.manualDiscount,
+    result?.totals?.manualDiscount,
+    result?.summary?.manualDiscount,
+  ]
+    .map((m) => Number(m?.oneTimeAmount))
+    .find((n) => Number.isFinite(n) && n > 0) || 0;
+  if (manualOneTimeSlice > 0) {
+    const manualLabel = [
+      result?.manualDiscount,
+      result?.totals?.manualDiscount,
+      result?.summary?.manualDiscount,
+    ].find((m) => m && Number(m.oneTimeAmount) > 0);
+    rows.push({
+      service: 'manual_discount',
+      label: manualLabel?.label || manualLabel?.catalogName || 'Discount',
+      amount: -Math.round(manualOneTimeSlice * 100) / 100,
+      detail: null,
+      kind: 'discount',
+    });
   }
 
   const rowTotal = rows.reduce((sum, row) => sum + row.amount, 0);
@@ -10113,7 +10222,9 @@ async function buildPricingBundle(estimate) {
     if (!manual) return payload;
     const manualWithMonthly = {
       ...manual,
-      monthlyAmount: Math.round((manual.amount / 12) * 100) / 100,
+      // monthlyAmount is the per-month recurring figure, so it tracks only the
+      // recurring slice; the one-time slice is shown in the one-time breakdown.
+      monthlyAmount: Math.round((Number(manual.recurringAmount ?? manual.amount) / 12) * 100) / 100,
     };
     return {
       ...payload,
@@ -10642,6 +10753,8 @@ module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
+module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;
+module.exports.applyManualOneTimeDiscountToChoiceRows = applyManualOneTimeDiscountToChoiceRows;
 module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;
 module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.detectPestOneTime = detectPestOneTime;
