@@ -16,6 +16,7 @@ exports.up = async (knex) => {
     t.string('directory_category');        // ai_tool | local_business | pest_niche | general | ...
     t.boolean('requires_account');
     t.boolean('requires_email_verification');
+    t.boolean('requires_captcha');
     t.boolean('requires_payment');
     t.decimal('detected_price_usd');
     t.boolean('recurring');
@@ -49,8 +50,8 @@ exports.down = async (knex) => {
   await knex.schema.alterTable('seo_link_prospects', (t) => {
     t.dropColumns(
       'directory_category', 'requires_account', 'requires_email_verification',
-      'requires_payment', 'detected_price_usd', 'recurring', 'offered_link_rel',
-      'automation_policy', 'risk_level', 'last_classified_at',
+      'requires_captcha', 'requires_payment', 'detected_price_usd', 'recurring',
+      'offered_link_rel', 'automation_policy', 'risk_level', 'last_classified_at',
     );
   });
 };
