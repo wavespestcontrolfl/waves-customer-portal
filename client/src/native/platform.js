@@ -11,8 +11,12 @@ export function isNativeApp() {
   try { return Capacitor.isNativePlatform(); } catch { return false; }
 }
 
-/** Whether a customer (or admin/tech) session JWT is present in localStorage. */
+/**
+ * Whether a customer session JWT is present. Customer-only on purpose — the
+ * native shell is the customer app (staff/tech use WavesPay; /admin + /tech are
+ * scoped out), so the Face ID lock keys off the customer token only.
+ */
 export function hasSessionToken() {
   if (typeof localStorage === 'undefined') return false;
-  return Boolean(localStorage.getItem('waves_token') || localStorage.getItem('waves_admin_token'));
+  return Boolean(localStorage.getItem('waves_token'));
 }
