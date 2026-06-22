@@ -28,8 +28,12 @@ export function isNativeApp() {
 
 function authToken() {
   if (typeof localStorage === 'undefined') return '';
-  // Customer JWT first; admin/tech token as a fallback (the portal serves both).
-  return localStorage.getItem('waves_token') || localStorage.getItem('waves_admin_token') || '';
+  // Customer-only: this is the customer App Store app. Staff/tech use the
+  // separate WavesPay app, and /admin + /tech are redirected out of the native
+  // shell, so we never register a staff token here (no admin-token fallback —
+  // that would leave a staff APNs token stranded since the customer login flow
+  // is the only flush path).
+  return localStorage.getItem('waves_token') || '';
 }
 
 async function postToken(token) {
