@@ -693,6 +693,11 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
       }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
     });
     logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+    // Stop any statement-level dunning now that it's paid (best-effort, outside
+    // the money txn — the dunning eligibility filter already excludes `paid`, so
+    // this is just hygiene and never gates settlement).
+    await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
+      .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
   } else if (eventType === 'processing') {
     // Re-read the CURRENT PI status before marking processing — a stale/retried
     // processing event can arrive AFTER payment_failed/canceled, and re-marking
