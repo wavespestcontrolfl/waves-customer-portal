@@ -21,7 +21,11 @@ jest.mock('../utils/datetime-et', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockSendTemplate(...a) }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: () => true }));
-jest.mock('../services/payer-statement-email', () => ({ resolveApRecipient: (...a) => mockResolveAp(...a) }));
+jest.mock('../services/payer-statement-email', () => ({
+  resolveApRecipient: (...a) => mockResolveAp(...a),
+  // forceRetry path walks to a fresh key; the test stub returns the base key.
+  forcedRetryKey: async (base) => base,
+}));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 
 const Followups = require('../services/payer-statement-followups');
@@ -171,6 +175,25 @@ describe('fireStep guards', () => {
     const r = await Followups.fireStep(10, 0);
     expect(r.fired).toBe(false);
     expect(followups[10]).toMatchObject({ status: 'paused', paused_reason: 'blocked' });
+  });
+
+  test('a terminal-blocked dedupe pauses (does NOT silently advance the step)', async () => {
+    // A previously-suppressed key comes back deduped+blocked+not-sent. This must
+    // be treated as a failure (pause), never an advance — else the reminder is
+    // silently skipped. (Regression: codex P2 on #1969.)
+    statements[10] = { id: 10, payer_id: 5, status: 'sent', total: 100, due_date: '2026-06-01', token: 'tok', terms_snapshot: 'net30' };
+    mockSendTemplate = async () => ({ deduped: true, sent: false, blocked: true, reason: 'blocked' });
+    const r = await Followups.fireStep(10, 0);
+    expect(r.fired).toBe(false);
+    expect(followups[10]).toMatchObject({ status: 'paused', step_index: 0 }); // did NOT advance
+  });
+
+  test('an already-delivered dedupe advances without re-counting the touch', async () => {
+    statements[10] = { id: 10, payer_id: 5, status: 'sent', total: 100, due_date: '2026-06-01', token: 'tok', terms_snapshot: 'net30' };
+    followups[10] = { id: 1, statement_id: 10, payer_id: 5, status: 'active', step_index: 0, touches_sent: 0 };
+    mockSendTemplate = async () => ({ deduped: true, sent: true });
+    const r = await Followups.fireStep(10, 0);
+    expect(followups[10]).toMatchObject({ step_index: 1, touches_sent: 0 }); // advanced, not re-counted
   });
 
   test('pauses when there is no AP email (never falls back to the homeowner)', async () => {

@@ -29,7 +29,7 @@ const config = require('../config/payer-statement-followups');
 const { isEnabled } = require('../config/feature-gates');
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
-const { resolveApRecipient } = require('./payer-statement-email');
+const { resolveApRecipient, forcedRetryKey } = require('./payer-statement-email');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
@@ -102,8 +102,23 @@ async function markCompleted(seqId) {
 /**
  * Render + send ONE dunning touch for a statement. Idempotency is per
  * (statement, step) so a step never double-mails even across overlapping ticks.
+ *
+ * Result contract (consumed by fireStep):
+ *  - `{ ok: true }`               — delivered (or the in-flight-race winner is).
+ *  - `{ ok: true, deduped: true }`— already delivered under this key (don't
+ *                                   re-count touches_sent).
+ *  - `{ ok: false, blocked }`     — suppressed/blocked/failed. NOT `deduped`, so
+ *                                   fireStep PAUSES rather than advancing. A
+ *                                   terminal-blocked dedupe lands here too (it is
+ *                                   NOT a delivery), which is why a blocked step
+ *                                   never silently advances.
+ *
+ * `forceRetry` (the explicit operator path) walks past terminally-blocked
+ * generations to a FRESH key (`forcedRetryKey`) so a reminder whose key was once
+ * suppressed can actually reach AP after the suppression is cleared — instead of
+ * deduping against the dead blocked row forever.
  */
-async function sendFollowupEmail(stmt, step) {
+async function sendFollowupEmail(stmt, step, { forceRetry = false } = {}) {
   const { apEmail, company } = await resolveApRecipient(stmt, db);
   if (!apEmail) return { ok: false, reason: 'no_ap_email' };
   if (!sendgrid.isConfigured()) return { ok: false, reason: 'email_not_configured' };
@@ -117,6 +132,9 @@ async function sendFollowupEmail(stmt, step) {
     .replace(/\{\{statement_number\}\}/g, statementNumber)
     .replace(/\{\{amount_due\}\}/g, amount)
     .replace(/\{\{days_past_due\}\}/g, String(daysPastDue));
+
+  const baseKey = `payer_statement_followup:${stmt.id}:${step.id}`;
+  const idempotencyKey = forceRetry ? await forcedRetryKey(baseKey, db) : baseKey;
 
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
@@ -134,12 +152,19 @@ async function sendFollowupEmail(stmt, step) {
       },
       recipientType: 'payer',
       recipientId: stmt.payer_id || null,
-      triggerEventId: `payer_statement_followup:${stmt.id}:${step.id}`,
-      idempotencyKey: `payer_statement_followup:${stmt.id}:${step.id}`,
+      triggerEventId: baseKey,
+      idempotencyKey,
       categories: ['payer_statement_followup', step.id],
       suppressionGroupKey: 'transactional_required',
     });
-    if (result?.deduped) return { ok: !!result.sent, deduped: true, blocked: !!result.blocked };
+    // A dedupe is benign ONLY if the keyed delivery actually went out — otherwise
+    // it's a terminal block masquerading as "already handled". Treat the blocked
+    // dedupe as a failure so fireStep pauses (and an explicit forceRetry escapes
+    // it via a fresh generation key) rather than silently advancing the step.
+    if (result?.deduped) {
+      if (result.sent) return { ok: true, deduped: true };
+      return { ok: false, blocked: !!result.blocked, reason: result.reason || 'blocked' };
+    }
     if (result?.sent === false) return { ok: false, blocked: !!result.blocked, reason: result.reason || 'suppressed' };
     return { ok: true };
   } catch (err) {
@@ -156,7 +181,7 @@ async function sendFollowupEmail(stmt, step) {
  * (TOCTOU vs a settle/void between the sweep and now). Advances the sequence on
  * success; pauses it on a hard delivery failure so the cron doesn't spin.
  */
-async function fireStep(statementId, stepIndex) {
+async function fireStep(statementId, stepIndex, { forceRetry = false } = {}) {
   const stmt = await db('payer_statements').where({ id: statementId }).first();
   if (!stmt || !DUNNABLE_STATEMENT_STATUSES.includes(stmt.status)) {
     // Settled / voided / went `processing` since the sweep — don't dun.
@@ -170,7 +195,7 @@ async function fireStep(statementId, stepIndex) {
   const step = config.steps[stepIndex];
   if (!step) { await markCompleted(seq.id); return { fired: false, reason: 'chain_exhausted' }; }
 
-  const result = await sendFollowupEmail(stmt, step);
+  const result = await sendFollowupEmail(stmt, step, { forceRetry });
   if (!result.ok && !result.deduped) {
     await db('payer_statement_followups').where({ id: seq.id }).update({
       status: 'paused',
@@ -327,7 +352,9 @@ async function sendNextStepNow(statementId) {
   if (seq.status !== 'active') {
     await db('payer_statement_followups').where({ id: seq.id }).update({ status: 'active', updated_at: db.fn.now() });
   }
-  const r = await fireStep(stmt.id, seq.step_index);
+  // Explicit operator retry: walk past a terminally-blocked key to a fresh
+  // generation so a reminder whose key was once suppressed actually reaches AP.
+  const r = await fireStep(stmt.id, seq.step_index, { forceRetry: true });
   if (r.fired || r.reason === undefined) return { ok: true, step: r.step };
   return { ok: false, error: r.reason };
 }
