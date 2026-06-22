@@ -244,6 +244,37 @@ test('apply mode spends a tight cap on the BEST-improvement move, not the first 
   }
 });
 
+test('a beyond-cap move that re-evaluation finds superseded is dropped (no_change), not counted as a cap-held recommendation', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    // cap=1: s1 (bigger gain) applies; s2 is beyond the cap AND, on the live
+    // re-evaluation, no longer has a valid slot. It must be no_change (superseded),
+    // not a MAX_CHANGES_REACHED recommendation — otherwise the reported backlog
+    // overcounts moves that aren't actually pending anymore.
+    servicesResult = [
+      svc({ id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04' }),
+      svc({ id: 's2', customer_id: 'c2', scheduled_date: '2026-08-05' }),
+    ];
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+    let s2calls = 0;
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => {
+      if (service.id === 's1') return { current: CURRENT, candidates: [CAND_BIG] }; // biggest gain → applied
+      s2calls += 1; // s2: qualifies in pass 1, superseded on pass-2 re-eval
+      return s2calls === 1 ? { current: CURRENT, candidates: [CAND_MODERATE] } : { current: CURRENT, candidates: [] };
+    });
+
+    const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
+
+    expect(res).toMatchObject({ changed: 1, recommended: 0 }); // s2 NOT counted as cap-held
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('s1');
+    expect(lastDecision('no_change').reason_description).toMatch(/Superseded by an earlier move/);
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
 test('apply mode re-evaluates before moving: a move superseded by the live schedule is dropped, not force-applied', async () => {
   const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
   process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';

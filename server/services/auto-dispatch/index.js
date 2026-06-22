@@ -309,18 +309,22 @@ async function runAutoDispatch(opts = {}) {
     if (config.mode !== 'dry_run' && plannedMoves.length) {
       plannedMoves.sort((a, b) => b.result.improvement - a.result.improvement);
       for (const pm of plannedMoves) {
+        let fresh = null;
         try {
-          if (totals.changed >= config.maxChangesPerRun) {
-            totals.recommended++; // cap-held but still a found move — count it in the summary
-            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (lower-improvement move held)`, ...pm.result.audit });
+          // Re-score against the now-live schedule (earlier applies this run may
+          // have changed routes/occupancy) BEFORE the cap decision, so the cap-held
+          // recommendation reflects the move's CURRENT value and a move whose gain
+          // was already captured is dropped (no_change) rather than reported as a
+          // pending recommendation or force-applied onto a stale placement.
+          fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
+          if (fresh.kind !== 'move') {
+            await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: fresh.reason_code, reason_description: `Superseded by an earlier move this run — ${fresh.reason_description}`, ...fresh.audit });
             continue;
           }
 
-          const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
-          if (fresh.kind !== 'move') {
-            // Re-scoring against the live schedule no longer clears the bar — an
-            // earlier-applied move this run already captured the gain.
-            await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: fresh.reason_code, reason_description: `Superseded by an earlier move this run — ${fresh.reason_description}`, ...fresh.audit });
+          if (totals.changed >= config.maxChangesPerRun) {
+            totals.recommended++; // cap-held but still a valid move — count it in the summary
+            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (lower-improvement move held, +${fresh.improvement})`, ...fresh.audit });
             continue;
           }
 
@@ -343,7 +347,9 @@ async function runAutoDispatch(opts = {}) {
           totals.failed++;
           logger.error(`[auto-dispatch] apply failed for ${pm.service && pm.service.id}: ${applyErr.message}`);
           try {
-            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...pm.result.audit, error: applyErr.message });
+            // Prefer the fresh (actually-attempted) placement in the failure row;
+            // fall back to the pass-1 audit if the re-evaluation itself threw.
+            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...((fresh && fresh.audit) || pm.result.audit), error: applyErr.message });
           } catch (_) { /* swallow */ }
         }
       }
