@@ -39,7 +39,7 @@ function parseQuality(q) {
  * Lease up to n unworked prospects of a lane, atomically. FOR UPDATE SKIP LOCKED
  * so parallel Hermes subagents never grab the same row.
  */
-async function claim({ n = 10, type = 'signup', requireContactEmail = false } = {}) {
+async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null } = {}) {
   const types = type === 'outreach' ? OUTREACH_TYPES : SIGNUP_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
 
@@ -59,6 +59,9 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false } = 
     // than claiming+skipping them every run. External callers (Hermes) omit this and
     // do their own recipient research.
     if (requireContactEmail) q = q.whereNotNull('contact_email');
+    // The citation runner leases only prospects the classifier marked auto-safe
+    // (automation_policy='submit_free') — never account/payment/CAPTCHA-gated ones.
+    if (automationPolicy) q = q.where('automation_policy', automationPolicy);
     const rows = await q
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('domain_rating', 'desc')
