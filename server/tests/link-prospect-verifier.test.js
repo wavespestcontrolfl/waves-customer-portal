@@ -36,6 +36,12 @@ describe('link prospect verifier target matching', () => {
     expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/wdo-inspection/' }, citation)).toBe(false);
   });
 
+  test('expectedTargetUrl: homepage for signup-lane, target_page otherwise (one source of truth)', () => {
+    expect(_test.expectedTargetUrl({ link_type: 'citation', target_page: 'https://wavespestcontrol.com/x' })).toBe('https://wavespestcontrol.com');
+    expect(_test.expectedTargetUrl({ link_type: 'directory', target_page: 'https://wavespestcontrol.com/x' })).toBe('https://wavespestcontrol.com');
+    expect(_test.expectedTargetUrl({ link_type: 'editorial', target_page: 'https://wavespestcontrol.com/wdo' })).toBe('https://wavespestcontrol.com/wdo');
+  });
+
   test('normalizes comparable URLs consistently', () => {
     expect(_test.normalizeComparableUrl('https://www.wavespestcontrol.com/wdo-inspection/'))
       .toBe('wavespestcontrol.com/wdo-inspection');

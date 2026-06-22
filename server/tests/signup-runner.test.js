@@ -126,16 +126,25 @@ describe('run — safety gates', () => {
     expect(fillCitationForm).not.toHaveBeenCalled();
     expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]);
   });
-  test('de-dupes by domain: two rows on the same directory → submit ONE, release the other', async () => {
+  test('de-dupes same directory + SAME location → submit one, release the true duplicate', async () => {
     worker.claim.mockResolvedValue([
       prospect({ id: 'p1', target_page: 'https://wavespestcontrol.com/a' }),
-      prospect({ id: 'p2', target_page: 'https://wavespestcontrol.com/b' }), // same citysquares.com domain
+      prospect({ id: 'p2', target_page: 'https://wavespestcontrol.com/b' }), // same citysquares.com, both → primary location
     ]);
     fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: null, pending: true, screenshot: Buffer.from('png') });
     const r = await runner.run({ allow: ['citysquares.com'] });
-    expect(fillCitationForm).toHaveBeenCalledTimes(1);     // only the first row for the domain
+    expect(fillCitationForm).toHaveBeenCalledTimes(1);
     expect(r.placed).toBe(1);
-    expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]); // dupe released
+    expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]); // true dup released
+  });
+  test('same directory, DIFFERENT locations → both submit (per-location listings are allowed)', async () => {
+    worker.claim.mockResolvedValue([
+      prospect({ id: 'p3', target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl' }), // → Sarasota
+      prospect({ id: 'p4', target_page: 'https://wavespestcontrol.com/' }),                          // → primary (Bradenton)
+    ]);
+    fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: null, pending: true, screenshot: Buffer.from('png') });
+    await runner.run({ allow: ['citysquares.com'] });
+    expect(fillCitationForm).toHaveBeenCalledTimes(2); // two distinct (domain, location) placements → both submitted
   });
 });
 

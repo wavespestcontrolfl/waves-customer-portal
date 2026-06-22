@@ -348,13 +348,19 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // never actionable → nothing dispatched → genuinely retryable. Once it dispatches
     // (no throw), the POST may have landed — we NEVER auto-retry; any later navigation
     // /verification error becomes placed+pending below.
-    // Capture the form's resolved action endpoint so the route guard can recognise THE
-    // submission request (vs. analytics/validation XHR). Best-effort — if unreadable, the
-    // guard falls back to the method/navigation heuristic.
+    // Capture the form's submission endpoint so the route guard can recognise THE submit
+    // request (vs. analytics/validation XHR). Use only an EXPLICIT endpoint: the submit
+    // control's `formaction` (which overrides the form), else the form's `action`
+    // ATTRIBUTE. A no-action / JS-driven form (where browsers resolve form.action to the
+    // page URL but the real POST goes elsewhere) returns '' → the guard falls back to the
+    // method/navigation heuristic, so we never miss a real submit and risk a duplicate.
     try {
       const action = await page.$eval(last.selector, (el) => {
+        const fa = el.getAttribute && el.getAttribute('formaction');
+        if (fa) return (el.formAction || fa); // resolved absolute formaction override
         const f = el.form || (el.closest && el.closest('form'));
-        return f ? (f.action || '') : '';
+        const a = f && f.getAttribute && f.getAttribute('action');
+        return a ? (f.action || a) : ''; // only when an explicit action attribute exists
       });
       if (action) submitActionKey = endpointKey(action);
     } catch { /* unreadable form → guard uses the fallback heuristic */ }

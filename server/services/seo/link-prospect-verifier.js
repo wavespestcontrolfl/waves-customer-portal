@@ -29,9 +29,18 @@ const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
+const OUR_HOMEPAGE = `https://${OUR_DOMAIN}`;
 // Signup-lane (citation) prospects: the runner submits the HOMEPAGE as the listing's
 // website, so their backlink targets the homepage — NOT prospect.target_page.
 const SIGNUP_LINK_TYPES = new Set(['directory', 'citation', 'social']);
+
+// THE single source of truth for "what URL should this prospect's backlink point at":
+// citations → the homepage; everything else → its money page. Used by the DataForSEO
+// reconcile, the crawl fallback, AND the Omega dofollow confirmation so every path agrees
+// (else a citation that links to the homepage would verify in one path but not another).
+function expectedTargetUrl(prospect) {
+  return SIGNUP_LINK_TYPES.has(prospect && prospect.link_type) ? OUR_HOMEPAGE : (prospect && prospect.target_page);
+}
 const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
 
 function stripUrl(u) {
@@ -73,9 +82,7 @@ function matchesTargetUrl(candidate, expected) {
 function backlinkTargetsProspect(link, prospect) {
   // Citations link to the homepage; reconcile signup-lane rows against the homepage so an
   // approved homepage listing matches (else it never matches target_page → stays pending).
-  const expected = SIGNUP_LINK_TYPES.has(prospect.link_type)
-    ? normalizeComparableUrl(OUR_DOMAIN)
-    : normalizeComparableUrl(prospect.target_page);
+  const expected = normalizeComparableUrl(expectedTargetUrl(prospect));
   if (!expected) return false;
   const candidates = [
     link.target_url,
@@ -168,7 +175,7 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowCon
   // Omega credit. DataForSEO's is_dofollow is unreliable (defaults true), so we
   // trust it only when a crawl already parsed the rel attribute (dofollowConfirmed).
   if (!dofollowConfirmed) {
-    const c = await crawlFn(liveUrl, prospect.target_page);
+    const c = await crawlFn(liveUrl, expectedTargetUrl(prospect));
     if (!c.found || c.isDofollow === false) {
       // Not dofollow (or not reachable right now): release the claim, don't spend.
       const release = { quality_signals: db.raw("quality_signals - 'omega_inflight'"), updated_at: new Date() };
@@ -320,7 +327,7 @@ async function verifyOne(prospect) {
 
     // 2. Crawl fallback — fresh links, or a moved/false-lost page. The crawl parses
     // the real rel attribute, so its dofollow verdict is authoritative.
-    const crawl = await crawlForLink(prospect.live_url, prospect.target_page);
+    const crawl = await crawlForLink(prospect.live_url, expectedTargetUrl(prospect));
     if (crawl.found) {
       return markLive(prospect, {
         isDofollow: crawl.isDofollow, anchorText: crawl.anchorText, dofollowConfirmed: true,
@@ -378,5 +385,5 @@ async function run({ limit = 200 } = {}) {
 module.exports = { run, verifyOne, crawlForLink, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
-  comparableDomain, parseQuality,
+  comparableDomain, parseQuality, expectedTargetUrl,
 };

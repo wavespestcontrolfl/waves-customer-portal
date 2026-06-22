@@ -93,17 +93,20 @@ function pickLocation(profile, prospect) {
   return def;
 }
 
-function buildNap(profile, prospect = null) {
-  const loc = pickLocation(profile, prospect);
+function napFromLocation(profile, loc) {
   return {
     business_name: profile.brand,
     website: profile.website, // citations link to the homepage (verifier reconciles homepage)
     email: profile.contact_email,
-    phone: loc.phone || '',
-    address: parseAddress(loc.address || WAVES_ADDRESS_LINE),
+    phone: (loc && loc.phone) || '',
+    address: parseAddress((loc && loc.address) || WAVES_ADDRESS_LINE),
     category: CATEGORY,
     description: DESCRIPTION,
   };
+}
+
+function buildNap(profile, prospect = null) {
+  return napFromLocation(profile, pickLocation(profile, prospect));
 }
 
 async function recordAttempt(p, result, evidenceKey) {
@@ -169,7 +172,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   const counts = { claimed: claimed.length, placed: 0, blocked: 0, failed: 0, skipped: 0 };
   const samples = [];
   const releaseAtEnd = [];
-  const submittedDomains = new Set(); // one submission per directory domain per run
+  // De-dupe per (domain + location), NOT per domain: a multi-location business legitimately
+  // gets one listing PER location on the same directory (Waves Pest Control Venice, Waves
+  // Pest Control Parrish, … each with its own page/NAP). Only a second row for the SAME
+  // (directory, location) is a true duplicate.
+  const submittedPlacements = new Set();
 
   for (let i = 0; i < claimed.length; i++) {
     const p = claimed[i];
@@ -180,11 +187,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     if (dryRun) { samples.push({ domain, submitUrl: rawUrl }); continue; }
     if (allowlist.length && !allowlist.includes(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
 
-    // ONE submission per directory domain per run: a citation directory creates one
-    // business profile per domain, so submitting a second row that shares the domain
-    // (different target_page) would be a duplicate listing / duplicate rejection. Release
-    // the extra row (no attempt consumed) so it's available next run if needed.
-    if (submittedDomains.has(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
+    const loc = pickLocation(profile, p); // the GBP location this prospect maps to
+    const placementKey = `${domain} ${loc.id || 'default'}`;
+    // Same directory + same location already submitted this run → true duplicate. Release
+    // the extra (no attempt consumed). Different locations on the same directory pass.
+    if (submittedPlacements.has(placementKey)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
 
     // SSRF: validate the ACTUAL navigated URL (target_url can differ from the
     // allowlisted target_domain) before launching a browser at it. An unsafe URL
@@ -199,11 +206,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       continue;
     }
 
-    // Committing to a real submission for this domain → claim the domain so no sibling
-    // row submits it again this run. (Parked-unsafe rows above don't claim it, so a
-    // sibling with a valid URL still gets its chance.)
-    submittedDomains.add(domain);
-    const nap = buildNap(profile, p); // per-location NAP (Sarasota/Venice/… when the page maps to one)
+    // Committing to a real submission → claim this (domain, location) so no sibling row
+    // submits the SAME placement again this run. (Parked-unsafe rows above don't claim it,
+    // so a sibling with a valid URL still gets its chance.)
+    submittedPlacements.add(placementKey);
+    const nap = napFromLocation(profile, loc); // per-location NAP (Venice/Parrish/… address+phone)
     const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic });
 
     // Run-level/environment/outage error (no LLM client, no browser, planning-LLM
