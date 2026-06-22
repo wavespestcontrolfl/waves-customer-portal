@@ -29,6 +29,7 @@ const {
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
+  manualDiscountForRecurringBase,
   oneTimeChoiceAmountForEstimate,
   pestMonthlyBaseForFrequency,
   preferenceMonthlyOffForPestVisits,
@@ -352,6 +353,21 @@ describe('public estimate one-time breakdown', () => {
     ]));
     expect(breakdown.items.find((r) => r.service === 'one_time_adjustment')).toBeUndefined();
     expect(breakdown.total).toBe(612);
+  });
+
+  test('manualDiscountForRecurringBase refreshes recurringAmount to the recomputed per-cadence amount', () => {
+    // The saved discount carries a recurringAmount/oneTimeAmount from the
+    // originally generated cadence. A different cadence has a different recurring
+    // base, so the recurring slice must be recomputed — the recurring price card
+    // (which prefers recurringAmount) must reconcile with the recomputed amount,
+    // not show the stale spread value.
+    const saved = { type: 'PERCENT', value: 15, amount: 162, recurringAmount: 70.2, oneTimeAmount: 91.8 };
+    const recomputed = manualDiscountForRecurringBase(saved, 600);
+
+    expect(recomputed.amount).toBe(90); // 15% of the 600 recurring base
+    expect(recomputed.recurringAmount).toBe(90); // tracks amount, not the stale 70.2
+    expect(recomputed.oneTimeAmount).toBe(0);
+    expect(recomputed.monthlyAmount).toBe(7.5); // 90 / 12
   });
 
   test('keeps free service-specific inspection rows visible in one-time breakdown', () => {

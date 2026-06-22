@@ -1298,6 +1298,12 @@ function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnua
     value,
     requestedAmount,
     amount,
+    // This per-cadence object is recomputed purely against the recurring base,
+    // so its whole amount is the recurring slice. Overwrite the (stale) spread
+    // recurringAmount/oneTimeAmount from the originally generated cadence so the
+    // recurring price cards reconcile with the recomputed amount/monthlyAmount.
+    recurringAmount: amount,
+    oneTimeAmount: 0,
     monthlyAmount: Math.round((amount / 12) * 100) / 100,
     discountableBase: Math.round(discountableAnnualBase * 100) / 100,
     capped: requestedAmount > amount,
@@ -10682,6 +10688,7 @@ module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
+module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;
 module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;
 module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.detectPestOneTime = detectPestOneTime;
