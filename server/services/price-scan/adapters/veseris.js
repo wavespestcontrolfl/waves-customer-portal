@@ -63,6 +63,13 @@ const adapter = makeAdapter({
       const email = page.locator('input[name="login[username]"]:visible').first();
       const pass = page.locator('input[name="login[password]"]:visible').first();
       await email.waitFor({ state: 'visible', timeout: 30000 });
+      // Re-check the host IMMEDIATELY before typing: the waitFor above can span a delayed
+      // client-side/meta redirect, and Playwright locators are live across navigations — so a
+      // tampered/open-redirect URL could move us off-host between the post-goto check and the
+      // fill. Fail closed here so the password is only ever typed on a trusted Veseris host.
+      if (!isTrustedVeserisLoginUrl(page.url())) {
+        throw new Error('veseris login aborted: navigation redirected off the trusted host');
+      }
       await email.fill(creds.email || creds.username);
       await pass.fill(creds.password);
       const submit = page.locator(
