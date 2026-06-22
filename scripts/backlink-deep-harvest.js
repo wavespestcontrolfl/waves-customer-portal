@@ -242,7 +242,10 @@ async function rescore(db, args) {
       const re = scorer.scoreProspect({ domain_rating: r.domain_rating }, s.classification, stored);
       s.score = re.score; s.tier = re.tier; s.priority = re.priority; // priority too — patch writes s.priority
     }
-    const isOutreachIntent = scorer.OUTREACH_INTENTS.has(s.intent_class) || s.gate.lane === 'haro_platform';
+    // 'haro' is one of the worker's OUTREACH_TYPES but not in the scorer's
+    // OUTREACH_INTENTS set, so include it explicitly — otherwise a no-contact
+    // non-platform HARO row would escape demotion and still be claimed by Hermes.
+    const isOutreachIntent = scorer.OUTREACH_INTENTS.has(s.intent_class) || s.intent_class === 'haro' || s.gate.lane === 'haro_platform';
     // Demote only un-worked rows whose outreach claim fails (no contact path,
     // HARO platform, or a low composite — the national directories). NEVER touch
     // a row already in flight: status stays 'prospect' while a draft is prepared
