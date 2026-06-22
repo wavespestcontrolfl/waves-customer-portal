@@ -1572,16 +1572,20 @@ const StripeService = {
           }
 
           if (activeIntent.status !== 'canceled') {
-            // Distinguish genuine money-in-flight (processing / succeeded /
-            // awaiting capture — the customer should land on the receipt's
-            // processing state) from a RECOVERABLE conflict like a card PI left
-            // in `requires_action` after an abandoned 3DS handoff, where the
-            // invoice is still unpaid and the customer must be able to retry.
-            // inProgress drives that branch on the pay page.
-            const inFlightStatuses = ['processing', 'succeeded', 'requires_capture'];
+            // Distinguish a genuinely in-flight, reconciliation-pending debit
+            // from conflicts that need an operator. Only `processing` is benign
+            // here — an ACH bank debit clearing over several business days, with
+            // the receipt to follow when the webhook settles it (the customer
+            // sees the "bank payment processing" state, no alert). Everything
+            // else is alert-worthy: `requires_action` is a recoverable card PI
+            // stuck after an abandoned 3DS (the customer is stuck), and
+            // `succeeded` means money was already captured but our local
+            // invoice/payment reconciliation never happened (a lost/failed
+            // webhook) — surfacing the processing copy there would hide an
+            // unpaid-with-no-receipt invoice.
             const err = new Error('Invoice payment is already in progress');
             err.statusCode = 409;
-            err.inProgress = inFlightStatuses.includes(activeIntent.status);
+            err.inProgress = activeIntent.status === 'processing';
             throw err;
           }
         }

@@ -261,7 +261,16 @@ router.post('/:token/setup', async (req, res, next) => {
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
-      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+      // The invoice already flipped to `processing` — an ACH debit in flight.
+      // This is the same benign in-progress state as the createInvoicePaymentIntent
+      // 409 below, and it can be hit by a fresh-return race (the webhook flips
+      // the status between the page's initial GET and this POST). Carry
+      // `inProgress: true` so the pay page shows the "bank payment processing"
+      // state instead of a red error.
+      if (invoice.status === 'processing') {
+        return res.status(409).json({ error: err.message, inProgress: true });
+      }
+      return res.status(400).json({ error: err.message });
     }
 
     const result = await StripeService.createInvoicePaymentIntent(invoice.id, { saveCard: !!saveCard, cardOnly: !!cardOnly });
