@@ -28,7 +28,15 @@
 
 // Curated allowlist. A competitor here MAY be named in a comparison table; the
 // writer may state ONLY the attributes listed (each carries its own source +
-// asOf). Seeded with widely-published, non-comparative facts; owner extends.
+// asOf). CONSERVATIVE SCOPE: only `reach` (service area) + `residential_recurring`
+// — publicly-stated, non-comparative facts. Each was verified against the
+// company's own site (WebFetch) or its official site via web search on the asOf
+// date, EXCEPT Terminix (terminix.com returned HTTP 403 to automated fetch on
+// 2026-06-22) whose two values rest on well-established public knowledge —
+// re-verify before relying on it. Richer / comparative attributes (guarantee
+// terms, pricing, response time, ratings) are intentionally NOT here — add them
+// only with your own verified first-party source. Local SWFL competitor list
+// supplied by the owner 2026-06-22.
 const COMPETITORS = [
   {
     id: 'orkin',
@@ -44,6 +52,8 @@ const COMPETITORS = [
     name: 'Terminix',
     aliases: ['terminix pest control'],
     attributes: {
+      // NOTE: not re-fetched 2026-06-22 (site returned 403); values are
+      // well-established public knowledge — re-verify before relying on them.
       reach: { value: 'National (US)', source: 'https://www.terminix.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.terminix.com', asOf: '2026-06-22' },
     },
@@ -53,8 +63,8 @@ const COMPETITORS = [
     name: 'Truly Nolen',
     aliases: ['truly nolen pest control', 'truly nolen of america'],
     attributes: {
-      reach: { value: 'National (US); Florida-founded', source: 'https://www.trulynolen.com', asOf: '2026-06-22' },
-      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.trulynolen.com', asOf: '2026-06-22' },
+      reach: { value: 'National (US)', source: 'https://www.trulynolen.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — quarterly or one-time', source: 'https://www.trulynolen.com', asOf: '2026-06-22' },
     },
   },
   {
@@ -62,8 +72,109 @@ const COMPETITORS = [
     name: 'Massey Services',
     aliases: ['massey', 'massey service'],
     attributes: {
-      reach: { value: 'Regional (Southeast US)', source: 'https://www.masseyservices.com', asOf: '2026-06-22' },
+      reach: { value: 'Regional (10 US states, incl. Florida)', source: 'https://www.masseyservices.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.masseyservices.com', asOf: '2026-06-22' },
+    },
+  },
+  // ── Owner-supplied local / Florida competitors (06-22), verified via each
+  //    company's official site (web search).
+  {
+    id: 'prodigy-pest',
+    name: 'Prodigy Pest Solutions',
+    aliases: ['prodigy pest', 'prodigy'],
+    attributes: {
+      reach: { value: 'Florida (Southwest & Southeast FL)', source: 'https://prodigypest.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://prodigypest.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'kellers-pest',
+    name: "Keller's Pest Control",
+    aliases: ['kellers pest control', 'kellers pest', "keller's pest"],
+    attributes: {
+      reach: { value: 'Local (Southwest Florida)', source: 'https://www.kellerspestcontrol.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.kellerspestcontrol.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'all-u-need-pest',
+    name: 'All U Need Pest Control',
+    aliases: ['all u need pest', 'all u need pest control', 'all "u" need pest control'],
+    attributes: {
+      reach: { value: 'Florida (statewide)', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — residential & commercial plans', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'arrow-environmental',
+    name: 'Arrow Environmental',
+    aliases: ['arrow environmental services', 'arrow services'],
+    attributes: {
+      reach: { value: 'Regional (West & Central Florida)', source: 'https://www.arrowservices.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.arrowservices.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'farrow-pest',
+    name: 'Farrow Pest Services',
+    aliases: ['farrow pest', 'farrow pest control'],
+    attributes: {
+      reach: { value: 'Local (Southwest Florida)', source: 'https://farrowpestservices.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — pest & lawn plans', source: 'https://farrowpestservices.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'rodent-solutions',
+    name: 'Rodent Solutions',
+    aliases: ['rodent solutions inc'],
+    attributes: {
+      reach: { value: 'Local (Southwest Florida)', source: 'https://rodentsolutioninc.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — residential & commercial plans', source: 'https://rodentsolutioninc.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'turner-pest',
+    name: 'Turner Pest Control',
+    aliases: ['turner pest'],
+    attributes: {
+      reach: { value: 'Florida (statewide)', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'good-news-pest',
+    name: 'Good News Pest Solutions',
+    aliases: ['good news pest'],
+    attributes: {
+      reach: { value: 'Local (Southwest Florida)', source: 'https://www.goodnewspestsolutions.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.goodnewspestsolutions.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'hometeam-pest-defense',
+    name: 'HomeTeam Pest Defense',
+    aliases: ['hometeam pest', 'home team pest defense', 'hometeam'],
+    attributes: {
+      reach: { value: 'National (US — 13+ states)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'ecoshield-pest',
+    name: 'EcoShield Pest Solutions',
+    aliases: ['ecoshield pest', 'ecoshield'],
+    attributes: {
+      reach: { value: 'National (US — multi-state, incl. Florida)', source: 'https://www.ecoshieldpest.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.ecoshieldpest.com', asOf: '2026-06-22' },
+    },
+  },
+  {
+    id: 'greenhouse-pest',
+    name: 'Greenhouse Termite & Pest Control',
+    aliases: ['greenhouse termite and pest control', 'greenhouse termite & pest', 'greenhouse pest'],
+    attributes: {
+      reach: { value: 'Regional (Florida West Coast — incl. Manatee/Sarasota/Charlotte)', source: 'https://mygreenhousepro.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://mygreenhousepro.com', asOf: '2026-06-22' },
     },
   },
 ];

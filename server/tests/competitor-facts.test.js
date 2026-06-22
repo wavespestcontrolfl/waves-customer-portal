@@ -8,6 +8,29 @@ describe('competitor-facts', () => {
     expect(cf.findCompetitor('Truly Nolen')?.id).toBe('truly-nolen');
   });
 
+  test('owner-supplied local/FL competitors are allowlisted with reach + recurring', () => {
+    for (const [name, id] of [
+      ['Prodigy Pest Solutions', 'prodigy-pest'],
+      ["Keller's Pest Control", 'kellers-pest'],
+      ['All U Need Pest Control', 'all-u-need-pest'],
+      ['Arrow Environmental', 'arrow-environmental'],
+      ['Farrow Pest Services', 'farrow-pest'],
+      ['Rodent Solutions', 'rodent-solutions'],
+      ['Turner Pest Control', 'turner-pest'],
+      ['Good News Pest Solutions', 'good-news-pest'],
+      ['HomeTeam Pest Defense', 'hometeam-pest-defense'],
+      ['EcoShield Pest Solutions', 'ecoshield-pest'],
+      ['Greenhouse Termite & Pest Control', 'greenhouse-pest'],
+    ]) {
+      const rec = cf.findCompetitor(name);
+      expect(rec?.id).toBe(id);
+      expect(cf.attributeValues(name).length).toBeGreaterThanOrEqual(2); // reach + recurring
+    }
+    // alias resolution
+    expect(cf.findCompetitor('prodigy pest')?.id).toBe('prodigy-pest');
+    expect(cf.findCompetitor('hometeam pest')?.id).toBe('hometeam-pest-defense');
+  });
+
   test('a non-allowlisted business is not known', () => {
     expect(cf.isKnownCompetitor('Hulett')).toBe(false); // detectable signal, not allowlisted
     expect(cf.isKnownCompetitor('Some Random LLC')).toBe(false);

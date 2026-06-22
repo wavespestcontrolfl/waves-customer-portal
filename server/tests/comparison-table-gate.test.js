@@ -423,9 +423,12 @@ describe('comparison-table-gate', () => {
       .findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /cell\/row/.test(f.message))).toBe(true);
   });
 
-  test('R9-B5: a business with a less-common suffix ("HomeTeam Pest Defense") is recognized', () => {
-    const r = gate.evaluate({ body: `Compared with HomeTeam Pest Defense in Venice.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
-    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /HomeTeam Pest Defense/.test(f.message))).toBe(true);
+  test('R9-B5: an UNallowlisted business with a less-common suffix ("Pest Defense") is recognized', () => {
+    // Uses a name NOT on the curated allowlist so it still exercises the
+    // suffix recognizer → fail-closed (allowlisted ones now route via the
+    // competitor-in-prose / known-competitor paths instead).
+    const r = gate.evaluate({ body: `Compared with Coastline Pest Defense in Venice.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Coastline Pest Defense/.test(f.message))).toBe(true);
   });
 
   // ── Round-10 findings (Codex review of the round-9 commit) ──
