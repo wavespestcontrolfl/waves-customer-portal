@@ -332,10 +332,16 @@ function makeAdapter(config) {
     const searchUrl = config.buildSearchUrl ? config.buildSearchUrl(product, vendor) : null;
     if (!searchUrl) return null;
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
-    // Results are commonly injected by a client-side search widget, so they aren't in
-    // the DOM at domcontentloaded — wait (bounded) for the first result link. Non-fatal.
-    const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
-    await page.waitForSelector(waitSel, { timeout: config.searchWaitMs || 8000 }).catch(() => {});
+    // OPT-IN wait: only adapters whose results are injected by a client-side widget set
+    // searchWaitMs (DoMyOwn's Reflektion search). For server-rendered adapters the
+    // results are already in the DOM, so we must NOT block here — otherwise a no-match
+    // (or a stale search path) burns the full timeout per product, adding minutes to a
+    // serial multi-product run. waitForSelector returns as soon as a link appears, so a
+    // successful dynamic search is still fast; only a genuine no-match waits it out.
+    if (config.searchWaitMs) {
+      const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
+      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
+    }
 
     // Search is fuzzy + relevance-ranked, and slug heuristics can't always tell
     // same-brand variants apart (Talstar P vs Talstar XTRA). So open the top-ranked
