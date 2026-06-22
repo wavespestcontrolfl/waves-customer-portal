@@ -626,6 +626,13 @@ describe('price-scan extract', () => {
     test('no targetOz -> null (cannot pick a variant without a target size)', () => {
       expect(pickVariantOffer(variants, {})).toBeNull();
     });
+    test('per-child stock (jsonConfig salable) flows through: an OOS variant reports out_of_stock', () => {
+      // collectSnapshot sets availabilityRaw to the schema enum forms from the salable map.
+      const got = pickVariantOffer([{ size: '32 oz', price: 40, availabilityRaw: 'OutOfStock' }], { targetOz: 32 });
+      expect(got).toMatchObject({ price: 40, availability: 'out_of_stock' }); // compare will exclude it
+      const ok = pickVariantOffer([{ size: '32 oz', price: 45, availabilityRaw: 'InStock' }], { targetOz: 32 });
+      expect(ok).toMatchObject({ price: 45, availability: 'in_stock' });
+    });
   });
 
   describe('offerFromSnapshot (size-explicit variants)', () => {

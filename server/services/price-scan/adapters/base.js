@@ -148,6 +148,19 @@ function collectSnapshot(sel) {
         }
       }
       if (!cfg) continue;
+      // Per-child stock: Magento lists salable children as salable[attrId][optionId] =
+      // [productIds]. A child is in stock iff its own id appears under its option. Returns
+      // null when the config carries no salable map (unknown), true/false otherwise — so a
+      // sold-out target size is reported out_of_stock, NOT promoted from page-level text.
+      const salableOf = (pid) => {
+        if (!cfg.salable || !cfg.index || !cfg.index[pid]) return null;
+        const idx = cfg.index[pid];
+        for (const aid in idx) {
+          const arr = cfg.salable[aid] && cfg.salable[aid][idx[aid]];
+          if (Array.isArray(arr) && arr.map(String).indexOf(String(pid)) !== -1) return true;
+        }
+        return false;
+      };
       for (const pid in cfg.optionPrices) {
         const op = cfg.optionPrices[pid];
         const price = op && op.finalPrice && op.finalPrice.amount;
@@ -161,7 +174,10 @@ function collectSnapshot(sel) {
             if (opt && opt.label) { size = opt.label; break; }
           }
         }
-        if (size != null && String(size).trim()) variants.push({ size: String(size), price: Number(price) });
+        if (size == null || !String(size).trim()) continue;
+        const salable = salableOf(pid);
+        const availabilityRaw = salable === true ? 'InStock' : salable === false ? 'OutOfStock' : null;
+        variants.push({ size: String(size), price: Number(price), availabilityRaw });
       }
       if (variants.length) break;
     }

@@ -403,10 +403,9 @@ function offerFromSnapshot(snapshot = {}, opts = {}) {
     const variant = pickVariantOffer(snapshot.variants, opts);
     if (variant) {
       variant.name = (typeof snapshot.title === 'string' && snapshot.title) || null;
-      if (variant.availability === 'unknown' && snapshot.availabilityText) {
-        const domAvail = mapAvailability(snapshot.availabilityText);
-        if (domAvail !== 'unknown') variant.availability = domAvail;
-      }
+      // Do NOT promote page-level availabilityText onto a variant: on a multi-variant page
+      // that text is the default selection's stock, not the matched child's. Per-child
+      // availability already came from the jsonConfig salable map (collectSnapshot).
       return variant;
     }
   }
