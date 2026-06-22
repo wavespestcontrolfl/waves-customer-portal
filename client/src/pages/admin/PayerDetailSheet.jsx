@@ -260,6 +260,15 @@ function StatementDetail({ payerId, statement, onChanged }) {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         setNotice({ tone: "err", text: d?.error || "Action failed." });
+        // Partial success: "Close & send" finalizes the statement, then 422s if the
+        // AP delivery is blocked — the response still carries the frozen statement.
+        // Refresh so the row reflects `finalized` (not stale `open`) and exposes the
+        // forced "Send to AP" retry path, instead of stranding the operator on a
+        // close button that can't escape the blocked first-delivery key.
+        if (d?.statement) {
+          await loadDetail();
+          if (onChanged) onChanged();
+        }
       } else {
         setNotice({ tone: "ok", text: `${label} ✓` });
         await loadDetail();
