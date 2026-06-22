@@ -21,6 +21,7 @@ describe('competitor-facts', () => {
       ['HomeTeam Pest Defense', 'hometeam-pest-defense'],
       ['EcoShield Pest Solutions', 'ecoshield-pest'],
       ['Greenhouse Termite & Pest Control', 'greenhouse-pest'],
+      ['Hughes Exterminators', 'hughes-exterminators'],
     ]) {
       const rec = cf.findCompetitor(name);
       expect(rec?.id).toBe(id);

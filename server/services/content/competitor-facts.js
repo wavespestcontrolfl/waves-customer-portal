@@ -177,6 +177,15 @@ const COMPETITORS = [
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://mygreenhousepro.com', asOf: '2026-06-22' },
     },
   },
+  {
+    id: 'hughes-exterminators',
+    name: 'Hughes Exterminators',
+    aliases: ['hughes pest control', 'hughes'],
+    attributes: {
+      reach: { value: 'Regional (Southwest Florida — Tampa Bay to Naples)', source: 'https://www.hughes-exterminators.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.hughes-exterminators.com', asOf: '2026-06-22' },
+    },
+  },
 ];
 
 // Detection-only list of pest-control BUSINESS names that may plausibly appear
