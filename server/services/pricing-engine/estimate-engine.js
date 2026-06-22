@@ -843,14 +843,16 @@ function generateEstimate(input) {
   const boraCareService = services.boraCare || services.bora_care;
   if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control')) {
     const boraCareOptions = serviceOptions(boraCareService);
-    // Wall-spray measurements may arrive via service options (route path) or at
-    // the top level of the estimate input (direct generateEstimate callers).
-    // The property profile does not carry them, so merge the top-level fields
-    // into the options the engine reads.
+    // Surface-treatment measurements may arrive via service options (route path)
+    // or at the top level of the estimate input (direct generateEstimate
+    // callers). The property profile does not carry them, so merge the top-level
+    // fields into the options the engine reads. Legacy wall* keys still accepted.
     const result = priceBoraCare(property, {
       ...boraCareOptions,
-      wallLinearFt: boraCareOptions.wallLinearFt ?? input.boraCareWallLinearFt,
-      wallHeightFt: boraCareOptions.wallHeightFt ?? input.boraCareWallHeightFt,
+      surfaceLinearFt: boraCareOptions.surfaceLinearFt ?? boraCareOptions.wallLinearFt
+        ?? input.boraCareSurfaceLinearFt ?? input.boraCareWallLinearFt,
+      surfaceHeightFt: boraCareOptions.surfaceHeightFt ?? boraCareOptions.wallHeightFt
+        ?? input.boraCareSurfaceHeightFt ?? input.boraCareWallHeightFt,
     });
     lineItems.push(result);
   }

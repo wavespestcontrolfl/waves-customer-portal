@@ -360,6 +360,12 @@ function validatePestPricingConfig(snapshot = constants) {
   if (!isPositiveNumber(boraCare.marginDivisor) || Number(boraCare.marginDivisor) >= 1) {
     errors.push('SPECIALTY.boraCare.marginDivisor must be positive and less than 1');
   }
+  // surfaceLaborSqFtPerHour is a divisor in priceBoraCare — a 0/negative value
+  // would blow up surface-only labor, so it must fail closed.
+  if (!isPositiveNumber(boraCare.surfaceLaborSqFtPerHour)) {
+    errors.push('SPECIALTY.boraCare.surfaceLaborSqFtPerHour must be positive');
+  }
+  if (!isPositiveNumber(boraCare.minJobPrice)) errors.push('SPECIALTY.boraCare.minJobPrice must be positive');
 
   const preSlab = SPECIALTY.preSlabTermidor || {};
   if (!isPositiveNumber(preSlab.coverage)) errors.push('SPECIALTY.preSlabTermidor.coverage must be positive');
@@ -1247,6 +1253,8 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.boraCare, 'coverage', bc.bc_cov ?? bc.coverage, Number);
       setNumber(constants.SPECIALTY.boraCare, 'equipCost', bc.bc_equip ?? bc.equipCost, Number);
       setNumber(constants.SPECIALTY.boraCare, 'marginDivisor', bc.marginDivisor ?? bc.margin_divisor, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', bc.min_job_price ?? bc.minJobPrice, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'surfaceLaborSqFtPerHour', bc.surface_labor_sqft_per_hr ?? bc.surfaceLaborSqFtPerHour, Number);
     }
     if (config.onetime_preslab) {
       const ps = config.onetime_preslab;

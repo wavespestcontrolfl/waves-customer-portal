@@ -1131,7 +1131,15 @@ const SPECIALTY = {
     coverage: 275,  // sqft/gal
     equipCost: 17.50,
     marginDivisor: 0.45,  // 55% target margin
-    defaultWallHeightFt: 8,  // measurement default for wall spraying (linear ft × height → sqft)
+    defaultSurfaceHeightFt: 8,  // measurement default for surface treatment (linear ft × height → sqft)
+    // Surface-treatment (linear-ft) jobs — walls, foundation, framing, block —
+    // have no attic-access overhead, so they skip the 3-gallon / 2-hour attic
+    // floors and price on actual gallons + actual labor, never below minJobPrice
+    // (covers the truck roll). Owner decision 2026-06-22: a 20 LF × 8 ft (160
+    // sqft) spray runs ~15 min, so surfaceLaborSqFtPerHour = 640 (160 ÷ 640 =
+    // 0.25 hr); that job lands ~$263 instead of the attic-floored $808.
+    minJobPrice: 150,
+    surfaceLaborSqFtPerHour: 640,
   },
   preSlabTermidor: {
     bottleCost: 152.10,
