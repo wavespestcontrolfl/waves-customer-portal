@@ -30,7 +30,6 @@ const { isEnabled } = require('../config/feature-gates');
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const { resolveApRecipient, forcedRetryKey } = require('./payer-statement-email');
-const { publicPortalUrl } = require('../utils/portal-url');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
 
@@ -127,7 +126,6 @@ async function sendFollowupEmail(stmt, step, { forceRetry = false } = {}) {
   const amount = currency(stmt.total);
   const dueYmd = dateOnlyString(stmt.due_date);
   const daysPastDue = Math.max(0, daysBetweenYmd(dueYmd, etDateString()));
-  const payUrl = `${publicPortalUrl()}/pay/statement/${stmt.token}`;
   const reminderLine = String(step.reminderLine || '')
     .replace(/\{\{statement_number\}\}/g, statementNumber)
     .replace(/\{\{amount_due\}\}/g, amount)
@@ -147,7 +145,6 @@ async function sendFollowupEmail(stmt, step, { forceRetry = false } = {}) {
         due_date: formatDateOnly(stmt.due_date, { fallback: '' }),
         days_past_due: String(daysPastDue),
         reminder_line: reminderLine,
-        pay_url: payUrl,
         terms: TERM_LABEL[stmt.terms_snapshot] || stmt.terms_snapshot || '',
       },
       recipientType: 'payer',

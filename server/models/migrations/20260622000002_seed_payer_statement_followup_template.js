@@ -8,10 +8,13 @@
  * `reminder_line` variable supplied by the step config — so editing cadence/tone
  * never needs a new template.
  *
- * Unlike `payer.statement.sent` (no CTA), the followup DOES carry a pay CTA: P3
- * shipped the self-serve `/pay/statement/:token` surface, so the nudge is
- * actionable. The PDF is NOT re-attached — AP already has it from the original
- * statement send; the reminder is a short prompt with the amount + a pay link.
+ * NO online-pay CTA (mirrors `payer.statement.sent`): P3 shipped the BACKEND
+ * `/api/pay/statement/:token` but there is no public CLIENT page for it yet (the
+ * deferred payer-portal statement-view UI slice), so a "pay online" button would
+ * dead-end at the login/portal catch-all. The reminder is a short amount-due
+ * prompt asking AP to reply/call to arrange payment; the PDF is NOT re-attached
+ * (AP has it from the original statement send). Re-add the CTA + `pay_url` here
+ * when the client statement-pay page ships.
  *
  * Transactional billing document → `transactional_required` stream (never
  * marketing-suppressed). Mirrors the publish pattern in
@@ -30,9 +33,7 @@ const TEMPLATE = {
   stream: 'transactional_required',
   legal: 'transactional_relationship',
   required: ['statement_number', 'amount_due'],
-  optional: ['company_name', 'due_date', 'days_past_due', 'reminder_line', 'pay_url', 'terms'],
-  ctaLabel: 'Pay this statement',
-  ctaUrlVariable: 'pay_url',
+  optional: ['company_name', 'due_date', 'days_past_due', 'reminder_line', 'terms'],
   subject: 'Reminder: Waves statement {{statement_number}} — {{amount_due}} due',
   preview: 'A quick reminder about your Waves Pest Control statement balance.',
   blocks: [
@@ -46,7 +47,7 @@ const TEMPLATE = {
         { label: 'Terms', value: '{{terms}}' },
       ],
     },
-    { type: 'paragraph', content: 'You can pay online using the button below, or reply with the date your check/ACH is scheduled and we will note it on your account.' },
+    { type: 'paragraph', content: 'Please reply with the date your check/ACH is scheduled, or call us to pay by card and we will note it on your account.' },
     { type: 'small_note', content: 'Already paid? Please disregard this notice — it may have crossed with your payment. Questions? Reply to this email or call (941) 297-5749.' },
   ],
   fixture: {
@@ -56,7 +57,6 @@ const TEMPLATE = {
     due_date: 'Jun 30, 2026',
     days_past_due: '15',
     reminder_line: 'this is a reminder that your Waves Pest Control statement S-1042 is now 15 days past due.',
-    pay_url: 'https://portal.wavespestcontrol.com/pay/statement/abc123',
     terms: 'Net 30',
   },
 };
