@@ -149,6 +149,43 @@ describe('findValidCandidateSlots', () => {
     expect(drops.preferred_time).toBe(1);
   });
 
+  test('re-fetches the FULL feasible set when find-time truncated, so route ranking cannot hide a preference-matching slot', async () => {
+    // 1st pass (capped at FETCH_CAP) route-ranked the off-preference Thursday slot
+    // first and truncated (total_feasible > returned). A preferred-day Wednesday
+    // slot sits past the cap. The re-fetch must surface it.
+    findAvailableSlots
+      .mockResolvedValueOnce({
+        slots: [
+          { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 }, // Thu — off-pref
+        ],
+        total_feasible: 2, // > 1 returned → truncated
+      })
+      .mockResolvedValueOnce({
+        slots: [
+          { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 }, // Thu
+          { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 9, total_drive_minutes: 30, stops_that_day: 3, score: 9 }, // Wed — preferred
+        ],
+        total_feasible: 2,
+      });
+    const wedOnly = { service_category: 'general', blackout: null, preferred_day_indexes: [3] };
+    const { candidates } = await findValidCandidateSlots(SERVICE, wedOnly, ctx());
+    expect(findAvailableSlots).toHaveBeenCalledTimes(2);
+    expect(findAvailableSlots.mock.calls[1][0].topN).toBe(2); // re-fetch asks for the full feasible set
+    expect(candidates.map((c) => c.date)).toEqual(['2026-08-05']); // preferred Wednesday found
+  });
+
+  test('does NOT re-fetch when find-time returned the full feasible set (no truncation)', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
+      ],
+      total_feasible: 1, // == returned → no truncation
+    });
+    const { candidates } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
+    expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+    expect(candidates.map((c) => c.date)).toEqual(['2026-08-05']);
+  });
+
   test('service-type DEFAULT time window is SOFT — does NOT hard-drop afternoon slots', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [

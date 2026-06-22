@@ -198,21 +198,34 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     .select('scheduled_date');
   const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
 
-  const res = await findAvailableSlots({
+  const findTimeArgs = {
     lat: geo.lat,
     lng: geo.lng,
     durationMinutes: duration,
     dateFrom,
     dateTo,
-    topN: ctx.fetchCap || FETCH_CAP, // full feasible set; HARD filters run before trim
     excludeServiceIds: [service.id],
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
     // NOTE: occupancy keeps find-time's default ['cancelled'] so it stays
     // consistent with SmartRebooker's overlap check (which treats 'rescheduled'
     // as a conflict). Excluding it here would propose slots apply then rejects.
-  });
+  };
+  // find-time route-RANKS (lowest detour first) then truncates to topN. Our HARD
+  // filters (blackout, sibling, weekend, explicit preferred day/time, deactivated
+  // tech) run AFTER, so if the route-best topN are all filtered out while a valid
+  // slot sits just past the cap, we'd wrongly report no candidate — i.e. route
+  // ranking would silently gate what the hard preference filter can see. Bound the
+  // first pass at FETCH_CAP, but if it truncated (total_feasible > returned),
+  // re-fetch the FULL feasible set so the hard filters see every slot. The window
+  // is only ±tolerance days, so the full set is small; the re-fetch is rare (never
+  // at current crew size) and only pays off in a dense window.
+  let res = await findAvailableSlots({ ...findTimeArgs, topN: ctx.fetchCap || FETCH_CAP });
+  let slots = (res && res.slots) || [];
+  if (res && typeof res.total_feasible === 'number' && res.total_feasible > slots.length) {
+    res = await findAvailableSlots({ ...findTimeArgs, topN: res.total_feasible });
+    slots = (res && res.slots) || [];
+  }
 
-  const slots = (res && res.slots) || [];
   // Drop tally — why feasible slots were rejected. Surfaced to the audit so an
   // empty candidate set reads as "honored the customer's preference, nothing
   // better available" rather than an opaque NO_VALID_SLOT.
