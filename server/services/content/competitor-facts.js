@@ -81,9 +81,9 @@ const COMPETITORS = [
   {
     id: 'prodigy-pest',
     name: 'Prodigy Pest Solutions',
-    aliases: ['prodigy pest', 'prodigy'],
+    aliases: ['prodigy pest'], // not bare 'prodigy' — too generic ("be a prodigy")
     attributes: {
-      reach: { value: 'Florida (Southwest & Southeast FL)', source: 'https://prodigypest.com', asOf: '2026-06-22' },
+      reach: { value: 'Florida (multiple markets, incl. SWFL)', source: 'https://prodigypest.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://prodigypest.com', asOf: '2026-06-22' },
     },
   },
@@ -158,7 +158,7 @@ const COMPETITORS = [
     name: 'HomeTeam Pest Defense',
     aliases: ['hometeam pest', 'home team pest defense', 'hometeam'],
     attributes: {
-      reach: { value: 'National (US — multi-state)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
+      reach: { value: 'Multi-state (US, incl. Florida)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
     },
   },
@@ -183,7 +183,7 @@ const COMPETITORS = [
   {
     id: 'hughes-exterminators',
     name: 'Hughes Exterminators',
-    aliases: ['hughes pest control', 'hughes'],
+    aliases: ['hughes pest control', 'hughes exterminators'], // not bare 'hughes' (surname)
     attributes: {
       reach: { value: 'Regional (Southwest Florida — Tampa Bay to Naples)', source: 'https://www.hughes-exterminators.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.hughes-exterminators.com', asOf: '2026-06-22' },
@@ -278,7 +278,11 @@ function attributeValues(name) {
  * names it contains (so "Massey Services" does not also report bare "Massey").
  */
 function findBusinessMentions(text) {
-  const haystack = String(text || '');
+  // Normalize curly quotes/apostrophes → straight so a stylized spelling like
+  // All "U" Need or Keller's still matches the straight-quote aliases.
+  const haystack = String(text || '')
+    .replace(/[‘’‛]/g, "'")
+    .replace(/[“”]/g, '"');
   if (!haystack) return [];
   const out = new Map(); // key → { name, inAllowlist }
   const claimedRanges = []; // [start,end) already attributed to a longer name

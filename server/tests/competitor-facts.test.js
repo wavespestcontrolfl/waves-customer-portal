@@ -32,6 +32,16 @@ describe('competitor-facts', () => {
     expect(cf.findCompetitor('hometeam pest')?.id).toBe('hometeam-pest-defense');
   });
 
+  test('bare generic single-word aliases do NOT false-match; smart-quote spellings DO', () => {
+    // generic words are not competitor mentions
+    expect(cf.findBusinessMentions("you don't have to be a prodigy to spot ants").some((m) => /Prodigy/.test(m.name))).toBe(false);
+    expect(cf.findBusinessMentions('the Hughes family called today').some((m) => /Hughes/.test(m.name))).toBe(false);
+    // but the actual business name still matches
+    expect(cf.findBusinessMentions('we use Prodigy Pest for the office').some((m) => m.inAllowlist && /Prodigy/.test(m.name))).toBe(true);
+    // curly-quote stylized spelling matches the allowlisted entry
+    expect(cf.findBusinessMentions('compared with All “U” Need Pest Control').some((m) => m.inAllowlist && /All U Need/.test(m.name))).toBe(true);
+  });
+
   test('a non-allowlisted business is not known', () => {
     expect(cf.isKnownCompetitor('Hulett')).toBe(false); // detectable signal, not allowlisted
     expect(cf.isKnownCompetitor('Some Random LLC')).toBe(false);
