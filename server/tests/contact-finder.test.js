@@ -96,4 +96,15 @@ describe('contact-finder', () => {
     expect(_internals.isBlockedHostname('8.8.8.8')).toBe(false);
     expect(_internals.isBlockedHostname('example.com')).toBe(false);
   });
+
+  test('isPrivateIp catches IPv4-mapped IPv6 in BOTH dotted and hex forms', () => {
+    const p = _internals.isPrivateIp;
+    expect(p('::ffff:127.0.0.1')).toBe(true);          // dotted loopback
+    expect(p('::ffff:7f00:1')).toBe(true);             // hex loopback (127.0.0.1)
+    expect(p('::ffff:a9fe:a9fe')).toBe(true);          // hex metadata (169.254.169.254)
+    expect(p('0:0:0:0:0:ffff:7f00:1')).toBe(true);     // expanded hex loopback
+    expect(p('::1')).toBe(true);
+    expect(p('::ffff:808:808')).toBe(false);           // 8.8.8.8 — public
+    expect(p('2606:4700:4700::1111')).toBe(false);     // public v6
+  });
 });

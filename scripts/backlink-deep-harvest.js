@@ -214,6 +214,15 @@ async function rescore(db, args) {
   const updates = [];
   scored.forEach((s, i) => {
     const r = rows[i];
+    // If the fresh probe found no contact but the row already has one on file,
+    // re-score WITH the stored contact — otherwise a transient/blocked probe
+    // zeroes the contactability component and permanently down-ranks a site with
+    // a known contact path. (Demotion is already protected separately.)
+    if ((r.contact_email || r.contact_url) && (!s.contact || !s.contact.has_contact_path)) {
+      const stored = { has_contact_path: true, contact_email: r.contact_email, contact_url: r.contact_url };
+      const re = scorer.scoreProspect({ domain_rating: r.domain_rating }, s.classification, stored);
+      s.score = re.score; s.tier = re.tier;
+    }
     const isOutreachIntent = scorer.OUTREACH_INTENTS.has(s.intent_class) || s.gate.lane === 'haro_platform';
     // Demote only un-worked rows whose outreach claim fails (no contact path,
     // HARO platform, or a low composite — the national directories). NEVER touch

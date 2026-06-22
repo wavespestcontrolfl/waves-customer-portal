@@ -24,6 +24,21 @@ const logger = require('../logger');
 // The prospect domain is untrusted and fetched server-side, so a malicious domain
 // (or a redirect to one) must not let us probe internal/cloud-metadata hosts.
 
+// Extract the embedded IPv4 from an IPv4-mapped/compatible IPv6 address — both
+// the dotted form (::ffff:127.0.0.1) AND the hex form (::ffff:7f00:1, including
+// expanded 0:0:0:0:0:ffff:7f00:1). Without the hex case, ::ffff:a9fe:a9fe (the
+// metadata host) would slip past the private-IP check.
+function mappedIpv4(h) {
+  const dotted = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (dotted && net.isIPv4(dotted[1])) return dotted[1];
+  if (!/(^|:)ffff:/.test(h)) return null;
+  const groups = h.replace(/^.*ffff:/, '').split(':');
+  if (groups.length !== 2) return null;
+  const hi = parseInt(groups[0], 16), lo = parseInt(groups[1], 16);
+  if (Number.isNaN(hi) || Number.isNaN(lo)) return null;
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 function isPrivateIp(ip) {
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split('.').map(Number);
@@ -34,7 +49,8 @@ function isPrivateIp(ip) {
       || (a === 100 && b >= 64 && b <= 127);   // CGNAT
   }
   const h = String(ip).toLowerCase();
-  if (h.startsWith('::ffff:') && net.isIPv4(h.slice(7))) return isPrivateIp(h.slice(7));
+  const mapped = mappedIpv4(h);
+  if (mapped) return isPrivateIp(mapped);
   return h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80');
 }
 
