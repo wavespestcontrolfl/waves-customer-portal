@@ -592,6 +592,24 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Signup classifier failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:30AM — Citation submission runner: auto-submit allowlisted submit_free
+  // listings (fail-closed on account/CAPTCHA/payment). No-op without an allowlist
+  // (SIGNUP_RUNNER_ALLOWLIST) — supervised-first. Never pays (Phase 2).
+  cron.schedule('30 3 * * *', async () => {
+    if (!isEnabled('signupRunner')) return;
+    logger.info('Running: citation submission runner');
+    try {
+      // runExclusive: this makes LIVE third-party submissions — a deploy overlap or a
+      // second app instance firing the same cron would turn one supervised batchSize:5
+      // run into 10+ real listings (worker.claim dedupes rows, not whole batches).
+      await runExclusive('signup-runner', async () => {
+        const r = require('./seo/signup-runner');
+        const res = await r.run({ batchSize: 5 });
+        logger.info(`[signup-runner] cron: ${JSON.stringify(res)}`);
+      });
+    } catch (err) { logger.error(`Citation runner failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 2:00AM — Backlink outreach drafter: claim outreach prospects, draft 1:1
   // pitches via Claude, park as 'drafted' for the morning approval queue. NEVER
   // sends. Gated by outreachDrafter (default OFF in prod) — independent of the

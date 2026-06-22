@@ -142,6 +142,9 @@ const gates = {
   // and (Phase 1b) the fail-closed browser runner that auto-submits FREE listings
   // and parks account/payment/CAPTCHA-gated ones. Never spends money (payments are
   // Phase 2). Default OFF in prod; the manual classify/run CLIs work regardless.
+  // PREREQUISITE before enabling in prod: an egress firewall on the runner's Railway
+  // service blocking private CIDRs (RFC1918 / 169.254 / ::1 / fc00::/7) — the browser
+  // runner drives a headless browser against untrusted pages (see signup-runner.js).
   signupRunner: isProd ? process.env.GATE_SIGNUP_RUNNER === 'true' : true,
 
   // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
