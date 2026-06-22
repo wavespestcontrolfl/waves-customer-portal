@@ -35,9 +35,16 @@ describe('classifyFcmResponse', () => {
     expect(classifyFcmResponse(200).ok).toBe(true);
   });
 
-  test('404 (or UNREGISTERED) → expired so the row gets deactivated', () => {
-    expect(classifyFcmResponse(404, 'NOT_FOUND').expired).toBe(true);
+  test('only the UNREGISTERED detail expires a token (deactivate)', () => {
+    expect(classifyFcmResponse(404, 'UNREGISTERED').expired).toBe(true);
     expect(classifyFcmResponse(400, 'UNREGISTERED').expired).toBe(true);
+  });
+
+  test('a bare 404 / NOT_FOUND is NOT expiry (could be a project/path misconfig)', () => {
+    // FCM returns 404 for both an unregistered token (with UNREGISTERED detail) AND
+    // a misconfigured project_id/path — only the former should deactivate the row.
+    expect(classifyFcmResponse(404, 'NOT_FOUND').expired).toBe(false);
+    expect(classifyFcmResponse(404, null).expired).toBe(false);
   });
 
   test('auth / quota / payload / server errors are NOT expired (fail soft)', () => {

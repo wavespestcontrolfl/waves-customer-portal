@@ -92,14 +92,16 @@ function buildFcmMessage(deviceToken, notification = {}) {
 }
 
 /**
- * Pure: classify an FCM v1 response. Only a genuinely unregistered token is
- * "expired" (deactivate the row). Auth/quota/payload/server errors are NOT token
- * expiry — fail soft, so one misconfig (bad service account, wrong project) can't
- * deactivate every Android subscription. Mirrors apns.js's 410-only rule.
+ * Pure: classify an FCM v1 response. Only the FCM `UNREGISTERED` error code marks
+ * a token "expired" (deactivate the row). Everything else — including a BARE 404
+ * / NOT_FOUND, which FCM also returns for a misconfigured project_id or API path,
+ * plus auth/quota/payload/server errors — is a non-expiring failure. This fails
+ * soft so one misconfig (wrong service account / project) can't deactivate every
+ * Android subscription. Mirrors apns.js's 410/Unregistered-only rule.
  */
 function classifyFcmResponse(status, errorCode) {
   if (status >= 200 && status < 300) return { ok: true };
-  if (status === 404 || /UNREGISTERED/i.test(errorCode || '')) {
+  if (/UNREGISTERED/i.test(errorCode || '')) {
     return { ok: false, expired: true, reason: errorCode || 'unregistered' };
   }
   return { ok: false, expired: false, reason: errorCode || `fcm_status_${status || 0}` };
