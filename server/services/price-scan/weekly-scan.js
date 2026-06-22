@@ -15,6 +15,7 @@ const { runScanMany } = require('./scanner');
 const { createDraft } = require('./price-match-draft');
 const { selectAdapterKey } = require('./adapters/registry');
 const { quantityToOz } = require('./extract');
+const { getVendorLoginCredentials } = require('../vendor-credentials');
 
 // A pack size is only usable if it normalizes to oz — that's exactly what verifyMatch's
 // size gate and the per-unit ($/oz) comparison need. In practice vendor_pricing.quantity
@@ -39,11 +40,15 @@ const DEFAULT_LIMIT = Number(process.env.PRICE_SCAN_MAX_PRODUCTS) || 25;
 // browser and an unapproved price never becomes a SiteOne baseline.
 const APPROVED_STATES = ['approved', 'auto_approved'];
 
-// The public storefronts we have a bespoke, search-capable adapter for. A vendor is
-// only scanned if it's price_scraping_enabled AND resolves to one of these (Veseris
-// arrives with the PR2b login adapter; everything else falls to the generic adapter,
-// which needs a direct URL and no search, so it's not driven autonomously).
-const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone'];
+// The storefronts we have a bespoke, search-capable adapter for. A vendor is only scanned
+// if it's price_scraping_enabled AND resolves to one of these; everything else falls to the
+// generic adapter (direct URL, no search), so it's not driven autonomously. Veseris is a
+// LOGIN adapter — it additionally needs decrypted credentials attached (see LOGIN_ADAPTER_KEYS).
+const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris'];
+
+// Adapters that authenticate before scraping (account pricing). For these, the weekly scan
+// decrypts the vendor's stored credentials and attaches them to the scan spec.
+const LOGIN_ADAPTER_KEYS = new Set(['veseris']);
 
 const hostOf = (url) => {
   try { return new URL(String(url)).hostname.toLowerCase(); } catch { return null; }
@@ -136,6 +141,27 @@ function toScanSpec(row, vendors = [], urlByVendorId = null) {
     url: (urlByVendorId && urlByVendorId.get && urlByVendorId.get(v.id)) || null,
   }));
   return { product, vendors: vlist, spend: Number(row.monthly_cost_estimate) || 0 };
+}
+
+// Attach decrypted login credentials to the spec vendors that use a login adapter (Veseris).
+// Resolves each vendor's creds ONCE (cached by vendor_id). A vendor with no usable creds is
+// left without — base.js then skips it cleanly (login_required) rather than scraping a gated,
+// unpriced session. Injectable getCreds for tests.
+async function attachLoginCredentials(db, specs, deps = {}) {
+  const getCreds = deps.getVendorLoginCredentials || getVendorLoginCredentials;
+  const cache = new Map();
+  for (const spec of specs || []) {
+    for (const v of (spec.vendors || [])) {
+      if (!LOGIN_ADAPTER_KEYS.has(selectAdapterKey({ name: v.name, url: v.url }))) continue;
+      if (!cache.has(v.vendor_id)) {
+        let creds = null;
+        try { creds = await getCreds(db, v.vendor_id); } catch (err) { creds = null; }
+        cache.set(v.vendor_id, creds);
+      }
+      const creds = cache.get(v.vendor_id);
+      if (creds && creds.password && (creds.username || creds.email)) v.credentials = creds;
+    }
+  }
 }
 
 // PURE: dedup baseline rows to one per product (caller orders by recency so the first
@@ -281,6 +307,9 @@ async function runWeeklyScan(opts = {}) {
     return { ok: true, evaluated: 0, scanned: 0, opportunities: 0, draftId: null, vendors: vendors.map((v) => v.name) };
   }
 
+  // Decrypt + attach login credentials for any login-adapter vendors (Veseris account pricing).
+  await (opts.attachLoginCredentials || attachLoginCredentials)(db, specs, opts);
+
   let results;
   try {
     results = await scanMany(specs, { headless: true });
@@ -339,6 +368,8 @@ module.exports = {
   tallyBreakdown,
   isBrowserUnavailable,
   isOnHost,
+  attachLoginCredentials,
+  LOGIN_ADAPTER_KEYS,
   scrapableVendors,
   matchKey,
   activeMatchKeys,

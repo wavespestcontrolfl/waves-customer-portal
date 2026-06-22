@@ -7,6 +7,7 @@ const {
   isOnHost,
   matchKey,
   runWeeklyScan,
+  attachLoginCredentials,
 } = require('../services/price-scan/weekly-scan');
 
 const baselineRow = (over = {}) => ({
@@ -232,5 +233,30 @@ describe('runWeeklyScan (injected deps)', () => {
     const scanMany = jest.fn(async () => { throw new Error("Cannot find module 'playwright'"); });
     const r = await runWeeklyScan({ vendorByName: siteoneOnly, vendors: VENDORS, specs, scanMany });
     expect(r).toEqual({ ok: false, reason: 'browser_unavailable', evaluated: 3 });
+  });
+});
+
+describe('attachLoginCredentials (login adapters get decrypted creds)', () => {
+  const veserisSpec = () => ({ product: { name: 'X' }, vendors: [{ vendor_id: 'ves', name: 'Veseris', url: 'https://veseris.com' }] });
+  test('attaches creds to a Veseris (login adapter) vendor, resolved once per vendor', async () => {
+    const getVendorLoginCredentials = jest.fn(async () => ({ username: 'u@x.com', email: 'u@x.com', password: 'pw', loginUrl: 'https://veseris.com/login' }));
+    const specs = [veserisSpec(), veserisSpec()];
+    await attachLoginCredentials({}, specs, { getVendorLoginCredentials });
+    expect(specs[0].vendors[0].credentials).toMatchObject({ email: 'u@x.com', password: 'pw' });
+    expect(specs[1].vendors[0].credentials).toMatchObject({ password: 'pw' });
+    expect(getVendorLoginCredentials).toHaveBeenCalledTimes(1); // cached by vendor_id
+  });
+  test('does NOT attach to a non-login (public) vendor', async () => {
+    const getVendorLoginCredentials = jest.fn(async () => ({ username: 'u', email: 'u', password: 'pw' }));
+    const specs = [{ product: { name: 'X' }, vendors: [{ vendor_id: 'sol', name: 'Solutions Pest & Lawn', url: 'https://www.solutionsstores.com' }] }];
+    await attachLoginCredentials({}, specs, { getVendorLoginCredentials });
+    expect(specs[0].vendors[0].credentials).toBeUndefined();
+    expect(getVendorLoginCredentials).not.toHaveBeenCalled();
+  });
+  test('leaves a login vendor WITHOUT creds when none are stored (clean skip downstream)', async () => {
+    const getVendorLoginCredentials = jest.fn(async () => ({ username: null, email: null, password: null, loginUrl: null }));
+    const specs = [veserisSpec()];
+    await attachLoginCredentials({}, specs, { getVendorLoginCredentials });
+    expect(specs[0].vendors[0].credentials).toBeUndefined();
   });
 });

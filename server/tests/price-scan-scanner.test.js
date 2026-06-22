@@ -167,8 +167,8 @@ describe('adapter registry getAdapter', () => {
     expect(a.key).toBe('domyown');
     expect(typeof a.fetchCandidate).toBe('function');
   });
-  test('unknown key falls back to generic', () => {
-    expect(getAdapter('veseris').key).toBe('generic'); // veseris arrives in PR2b
+  test('veseris resolves to its login adapter; unknown key falls back to generic', () => {
+    expect(getAdapter('veseris').key).toBe('veseris'); // now built (B2B login adapter)
     expect(getAdapter('nope').key).toBe('generic');
   });
 });
@@ -193,5 +193,21 @@ describe('extractSizeToken', () => {
   test('mixed numbers and dotted fl. oz normalize for parsePackSize', () => {
     expect(extractSizeToken('Drum 2 1/2 gal')).toBe('2 1/2 gal');
     expect(extractSizeToken('Bifen 30 fl. oz Bottle')).toBe('30 fl oz'); // dot dropped
+  });
+});
+
+describe('veseris login-URL host guard (security)', () => {
+  const { isTrustedVeserisLoginUrl } = require('../services/price-scan/adapters/veseris');
+  test('accepts https veseris.com hosts', () => {
+    expect(isTrustedVeserisLoginUrl('https://veseris.com/default/customer/account/login/')).toBe(true);
+    expect(isTrustedVeserisLoginUrl('https://www.veseris.com/customer/account/login')).toBe(true);
+  });
+  test('rejects non-https, foreign hosts, and look-alikes (fail closed)', () => {
+    expect(isTrustedVeserisLoginUrl('http://veseris.com/login')).toBe(false); // not https
+    expect(isTrustedVeserisLoginUrl('https://evil.com/login')).toBe(false);
+    expect(isTrustedVeserisLoginUrl('https://veseris.com.evil.com/login')).toBe(false); // look-alike
+    expect(isTrustedVeserisLoginUrl('https://notveseris.com/login')).toBe(false);
+    expect(isTrustedVeserisLoginUrl('garbage')).toBe(false);
+    expect(isTrustedVeserisLoginUrl(null)).toBe(false);
   });
 });
