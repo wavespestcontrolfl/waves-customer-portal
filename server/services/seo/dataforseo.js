@@ -123,7 +123,10 @@ class DataForSEO {
     // order_by uses the COMMA format ('rank,desc'); the prior 'rank.desc' (dot)
     // is rejected by DataForSEO with 40501 Invalid Field and silently returned
     // null — which is why scanCompetitorGaps never populated seo_competitor_backlinks.
-    const task = { target, limit, order_by: ['rank,desc'] };
+    // rank_scale: one_hundred so domain_from_rank is 0–100 (DR semantics) — the
+    // default one_thousand would store inflated DR in seo_backlinks /
+    // seo_competitor_backlinks once this (newly un-broken) call returns data.
+    const task = { target, limit, order_by: ['rank,desc'], rank_scale: 'one_hundred' };
     if (dofollowOnly) task.filters = ['dofollow', '=', true];
     return this.request('/backlinks/backlinks/live', [task]);
   }
