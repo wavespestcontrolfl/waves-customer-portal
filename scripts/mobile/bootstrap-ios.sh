@@ -53,6 +53,20 @@ if [ -f "$APPDELEGATE" ]; then
   fi
 fi
 
+# Native capability usage strings, required by App review (Face ID app-lock +
+# camera/photo capture). Idempotent: Add fails if the key exists, then Set.
+PLIST="ios/App/App/Info.plist"
+if [ -f "$PLIST" ]; then
+  set_plist() {
+    /usr/libexec/PlistBuddy -c "Add :$1 string $2" "$PLIST" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Set :$1 $2" "$PLIST"
+  }
+  set_plist NSFaceIDUsageDescription "Unlock the Waves app with Face ID."
+  set_plist NSCameraUsageDescription "Take photos of pests or lawn issues to share with your technician."
+  set_plist NSPhotoLibraryUsageDescription "Attach photos from your library to share with your technician."
+  echo "==> Info.plist usage strings set (Face ID, camera, photo library) ✓"
+fi
+
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"
 cat <<'NOTES'
