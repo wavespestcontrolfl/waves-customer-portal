@@ -334,6 +334,7 @@ router.post('/publish', async (req, res, next) => {
           content,
           imageUrl: imageUrl || undefined,
           locationId: platform === 'gbp' ? locationId : undefined,
+          mediaFallback: false, // photo-first: never downgrade to a text-only post
         });
         // Keep the claim regardless of the result: once postToSingle is invoked the
         // outcome is ambiguous (a returned failure or a thrown timeout may still have
