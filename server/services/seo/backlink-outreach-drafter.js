@@ -119,6 +119,7 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
   }
   const profile = worker.businessProfile();
   let drafted = 0, skipped = 0, failed = 0;
+  const samples = []; // dry-run previews — returned to the CLI's stdout, NOT logged (email/body are PII)
 
   for (const p of claimed) {
     const email = p.contact_email;
@@ -133,7 +134,9 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
         failed++; continue;
       }
       if (dryRun) {
-        logger.info(`[outreach-drafter][dry] ${p.target_domain} (T${p.tier ?? '?'} ${p.link_type}) → ${email}\n  SUBJECT: ${draft.subject}\n  BODY: ${draft.body.replace(/\n+/g, ' / ').slice(0, 320)}…`);
+        // Don't log the recipient or body (PII / verbose) — collect for the CLI to print to stdout.
+        logger.info(`[outreach-drafter][dry] drafted ${p.target_domain} (T${p.tier ?? '?'} ${p.link_type})`);
+        samples.push({ domain: p.target_domain, tier: p.tier, link_type: p.link_type, to_email: email, subject: draft.subject, body: draft.body });
         drafted++; continue;
       }
       const res = await worker.report({
@@ -150,11 +153,12 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
   }
 
   // Dry-run claimed leases but never reported (which is what releases a lease), so
-  // release them now — keeps a preview side-effect-free (no rows left locked).
-  if (dryRun) await worker.releaseClaims(claimed.map((p) => p.id)).catch(() => {});
+  // release them now — keeps a preview side-effect-free. Pass {id, lease_token} so
+  // we only clear OUR exact lease (never a newer one from a reclaim).
+  if (dryRun) await worker.releaseClaims(claimed.map((p) => ({ id: p.id, lease_token: p.lease_token }))).catch(() => {});
 
   logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${drafted} skipped=${skipped} failed=${failed}${dryRun ? ' (DRY-RUN)' : ''}`);
-  return { claimed: claimed.length, drafted, skipped, failed };
+  return { claimed: claimed.length, drafted, skipped, failed, ...(dryRun ? { samples } : {}) };
 }
 
 module.exports = { run };

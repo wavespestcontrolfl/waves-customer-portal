@@ -235,13 +235,22 @@ async function sweepExpiredClaims(maxHours = 6) {
 }
 
 /** Release specific leases back to the pool (e.g. a dry-run that claimed but won't
- *  report). Only clears rows still claimed; never touches status/attempts. */
-async function releaseClaims(ids = []) {
-  if (!Array.isArray(ids) || ids.length === 0) return { released: 0 };
-  const released = await db('seo_link_prospects')
-    .whereIn('id', ids)
-    .whereNotNull('claimed_at')
-    .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
+ *  report). Takes [{ id, lease_token }] and clears ONLY rows whose claimed_at still
+ *  equals the lease we hold — so if the sweep released and another worker reclaimed
+ *  mid-run, we never clobber that newer lease (optimistic-concurrency, same guard
+ *  as report()). Never touches status/attempts. */
+async function releaseClaims(claims = []) {
+  if (!Array.isArray(claims) || claims.length === 0) return { released: 0 };
+  let released = 0;
+  for (const c of claims) {
+    if (!c || !c.id || !c.lease_token) continue;
+    const leaseDate = new Date(c.lease_token);
+    if (Number.isNaN(leaseDate.getTime())) continue;
+    released += await db('seo_link_prospects')
+      .where({ id: c.id })
+      .where('claimed_at', leaseDate)
+      .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
+  }
   return { released };
 }
 

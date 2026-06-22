@@ -86,7 +86,11 @@ describe('run', () => {
     const r = await drafter.run({ anthropic: fakeAnthropic('{"subject":"S","body":"B\\n— The Waves Pest Control Team"}'), fetchPageFn: noFetch, dryRun: true });
     expect(r.drafted).toBe(1);
     expect(worker.report).not.toHaveBeenCalled();
-    expect(worker.releaseClaims).toHaveBeenCalledWith(['p1']); // dry-run releases its lease
+    // dry-run releases its lease keyed on the exact lease_token (not just id)
+    expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p1', lease_token: '2026-06-22T00:00:00.000Z' }]);
+    // previews are returned (for the CLI's stdout), not logged
+    expect(r.samples).toHaveLength(1);
+    expect(r.samples[0]).toMatchObject({ domain: 'directinspections.com', to_email: 'michael@directinspections.com' });
   });
 
   test('unparseable model output → reports failed (not drafted)', async () => {

@@ -31,6 +31,13 @@ function parseArgs() {
   console.log(`backlink-outreach-draft dryRun=${a.dryRun} batchSize=${a.batchSize}`);
   try {
     const r = await drafter.run({ batchSize: a.batchSize, dryRun: a.dryRun });
+    // Dry-run previews print to STDOUT here (operator terminal), never via the app
+    // logger — recipient emails/bodies must not land in Railway's plain-text logs.
+    for (const s of r.samples || []) {
+      console.log(`\n── ${s.domain}  (T${s.tier ?? '?'} ${s.link_type})  → ${s.to_email}`);
+      console.log(`   SUBJECT: ${s.subject}`);
+      console.log(s.body.split('\n').map((l) => `   ${l}`).join('\n'));
+    }
     console.log(`\nclaimed=${r.claimed} drafted=${r.drafted} skipped=${r.skipped} failed=${r.failed}${r.note ? ` note=${r.note}` : ''}`);
   } catch (err) {
     console.error(`\n[outreach-draft] FAILED: ${err.stack || err.message}`);
