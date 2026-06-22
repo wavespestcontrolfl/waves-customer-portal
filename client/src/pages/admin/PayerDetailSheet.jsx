@@ -312,7 +312,19 @@ function StatementDetail({ payerId, statement, onChanged }) {
           </>
         )}
         {canSend && (
-          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => act("Sent", `${base}/send`, {})}>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!!busy}
+            // A first delivery (finalized) sends `force` so a blocked/suppressed
+            // attempt can be retried after AP fixes the bounce — otherwise it
+            // dedupes against the terminal-blocked row forever. `force` is safe
+            // here: it resolves to the stable base key when nothing's blocked
+            // (still dedupes double-clicks) and only walks to a fresh retry key to
+            // escape an actual block. A sent/viewed resend stays keyless (always
+            // re-sends).
+            onClick={() => act("Sent", `${base}/send`, status === "finalized" ? { force: true } : {})}
+          >
             {status === "finalized" ? "Send to AP" : "Resend"}
           </Button>
         )}
