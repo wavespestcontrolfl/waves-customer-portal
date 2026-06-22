@@ -187,7 +187,10 @@ ${JSON.stringify(list)}`;
       intent_class: normalizeIntent(hit.intent_class, c.domain, c.source_url),
       relevance_0_100: Math.max(0, Math.min(100, Number(hit.relevance_0_100) || 0)),
       is_local_swfl: !!hit.is_local_swfl,
-      lead_value_tier: Number(hit.lead_value_tier) || 0,
+      // Preserve a missing/invalid tier as undefined (NOT 0) so tierFor() can use
+      // its intent fallback — coercing to 0 would mark it explicit "none" → tier 5
+      // and underscore an editorial/resource prospect the intent could place.
+      lead_value_tier: Number.isFinite(Number(hit.lead_value_tier)) ? Number(hit.lead_value_tier) : undefined,
       is_haro_platform: !!hit.is_haro_platform || HARO_PLATFORMS.has(String(c.domain).toLowerCase()),
       target_topic: normalizeTopic(hit.target_topic),
       suggested_anchor: hit.suggested_anchor || null,

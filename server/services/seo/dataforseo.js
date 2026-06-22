@@ -135,7 +135,10 @@ class DataForSEO {
     // No order_by — the referring_domains endpoint rejects it (40501 Invalid
     // Field). Callers sort client-side; DataForSEO returns highest-rank first.
     // offset enables paging past the 1000/call cap (result carries total_count).
-    return this.request('/backlinks/referring_domains/live', [{ target, limit, offset }]);
+    // rank_scale: one_hundred so `rank` comes back 0–100 (DR semantics) — the
+    // default one_thousand would saturate scoreProspect's 0–100 DR clamp and
+    // store 1000-scale values as DR.
+    return this.request('/backlinks/referring_domains/live', [{ target, limit, offset, rank_scale: 'one_hundred' }]);
   }
 
   // Bulk domain rank for up to 1000 targets in ONE call (credit discipline).

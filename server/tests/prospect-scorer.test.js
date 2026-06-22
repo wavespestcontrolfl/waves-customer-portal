@@ -128,6 +128,15 @@ describe('classifyBatch LLM path', () => {
     expect(b.target_topic).toBe('wdo');        // 'WDO' canonicalized → matches /wdo money page
   });
 
+  test('a model response omitting lead_value_tier stays undefined → intent fallback (not tier 5)', async () => {
+    const fake = {
+      messages: { create: async () => ({ content: [{ text: '[{"i":0,"domain":"localnews.com","intent_class":"editorial","relevance_0_100":65,"is_local_swfl":true}]' }] }) },
+    };
+    const [c] = await scorer.classifyBatch([{ domain: 'localnews.com' }], { anthropic: fake });
+    expect(c.lead_value_tier).toBeUndefined();
+    expect(scorer.scoreProspect({ domain_rating: 40 }, c, { has_contact_path: true }).tier).toBe(2); // editorial intent fallback, not 5
+  });
+
   test('falls back to heuristic when the model errors', async () => {
     const boom = { messages: { create: async () => { throw new Error('500'); } } };
     const [c] = await scorer.classifyBatch([{ domain: 'helpareporter.com' }], { anthropic: boom });
