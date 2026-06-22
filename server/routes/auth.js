@@ -9,6 +9,34 @@ const { generateToken, generateRefreshToken, authenticate } = require('../middle
 const logger = require('../services/logger');
 
 // =========================================================================
+// App Store reviewer login — lets Apple reviewers sign in without receiving
+// an SMS code (the app's login is phone + SMS, which reviewers can't use).
+// Active ONLY when BOTH env vars are set, and ONLY for the exact demo phone
+// + code. It maps to a real demo customer row (created by the owner) matched
+// by REVIEW_LOGIN_PHONE. Zero effect on real customer auth.
+//   REVIEW_LOGIN_PHONE = +1XXXXXXXXXX (the demo customer's phone)
+//   REVIEW_LOGIN_CODE  = a fixed 6-digit code the reviewer types
+// =========================================================================
+function normalizePhoneDigits(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+function reviewLoginConfig() {
+  const phone = (process.env.REVIEW_LOGIN_PHONE || '').trim();
+  const code = (process.env.REVIEW_LOGIN_CODE || '').trim();
+  if (!phone || !code) return null;
+  return { phoneDigits: normalizePhoneDigits(phone), code };
+}
+function isReviewPhone(phone) {
+  const rl = reviewLoginConfig();
+  return Boolean(rl && normalizePhoneDigits(phone) === rl.phoneDigits);
+}
+function isReviewLogin(phone, code) {
+  const rl = reviewLoginConfig();
+  return Boolean(rl && normalizePhoneDigits(phone) === rl.phoneDigits && code === rl.code);
+}
+
+// =========================================================================
 // Rate limiters — protect OTP endpoints from brute force / enumeration
 // =========================================================================
 const sendCodeLimiter = rateLimit({
@@ -194,6 +222,12 @@ router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
 
     const { phone } = await schema.validateAsync(req.body);
 
+    // App Store reviewer demo phone has no real SMS — skip Twilio entirely.
+    if (isReviewPhone(phone)) {
+      logger.info('[auth] review-login send-code (SMS skipped)');
+      return res.json(UNIFORM_SEND_RESPONSE);
+    }
+
     // Check customer exists — but DO NOT leak existence in the response.
     const customer = await activeCustomerByPhone(phone);
 
@@ -226,7 +260,12 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
 
     const { phone, code } = await schema.validateAsync(req.body);
 
-    const result = await TwilioService.checkVerificationCode(phone, code);
+    // App Store reviewer bypass: exact demo phone + fixed code skips Twilio.
+    // Still requires a real demo customer row matching REVIEW_LOGIN_PHONE below.
+    const reviewBypass = isReviewLogin(phone, code);
+    const result = reviewBypass
+      ? { success: true }
+      : await TwilioService.checkVerificationCode(phone, code);
 
     // Uniform error for invalid code OR unknown customer to avoid enumeration.
     const invalidResponse = { error: 'Invalid or expired verification code' };
@@ -234,6 +273,7 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
     if (!result.success) {
       return res.status(401).json(invalidResponse);
     }
+    if (reviewBypass) logger.info('[auth] review-login verify-code bypass used');
 
     const customer = await activeCustomerByPhone(phone);
 
