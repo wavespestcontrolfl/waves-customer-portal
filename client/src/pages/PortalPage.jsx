@@ -9745,11 +9745,17 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   };
 
   // Native iOS shell: use the Capacitor camera/photo picker instead of the
-  // <input type="file"> (more reliable inside a WKWebView). No-op on web.
+  // <input type="file"> (more reliable inside a WKWebView). If the Camera plugin
+  // isn't in this build (older binary loading newer web code), fall back to the
+  // file input so the photo tile never silently does nothing. User cancel = no-op.
   const handleNativePhoto = async () => {
     if (photosRemaining <= 0) return;
-    const photo = await captureCameraPhoto();
-    if (photo) setPhotos(prev => [...prev, photo].slice(0, photoLimit));
+    const result = await captureCameraPhoto();
+    if (result.photo) {
+      setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
+    } else if (result.unavailable) {
+      fileRef.current?.click();
+    }
   };
 
   const removePhoto = (idx) => {
