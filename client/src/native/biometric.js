@@ -3,14 +3,16 @@ import { isNativeApp } from './platform';
 /**
  * Face ID / Touch ID app-lock helper (native only).
  *
- * Fails OPEN (returns true = unlocked) whenever biometry can't actually run: on
- * the web, when the native plugin isn't present in this build, when biometry is
- * unavailable, or when nothing is enrolled. This matters because the shell loads
- * the LIVE portal (capacitor.config.json) — a web deploy of this code can run
- * inside an OLDER installed binary that doesn't yet bundle the BiometricAuth
- * native plugin, and we must never trap a logged-in customer behind a lock they
- * can't clear. Only an explicit failed/cancelled biometric PROMPT (plugin
- * present and actually ran) returns false (stay locked).
+ * Fail-OPEN is deliberate but NARROW — only when biometry could never run here:
+ * on the web, when the native plugin isn't in this build (the shell loads the
+ * LIVE portal, so newer web code can run inside an older binary), or when the
+ * device has no biometry / nothing enrolled. We must not trap a logged-in
+ * customer behind a lock the build/device can't satisfy.
+ *
+ * CRUCIALLY, biometric LOCKOUT (too many failed attempts) is NOT fail-open — that
+ * would reward failed attempts by opening the app. On lockout we still require an
+ * explicit unlock via the device passcode (allowDeviceCredential). Only an
+ * explicit cancelled/failed prompt keeps the app locked.
  */
 let biometryUnavailable = false;
 
@@ -20,34 +22,47 @@ export async function authenticateBiometric(reason = 'Unlock Waves') {
 
   // Load the plugin. Missing in this build (older binary, newer web code) → open.
   let BiometricAuth;
+  let BiometryErrorType;
   try {
-    ({ BiometricAuth } = await import('@aparajita/capacitor-biometric-auth'));
+    ({ BiometricAuth, BiometryErrorType } = await import('@aparajita/capacitor-biometric-auth'));
   } catch {
     biometryUnavailable = true;
     return true;
   }
 
-  // Probe availability. A throw here means the native plugin isn't implemented
-  // in this build (or biometry is unusable) → fail open, don't lock out.
+  // Probe availability. A throw here means the plugin isn't implemented in this
+  // build → fail open.
+  let info;
   try {
-    const info = await BiometricAuth.checkBiometry();
-    if (!info?.isAvailable) {
+    info = await BiometricAuth.checkBiometry();
+  } catch {
+    biometryUnavailable = true;
+    return true;
+  }
+
+  if (!info?.isAvailable) {
+    // "Never had biometry" (unsupported / not enrolled) → fail open so a customer
+    // without Face ID isn't trapped. But LOCKOUT (too many failed attempts) must
+    // NOT open — fall through to a passcode prompt instead.
+    const code = info?.code;
+    const lockedOut = (BiometryErrorType && code === BiometryErrorType.biometryLockout)
+      || /lockout/i.test(`${code ?? ''} ${info?.reason ?? ''}`);
+    if (!lockedOut) {
       biometryUnavailable = true;
       return true;
     }
-  } catch {
-    biometryUnavailable = true;
-    return true;
+    // locked out → continue to authenticate() with the device-credential fallback.
   }
 
-  // Plugin present and biometry available — now an explicit prompt. Only a real
-  // cancel/failure keeps the app locked.
+  // Prompt: biometric when available, else (lockout) the OS falls back to the
+  // device passcode via allowDeviceCredential. Only an explicit cancel/fail
+  // keeps the app locked.
   try {
     await BiometricAuth.authenticate({
       reason,
       cancelTitle: 'Cancel',
       iosFallbackTitle: 'Use Passcode',
-      allowDeviceCredential: true, // passcode fallback so the user is never stuck
+      allowDeviceCredential: true,
     });
     return true;
   } catch {
