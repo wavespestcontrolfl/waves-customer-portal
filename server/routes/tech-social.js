@@ -346,14 +346,12 @@ router.post('/publish', async (req, res, next) => {
       }
     }
 
-    // Don't leave an orphan: if a photo was hosted but no platform actually
-    // published, delete it so a customer field photo isn't left publicly
-    // fetchable — and don't record the (now-deleted) URL in the audit row.
-    const anyPublished = results.some((r) => r && r.success);
-    if (imageUrl && !anyPublished) {
-      await social.deleteSocialImage(imageUrl).catch(() => {});
-      imageUrl = null;
-    }
+    // We intentionally do NOT delete the hosted image on an all-failed publish:
+    // once postToSingle is invoked the outcome is ambiguous (a timeout may have
+    // created the post — which is why the claim is kept above), so deleting the
+    // media could break a live post. Missing-CDN can't orphan either, since
+    // isImageHostingConfigured() gates the upload; the unguessable key bounds any
+    // residual exposure when hosting truly succeeded with no post.
 
     // Audit ONLY the validated captions (those that passed content + PII checks
     // and were attempted) — never persist a PII-rejected caption to history.

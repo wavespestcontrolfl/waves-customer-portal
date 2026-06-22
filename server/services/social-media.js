@@ -1424,7 +1424,17 @@ const SocialMediaService = {
       return { platform, success: false, dryRun: true, content: text };
     }
 
-    if (platform === 'facebook') return postToFacebook(text, link, imageUrl);
+    if (platform === 'facebook') {
+      if (!imageUrl) return postToFacebook(text, link);
+      // Preserve the text/link fallback: if Meta can't fetch/accept the image,
+      // still create the FB post from text + link rather than failing outright.
+      try {
+        return await postToFacebook(text, link, imageUrl);
+      } catch (err) {
+        logger.warn(`[social] FB photo post failed (${err.message}) — falling back to text/link`);
+        return postToFacebook(text, link);
+      }
+    }
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
     if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
@@ -1473,26 +1483,6 @@ function isImageHostingConfigured() {
     && !!(config.s3 && config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket);
 }
 
-// Delete a previously hosted social image (CDN URL → S3 key). Used to clean up a
-// field photo when every publish attempt failed, so an orphaned customer photo
-// isn't left publicly fetchable.
-async function deleteSocialImage(url) {
-  if (!url || !config.s3.accessKeyId || !config.s3.bucket) return;
-  try {
-    const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-    const key = new URL(url).pathname.replace(/^\/+/, '');
-    if (!key) return;
-    const s3 = new S3Client({
-      region: config.s3.region,
-      credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
-    });
-    await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
-    logger.info(`[social] deleted hosted image ${key}`);
-  } catch (err) {
-    logger.warn(`[social] deleteSocialImage failed: ${err.message}`);
-  }
-}
-
 module.exports = SocialMediaService;
 module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 module.exports.isPausedByAdmin = isPausedByAdmin;
@@ -1508,5 +1498,4 @@ module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
 module.exports.buildSocialFailureAlert = buildSocialFailureAlert;
 // Reused by tech-social-caption.js so field-photo captions share one brand voice.
 module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;
-module.exports.deleteSocialImage = deleteSocialImage;
 module.exports.isImageHostingConfigured = isImageHostingConfigured;
