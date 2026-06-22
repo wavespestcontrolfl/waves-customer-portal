@@ -45,19 +45,24 @@ function hostMatchesExpected(host, expected) {
 }
 
 /**
- * Egress decision for the Playwright route guard. The browser may ONLY contact the
- * pinned allowlisted host (apex or its www, which we pin to the same verified public
- * IP); EVERY other request — off-host sub-resource, redirect, or a non-www sub-domain
- * we didn't pin — is aborted BEFORE it connects, so nothing unpinned is ever resolved
- * and there is no off-host channel to exfiltrate through. Synchronous (no DNS): the
- * private-IP safety comes from pinning + the deployment egress firewall, not a lookup.
+ * Egress decision for the Playwright route guard. The browser may contact ONLY a host
+ * whose EXACT hostname was successfully DNS-pinned to a verified public IP (allowedHosts
+ * = the pin set). EVERY other request — off-host sub-resource, redirect, OR an
+ * apex/www sibling we couldn't pin — is aborted BEFORE it connects, so Chromium never
+ * does its own (rebindable) lookup and there is no off-host exfil channel. Exact-match,
+ * never normalized: a host that isn't in the pin set is refused even if it's the same
+ * registrable domain (an unpinned sibling would otherwise reopen the rebinding gap).
  */
-function requestAllowed({ url, expectedHost }) {
+function requestAllowed({ url, allowedHosts }) {
   let host = '';
-  try { host = new URL(url).hostname; } catch { return false; }
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return false; }
   if (!host || ssrf.isBlockedHostname(host)) return false;
-  return !!expectedHost && hostOf(url) === expectedHost; // apex/www of the pinned host only
+  return allowedHosts instanceof Set && allowedHosts.has(host);
 }
+
+// The plan contract's legal "blocked" values — anything else (omitted/false/'') is a
+// malformed/injected plan and must fail closed, not proceed to fill+submit.
+const BLOCKED_VALUES = new Set([null, 'account', 'captcha', 'payment', 'phone']);
 
 /**
  * Resolve a host to its PUBLIC IPs for DNS-pinning. Fail-closed: returns [] if the
@@ -201,7 +206,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       await context.route('**/*', (route) => {
         const req = route.request();
         let ok = false;
-        try { ok = requestAllowed({ url: req.url(), expectedHost }); } catch { ok = false; }
+        try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
         if (!ok) {
           // If we abort the SUBMIT itself (form POST or the post-submit navigation to an
           // off-host/unpinned endpoint), record it — the submission did not land.
@@ -219,18 +224,31 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       catch (e) { logger.warn(`[form-filler] routeWebSocket setup failed: ${e.message}`); }
     }
     await page.goto(submitUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-    // Off-host redirect guard: if the page navigated away from the allowlisted host,
-    // bail before screenshotting / sending anything to the model.
-    if (expectedHost && typeof page.url === 'function' && !hostMatchesExpected(hostOf(page.url()), expectedHost)) {
-      return { outcome: 'failed', errorCode: 'offsite_redirect', notes: `redirected off ${expectedHost}` };
+    // Off-pin redirect guard: if the page landed on a host we did NOT pin (the route
+    // guard should already have aborted it), bail before screenshotting / calling the model.
+    const landedHost = (() => { try { return new URL(page.url()).hostname.toLowerCase(); } catch { return ''; } })();
+    if (typeof page.url === 'function' && !pinned.has(landedHost)) {
+      return { outcome: 'failed', errorCode: 'offsite_redirect', notes: `landed off the pinned host: ${landedHost || 'unknown'}` };
     }
     await page.waitForTimeout(1500);
 
     const shot1 = (await page.screenshot({ fullPage: true, type: 'png' }));
     const plan = await callVision(client, shot1.toString('base64'), planPrompt(nap));
     if (!plan || typeof plan !== 'object') return { outcome: 'failed', errorCode: 'plan_parse', screenshot: shot1, notes: 'no plan' };
+    // FAIL-CLOSED full-schema validation BEFORE touching the page. A malformed/injected
+    // plan (blocked omitted/false/'' , non-boolean form_present, non-array actions, or an
+    // unexpected action type) must NOT slip past the gate checks into fill+submit.
+    if (!BLOCKED_VALUES.has(plan.blocked) || typeof plan.form_present !== 'boolean' || !Array.isArray(plan.actions)) {
+      return { outcome: 'failed', errorCode: 'plan_invalid', screenshot: shot1, notes: 'malformed plan (blocked/form_present/actions)' };
+    }
     if (plan.blocked) return { outcome: `blocked_${plan.blocked}`.replace('blocked_phone', 'blocked_phone_verification'), errorCode: `blocked_${plan.blocked}`, screenshot: shot1, notes: plan.notes };
-    if (plan.form_present !== true || !Array.isArray(plan.actions) || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: plan.notes || 'no form' };
+    if (!plan.form_present || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: plan.notes || 'no form' };
+    // Every action must be a known type — an unexpected type (click/upload/etc.) signals
+    // a plan we can't faithfully execute, so reject the whole plan rather than submit a
+    // form with steps silently dropped.
+    if (!plan.actions.every((a) => a && ALLOWED_ACTIONS.has(a.action))) {
+      return { outcome: 'failed', errorCode: 'plan_invalid', screenshot: shot1, notes: 'unexpected action type in plan' };
+    }
 
     // Validate the plan SHAPE before touching the page: exactly one submit action, and
     // it must be the FINAL action. We then run actions[0..-2] as fields and the last as

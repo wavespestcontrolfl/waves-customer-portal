@@ -204,7 +204,7 @@ describe('fillCitationForm', () => {
     expect(r.errorCode).toBe('no_browser');
   });
 
-  test('P1: model-emitted clicks are never executed (only fill/select/check + final submit)', async () => {
+  test('P1: a plan containing an unexpected action type (click) → plan_invalid, fail-closed (nothing filled/submitted)', async () => {
     const log = [];
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
@@ -213,10 +213,9 @@ describe('fillCitationForm', () => {
         { success: true, pending: false, live_url: 'https://x.com/ok' },
       ),
     }));
-    expect(r.outcome).toBe('placed');
-    expect(log.find((a) => a[1] === 'button.btn-primary')).toBeUndefined(); // arbitrary click never fired
-    expect(log).toContainEqual(['fill', '#n', 'W']);
-    expect(log).toContainEqual(['click', '#go']); // only the explicit final submit pressed a button
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('plan_invalid');
+    expect(log).toHaveLength(0); // rejected before any action
   });
 
   test('P1: plan with no single final submit → failed up front, nothing filled', async () => {
@@ -231,17 +230,34 @@ describe('fillCitationForm', () => {
     expect(log).toHaveLength(0); // rejected before any fill
   });
 
-  test('ignores non-allowlisted action types (e.g. upload) the model might emit', async () => {
+  test('a plan with a file upload (or any non-vocab action) → plan_invalid, never submitted', async () => {
     const log = [];
-    await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'upload', selector: '#logo', file: 'logo' }, { action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
         { success: true, live_url: null },
       ),
     }));
-    expect(log.find((a) => a[0] === 'upload')).toBeUndefined(); // upload never executed
-    expect(log).toContainEqual(['fill', '#n', 'W']);
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('plan_invalid');
+    expect(log).toHaveLength(0);
+  });
+
+  test('P1: a plan with blocked omitted/false (not null) + actions → plan_invalid, never fills (fail-closed)', async () => {
+    const log = [];
+    const omitted = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(omitted.outcome).toBe('failed');
+    expect(omitted.errorCode).toBe('plan_invalid');
+    const falsey = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([]),
+      anthropic: fakeAnthropic({ form_present: true, blocked: false, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(falsey.errorCode).toBe('plan_invalid');
+    expect(log).toHaveLength(0);
   });
 
   test('no submit action in plan → failed (never half-submits silently)', async () => {
@@ -300,31 +316,34 @@ describe('fillCitationForm', () => {
   });
 });
 
-describe('requestAllowed (egress lock — pinned host only)', () => {
+describe('requestAllowed (egress lock — EXACTLY the pinned host set)', () => {
   const { requestAllowed } = _internals;
-  test('allows the pinned apex host', () => {
-    expect(requestAllowed({ url: 'https://x.com/add', expectedHost: 'x.com' })).toBe(true);
+  const both = new Set(['x.com', 'www.x.com']); // apex + www both pinned
+  const apexOnly = new Set(['x.com']);          // www could NOT be pinned
+  test('allows an exact pinned host (apex or www when both pinned)', () => {
+    expect(requestAllowed({ url: 'https://x.com/add', allowedHosts: both })).toBe(true);
+    expect(requestAllowed({ url: 'https://www.x.com/add', allowedHosts: both })).toBe(true);
   });
-  test('allows www of the pinned host (pinned to the same IP)', () => {
-    expect(requestAllowed({ url: 'https://www.x.com/add', expectedHost: 'x.com' })).toBe(true);
+  test('P0: blocks an UNPINNED sibling even on the same registrable domain', () => {
+    // www not in the pin set → must be refused (else Chromium would do its own lookup → rebinding)
+    expect(requestAllowed({ url: 'https://www.x.com/add', allowedHosts: apexOnly })).toBe(false);
   });
   test('blocks any off-host request (no off-host sub-resources → no exfil channel)', () => {
-    expect(requestAllowed({ url: 'https://cdn.other.com/a.css', expectedHost: 'x.com' })).toBe(false);
-    expect(requestAllowed({ url: 'https://evil.example/x', expectedHost: 'x.com' })).toBe(false);
+    expect(requestAllowed({ url: 'https://cdn.other.com/a.css', allowedHosts: both })).toBe(false);
+    expect(requestAllowed({ url: 'https://evil.example/x', allowedHosts: both })).toBe(false);
   });
-  test('blocks an unpinned sub-domain (only apex/www are pinned)', () => {
-    expect(requestAllowed({ url: 'https://listings.x.com/biz', expectedHost: 'x.com' })).toBe(false);
-  });
-  test('blocks a look-alike host that merely ends with the string', () => {
-    expect(requestAllowed({ url: 'https://notx.com/add', expectedHost: 'x.com' })).toBe(false);
+  test('blocks an unpinned sub-domain and a look-alike host', () => {
+    expect(requestAllowed({ url: 'https://listings.x.com/biz', allowedHosts: both })).toBe(false);
+    expect(requestAllowed({ url: 'https://notx.com/add', allowedHosts: both })).toBe(false);
   });
   test('blocks localhost / metadata IP-literal hosts', () => {
-    expect(requestAllowed({ url: 'http://169.254.169.254/latest/meta-data/', expectedHost: 'x.com' })).toBe(false);
-    expect(requestAllowed({ url: 'http://localhost:8080/x', expectedHost: 'x.com' })).toBe(false);
+    expect(requestAllowed({ url: 'http://169.254.169.254/latest/meta-data/', allowedHosts: both })).toBe(false);
+    expect(requestAllowed({ url: 'http://localhost:8080/x', allowedHosts: both })).toBe(false);
   });
-  test('blocks garbage / empty urls', () => {
-    expect(requestAllowed({ url: 'not a url', expectedHost: 'x.com' })).toBe(false);
-    expect(requestAllowed({ url: '', expectedHost: 'x.com' })).toBe(false);
+  test('blocks garbage / empty urls and a missing pin set', () => {
+    expect(requestAllowed({ url: 'not a url', allowedHosts: both })).toBe(false);
+    expect(requestAllowed({ url: '', allowedHosts: both })).toBe(false);
+    expect(requestAllowed({ url: 'https://x.com/add', allowedHosts: null })).toBe(false);
   });
 });
 
