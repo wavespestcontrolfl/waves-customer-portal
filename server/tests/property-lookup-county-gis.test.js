@@ -21,6 +21,7 @@ const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
 const {
   lookupCountyParcelByPoint,
   countyUseDescToPropertyType,
+  dorMajorCategory,
   normalizeCountyName,
   _private: { paoParcelIdFrom },
 } = countyGis;
@@ -64,6 +65,24 @@ describe('countyUseDescToPropertyType', () => {
     expect(countyUseDescToPropertyType('0100')).toBeNull();
     expect(countyUseDescToPropertyType('')).toBeNull();
     expect(countyUseDescToPropertyType(null)).toBeNull();
+  });
+});
+
+describe('dorMajorCategory (codex P2 — 4-digit county DOR codes)', () => {
+  test('collapses ONLY 4-digit county codes to their 2-digit category', () => {
+    expect(dorMajorCategory('0100')).toBe('01'); // Sarasota SFR
+    expect(dorMajorCategory('0405')).toBe('04'); // Sarasota condo (sub-class 05)
+    expect(dorMajorCategory('0800')).toBe('08'); // multifamily
+    expect(dorMajorCategory('6307')).toBe('63'); // ag/other
+  });
+
+  test('passes shorter codes through unchanged (FDOR 3-digit / Manatee 2-digit)', () => {
+    expect(dorMajorCategory('001')).toBe('001'); // FDOR
+    expect(dorMajorCategory('011')).toBe('011'); // FDOR — must stay null downstream
+    expect(dorMajorCategory('01')).toBe('01'); // Manatee
+    expect(dorMajorCategory('89')).toBe('89');
+    expect(dorMajorCategory('')).toBe('');
+    expect(dorMajorCategory(null)).toBe('');
   });
 });
 
@@ -366,6 +385,21 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
     const profile = buildEnrichedProfile(record, {}, 27.4, -82.4);
     expect(profile.category).toBe('RESIDENTIAL');
     expect(profile.propertyType).toBe('Townhome');
+  });
+
+  test('Sarasota 4-digit DOR code resolves the type with no land-use description (codex P2)', () => {
+    const mk = (stcd) => buildCadastralRecord({
+      county: 'Sarasota', parcelId: '0009112081', situsAddress: '1 BAY ST', situsCity: 'VENICE', situsZip: '34285',
+      lotSqft: 6000, livingAreaSqft: 1500, yearBuilt: 2018, dorUseCode: stcd,
+      landUseDescription: null, // Sarasota carries the numeric code only
+      sourceUrl: 'https://ags3.scgov.net/x', gisProvider: 'sarasota_gis',
+    }, 'addr');
+
+    expect(mk('0100').propertyType).toBe('Single Family');
+    expect(mk('0405').propertyType).toBe('Condo'); // would have been null before
+    expect(mk('0800').propertyType).toBe('Multifamily');
+    // raw code preserved for provenance even though the type used the category
+    expect(mk('0405')._raw.dorUseCode).toBe('0405');
   });
 
   test('FDOR cadastral parcel (no gisProvider) still labels as cadastral', () => {

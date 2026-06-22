@@ -21,7 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
-const { lookupCountyParcelByPoint, countyUseDescToPropertyType } = require('./county-parcel-gis');
+const { lookupCountyParcelByPoint, countyUseDescToPropertyType, dorMajorCategory } = require('./county-parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -767,7 +767,7 @@ function buildCadastralRecord(parcel, address) {
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
     stories: coerceInt(parcel.stories, 1, 4),
-    propertyType: useDescType || dorUcPropertyType(parcel.dorUseCode),
+    propertyType: useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode)),
     // County-assessed pool flag (tri-state). For a new build where county GIS is
     // the only public-record hit, this carries the pool into pest/mosquito
     // pricing instead of leaving it for vision to (maybe) catch.

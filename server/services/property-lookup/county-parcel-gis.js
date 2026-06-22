@@ -235,6 +235,20 @@ function normalizeCountyName(county) {
 // condo_*), or null for non-residential / vacant / ambiguous so other sources
 // and the commercial path decide. Numeric-only codes return null here — the
 // DOR-code map handles those.
+// FL DOR property-use codes: the major land-use category is the leading two
+// digits. FDOR statewide returns a 3-digit form (001) and Manatee a 2-digit
+// form (01) that dorUcPropertyType already maps via padStart; Sarasota/Charlotte
+// return a 4-digit COUNTY code (0100 SFR, 0405 condo, 0800 multifamily) whose
+// trailing sub-class digits would otherwise miss the map — and Sarasota has no
+// land-use description to fall back on, so a condo/multifamily would price as a
+// detached home. Collapse ONLY the 4-digit form to its 2-digit category so it
+// lands on the existing map; shorter codes pass through unchanged (preserving
+// the FDOR 3-digit contract, e.g. 011 -> null). (codex P2)
+function dorMajorCategory(code) {
+  const digits = String(code ?? '').replace(/\D/g, '');
+  return digits.length === 4 ? digits.slice(0, 2) : String(code ?? '');
+}
+
 function countyUseDescToPropertyType(description) {
   const s = String(description || '').toLowerCase();
   if (!s) return null;
@@ -387,6 +401,7 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
 module.exports = {
   lookupCountyParcelByPoint,
   countyUseDescToPropertyType,
+  dorMajorCategory,
   normalizeCountyName,
   _private: {
     COUNTY_LAYERS,
