@@ -124,7 +124,8 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}
     // poller reconciles). We only append the reviewer note here; a gate/guard/
     // publish failure throws and leaves the item parked for retry.
     const runner = require('./autonomous-runner');
-    await runner.approveAndPublishNamedCompetitor(opportunityId, { approvedBy: reviewerName });
+    // Publish the exact run that was reviewed (run.id), not "latest for the opp".
+    await runner.approveAndPublishNamedCompetitor(opportunityId, { runId: run?.id, approvedBy: reviewerName });
     if (run?.id) {
       await db('autonomous_runs').where('id', run.id).update({
         reviewer_notes: appendReviewerNote(run.reviewer_notes, {

@@ -149,17 +149,18 @@ function extractColumns(block) {
   return out;
 }
 
-// Parse row objects ORDER-INSENSITIVELY: match each { … } that contains a
-// values:[…] array (row objects carry no nested braces), then pull label +
-// values independently of their order or any extra props between them.
+// Parse row objects ORDER-INSENSITIVELY and regardless of QUOTED keys: match
+// each { … } that contains a values:[…] array (row objects carry no nested
+// braces), then pull label + values independently of their order, any extra
+// props, or whether the keys are bare (values:) or quoted ("values":).
 function extractRows(block) {
   const rows = [];
-  const objRe = /\{[^{}]*\bvalues\s*:\s*\[[^\]]*\][^{}]*\}/g;
+  const objRe = /\{[^{}]*["']?values["']?\s*:\s*\[[^\]]*\][^{}]*\}/g;
   let m;
   while ((m = objRe.exec(String(block || ''))) !== null) {
     const obj = m[0];
-    const labelM = obj.match(/\blabel\s*:\s*(["'])([\s\S]*?)\1/);
-    const valsM = obj.match(/\bvalues\s*:\s*\[([\s\S]*?)\]/);
+    const labelM = obj.match(/["']?label["']?\s*:\s*(["'])([\s\S]*?)\1/);
+    const valsM = obj.match(/["']?values["']?\s*:\s*\[([\s\S]*?)\]/);
     const values = [];
     if (valsM) {
       const vre = /(["'])([\s\S]*?)\1/g;
@@ -320,9 +321,10 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
         known.add(name);
         blockKnown.add(name);
         const attrVals = competitorFacts.attributeValues(name);
-        // Fail closed: a table that names a competitor but whose rows we cannot
-        // parse must NOT pass unvalidated — its cells could claim anything.
-        if (rows.length === 0 && /\bvalues\s*:/.test(block)) {
+        // Fail closed: a comparison table that names a competitor must have
+        // parseable rows to validate; if we got none, its cells could claim
+        // anything, so route to review rather than pass unvalidated.
+        if (rows.length === 0) {
           unsupportedFacts.add(`${name} — (table rows could not be parsed for validation)`);
         }
         for (const row of rows) {
@@ -364,6 +366,19 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   // Known competitors named only in prose (never in a table) have no caption → unsourced.
   for (const n of known) if (!blockNamedKnown.has(n)) unsourcedKnown.add(n);
 
+  // A competitor may be named ONLY inside the comparison table, where every cell
+  // is validated against curated facts. A mention in the surrounding prose /
+  // title / meta carries unvalidatable claims ("Orkin offers free same-day
+  // service in Sarasota"), so flag it — the writer must move the competitor into
+  // the table. proseText = body with the <ComparisonTable> blocks removed.
+  let proseText = body;
+  for (const b of blocks) proseText = proseText.split(b).join(' ');
+  if (metaText) proseText = `${proseText}\n${metaText}`;
+  const competitorInProse = new Set();
+  for (const m of competitorFacts.findBusinessMentions(proseText)) {
+    if (m.inAllowlist) competitorInProse.add(m.name);
+  }
+
   // Reconcile overlaps.
   for (const nm of known) unknown.delete(nm);
   for (const nm of [...unclassified]) {
@@ -382,6 +397,10 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   for (const f of unsupportedFacts) {
     findings.push(finding('P1', 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT',
       `Comparison states a fact about ${f} that is not a curated attribute in competitor-facts.js — only sourced, curated attributes may be claimed about a named competitor.`));
+  }
+  for (const nm of competitorInProse) {
+    findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
+      `Names competitor "${nm}" in prose/title/meta, outside the comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside the <ComparisonTable> (every cell is checked), not in the surrounding copy.`));
   }
   if (known.size && !namedCompetitorEnabled) {
     findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_DISABLED',

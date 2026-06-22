@@ -55,7 +55,7 @@ if (!RUN_ID) {
       // The runner atomically claims + publishes + owns the final opportunity/run
       // state (done for live; parked as astro_pr_pending_merge for a PR).
       const runner = require('../services/content/autonomous-runner');
-      const result = await runner.approveAndPublishNamedCompetitor(run.opportunity_id, { approvedBy: APPROVED_BY });
+      const result = await runner.approveAndPublishNamedCompetitor(run.opportunity_id, { runId: run.id, approvedBy: APPROVED_BY });
       console.log(`Named-competitor run ${RUN_ID} approved by ${APPROVED_BY} → ${result.published_url || result.astro_pr_url || result.publish_status || 'submitted'}`);
       return;
     }

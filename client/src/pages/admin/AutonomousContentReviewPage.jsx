@@ -460,6 +460,16 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                         onClick={() => submitDecision("approve_trust_build")}
                       />
                     )}
+                    {reviewActions.can_approve_named_competitor && (
+                      <ActionButton
+                        icon={CheckCircle2}
+                        label="Approve & publish"
+                        tone="green"
+                        disabled={!!actionPending}
+                        pending={actionPending === "approve_named_competitor"}
+                        onClick={() => submitDecision("approve_named_competitor")}
+                      />
+                    )}
                     <ActionButton
                       icon={XCircle}
                       label="Dismiss"

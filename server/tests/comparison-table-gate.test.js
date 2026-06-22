@@ -381,4 +381,23 @@ describe('comparison-table-gate', () => {
     const r = gate.evaluate({ body: `Honestly, Orkin is the worst.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
   });
+
+  // ── Round-8 findings ──
+
+  test('R8-A2: an allowlisted competitor named in PROSE (outside the table) is flagged', () => {
+    const body = `Orkin offers free same-day service in Sarasota.\n\n${NAMED_TABLE('Attributes as of June 2026, per each company public website.')}`;
+    const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE' && /Orkin/.test(f.message))).toBe(true);
+  });
+
+  test('R8-A4: quoted-key rows are parsed and validated (not silently skipped)', () => {
+    expect(gate.extractRows('rows={[{ "label": "A", "values": ["1","2"] }]}')[0]).toEqual({ label: 'A', values: ['1', '2'] });
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[{ "label": "Free termite inspections", "values": ["Yes","No"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
+  });
 });
