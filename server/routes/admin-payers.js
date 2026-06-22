@@ -18,6 +18,8 @@ const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { finalizeStatement, loadStatementLines } = require('../services/payer-statements');
 const { sendStatementEmail } = require('../services/payer-statement-email');
+const StripeService = require('../services/stripe');
+const { settleStatementPaid, PAYABLE_STATEMENT_STATUSES } = require('../services/payer-statement-settle');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -176,6 +178,77 @@ router.post('/:id/statements/:statementId/send', async (req, res, next) => {
     if (!delivery.ok) return res.status(422).json({ error: delivery.error || 'send_failed', delivery });
     res.json({ delivery });
   } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/payers/:id/statements/:statementId/reconcile — record an
+// OFFLINE settlement (check/ACH/wire) against a statement and cascade. The common
+// AP path. Refuses while `processing` (online payment in flight) or `paid`, and
+// CANCELS any unconfirmed online PI first so the AP can't also pay online after
+// the operator records the check. Body { method?, amount? }. Gated.
+router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => {
+  if (!isEnabled('payerStatements')) return res.status(403).json({ error: 'Payer statements are not enabled' });
+  try {
+    const owned = await loadOwnedStatement(req.params.id, req.params.statementId);
+    if (!owned) return res.status(404).json({ error: 'Statement not found' });
+
+    const method = String(req.body?.method || 'check').toLowerCase(); // check | ach | wire | offline
+    // OFFLINE methods only — a card/unknown value would record a card-family
+    // settlement at the BASE amount with no surcharge (the surcharge MUST derive
+    // from computeChargeAmount on the online pay path, never here).
+    if (!['check', 'ach', 'wire', 'offline'].includes(method)) {
+      return res.status(400).json({ error: 'Reconcile method must be one of: check, ach, wire, offline' });
+    }
+    const rawAmount = req.body?.amount; // validated against the LOCKED total inside the txn
+
+    // Cancel + settle UNDER ONE LOCK: a concurrent /pay/statement/:token/setup
+    // also takes `forUpdate` on the statement, so holding the lock across the PI
+    // cancel and the settle prevents it from minting + storing a new confirmable
+    // PI between the two (which would let the AP confirm online after the check is
+    // recorded — double collection). Status AND amount are validated against the
+    // LOCKED row (a close/reroll between the pre-lock read and here can change the
+    // total). cancelStatementPaymentIntentIfUnconfirmed throws 409 if money is
+    // truly in flight (and fails closed if the PI can't be verified).
+    let settledAmount;
+    const result = await db.transaction(async (trx) => {
+      // Take the statement money advisory lock BEFORE the row lock — same order
+      // as the webhook money paths (advisory → FOR UPDATE) so a concurrent
+      // settle/refund/dispute can't deadlock with this reconcile (it also matches
+      // the order settleStatementPaid uses internally).
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(owned.id)]);
+      const locked = await trx('payer_statements').where({ id: owned.id }).forUpdate().first();
+      if (!locked) { const e = new Error('Statement not found'); e.statusCode = 404; throw e; }
+      if (locked.status === 'paid') { const e = new Error('Statement is already paid'); e.statusCode = 409; throw e; }
+      if (locked.status === 'processing') { const e = new Error('An online payment is in flight — wait for it to resolve before reconciling'); e.statusCode = 409; throw e; }
+      if (!PAYABLE_STATEMENT_STATUSES.has(locked.status)) { const e = new Error('Close the statement before reconciling'); e.statusCode = 400; throw e; }
+
+      const total = Number(locked.total);
+      const amount = rawAmount != null ? Number(rawAmount) : total;
+      // Mirror the invoice reconcile's $1 tolerance — a materially different
+      // amount would drift the ledger from the statement.
+      if (!Number.isFinite(amount) || Math.abs(amount - total) > 1) {
+        const e = new Error(`Amount mismatch — recorded $${(Number(amount) || 0).toFixed(2)} but statement is $${total.toFixed(2)}. Edit the statement first if it changed.`);
+        e.statusCode = 400;
+        throw e;
+      }
+      settledAmount = amount;
+
+      if (locked.stripe_payment_intent_id) {
+        await StripeService.cancelStatementPaymentIntentIfUnconfirmed(owned.id);
+      }
+      return settleStatementPaid(owned.id, {
+        paymentMethod: method,
+        amountCents: Math.round(amount * 100),
+        source: 'admin_reconcile',
+      }, { database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });
+    });
+
+    logger.info(`[payers] statement ${owned.id} reconciled offline via ${method} ($${settledAmount.toFixed(2)})`);
+    res.json({ ok: true, statement: result.statement, alreadyPaid: !!result.alreadyPaid, childrenSettled: result.childrenSettled || 0 });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
     next(err);
   }
 });

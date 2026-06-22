@@ -257,6 +257,13 @@ finding and warns on P1. Reviewers must return JSON matching
   applies them at `router.use(...)` on line 1 of the router. JWT secret
   is `config.jwt.secret` (env: `JWT_SECRET`).
 - **Public-by-token routes (no auth, by design).** `/api/pay/:token`,
+  `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
+  statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
+  64-hex `payer_statements.token` format gate + public-route rate limit; resolves
+  a `payer_statements` row (never a homeowner record), charges the PAYER's Stripe
+  customer only, exposes only the consolidated statement + serviced addresses
+  already on it (no homeowner PII/links); settlement happens via the webhook,
+  not the route,
   `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
   `/api/public/estimates/:token/ask`,
   `/api/public/estimates/:token/find-slots`, `/api/reports/:token/*`,

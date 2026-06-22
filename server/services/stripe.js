@@ -137,6 +137,55 @@ const StripeService = {
     }
   },
 
+  /**
+   * Create or retrieve the PAYER's Stripe customer, persisting stripe_customer_id
+   * on the payers row. Kept SEPARATE from ensureStripeCustomer (homeowner) so a
+   * payer and a homeowner Stripe customer never cross — a NET-terms statement
+   * charges the payer's AP card, never the resident's. Returns the Stripe
+   * customer ID. (Phase-1 left payers.stripe_customer_id nullable + stored-only;
+   * this is the first writer.)
+   */
+  async ensureStripePayerCustomer(payerId) {
+    const payer = await db('payers').where({ id: payerId }).first();
+    if (!payer) throw new Error('Payer not found');
+    if (payer.stripe_customer_id) return payer.stripe_customer_id;
+
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    try {
+      const stripeCustomer = await stripe.customers.create({
+        name: payer.company_name || payer.display_name,
+        email: payer.ap_email || undefined,
+        phone: payer.ap_phone || undefined,
+        address: payer.billing_address_line1 ? {
+          line1: payer.billing_address_line1,
+          city: payer.billing_city || undefined,
+          state: payer.billing_state || undefined,
+          postal_code: payer.billing_zip || undefined,
+          country: 'US',
+        } : undefined,
+        metadata: {
+          waves_payer_id: String(payerId),
+          payer_billing: 'true',
+        },
+      }, {
+        idempotencyKey: `payer-cust-create-${payerId}`,
+      });
+
+      const stripeCustomerId = stripeCustomer.id;
+      await db('payers')
+        .where({ id: payerId })
+        .update({ stripe_customer_id: stripeCustomerId, updated_at: db.fn.now() });
+
+      logger.info(`[stripe] Payer Stripe customer created: ${stripeCustomerId} for payer ${payerId}`);
+      return stripeCustomerId;
+    } catch (err) {
+      logger.error(`[stripe] Payer Stripe customer creation failed: ${err.message}`);
+      throw new Error('Failed to create payer Stripe customer');
+    }
+  },
+
   // =========================================================================
   // SETUP INTENT (Card / ACH Save)
   // =========================================================================
@@ -1780,6 +1829,313 @@ const StripeService = {
     } catch (err) {
       logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
       throw new Error(`Failed to finalize payment: ${err.message}`);
+    }
+  },
+
+  // =========================================================================
+  // PAYER STATEMENT PAYMENT (P3) — charges payer.stripe_customer_id, NOT the
+  // homeowner. Mirrors the invoice setup → quote → finalize surcharge flow, but
+  // keyed on a payer_statements token + status state machine. Statement settles
+  // to `paid` (cascade) only via the webhook; a freshly-created PI never moves
+  // the statement to `processing` (it stays replaceable until confirmed).
+  // =========================================================================
+
+  /**
+   * Create (or reuse a replaceable) PaymentIntent for a FROZEN, not-in-flight
+   * statement, on the payer's Stripe customer. PI starts at the BASE total (no
+   * surcharge) — surcharge is applied via /quote → /finalize once PM funding is
+   * known. Does NOT move the statement to `processing` (the webhook does, on the
+   * confirmed money-in-flight event), so an abandoned pay page can't lock it.
+   */
+  async createStatementPaymentIntent(statementId, opts = {}) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+    const { isPayableStatementStatus, PAYABLE_STATEMENT_STATUSES } = require('./payer-statement-settle');
+    const payableList = [...PAYABLE_STATEMENT_STATUSES];
+
+    const assertPayable = (status) => {
+      if (isPayableStatementStatus(status)) return;
+      const inFlightOrDone = status === 'processing' || status === 'paid';
+      const err = new Error(status === 'processing'
+        ? 'A payment is already in progress for this statement'
+        : status === 'paid'
+          ? 'This statement is already paid'
+          : 'This statement is not payable');
+      err.statusCode = inFlightOrDone ? 409 : 400;
+      throw err;
+    };
+
+    const statement = await db('payer_statements').where({ id: statementId }).first();
+    if (!statement) throw new Error('Statement not found');
+    assertPayable(statement.status);
+
+    const stripeCustomerId = await this.ensureStripePayerCustomer(statement.payer_id);
+    const saveCard = !!opts.saveCard; // card-save is OPTIONAL (owner) — off by default
+
+    let paymentIntent;
+    let baseAmount;
+    try {
+      await db.transaction(async (trx) => {
+        const locked = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
+        if (!locked) throw new Error('Statement not found');
+        assertPayable(locked.status);
+
+        baseAmount = parseFloat(locked.total);
+        const baseCents = Math.round(baseAmount * 100);
+
+        const piParams = {
+          amount: baseCents,
+          currency: 'usd',
+          customer: stripeCustomerId,
+          description: `Waves statement S-${statementId}`,
+          metadata: {
+            waves_statement_id: String(statementId),
+            waves_payer_id: String(locked.payer_id),
+            base_amount: String(baseAmount),
+            card_surcharge: '0',
+            save_card_opt_in: saveCard ? 'true' : 'false',
+            selected_method_category: 'card',
+            // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+            // MERGE) so a reused PI that was previously finalized can't carry a
+            // stale surcharge_policy_version — which the webhook guard reads as
+            // "finalized" and would settle a later base-only card confirm without
+            // surcharge. Empty string deletes the key on update.
+            surcharge_policy_version: '',
+            surcharge_rate_bps: '',
+            card_funding: '',
+          },
+          payment_method_types: ['card', 'us_bank_account'],
+        };
+        if (saveCard) piParams.setup_future_usage = 'off_session';
+
+        // Reuse a replaceable unconfirmed PI; cancel-and-replace other
+        // unconfirmed states; refuse if money is genuinely in flight.
+        if (locked.stripe_payment_intent_id) {
+          const activeIntent = await stripe.paymentIntents.retrieve(locked.stripe_payment_intent_id);
+          const activeStatementId = activeIntent.metadata?.waves_statement_id || null;
+          if (activeStatementId && String(activeStatementId) !== String(statementId)) {
+            throw new Error('PaymentIntent does not belong to this statement');
+          }
+          if (activeIntent.status === 'requires_payment_method') {
+            const updateParams = { ...piParams };
+            delete updateParams.currency;
+            if (!saveCard) updateParams.setup_future_usage = '';
+            paymentIntent = await stripe.paymentIntents.update(activeIntent.id, updateParams);
+            const reused = await trx('payer_statements').where({ id: statementId }).whereIn('status', payableList)
+              .update({ stripe_payment_intent_id: paymentIntent.id, updated_at: trx.fn.now() });
+            if (!reused) throw new Error('Statement is no longer payable');
+            return;
+          }
+          if (activeIntent.status !== 'canceled') {
+            if (REPLACEABLE_PI_STATUSES.has(activeIntent.status)) {
+              // FAIL CLOSED: if the cancel fails, the old PI may have raced into
+              // processing/succeeded — minting a replacement while its client
+              // secret can still collect would double-charge. Refuse instead of
+              // repointing the statement at a new PI.
+              try {
+                await stripe.paymentIntents.cancel(activeIntent.id);
+              } catch (e) {
+                logger.warn(`[stripe] could not cancel replaceable statement PI ${activeIntent.id}: ${e.message}`);
+                const err = new Error('Could not replace the existing payment — please try again in a moment');
+                err.statusCode = 409;
+                throw err;
+              }
+            } else {
+              const err = new Error('A payment is already in progress for this statement');
+              err.statusCode = 409;
+              throw err;
+            }
+          }
+        }
+
+        const sourceIntent = locked.stripe_payment_intent_id || 'new';
+        const idempotencyKey = `statement_pi_${statementId}_${baseCents}_${saveCard ? 'save' : 'nosave'}_${sourceIntent}`;
+        paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey });
+        if (paymentIntent.status === 'canceled') {
+          paymentIntent = await stripe.paymentIntents.create(piParams, { idempotencyKey: `${idempotencyKey}_replacement_${uuidv4()}` });
+        }
+        if (paymentIntent.status === 'canceled') throw new Error(`Stripe returned canceled PaymentIntent ${paymentIntent.id}`);
+
+        const updated = await trx('payer_statements').where({ id: statementId }).whereIn('status', payableList)
+          .update({ stripe_payment_intent_id: paymentIntent.id, updated_at: trx.fn.now() });
+        if (!updated) throw new Error('Statement is no longer payable');
+      });
+
+      logger.info(`[stripe] Statement PaymentIntent created: ${paymentIntent.id} for statement S-${statementId} (base=$${baseAmount})`);
+      return {
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        amount: baseAmount,
+        baseAmount,
+        cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
+        surchargeRateBps: CONFIGURED_COST_BPS,
+      };
+    } catch (err) {
+      if (err.statusCode) {
+        logger.warn(`[stripe] Statement PaymentIntent setup blocked for S-${statementId}: ${err.message}`);
+        throw err;
+      }
+      if (paymentIntent?.id) {
+        try {
+          const cur = await db('payer_statements').where({ id: statementId }).first();
+          if (String(cur?.stripe_payment_intent_id || '') !== String(paymentIntent.id)) {
+            await stripe.paymentIntents.cancel(paymentIntent.id);
+          }
+        } catch (cancelErr) {
+          logger.warn(`[stripe] could not cancel unlinked statement PI ${paymentIntent.id}: ${cancelErr.message}`);
+        }
+      }
+      logger.error(`[stripe] Statement PaymentIntent failed for S-${statementId}: ${err.message}`);
+      throw new Error(`Failed to create payment intent for statement: ${err.message}`);
+    }
+  },
+
+  /**
+   * Cancel a statement's PaymentIntent if it is still UNCONFIRMED (requires_*),
+   * so an admin offline reconcile can't be undercut by the AP confirming the
+   * online PI afterward. Throws 409 if the PI is processing/succeeded (real money
+   * in flight ⇒ do NOT reconcile offline). No-op when there's no PI / already
+   * canceled / Stripe unconfigured.
+   */
+  async cancelStatementPaymentIntentIfUnconfirmed(statementId) {
+    // Load the statement FIRST — only no-op when there is genuinely no PI to
+    // verify. If a PI exists but Stripe is unconfigured we CANNOT confirm it's
+    // dead, so fail closed (the AP could still confirm the live client secret).
+    const statement = await db('payer_statements').where({ id: statementId }).first();
+    if (!statement?.stripe_payment_intent_id) return { canceled: false, reason: 'no_pi' };
+    const stripe = getStripe();
+    if (!stripe) {
+      const err = new Error('Cannot verify the existing online payment intent (Stripe unavailable) — try the reconcile again shortly');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    let intent;
+    try {
+      intent = await stripe.paymentIntents.retrieve(statement.stripe_payment_intent_id);
+    } catch (e) {
+      // FAIL CLOSED: if we can't verify/cancel the existing PI, the AP's client
+      // secret may still be confirmable — recording an offline payment now risks
+      // double collection once Stripe recovers. Refuse the reconcile.
+      logger.warn(`[stripe] could not retrieve statement PI ${statement.stripe_payment_intent_id}: ${e.message}`);
+      const err = new Error('Could not verify the existing online payment intent — try the reconcile again shortly');
+      err.statusCode = 409;
+      throw err;
+    }
+    if (intent.status === 'canceled') return { canceled: false, reason: 'already_canceled' };
+    if (!REPLACEABLE_PI_STATUSES.has(intent.status)) {
+      const err = new Error('An online payment is already in progress for this statement — cannot reconcile offline until it resolves');
+      err.statusCode = 409;
+      throw err;
+    }
+    await stripe.paymentIntents.cancel(intent.id);
+    logger.info(`[stripe] Canceled unconfirmed statement PI ${intent.id} for S-${statementId} ahead of offline reconcile`);
+    return { canceled: true, paymentIntentId: intent.id };
+  },
+
+  /** Surcharge quote for a statement payment method (HMAC-signed token → /finalize). */
+  async quoteStatementSurcharge(statementId, paymentMethodId) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+    const { isPayableStatementStatus } = require('./payer-statement-settle');
+
+    const statement = await db('payer_statements').where({ id: statementId }).first();
+    if (!statement) throw new Error('Statement not found');
+    if (!isPayableStatementStatus(statement.status)) throw new Error('This statement is not payable');
+
+    let pm;
+    try { pm = await stripe.paymentMethods.retrieve(paymentMethodId); }
+    catch (err) { throw new Error(`Could not retrieve payment method: ${err.message}`); }
+
+    const methodType = pm.type || 'card';
+    const funding = pm.card?.funding || null;
+    const baseAmount = parseFloat(statement.total);
+    const { baseCents, surchargeCents, totalCents, rateBps } = computeChargeAmount(baseAmount, methodType, { funding });
+
+    const crypto = require('crypto');
+    const hmacSecret = process.env.JWT_SECRET;
+    if (!hmacSecret) throw new Error('JWT_SECRET is required for surcharge quote signing');
+    const payloadJson = JSON.stringify({ statementId, paymentMethodId, statementTotal: baseAmount, quotedAt: Date.now() });
+    const signature = crypto.createHmac('sha256', hmacSecret).update(payloadJson).digest('base64url');
+    const quoteToken = `${Buffer.from(payloadJson).toString('base64url')}.${signature}`;
+
+    return { quoteToken, base: baseCents / 100, surcharge: surchargeCents / 100, total: totalCents / 100, rateBps, funding, methodType };
+  },
+
+  /** Finalize a statement payment: apply surcharge from the quote to the PI, confirm. */
+  async finalizeStatementPayment(statementId, quoteToken, opts = {}) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+    const { isPayableStatementStatus } = require('./payer-statement-settle');
+
+    const crypto = require('crypto');
+    const hmacSecret = process.env.JWT_SECRET;
+    if (!hmacSecret) throw new Error('JWT_SECRET is required for surcharge quote signing');
+    let quote;
+    try {
+      const [payloadPart, sigPart] = quoteToken.split('.');
+      if (!payloadPart || !sigPart) throw new Error('malformed');
+      const expectedSig = crypto.createHmac('sha256', hmacSecret).update(Buffer.from(payloadPart, 'base64url').toString()).digest('base64url');
+      if (sigPart !== expectedSig) throw new Error('signature mismatch');
+      quote = JSON.parse(Buffer.from(payloadPart, 'base64url').toString());
+    } catch { throw new Error('Invalid or tampered quote token'); }
+
+    if (String(quote.statementId) !== String(statementId)) throw new Error('Quote token does not match this statement');
+    if (Date.now() - (quote.quotedAt || 0) > 10 * 60 * 1000) throw new Error('Quote expired — please try again');
+
+    const statement = await db('payer_statements').where({ id: statementId }).first();
+    if (!statement) throw new Error('Statement not found');
+    if (!isPayableStatementStatus(statement.status)) throw new Error('This statement is not payable');
+    if (!statement.stripe_payment_intent_id) throw new Error('Statement has no active PaymentIntent');
+
+    const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
+    const funding = pm.card?.funding || null;
+    const baseAmount = parseFloat(statement.total);
+    if (quote.statementTotal != null && Math.abs(baseAmount - quote.statementTotal) > 0.01) {
+      throw new Error('Statement total changed since quote was created. Please request a new quote.');
+    }
+
+    const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = computeChargeAmount(baseAmount, pm.type || 'card', { funding });
+    const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
+    const usePreview = !!surchargeDetails;
+    const saveCard = !!opts.saveCard;
+
+    const updateParams = {
+      amount: totalCents,
+      payment_method: quote.paymentMethodId,
+      metadata: {
+        waves_statement_id: String(statementId),
+        waves_payer_id: String(statement.payer_id),
+        base_amount: String(baseCents / 100),
+        card_surcharge: String(surchargeCents / 100),
+        surcharge_rate_bps: String(rateBps),
+        surcharge_policy_version: policyVersion,
+        card_funding: funding || 'unknown',
+        save_card_opt_in: saveCard ? 'true' : 'false',
+      },
+      setup_future_usage: saveCard ? 'off_session' : '',
+    };
+    if (surchargeDetails) updateParams.amount_details = surchargeDetails;
+
+    try {
+      await stripe.paymentIntents.update(statement.stripe_payment_intent_id, updateParams, usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined);
+      const confirmed = await stripe.paymentIntents.confirm(statement.stripe_payment_intent_id, {}, usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined);
+      logger.info(`[stripe] Finalized statement S-${statementId}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
+      return {
+        paymentIntentId: confirmed.id,
+        paymentMethodId: quote.paymentMethodId,
+        clientSecret: confirmed.client_secret,
+        status: confirmed.status,
+        requiresAction: confirmed.status === 'requires_action',
+        base: baseCents / 100,
+        surcharge: surchargeCents / 100,
+        total: totalCents / 100,
+        rateBps,
+        funding,
+      };
+    } catch (err) {
+      logger.error(`[stripe] Finalize failed for statement PI ${statement.stripe_payment_intent_id}: ${err.message}`);
+      throw new Error(`Failed to finalize statement payment: ${err.message}`);
     }
   },
 

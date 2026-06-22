@@ -211,6 +211,18 @@ const limiter = rateLimit({
   keyGenerator: rateLimitKey,
   skip: () => process.env.NODE_ENV !== 'production',
 });
+// The disabled payer-statement-pay surface must ALWAYS look like Not Found —
+// even ahead of the global /api/ limiter — so an IP that already exhausted the
+// app-wide limit can't observe the surface via a 429 (contract: 404 when
+// GATE_PAYER_STATEMENTS is off). Runs before the limiter; the route's own
+// gate + per-route limiter still apply when the feature is enabled.
+app.use('/api/pay/statement', (req, res, next) => {
+  // eslint-disable-next-line global-require
+  if (!require('./config/feature-gates').isEnabled('payerStatements')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
@@ -401,6 +413,9 @@ app.use('/api/admin/job-forms', require('./routes/admin-job-forms'));
 app.use('/api/admin/job-costs', require('./routes/admin-job-costs'));
 app.use('/api/admin/job-expenses', require('./routes/admin-job-expenses'));
 app.use('/api/admin/projects', require('./routes/admin-projects'));
+// Statement pay (P3) mounts BEFORE /api/pay so its two-segment paths aren't
+// shadowed by the invoice router's `/:token`. Gated behind GATE_PAYER_STATEMENTS.
+app.use('/api/pay/statement', require('./routes/pay-statement'));
 app.use('/api/pay', require('./routes/pay-v2'));
 app.use('/api/receipt', require('./routes/receipt-v2'));
 app.use('/api/contracts', require('./routes/contracts-public'));
