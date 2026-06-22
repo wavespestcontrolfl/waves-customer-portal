@@ -12,8 +12,16 @@
 
 const db = require('../models/db');
 
+// Candidate keys, PRIMARY first. Writes use the primary; reads try ALL of them, so a
+// credential encrypted under the fallback (DATA_HYGIENE_VAULT_KEY, the out-of-the-box path)
+// still decrypts after a dedicated VENDOR_CREDENTIAL_KEY is later promoted — without forcing
+// a re-encryption migration or stranding the saved passwords.
+function vendorCredentialKeys() {
+  return [...new Set([process.env.VENDOR_CREDENTIAL_KEY, process.env.DATA_HYGIENE_VAULT_KEY].filter(Boolean))];
+}
+
 function vendorCredentialKey() {
-  return process.env.VENDOR_CREDENTIAL_KEY || process.env.DATA_HYGIENE_VAULT_KEY || null;
+  return vendorCredentialKeys()[0] || null;
 }
 
 // Pure decision for how a PUT should treat an incoming loginPassword field. Kept separate
@@ -48,14 +56,16 @@ async function getVendorLoginCredentials(conn, vendorId) {
     .first('login_username', 'login_email', 'account_number', 'login_url', 'login_password_encrypted');
   if (!row) return null;
   let password = null;
-  const key = vendorCredentialKey();
-  if (row.login_password_encrypted && key) {
-    try {
-      const r = await conn.raw('SELECT pgp_sym_decrypt(dearmor(?), ?) AS pw', [row.login_password_encrypted, key]);
-      password = (r && r.rows && r.rows[0] && r.rows[0].pw) || null;
-    } catch (e) {
-      // Not armored (legacy plaintext not yet migrated) or wrong key — never expose the raw value.
-      password = null;
+  if (row.login_password_encrypted) {
+    // Try each candidate key (primary first) so credentials encrypted under the fallback
+    // key still decrypt after a dedicated key is promoted. A wrong key / unarmored legacy
+    // value throws — caught, try the next; the raw value is never exposed.
+    for (const key of vendorCredentialKeys()) {
+      try {
+        const r = await conn.raw('SELECT pgp_sym_decrypt(dearmor(?), ?) AS pw', [row.login_password_encrypted, key]);
+        const pw = r && r.rows && r.rows[0] && r.rows[0].pw;
+        if (pw) { password = pw; break; }
+      } catch (e) { /* wrong key / not armored — try the next candidate */ }
     }
   }
   return {
@@ -69,6 +79,7 @@ async function getVendorLoginCredentials(conn, vendorId) {
 
 module.exports = {
   vendorCredentialKey,
+  vendorCredentialKeys,
   passwordWriteAction,
   encryptedPasswordRaw,
   getVendorLoginCredentials,

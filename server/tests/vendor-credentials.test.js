@@ -1,4 +1,4 @@
-const { passwordWriteAction, vendorCredentialKey } = require('../services/vendor-credentials');
+const { passwordWriteAction, vendorCredentialKey, vendorCredentialKeys } = require('../services/vendor-credentials');
 
 describe('passwordWriteAction', () => {
   test('absent field -> skip (leave stored value untouched)', () => {
@@ -44,5 +44,17 @@ describe('vendorCredentialKey', () => {
     expect(vendorCredentialKey()).toBe('vault');
     delete process.env.DATA_HYGIENE_VAULT_KEY;
     expect(vendorCredentialKey()).toBeNull();
+  });
+  test('vendorCredentialKeys lists candidates primary-first, deduped, for read-tries-all', () => {
+    process.env.VENDOR_CREDENTIAL_KEY = 'dedicated';
+    process.env.DATA_HYGIENE_VAULT_KEY = 'vault';
+    expect(vendorCredentialKeys()).toEqual(['dedicated', 'vault']); // promotion: new key tried first, old still available
+    process.env.DATA_HYGIENE_VAULT_KEY = 'dedicated'; // same value -> deduped
+    expect(vendorCredentialKeys()).toEqual(['dedicated']);
+    delete process.env.VENDOR_CREDENTIAL_KEY;
+    process.env.DATA_HYGIENE_VAULT_KEY = 'vault';
+    expect(vendorCredentialKeys()).toEqual(['vault']); // out-of-box: fallback only
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    expect(vendorCredentialKeys()).toEqual([]);
   });
 });
