@@ -682,8 +682,22 @@ function customerEligibleForFreeCallback(customer = {}) {
 }
 
 function normalizeDiscountAmount(row, clientAmount) {
-  const isVariable = row?.discount_type === 'variable_amount' || row?.discount_type === 'variable_percentage';
-  const raw = isVariable && clientAmount !== null && clientAmount !== undefined && clientAmount !== ''
+  const dbAmount = Number(row?.amount);
+  // Honor the operator-supplied amount for the variable_* types AND for the
+  // seeded custom presets (custom_percent / custom_dollar — percentage /
+  // fixed_amount rows that ship with DB amount 0). Without the custom-preset
+  // branch these resolve back to 0 on save and the line discount is dropped,
+  // so the saved appointment/invoice would charge full price despite the
+  // discounted modal preview. Mirrors the canonical detection in
+  // server/services/invoice.js resolveLineItemDiscount.
+  const honorsClientAmount =
+    row?.discount_type === 'variable_amount' ||
+    row?.discount_type === 'variable_percentage' ||
+    (row?.discount_type === 'percentage' &&
+      (row?.discount_key === 'custom_percent' || !(dbAmount > 0))) ||
+    (row?.discount_type === 'fixed_amount' &&
+      (row?.discount_key === 'custom_dollar' || !(dbAmount > 0)));
+  const raw = honorsClientAmount && clientAmount !== null && clientAmount !== undefined && clientAmount !== ''
     ? clientAmount
     : row?.amount;
   const num = Number(raw);
