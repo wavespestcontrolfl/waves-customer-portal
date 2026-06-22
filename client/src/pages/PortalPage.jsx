@@ -11368,6 +11368,47 @@ export default function PortalPage() {
                     </span>
                     <span style={{ fontSize: 14, fontWeight: 850 }}>Sign Out</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!window.confirm('Delete your Waves account? This permanently removes your access to the app and your portal account. For questions about active service or billing, please contact us first — this can’t be undone from the app.')) return;
+                      try {
+                        await api.deleteAccount();
+                        logout();
+                        setShowMenu(false);
+                      } catch (e) {
+                        window.alert('Sorry — we couldn’t delete your account just now. Please try again or contact support.');
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '11px 8px',
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      color: PORTAL_SHELL.muted,
+                      fontFamily: FONTS.body,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span style={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: 8,
+                      background: `${PORTAL_SHELL.muted}14`,
+                      color: PORTAL_SHELL.muted,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}>
+                      <Icon name="warning" size={16} strokeWidth={2} />
+                    </span>
+                    <span style={{ fontSize: 14, fontWeight: 850 }}>Delete Account</span>
+                  </button>
                 </div>
               </div>
             )}
