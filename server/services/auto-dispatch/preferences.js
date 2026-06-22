@@ -3,11 +3,16 @@
  *
  * Reads the existing property_preferences row (preferred_day, preferred_time,
  * blackout_start/end) and normalizes it into a structure the scorer/candidate
- * generator consume. Per the owner decision:
+ * generator consume. Per the owner decision (updated 2026-06-21):
  *   - blackout = HARD constraint (handled in candidate-slots)
- *   - preferred_day / preferred_time = SOFT scoring
- *   - when no explicit preferred_time, fall back to the service-type default
- *     (pest → early AM, lawn → mid/late AM) from service-category.js
+ *   - EXPLICIT preferred_day / preferred_time (the customer set them in the
+ *     portal, i.e. not 'no_preference') = HARD constraints too. Route efficiency
+ *     is the optimization driver, but a customer's portal preference OVERRIDES
+ *     it: candidate-slots only keeps slots on the preferred day/time, so a visit
+ *     is never moved off the customer's stated day/time to shave detour.
+ *   - the service-type DEFAULT time window (pest → early AM, lawn → mid/late AM,
+ *     from service-category.js) is NOT a customer preference — it stays SOFT
+ *     scoring so route can still optimize freely when the customer set no time.
  */
 const db = require('../../models/db');
 const {
@@ -48,10 +53,11 @@ function normalizePreferences(prefs, serviceType) {
 
   return {
     preferred_days,
+    // explicit customer day pref → HARD filter in candidate-slots when non-empty
     preferred_day_indexes: preferred_days.map((d) => DAY_NAME_TO_INDEX[d]),
-    preferred_time_window: explicitTime,          // explicit customer pref, or null
-    default_time_window: defaultTime,             // service-type default (always present)
-    effective_time_window: explicitTime || defaultTime,
+    preferred_time_window: explicitTime,          // explicit customer pref → HARD filter when non-null
+    default_time_window: defaultTime,             // service-type default → SOFT scoring only (never a hard filter)
+    effective_time_window: explicitTime || defaultTime, // explicit pref if set, else default — used by SOFT scoring
     blackout,                                     // HARD constraint, or null
     contact_preference: (prefs && prefs.contact_preference) || null,
     has_explicit_prefs: !!(explicitDay || explicitTime || blackout),

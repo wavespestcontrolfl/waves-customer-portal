@@ -100,6 +100,14 @@ async function findAvailableSlots(opts) {
     // Snap proposed start times up to this minute granularity (e.g. 60 = on the
     // hour). Default 1 = exact earliest-feasible minute (identical legacy behavior).
     slotStepMinutes = 1,
+    // Lower bound (minutes from midnight) on a proposed start time. Used to honor
+    // a HARD customer time-window preference: each route gap emits only its
+    // earliest-feasible start, so without this an empty/early gap collapses to
+    // e.g. 08:00 and a valid later preferred start (e.g. 13:00 for an afternoon
+    // preference) is never generated. Floors earliestStart so the gap yields a
+    // candidate at/after the window start instead. Default 0 = no effect
+    // (identical legacy behavior for every other caller).
+    earliestStartMin = 0,
   } = opts;
   const excludeSet = new Set((excludeServiceIds || []).map(String));
 
@@ -204,6 +212,7 @@ async function findAvailableSlots(opts) {
           dayOpen,
           prev.endMin + driveMin(prev, newStop),
           date === todayEt ? todayFloorMin : 0,
+          earliestStartMin, // honor a hard time-window lower bound (0 = no-op)
         );
         // Snap up to the requested granularity (e.g. on-the-hour). The gap
         // checks below then re-validate the snapped time, so a snap that no
