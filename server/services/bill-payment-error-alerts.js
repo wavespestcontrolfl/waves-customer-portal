@@ -109,12 +109,30 @@ function isClientFormValidationError(input = {}) {
   return stripeType === 'validation_error' && normalizePhase(input.phase) === 'payment_form_submit';
 }
 
+// A 409 from the pay flow is never a payment FAILURE — it's an
+// already-in-progress conflict: the invoice already has a live PaymentIntent
+// (most often an ACH bank debit sitting in `processing` for several business
+// days, or the invoice already flipped to `processing`). A customer who
+// reloads the pay link, returns from a bank redirect, or double-submits hits
+// this 409, and every retry would otherwise raise a "bill payment error" admin
+// alert ("Card during setup: Invoice payment is already in progress") for a
+// payment that is actually working. These are benign concurrency signals, not
+// declines — suppress them so the real failures aren't drowned out. (The pay
+// page routes the customer to the receipt's "bank payment processing" state.)
+function isInProgressConflict(input = {}) {
+  return Number(input.statusCode) === 409;
+}
+
 async function alertBillPaymentError(input = {}) {
   const invoice = input.invoice || {};
   if (!invoice.id) return { notified: false, skipped: true, reason: 'missing_invoice' };
 
   if (isClientFormValidationError(input)) {
     return { notified: false, skipped: true, reason: 'client_validation_error' };
+  }
+
+  if (isInProgressConflict(input)) {
+    return { notified: false, skipped: true, reason: 'payment_in_progress_conflict' };
   }
 
   const phase = normalizePhase(input.phase);
@@ -203,6 +221,7 @@ module.exports = {
   __private: {
     buildDedupeKey,
     isClientFormValidationError,
+    isInProgressConflict,
     normalizeErrorMessage,
     normalizePhase,
     normalizeMethod,

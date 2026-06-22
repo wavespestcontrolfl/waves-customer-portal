@@ -279,6 +279,15 @@ router.post('/:token/setup', async (req, res, next) => {
       status: result.status,
     });
   } catch (err) {
+    // 409 = expected already-in-progress conflict (the invoice already has a
+    // live PaymentIntent — most often an ACH bank debit still `processing`, or
+    // a customer reloading the pay link / returning from a bank redirect).
+    // Surface it to the customer without raising an admin bill-payment-error
+    // alert; it's not a failure (matches /update-amount). The pay page routes
+    // the customer to the receipt's "bank payment processing" state.
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message });
+    }
     logger.error(`[pay-v2] Setup error: ${err.message}`);
     reportBillPaymentError(req, {
       invoice,
@@ -288,9 +297,6 @@ router.post('/:token/setup', async (req, res, next) => {
       statusCode: err.statusCode || 500,
       metadata: { save_card: !!req.body?.saveCard },
     });
-    if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message });
-    }
     next(err);
   }
 });

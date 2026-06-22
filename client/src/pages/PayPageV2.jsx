@@ -113,9 +113,10 @@ function paymentErrorPayload(err, extra = {}) {
   };
 }
 
-function serverReportedError(message) {
+function serverReportedError(message, status = null) {
   const err = new Error(message || 'Payment error');
   err.serverReported = true;
+  if (status != null) err.status = status;
   return err;
 }
 
@@ -1119,12 +1120,20 @@ export default function PayPageV2() {
       .catch((e) => { setError(e.message); setLoading(false); });
   }, [token]);
 
-  // Stripe redirect return (3DS, bank redirect)
+  // Stripe redirect return (3DS, bank redirect). ACH bank payments come back
+  // as `processing` (they clear over several business days), not `succeeded` —
+  // route both to the receipt page, which renders the honest "bank payment
+  // submitted / processing" state. Without the `processing` branch the page
+  // would fall through to the /setup effect and 409 against the now-in-flight
+  // PaymentIntent, showing the customer a false "payment already in progress"
+  // error after a valid ACH submission.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const redirectStatus = params.get('redirect_status');
     if (redirectStatus === 'succeeded') {
       navigate(`/receipt/${token}?fresh=1`, { replace: true });
+    } else if (redirectStatus === 'processing') {
+      navigate(`/receipt/${token}`, { replace: true });
     }
   }, [navigate, token]);
 
@@ -1175,7 +1184,7 @@ export default function PayPageV2() {
     })
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
-        if (!r.ok) throw serverReportedError(setup.error || 'Failed to initialize payment');
+        if (!r.ok) throw serverReportedError(setup.error || 'Failed to initialize payment', r.status);
         return setup;
       })
       .then((setup) => {
@@ -1224,6 +1233,16 @@ export default function PayPageV2() {
         setPaymentState('ready');
       })
       .catch((err) => {
+        // A 409 from /setup is not a failure — the invoice already has a live
+        // PaymentIntent (most often an ACH bank debit still `processing`, which
+        // takes several business days). Showing a red "payment already in
+        // progress" error here is what made customers retry repeatedly; route
+        // them to the receipt page instead, which renders the honest "bank
+        // payment submitted / processing" state.
+        if (err.status === 409) {
+          navigate(`/receipt/${token}`, { replace: true });
+          return;
+        }
         // Allow a retry: the guard was set before the POST to stop the
         // partial-credit sync from re-posting an IN-FLIGHT setup, but a failed
         // setup must be retryable (else the customer is stuck until a reload).
@@ -1237,7 +1256,7 @@ export default function PayPageV2() {
           }));
         }
       });
-  }, [data, token, saveCardDefault]);
+  }, [data, token, saveCardDefault, navigate]);
 
   useEffect(() => {
     setSaveCard(saveCardDefault);

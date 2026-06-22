@@ -124,6 +124,45 @@ describe('bill-payment-error-alerts', () => {
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
+  test('suppresses the benign 409 "already in progress" conflict without writing a row or notifying', async () => {
+    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
+
+    // Mirrors the real WPC-2026-0190 case: customer started an ACH bank payment
+    // (sits in `processing` for days), then reloaded the pay link / returned
+    // from the bank redirect — /setup 409s against the in-flight PaymentIntent.
+    // That is not a failure, so it must never raise a "bill payment error" alert.
+    const result = await alertBillPaymentError({
+      invoice: {
+        id: 'inv_123',
+        invoice_number: 'WPC-2026-0190',
+        customer_id: 'cust_123',
+        total: '35.67',
+        stripe_payment_intent_id: 'pi_123',
+      },
+      phase: 'setup',
+      methodCategory: 'card',
+      message: 'Invoice payment is already in progress',
+      statusCode: 409,
+      source: 'server',
+    });
+
+    expect(result).toEqual({ notified: false, skipped: true, reason: 'payment_in_progress_conflict' });
+    // Early return — no audit row, no admin notification.
+    expect(dbMock).not.toHaveBeenCalledWith('bill_payment_error_alerts');
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('isInProgressConflict matches only a 409 status code', () => {
+    const { __private } = require('../services/bill-payment-error-alerts');
+    const { isInProgressConflict } = __private;
+
+    expect(isInProgressConflict({ statusCode: 409 })).toBe(true);
+    expect(isInProgressConflict({ statusCode: '409' })).toBe(true);
+    expect(isInProgressConflict({ statusCode: 400 })).toBe(false);
+    expect(isInProgressConflict({ statusCode: 500 })).toBe(false);
+    expect(isInProgressConflict({})).toBe(false);
+  });
+
   test('still alerts on a real server-side decline (not a validation error)', async () => {
     const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
 
