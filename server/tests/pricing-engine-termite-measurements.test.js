@@ -322,6 +322,13 @@ describe('termite measurement overrides and safeguards', () => {
     const wallNoAttic = priceBoraCare({}, { wallLinearFt: 100 });
     expect(wallNoAttic.requiresManualReview).toBe(false);
     expect(wallNoAttic.manualReviewReasons).toHaveLength(0);
+
+    // Route flow: attic + wall both arrive via options (manual override). An
+    // invalid attic option with valid walls must still flag review.
+    const invalidAtticOption = priceBoraCare({}, { atticSqFt: -10, wallLinearFt: 100 });
+    expect(invalidAtticOption.totalSqFt).toBe(800);
+    expect(invalidAtticOption.requiresManualReview).toBe(true);
+    expect(invalidAtticOption.manualReviewReasons).toContain('invalid_boracare_attic_sqft');
   });
 
   test('Pre-Slab Termiticide normalizes products and aliases', () => {
