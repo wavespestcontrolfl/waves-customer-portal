@@ -56,6 +56,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
+import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -3465,6 +3466,17 @@ export default function EstimateToolViewV2({
       alert("Save the estimate first.");
       return;
     }
+    // Provisional guard: a low-confidence / incomplete property lookup means the
+    // auto-priced quote may be wrong (the reported 0/100 new-construction case).
+    // Make the operator acknowledge before a firm quote goes to the customer.
+    const provisional = computeProvisionalState(enrichedProfile?.propertyDataQuality);
+    if (provisional.provisional) {
+      const proceed = window.confirm(
+        `This estimate is based on unverified property data (${provisionalSummary(provisional)}).\n\n` +
+          "Pricing may change once verified on site. Send the quote anyway?"
+      );
+      if (!proceed) return;
+    }
     const sendMethod = method || "both";
     let scheduled = null;
     if (form.scheduleSend) {
@@ -3821,6 +3833,9 @@ export default function EstimateToolViewV2({
     : null;
   const formCtx = { form, set, toggle };
   const sendBusy = generating || saving || sending;
+  const provisionalState = computeProvisionalState(
+    enrichedProfile?.propertyDataQuality
+  );
   const generateBusy = generating || saving || sending;
 
   // ═══════════════════════════════════════════════════════════════
@@ -5937,6 +5952,19 @@ export default function EstimateToolViewV2({
               <Card className="p-5 border-zinc-900">
                 {" "}
                 <PanelTitle>Send Estimate</PanelTitle>{" "}
+                {provisionalState.provisional && (
+                  <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
+                    <div className="text-12 font-medium text-alert-fg">
+                      Provisional estimate — {provisionalSummary(provisionalState)}.
+                    </div>
+                    <div className="text-11 text-ink-secondary mt-0.5">
+                      Pricing may change once verified on site. Confirm square
+                      footage, lot, stories, and property type in the property
+                      panel above (Save as field-verified) before sending a firm
+                      quote.
+                    </div>
+                  </div>
+                )}
                 <FieldV2 label="Customer Phone Number">
                   {" "}
                   <input
