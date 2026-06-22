@@ -7,7 +7,8 @@
 // reliable than scraping the DOM, so this adapter searches (/search?q=), picks the best
 // product link, then reads .js and size-matches via the shared pickVariantOffer.
 const { searchQuery, selectSearchCandidates } = require('./base');
-const { pickVariantOffer, extractSizeToken, quantityToOz } = require('../extract');
+const { pickVariantOffer, extractSizeToken, quantityToOz, verifyMatch } = require('../extract');
+const { isUnavailable } = require('../compare');
 const { convertToOz } = require('../../product-costing');
 
 const DEFAULT_TIMEOUT = 20000;
@@ -65,6 +66,13 @@ async function fetchCandidate(page, vendor, product) {
     links = selectSearchCandidates(found, product, MAX_CANDIDATES);
   }
 
+  const vid = vendor.vendor_id || vendor.id;
+  const vname = vendor.name || vendor.vendor_id || vendor.id;
+  // Search is fuzzy/relevance-ranked, so open the top candidates and VERIFY each (name/EPA/
+  // size) before trusting it — a wrong same-size product ranked first must not block the real
+  // match. Prefer a verified BUYABLE match; else a verified-but-unbuyable; else the best
+  // priced+size-matched page (a precise 'unverified' skip downstream).
+  let firstUnbuyable = null;
   let fallback = null;
   for (const link of links) {
     const handle = handleOf(link);
@@ -74,36 +82,30 @@ async function fetchCandidate(page, vendor, product) {
     if (!data) continue;
     const offer = targetOz ? pickVariantOffer(variantsFromShopify(data), { targetOz }) : null;
     const productUrl = `${origin}/products/${handle}`;
-    if (offer) {
-      return {
-        price: offer.price,
-        currency: 'USD',
-        availability: offer.availability,
-        name: data.title || null,
-        quantity: offer.quantity,
-        source_url: productUrl,
-        competing_same_size: !!offer.competingSameSize,
-        price_type: 'public',
-        vendor_id: vendor.vendor_id || vendor.id,
-        vendor: vendor.name || vendor.vendor_id || vendor.id,
-      };
+    if (!offer) {
+      if (!fallback && data.variants && data.variants.length) {
+        fallback = {
+          price: Number(data.variants[0].price) / 100, currency: 'USD',
+          availability: data.variants[0].available === false ? 'out_of_stock' : 'unknown',
+          name: data.title || null, quantity: extractSizeToken(data.title) || null,
+          source_url: productUrl, price_type: 'public', vendor_id: vid, vendor: vname,
+        };
+      }
+      continue;
     }
-    // Remember a priced product page even if no size matched, for a precise 'unverified' skip.
-    if (!fallback && data.variants && data.variants.length) {
-      fallback = {
-        price: Number(data.variants[0].price) / 100,
-        currency: 'USD',
-        availability: data.variants[0].available === false ? 'out_of_stock' : 'unknown',
-        name: data.title || null,
-        quantity: extractSizeToken(data.title) || null,
-        source_url: productUrl,
-        price_type: 'public',
-        vendor_id: vendor.vendor_id || vendor.id,
-        vendor: vendor.name || vendor.vendor_id || vendor.id,
-      };
+    const cand = {
+      price: offer.price, currency: 'USD', availability: offer.availability,
+      name: data.title || null, quantity: offer.quantity, source_url: productUrl,
+      competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: vid, vendor: vname,
+    };
+    const verdict = verifyMatch({ name: cand.name, text: null, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);
+    if (verdict.matched) {
+      if (!isUnavailable(cand)) return cand; // verified + buyable -> done
+      if (!firstUnbuyable) firstUnbuyable = cand; // verified but out of stock
     }
+    if (!fallback) fallback = cand; // priced + size-matched, verify pending -> precise 'unverified'
   }
-  return fallback;
+  return firstUnbuyable || fallback;
 }
 
 module.exports = {
