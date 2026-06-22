@@ -378,6 +378,48 @@ ${modeRules.length ? `${modeRules.join('\n')}\n` : ''}- Cap output at ${maxEvent
 - Return JSON only — no code fence, no commentary.`;
 }
 
+// Recover complete event objects from a possibly-truncated JSON array.
+// The model emits {"events":[ {...}, {...}, ... ]}; when the response hits
+// the max_tokens ceiling the trailing object is cut off mid-string and the
+// whole blob fails JSON.parse (V8: "Expected ',' or ']' after array
+// element …"). Rather than fail the entire pull — which trips the source's
+// consecutive_failures and fires a health alert (this was The Gabber's
+// 24-failed-pulls alarm) — walk the events array and keep every object that
+// closed cleanly, dropping only the partial tail.
+function recoverEventObjectsFromTruncatedJson(text) {
+  const eventsKey = text.indexOf('"events"');
+  if (eventsKey === -1) return null;
+  const arrStart = text.indexOf('[', eventsKey);
+  if (arrStart === -1) return null;
+
+  const objects = [];
+  let depth = 0;
+  let objStart = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = arrStart + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') { if (depth === 0) objStart = i; depth += 1; }
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && objStart !== -1) { objects.push(text.slice(objStart, i + 1)); objStart = -1; }
+    } else if (ch === ']' && depth === 0) break; // clean end of array
+  }
+  if (!objects.length) return null;
+  const events = [];
+  for (const obj of objects) {
+    try { events.push(JSON.parse(obj)); } catch { /* skip a malformed object */ }
+  }
+  return events.length ? events : null;
+}
+
 async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
@@ -393,14 +435,30 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
 
   const response = await anthropic.messages.create({
     model: MODELS.WORKHORSE,
-    max_tokens: 2000,
+    // Headroom for the full maxEvents (≤30) list. The old 2000-token cap
+    // truncated event-dense feeds mid-array (~4KB of JSON), which then
+    // failed JSON.parse and hard-failed the pull; ~250 tokens/event needs
+    // well north of that to emit 30 complete objects.
+    max_tokens: 8000,
     system: systemPrompt,
     messages: [{ role: 'user', content: wrapped }],
   });
   const text = response.content?.[0]?.text || '';
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude did not return JSON for event extraction');
-  const parsed = JSON.parse(jsonMatch[0]);
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (err) {
+    // Defense-in-depth against truncation even with the raised cap:
+    // salvage the complete event objects instead of dropping the pull.
+    const recovered = recoverEventObjectsFromTruncatedJson(text);
+    if (!recovered) throw err;
+    logger.warn(
+      `[event-ingestion] recovered ${recovered.length} event(s) from truncated JSON for source ${source.id} (${source.name || source.feed_url})`,
+    );
+    parsed = { events: recovered };
+  }
   return Array.isArray(parsed.events) ? parsed.events.slice(0, maxEvents) : [];
 }
 
@@ -844,4 +902,5 @@ module.exports = {
   buildArticleBundle,
   buildExtractionSystemPrompt,
   normalizeExtractedEvent,
+  recoverEventObjectsFromTruncatedJson,
 };
