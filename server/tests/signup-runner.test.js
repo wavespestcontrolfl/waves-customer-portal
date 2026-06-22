@@ -163,6 +163,15 @@ describe('run — outcomes', () => {
     expect(r.placed).toBe(0);
     expect(r.failed).toBe(1);
   });
+  test('submit_blocked (off-host submit endpoint) → parked skip + last_classified_at refreshed, not a retryable failure', async () => {
+    worker.claim.mockResolvedValue([prospect()]);
+    fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'submit_blocked', screenshot: Buffer.from('png') });
+    const r = await runner.run({ allow: ['citysquares.com'] });
+    expect(r.skipped).toBe(1);
+    expect(r.failed).toBe(0);
+    expect(worker.report).not.toHaveBeenCalled(); // not retried
+    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, last_classified_at: expect.any(Date) }));
+  });
   test('a run-level config error (no_anthropic) ABORTS the batch + releases claims, no attempts burned', async () => {
     worker.claim.mockResolvedValue([prospect({ id: 'p1' }), prospect({ id: 'p2' })]);
     fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'no_anthropic' });

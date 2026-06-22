@@ -599,9 +599,14 @@ function initScheduledJobs() {
     if (!isEnabled('signupRunner')) return;
     logger.info('Running: citation submission runner');
     try {
-      const r = require('./seo/signup-runner');
-      const res = await r.run({ batchSize: 5 });
-      logger.info(`[signup-runner] cron: ${JSON.stringify(res)}`);
+      // runExclusive: this makes LIVE third-party submissions — a deploy overlap or a
+      // second app instance firing the same cron would turn one supervised batchSize:5
+      // run into 10+ real listings (worker.claim dedupes rows, not whole batches).
+      await runExclusive('signup-runner', async () => {
+        const r = require('./seo/signup-runner');
+        const res = await r.run({ batchSize: 5 });
+        logger.info(`[signup-runner] cron: ${JSON.stringify(res)}`);
+      });
     } catch (err) { logger.error(`Citation runner failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 

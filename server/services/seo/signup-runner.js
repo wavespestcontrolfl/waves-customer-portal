@@ -107,7 +107,10 @@ async function leaseGuardedReclassify(p, patch) {
   const n = await db('seo_link_prospects')
     .where({ id: p.id })
     .where('claimed_at', leaseDate)
-    .update({ ...patch, claimed_at: null, claimed_by: null, updated_at: new Date() });
+    // Stamp last_classified_at so the weekly classifier treats this runtime decision as
+    // fresh and won't re-pick the row and revert a parked gate (e.g. a heuristic FREEFORM
+    // domain back to submit_free) before the 30-day reclassify window.
+    .update({ ...patch, claimed_at: null, claimed_by: null, last_classified_at: new Date(), updated_at: new Date() });
   if (n === 0) logger.warn(`[signup-runner] stale lease on ${p.target_domain} — reclassify skipped (row was reclaimed)`);
   return n;
 }
@@ -186,6 +189,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       counts.blocked++;
     } else if (result.outcome === 'skipped') {
       // No submittable form here — mark off-lane so we stop claiming it.
+      await leaseGuardedReclassify(p, { automation_policy: 'skip' });
+      counts.skipped++;
+    } else if (result.errorCode === 'submit_blocked') {
+      // The submit endpoint is off the pinned host — we can't auto-submit this directory
+      // safely, and retrying is futile. Park it (skip) so we stop re-claiming it.
       await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       counts.skipped++;
     } else if (RUN_LEVEL_ERRORS.has(result.errorCode)) {

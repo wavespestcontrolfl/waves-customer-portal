@@ -172,6 +172,38 @@ describe('fillCitationForm', () => {
     expect(rules).not.toContain('[');
   });
 
+  test('P2: pins the ACTUAL navigated host (www) to its OWN IP, not just the apex', async () => {
+    let rules = null;
+    await fillCitationForm({ submitUrl: 'https://www.x.com/add', nap, expectedHost: 'x.com' }, {
+      resolveHostIps: async (h) => (h === 'www.x.com' ? ['203.0.113.8'] : ['203.0.113.7']),
+      launchBrowser: async (opts) => { rules = opts && opts.hostResolverRules; return fakeBrowser([]); },
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    });
+    expect(rules).toContain('MAP www.x.com 203.0.113.8'); // navigated host pinned to its own record
+    expect(rules).toContain('MAP x.com 203.0.113.7');
+  });
+
+  test('P2: navigated host that does not resolve public → host_not_public, never launches', async () => {
+    let launched = false;
+    const r = await fillCitationForm({ submitUrl: 'https://www.x.com/add', nap, expectedHost: 'x.com' }, {
+      resolveHostIps: async (h) => (h === 'www.x.com' ? [] : ['203.0.113.7']), // the host we'd navigate to has no public record
+      launchBrowser: async () => { launched = true; return fakeBrowser([]); },
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [] }, {}),
+    });
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('host_not_public');
+    expect(launched).toBe(false);
+  });
+
+  test('P1: a browser launch failure → no_browser (run-level; the runner aborts the batch)', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => { throw new Error("Executable doesn't exist; run npx playwright install"); },
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [] }, {}),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('no_browser');
+  });
+
   test('P1: model-emitted clicks are never executed (only fill/select/check + final submit)', async () => {
     const log = [];
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({

@@ -155,21 +155,39 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   // expectedHost is mandatory — the browser is pinned + egress-locked to it.
   if (!expectedHost) return { outcome: 'failed', errorCode: 'no_expected_host', notes: 'expectedHost required (pinned egress)' };
 
-  // Resolve the allowlisted host to a verified PUBLIC IP and PIN Chromium's DNS to it
-  // so the browser connects to the address we checked (no rebinding to an internal IP).
-  // Fail-closed: if it doesn't resolve public, never launch.
-  const ips = await resolveHostIps(expectedHost);
-  if (!ips || !ips.length) return { outcome: 'failed', errorCode: 'host_not_public', notes: `${expectedHost} did not resolve to a public IP` };
-  // Prefer an IPv4 address; --host-resolver-rules requires an IPv6 replacement to be
-  // bracketed ([addr]) — an unbracketed v6 is ignored/misparsed, so Chromium would
-  // fall back to its own lookup and reopen the rebinding gap this pin closes.
-  const rawIp = ips.find((ip) => net.isIPv4(ip)) || ips[0];
-  const pinnedIp = net.isIPv6(rawIp) ? `[${rawIp}]` : rawIp;
-  const hostResolverRules = `MAP ${expectedHost} ${pinnedIp},MAP www.${expectedHost} ${pinnedIp}`;
+  // PIN Chromium's DNS to verified PUBLIC IPs so it connects to the address we checked
+  // (no rebinding to an internal IP). The egress guard allows the apex AND its www, so
+  // pin EACH to its OWN resolved public IP (apex and www can be different origins, or
+  // only www may have a record) — any allowed-but-unpinned host would let Chromium do
+  // its own lookup and reopen the rebinding gap. Fail-closed: the host we actually
+  // navigate to MUST resolve public, else never launch.
+  const navHost = (() => { try { return new URL(submitUrl).hostname.toLowerCase(); } catch { return expectedHost; } })();
+  const rules = [];
+  const pinned = new Set();
+  for (const h of new Set([expectedHost, `www.${expectedHost}`, navHost])) {
+    const hips = await resolveHostIps(h);
+    if (!hips || !hips.length) continue; // no public record → not pinned (not a rebinding vector)
+    // Prefer IPv4; an IPv6 replacement must be bracketed ([addr]) in --host-resolver-rules.
+    const raw = hips.find((ip) => net.isIPv4(ip)) || hips[0];
+    rules.push(`MAP ${h} ${net.isIPv6(raw) ? `[${raw}]` : raw}`);
+    pinned.add(h);
+  }
+  if (!pinned.has(navHost)) return { outcome: 'failed', errorCode: 'host_not_public', notes: `${navHost} did not resolve to a public IP` };
+  const hostResolverRules = rules.join(',');
+
+  // Track whether the egress guard aborted the actual SUBMIT request (form POST or the
+  // post-submit navigation). If it did, nothing landed at the directory — we must NOT
+  // report placed (which would strand a row the verifier polls forever).
+  let submitPhase = false;
+  let submitAborted = false;
 
   let browser;
   try {
-    browser = await launchBrowser({ hostResolverRules });
+    // A browser launch failure (Playwright/Chromium absent, missing host deps) is a
+    // RUN-LEVEL environment error, not this prospect's fault → no_browser so the runner
+    // aborts the batch + releases claims rather than burning the prospect's attempts.
+    try { browser = await launchBrowser({ hostResolverRules }); }
+    catch (e) { return { outcome: 'failed', errorCode: 'no_browser', notes: `browser launch failed (env): ${String(e.message).slice(0, 120)}` }; }
     // serviceWorkers:'block' — context.route() does NOT intercept requests made from a
     // Service Worker, so a registered SW would be an egress hole around the one-host
     // guard. Block SWs so route() is the complete HTTP(S) boundary.
@@ -181,9 +199,16 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // there is no off-host channel for a hostile page to exfiltrate through or pivot.
     if (typeof context.route === 'function') {
       await context.route('**/*', (route) => {
+        const req = route.request();
         let ok = false;
-        try { ok = requestAllowed({ url: route.request().url(), expectedHost }); } catch { ok = false; }
-        return ok ? route.continue() : route.abort();
+        try { ok = requestAllowed({ url: req.url(), expectedHost }); } catch { ok = false; }
+        if (!ok) {
+          // If we abort the SUBMIT itself (form POST or the post-submit navigation to an
+          // off-host/unpinned endpoint), record it — the submission did not land.
+          try { if (submitPhase && (req.isNavigationRequest() || req.method() === 'POST')) submitAborted = true; } catch { /* noop */ }
+          return route.abort();
+        }
+        return route.continue();
       });
     }
     // EGRESS LOCK (WebSockets): route() doesn't cover WS, which would otherwise be an
@@ -245,12 +270,20 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // never actionable → nothing dispatched → genuinely retryable. Once it dispatches
     // (no throw), the POST may have landed — we NEVER auto-retry; any later navigation
     // /verification error becomes placed+pending below.
+    submitPhase = true; // requests from here are the submission (POST / nav)
     try {
       await page.click(last.selector, { noWaitAfter: true });
     } catch (e) {
       return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit not actionable (nothing dispatched): ${e.message}` };
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {}); // best-effort settle; never fatal post-dispatch
+
+    // If the egress guard aborted the submit's own POST/navigation, nothing reached the
+    // directory — do NOT report placed. The runner parks it (off-host submit endpoint
+    // can't be auto-submitted) rather than stranding a row the verifier polls forever.
+    if (submitAborted) {
+      return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot1, notes: 'submit POST/navigation went off the pinned host (aborted) — nothing submitted' };
+    }
 
     // Submit landed → from here ANY error still yields a PENDING placement, never a
     // retryable failure (a retry could duplicate the listing). Verification is
