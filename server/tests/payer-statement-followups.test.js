@@ -133,8 +133,8 @@ describe('runPending firing', () => {
       to: 'ap@payer.com',
       idempotencyKey: 'payer_statement_followup:10:due0_reminder',
     });
-    // No online-pay CTA yet (no client statement-pay page) — must not leak a pay_url.
-    expect(sentEmails[0].payload.pay_url).toBeUndefined();
+    // P5b: the reminder carries the online-pay CTA → /pay/statement/:token.
+    expect(sentEmails[0].payload.pay_url).toBe('https://portal.test/pay/statement/tok');
     // sequence advanced to step 1, still active (more steps remain)
     expect(followups[10]).toMatchObject({ step_index: 1, touches_sent: 1, status: 'active' });
   });
