@@ -16,6 +16,10 @@ describe('passwordWriteAction', () => {
     expect(passwordWriteAction(undefined, false, true)).toBe('clear');
     expect(passwordWriteAction('whatever', true, true)).toBe('clear'); // clear flag wins
   });
+  test('explicit null loginPassword -> clear (a deliberate API value the form never sends)', () => {
+    expect(passwordWriteAction(null, true)).toBe('clear');
+    expect(passwordWriteAction(null, false)).toBe('clear');
+  });
   test('non-empty + key -> encrypt', () => {
     expect(passwordWriteAction('hunter2', true)).toBe('encrypt');
   });

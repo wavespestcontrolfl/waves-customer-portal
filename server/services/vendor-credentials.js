@@ -18,15 +18,16 @@ function vendorCredentialKey() {
 
 // Pure decision for how a PUT should treat an incoming loginPassword field. Kept separate
 // from the DB so it's unit-testable:
-//   'skip'    — field absent OR blank: leave the stored value UNCHANGED. Critical: the admin
-//               vendor form initializes loginPassword to '' and submits the whole form on
-//               every save, so a blank field means "didn't retype it", NOT "erase it" — else
-//               editing the username/URL would silently wipe the saved password.
-//   'clear'   — caller explicitly asked to remove it (clearRequested): set the column NULL
+//   'skip'    — field absent OR blank STRING: leave the stored value UNCHANGED. Critical: the
+//               admin vendor form initializes loginPassword to '' and submits the whole form
+//               on every save, so a blank field means "didn't retype it", NOT "erase it" —
+//               else editing the username/URL would silently wipe the saved password.
+//   'clear'   — caller explicitly asked to remove it: clearRequested flag OR an explicit null
+//               loginPassword (a deliberate API value the form never sends): set column NULL
 //   'encrypt' — non-empty + a key available: caller stores armor(pgp_sym_encrypt(...))
 //   'reject'  — non-empty but NO key: refuse rather than store plaintext (fail closed)
 function passwordWriteAction(loginPassword, hasKey, clearRequested) {
-  if (clearRequested === true) return 'clear';
+  if (clearRequested === true || loginPassword === null) return 'clear';
   if (loginPassword === undefined || String(loginPassword) === '') return 'skip';
   return hasKey ? 'encrypt' : 'reject';
 }

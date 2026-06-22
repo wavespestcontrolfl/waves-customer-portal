@@ -12,8 +12,14 @@ const KEY = () => process.env.VENDOR_CREDENTIAL_KEY || process.env.DATA_HYGIENE_
 exports.up = async function up(knex) {
   const key = KEY();
   if (!key) {
+    // In a deployed env the key MUST be present — otherwise this migration would be marked
+    // applied while plaintext passwords silently remain (and a blank-skip save never
+    // re-encrypts them). Fail loudly so the operator sets the key and re-deploys.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('VENDOR_CREDENTIAL_KEY or DATA_HYGIENE_VAULT_KEY must be set to encrypt vendor passwords at rest');
+    }
     // eslint-disable-next-line no-console
-    console.warn('[migration] no VENDOR_CREDENTIAL_KEY/DATA_HYGIENE_VAULT_KEY set — leaving vendor passwords as-is (encrypted on next save)');
+    console.warn('[migration] no credential key set (non-prod) — leaving vendor passwords as-is');
     return;
   }
   await knex.raw('CREATE EXTENSION IF NOT EXISTS pgcrypto');
