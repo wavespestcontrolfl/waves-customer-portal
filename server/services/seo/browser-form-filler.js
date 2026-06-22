@@ -15,6 +15,11 @@
 
 const MODELS = require('../../config/models');
 const logger = require('../logger');
+const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname (sync, no-DNS)
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+}
 
 let chromium;
 try { ({ chromium } = require('playwright')); } catch { chromium = null; }
@@ -78,7 +83,7 @@ async function callVision(anthropic, screenshotB64, text) {
  * fillCitationForm — submit one free citation form. Returns a structured outcome;
  * never throws (engine errors → { outcome:'failed' }).
  */
-async function fillCitationForm({ submitUrl, nap }, { launchBrowser = defaultLaunch, anthropic } = {}) {
+async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launchBrowser = defaultLaunch, anthropic } = {}) {
   let client = anthropic;
   if (!client && Anthropic && process.env.ANTHROPIC_API_KEY) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   if (!client) return { outcome: 'failed', errorCode: 'no_anthropic', notes: 'no LLM client' };
@@ -88,8 +93,23 @@ async function fillCitationForm({ submitUrl, nap }, { launchBrowser = defaultLau
   try {
     browser = await launchBrowser();
     const context = await browser.newContext();
+    // Defense in depth (the runner already host-validates the entry URL): abort ANY
+    // request — including a redirect or sub-resource — to a localhost/intranet/
+    // private-IP-literal host so a hostile page can't pivot the browser internally.
+    if (typeof context.route === 'function') {
+      await context.route('**/*', (route) => {
+        const h = (() => { try { return new URL(route.request().url()).hostname; } catch { return ''; } })();
+        if (!h || ssrf.isBlockedHostname(h)) return route.abort();
+        return route.continue();
+      });
+    }
     const page = await context.newPage();
     await page.goto(submitUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    // Off-host redirect guard: if the page navigated away from the allowlisted host,
+    // bail before screenshotting / sending anything to the model.
+    if (expectedHost && typeof page.url === 'function' && hostOf(page.url()) !== expectedHost) {
+      return { outcome: 'failed', errorCode: 'offsite_redirect', notes: `redirected off ${expectedHost}` };
+    }
     await page.waitForTimeout(1500);
 
     const shot1 = (await page.screenshot({ fullPage: true, type: 'png' }));

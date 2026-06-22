@@ -39,9 +39,14 @@ function parseQuality(q) {
  * Lease up to n unworked prospects of a lane, atomically. FOR UPDATE SKIP LOCKED
  * so parallel Hermes subagents never grab the same row.
  */
-async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null } = {}) {
+async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null } = {}) {
   const types = type === 'outreach' ? OUTREACH_TYPES : SIGNUP_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
+  // Normalize the optional domain allowlist (lowercase, strip scheme/www) so it
+  // matches the SQL-normalized target_domain below.
+  const domainAllow = Array.isArray(domains)
+    ? domains.map((d) => String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(Boolean)
+    : null;
 
   return db.transaction(async (trx) => {
     let q = trx('seo_link_prospects')
@@ -62,6 +67,21 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // The citation runner leases only prospects the classifier marked auto-safe
     // (automation_policy='submit_free') — never account/payment/CAPTCHA-gated ones.
     if (automationPolicy) q = q.where('automation_policy', automationPolicy);
+    // Supervised-first: when a domain allowlist is supplied, claim ONLY those rows
+    // (host-normalized match) so higher-ranked non-allowlisted rows aren't leased and
+    // released every run, starving the allowlisted target. SECURITY note: this is the
+    // STARVATION fix only — the runner still independently validates each navigated
+    // URL's host before submitting.
+    if (domainAllow && domainAllow.length) {
+      q = q.where((b) => {
+        for (const d of domainAllow) {
+          b.orWhereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [d]);
+        }
+      });
+    } else if (domainAllow) {
+      // An explicit-but-empty allowlist matches nothing (don't silently claim all).
+      q = q.whereRaw('1 = 0');
+    }
     const rows = await q
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('domain_rating', 'desc')

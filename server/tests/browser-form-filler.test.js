@@ -1,16 +1,17 @@
 const { fillCitationForm, _internals } = require('../services/seo/browser-form-filler');
 
 // Fake Playwright page/browser that records actions and serves canned screenshots.
-function fakeBrowser(actionsLog) {
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add' } = {}) {
   const page = {
     goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
+    url: () => landedUrl,
     screenshot: async () => Buffer.from('png'),
     fill: async (sel, val) => actionsLog.push(['fill', sel, val]),
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
     check: async (sel) => actionsLog.push(['check', sel]),
     click: async (sel) => actionsLog.push(['click', sel]),
   };
-  const ctx = { newPage: async () => page };
+  const ctx = { newPage: async () => page, route: async () => {} };
   return { newContext: async () => ctx, close: async () => {} };
 }
 // Fake Claude: first call (plan) then second call (verify).
@@ -73,6 +74,19 @@ describe('fillCitationForm', () => {
     const r = await fillCitationForm({ submitUrl: 'https://x.com', nap }, { launchBrowser: async () => fakeBrowser([]) });
     expect(r.outcome).toBe('failed');
     if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+  });
+
+  test('off-host redirect → failed, before any model call or fill', async () => {
+    const log = [];
+    let called = 0;
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+      launchBrowser: async () => fakeBrowser(log, { landedUrl: 'https://evil.example/add' }),
+      anthropic: { messages: { create: async () => { called += 1; return { content: [{ text: '{}' }] }; } } },
+    });
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('offsite_redirect');
+    expect(called).toBe(0); // never sent a screenshot to the model
+    expect(log).toHaveLength(0);
   });
 
   test('only fill/select/check/click/submit are allowed actions', () => {

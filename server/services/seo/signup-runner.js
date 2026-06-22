@@ -15,6 +15,7 @@ const db = require('../../models/db');
 const worker = require('./link-prospect-worker');
 const { fillCitationForm } = require('./browser-form-filler');
 const { uploadEvidence } = require('./signup-evidence');
+const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname / hostResolvesPublic
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
 
 const CATEGORY = 'Pest Control';
@@ -30,6 +31,25 @@ function parseAddress(line) {
   const m = String(line || '').match(/^(.*),\s*([^,]+),\s*([A-Za-z]{2})\s*(\d{5})/);
   if (!m) return { street: line || '', city: '', state: '', zip: '' };
   return { street: m[1].trim(), city: m[2].trim(), state: m[3].toUpperCase(), zip: m[4] };
+}
+
+/**
+ * SSRF guard for the navigated submit URL. `target_url` is untrusted and may differ
+ * from the (operator-allowlisted) `target_domain`, so before we point a real browser
+ * at it — and ship its screenshot to Anthropic — require: http(s) only (no file:,
+ * data:, etc.), the host to EQUAL the allowlisted domain, not a localhost/intranet/
+ * IP-literal host, and DNS that resolves to a public address (no metadata/private IP).
+ * Returns the canonical URL string, or null to reject. The browser layer adds a
+ * per-request abort + off-host redirect check as defense in depth.
+ */
+async function validateSubmitUrl(rawUrl, allowedDomain) {
+  let u;
+  try { u = new URL(String(rawUrl || '')); } catch { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  if (!allowedDomain || normDomain(u.hostname) !== allowedDomain) return null;
+  if (ssrf.isBlockedHostname(u.hostname)) return null;
+  if (!(await ssrf.hostResolvesPublic(u.hostname))) return null;
+  return u.toString();
 }
 
 function buildNap(profile) {
@@ -77,7 +97,10 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0, note: 'no_allowlist' };
   }
 
-  const claimed = await worker.claim({ n: batchSize, type: 'signup', automationPolicy: 'submit_free' });
+  // Live runs push the allowlist into the claim so only allowlisted rows are leased
+  // (no starving the supervised target by claiming+releasing higher-ranked rows).
+  // Dry-run claims all submit_free rows to preview the full triage.
+  const claimed = await worker.claim({ n: batchSize, type: 'signup', automationPolicy: 'submit_free', ...(dryRun ? {} : { domains: allowlist }) });
   if (!claimed.length) { logger.info('[signup-runner] no submit_free prospects to claim'); return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0 }; }
 
   const nap = buildNap(worker.businessProfile());
@@ -87,18 +110,39 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 
   for (const p of claimed) {
     const domain = normDomain(p.target_domain);
-    const submitUrl = p.target_url || `https://${domain}/`;
+    const rawUrl = p.target_url || `https://${domain}/`;
 
     if (allowlist.length && !allowlist.includes(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
-    if (dryRun) { samples.push({ domain, submitUrl }); releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
+    if (dryRun) { samples.push({ domain, submitUrl: rawUrl }); releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
 
-    const result = await fillCitationForm({ submitUrl, nap }, { launchBrowser, anthropic });
+    // SSRF: validate the ACTUAL navigated URL (target_url can differ from the
+    // allowlisted target_domain) before launching a browser at it. An unsafe/off-host
+    // URL is parked (→ skip) so we stop re-claiming it; never navigated.
+    const submitUrl = await validateSubmitUrl(rawUrl, domain);
+    if (!submitUrl) {
+      logger.warn(`[signup-runner] unsafe/non-allowlisted submit URL for ${domain} — parking (skip)`);
+      await db('seo_link_prospects').where({ id: p.id }).update({ automation_policy: 'skip', claimed_at: null, claimed_by: null, updated_at: new Date() });
+      await recordAttempt(p, { outcome: 'skipped', errorCode: 'unsafe_url', notes: 'target_url failed host/SSRF validation' }, null);
+      counts.skipped++;
+      continue;
+    }
+
+    const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic });
     const evidenceKey = result.screenshot ? await uploadEvidence(result.screenshot, domain) : null;
     await recordAttempt(p, result, evidenceKey);
 
     if (result.outcome === 'placed') {
-      await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending: !!result.pending, notes: 'auto-submitted citation' });
-      counts.placed++;
+      // No confirmed live URL → report as PENDING (slow-moderation), never as a
+      // resolved placement worker.report would reject for a missing live_url.
+      const pending = !!result.pending || !result.liveUrl;
+      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, notes: 'auto-submitted citation' });
+      if (rep && rep.ok) { counts.placed++; }
+      else {
+        // report rejected (e.g. stale lease) — don't claim success; the row stays
+        // claimable for the sweep. Count as failed so the run total is honest.
+        logger.warn(`[signup-runner] placed report rejected for ${domain}: ${rep && rep.code}`);
+        counts.failed++;
+      }
     } else if (result.outcome.startsWith('blocked_')) {
       // The classifier missed a gate the engine found — RECLASSIFY so it's not
       // auto-retried, and release the lease (not a retryable failure).
@@ -128,4 +172,4 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 }
 
 module.exports = { run };
-module.exports._internals = { buildNap, parseAddress, normDomain };
+module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl };
