@@ -14,6 +14,7 @@ const {
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
   buildEstimateInvoiceModeDraft,
+  buildOneTimeInvoiceServiceLabel,
   buildPricingBundle,
   buildStandardPayPerApplicationInvoiceCopy,
   buildWaveGuardIntelligencePayload,
@@ -2547,6 +2548,56 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('class="mini-guarantee"');
     expect(html).toContain('Warranty terms depend on the selected warranty option.');
+  });
+
+  test('Bora-Care-only quote with a member-discount row still renders Bora-Care copy and no pest callback', () => {
+    // The real estimate carries a "WaveGuard Member Discount" one-time row; that
+    // adjustment line must not knock the quote out of the Bora-Care-only path.
+    const html = renderPage('boracare-discount-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 893.35,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 893.35,
+          items: [
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+            { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -157.65 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
+    expect(html).not.toContain('30-day callback period if pests return');
+    expect(html).not.toContain('class="mini-guarantee"');
+  });
+
+  test('Bora-Care invoice label resolves to the category name, not the raw service key', () => {
+    // Engine-backed rows can arrive with only `service: 'bora_care'` and no name;
+    // the customer-facing label must not surface "bora_care".
+    const label = buildOneTimeInvoiceServiceLabel({
+      estimate: {},
+      estData: { result: { recurring: { services: [] }, oneTime: { total: 1051, items: [{ service: 'bora_care', price: 1051 }] } } },
+      oneTimeList: [{ service: 'bora_care', price: 1051 }],
+    });
+    expect(label).toBe('Bora-Care Wood Treatment');
+  });
+
+  test('Ask Waves Bora-Care chip routes to a Bora-Care answer in the assistant fallback', () => {
+    const answer = answerEstimateQuestionFallback('What does Bora-Care treat?', { company: { phone: '941-555-0100' } });
+    expect(answer).toMatch(/Bora-Care/);
+    expect(answer).toMatch(/wood-boring beetles|wood-decay fungi|termites/);
+    expect(answer).not.toMatch(/^I can answer questions/);
   });
 
   test('server-rendered booking review buttons use explicit click listeners', () => {

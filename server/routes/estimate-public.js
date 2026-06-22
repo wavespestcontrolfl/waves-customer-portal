@@ -669,7 +669,12 @@ function buildOneTimeInvoiceServiceLabel({
   const rowLabel = row ? oneTimeInvoiceRowLabel(row) : '';
   const category = row ? serviceCategoryForOneTimeItem(row) : serviceCategoryForOneTimeChoice(estData, pricingBundle);
 
-  if (rowLabel) return rowLabel;
+  // A row whose only label is the raw engine service key (e.g. "bora_care",
+  // which normalizeOneTimeBreakdown falls back to when no name is stored) is not
+  // a customer-facing label — prefer the mapped category label.
+  const rowLabelIsRawServiceKey = !!rowLabel && !!row
+    && rowLabel.toLowerCase() === String(row.service || '').toLowerCase();
+  if (rowLabel && !rowLabelIsRawServiceKey) return rowLabel;
   return oneTimeInvoiceLabelForCategory(category);
 }
 
@@ -1967,10 +1972,14 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
 function hasOnlyBoraCareServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  // Adjustment/discount/setup rows (e.g. the WaveGuard member discount) carry no
+  // billable service category — ignore them so a Bora-Care-only quote with a
+  // discount line still counts as Bora-Care-only.
   return recurringRows.length === 0
-    && oneTimeRows.length > 0
     && oneTimeRows.some(isBoraCareOneTimeItem)
-    && oneTimeRows.every((item) => isBoraCareOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
+    && oneTimeRows.every((item) => isBoraCareOneTimeItem(item)
+      || isInspectionReviewOneTimeItem(item)
+      || serviceCategoryForOneTimeItem(item) === null);
 }
 
 function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
@@ -2915,9 +2924,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   );
   const recurring = recurringServicesWithSupplements(estResult);
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+  // Bora-Care detection reads the normalized one-time rows — the same set the
+  // Waves AI card uses — so it stays consistent with the AI card and also covers
+  // nested-result / engine-backed estimates that don't populate
+  // result.oneTime.items directly.
+  const boraCareOneTimeRows = normalizeOneTimeBreakdown(estData).items;
   const hasPreSlabOneTime = oneTimeItems.some(isPreSlabOneTimeItem);
   const preSlabCopy = hasPreSlabOneTime ? preSlabCustomerCopy(oneTimeItems) : null;
-  const hasBoraCareOneTime = oneTimeItems.some(isBoraCareOneTimeItem);
+  const hasBoraCareOneTime = boraCareOneTimeRows.some(isBoraCareOneTimeItem);
   const boraCareCopy = hasBoraCareOneTime ? boraCareCustomerCopy() : null;
   const germanRoachCleanoutItem = oneTimeItems.find(isGermanRoachCleanoutOneTimeItem);
   const germanRoachOneTimeCopy = germanRoachCleanoutItem
@@ -2942,7 +2956,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteBaitServices = hasOnlyTermiteBaitServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteTrenchingServices = hasOnlyTermiteTrenchingServiceMix(recurring, oneTimeItems);
-  const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, oneTimeItems);
+  const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
         heroSuffix: "here's your lawn care estimate.",

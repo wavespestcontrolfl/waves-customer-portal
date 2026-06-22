@@ -838,6 +838,10 @@ function answerEstimateQuestionFallback(question, context = {}) {
     return `Waves Pest Control is a local ${COMPANY.serviceArea} pest control and lawn care company. You can call or text ${phone}, or email ${COMPANY.email}.`;
   }
 
+  if (/\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/.test(q)) {
+    return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
+  }
+
   return `I can answer questions about this estimate, pricing, included services, billing, scheduling, or Waves. For anything not shown here, call or text Waves at ${phone}.`;
 }
 
