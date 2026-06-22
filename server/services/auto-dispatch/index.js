@@ -330,7 +330,7 @@ async function runAutoDispatch(opts = {}) {
 
           if (totals.changed >= config.maxChangesPerRun) {
             totals.recommended++; // cap-held but still a valid move — count it in the summary
-            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (lower-improvement move held, +${fresh.improvement})`, ...fresh.audit });
+            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement})`, ...fresh.audit });
             continue;
           }
 
