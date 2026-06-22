@@ -105,17 +105,20 @@ function publishClaimKey(publishId, platform) {
   return `tech_social_claim:${publishId}:${platform}`;
 }
 
+// Returns true only if WE won the claim. Fails CLOSED (false) on any error or a
+// missing key — we must NOT post to a public feed when the de-dupe can't be
+// recorded (publishId shape is bounded at the route so the key always fits).
 async function claimPlatformPublish(publishId, platform) {
-  if (!publishId) return true; // no key → can't dedupe; allow (best effort)
+  if (!publishId) return false;
   try {
     const inserted = await db('system_settings')
       .insert({ key: publishClaimKey(publishId, platform), value: 'claimed', category: 'tech_social', updated_at: new Date() })
       .onConflict('key').ignore()
       .returning('key');
-    return Array.isArray(inserted) ? inserted.length > 0 : true;
+    return Array.isArray(inserted) && inserted.length > 0;
   } catch (err) {
-    logger.warn(`[tech-social] publish claim failed: ${err.message}`);
-    return true; // never block a real publish on a claim-store error
+    logger.warn(`[tech-social] publish claim failed (failing closed): ${err.message}`);
+    return false;
   }
 }
 
@@ -184,7 +187,10 @@ router.post('/generate', async (req, res, next) => {
     // geolocation is unavailable, we have no signal — don't silently default to the
     // primary location (would post a wrong-city GBP). Force a manual selection.
     const hasCoords = Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
-    if (!locationId && !hasCoords) {
+    const validLocId = !!locationId && WAVES_LOCATIONS.some((l) => l.id === locationId);
+    // A valid pick OR usable coords is required — never silently default to the
+    // primary GBP for an absent/stale/unknown locationId (wrong-city GBP copy).
+    if (!validLocId && !hasCoords) {
       return res.status(422).json({ error: 'Select your service area — location auto-detect is unavailable' });
     }
 
@@ -229,6 +235,12 @@ router.post('/publish', async (req, res, next) => {
     // client photo and push it through uploadImageToS3/Sharp unbounded.
     if (photo && photo.data && String(photo.data).length > MAX_PHOTO_BASE64_BYTES) {
       return res.status(413).json({ error: 'Photo is too large — retake or let the app shrink it' });
+    }
+    // Idempotency requires a stable, bounded key — the client mints one per
+    // generated caption set. Bound the shape so the claim key always fits
+    // system_settings.key (varchar 100) and the de-dupe can't be bypassed.
+    if (typeof publishId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(publishId)) {
+      return res.status(400).json({ error: 'Missing or invalid publishId' });
     }
 
     const publishPlatforms = selectPublishPlatforms(platforms);
@@ -276,34 +288,42 @@ router.post('/publish', async (req, res, next) => {
       plan.push({ platform, content });
     }
 
-    // Host the photo on the public CDN once — and only if something will actually
-    // publish and it isn't a dry run. Instagram requires a public URL; Facebook
-    // and GBP attach it when present. Null when image hosting isn't configured.
+    // Claim each planned platform BEFORE hosting the photo or posting — the atomic
+    // INSERT…ON CONFLICT serializes concurrent/retry publishes, so a timed-out
+    // retry can't re-host the field photo or re-post for a platform another request
+    // already claimed. (Dry-run does no real work, so it skips claiming.)
+    const toPublish = [];
+    for (const item of plan) {
+      if (dryRun || await claimPlatformPublish(publishId, item.platform)) {
+        toPublish.push(item);
+      } else {
+        results.push({ platform: item.platform, skipped: 'Skipped to avoid a duplicate post (idempotency)' });
+      }
+    }
+
+    // Host the photo on the public CDN once — only if a claimed platform will
+    // actually publish and it isn't a dry run. Instagram requires a public URL;
+    // Facebook and GBP attach it when present.
     let imageUrl = null;
-    if (plan.length && !dryRun && photo && photo.data) {
+    if (toPublish.length && !dryRun && photo && photo.data) {
       // Unguessable, collision-free key — these are customer field photos.
       imageUrl = await social.uploadImageToS3(photo.data, `tech-field-${crypto.randomUUID()}.jpg`);
     }
 
     // Photo-first flow: if the tech submitted a photo but it couldn't be hosted,
     // do NOT publish text-only posts describing a photo the public won't see —
-    // fail every planned native platform with a clear reason. (Dry-run skips
-    // hosting by design and postToSingle no-ops, so it's exempt.)
-    const photoHostingFailed = !!(plan.length && photo && photo.data && !dryRun && !imageUrl);
+    // fail every claimed platform and release its claim so a retry can re-try.
+    const photoHostingFailed = !!(toPublish.length && photo && photo.data && !dryRun && !imageUrl);
 
-    for (const { platform, content } of plan) {
+    for (const { platform, content } of toPublish) {
       if (photoHostingFailed) {
+        if (!dryRun) await releasePlatformClaim(publishId, platform);
         results.push({ platform, success: false, error: 'Field photo could not be hosted — not publishing (check SOCIAL_MEDIA_CDN_DOMAIN / S3)' });
         continue;
       }
       if (platform === 'instagram' && !imageUrl && !dryRun) {
+        await releasePlatformClaim(publishId, platform);
         results.push({ platform, success: false, error: 'Instagram needs a hosted image (set SOCIAL_MEDIA_CDN_DOMAIN)' });
-        continue;
-      }
-      // Atomic idempotency claim right before the real post (skip in dry-run —
-      // nothing real to dedupe). If another request already claimed it, skip.
-      if (!dryRun && !(await claimPlatformPublish(publishId, platform))) {
-        results.push({ platform, skipped: 'Already published (idempotent retry)' });
         continue;
       }
       try {
@@ -312,11 +332,13 @@ router.post('/publish', async (req, res, next) => {
           imageUrl: imageUrl || undefined,
           locationId: platform === 'gbp' ? locationId : undefined,
         });
-        // Release the claim if the attempt did not actually post, so a retry can re-try.
-        if (!dryRun && !(r && r.success)) await releasePlatformClaim(publishId, platform);
+        // Keep the claim regardless of the result: once postToSingle is invoked the
+        // outcome is ambiguous (a returned failure or a thrown timeout may still have
+        // created the public post), so we never release post-attempt — a retry must
+        // not be able to duplicate it. The platform stays claimed until a fresh
+        // publishId. (Pre-attempt no-side-effect skips above DO release.)
         results.push({ platform, ...r });
       } catch (err) {
-        if (!dryRun) await releasePlatformClaim(publishId, platform);
         results.push({ platform, success: false, error: err.message });
       }
     }
