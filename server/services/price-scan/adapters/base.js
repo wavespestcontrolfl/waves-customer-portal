@@ -354,8 +354,19 @@ function makeAdapter(config) {
     let fallback = null; // best-ranked priced page, if nothing verifies (-> precise 'unverified')
     let firstBuyable = null; // first BUYABLE name+size match lacking EPA confirmation
     let firstUnbuyable = null; // first verified match that isn't buyable (compare drops it)
+    let candidateError = null; // a per-candidate nav/scrape failure, surfaced only if nothing verifies
     for (const url of candidates) {
-      const cand = await scrapeCandidate(page, vendor, product, url);
+      let cand;
+      try {
+        cand = await scrapeCandidate(page, vendor, product, url);
+      } catch (err) {
+        // A transient nav timeout / scrape failure on ONE candidate must not abort the
+        // product — the real match is often the very next link (the search is fuzzy and
+        // relevance-ranked). Remember the error so an all-fail run still reports
+        // fetch_error, but keep trying the remaining candidates.
+        candidateError = err;
+        continue;
+      }
       if (!cand) continue;
       if (!fallback) fallback = cand;
       const verdict = verifyMatch(
@@ -375,7 +386,11 @@ function makeAdapter(config) {
     }
     // A buyable match (can actually be an opportunity) beats a verified-but-unbuyable one
     // (compare would drop it), which beats any priced page (a precise 'unverified' skip).
-    return firstBuyable || firstUnbuyable || fallback;
+    const result = firstBuyable || firstUnbuyable || fallback;
+    // Nothing usable AND at least one candidate threw -> surface the error so the run
+    // reports a precise 'fetch_error' rather than a misleading 'no_candidate'.
+    if (!result && candidateError) throw candidateError;
+    return result;
   }
 
   return { key: config.key, config, fetchCandidate };
