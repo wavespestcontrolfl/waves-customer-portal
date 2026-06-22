@@ -56,8 +56,14 @@ module.exports = makeAdapter({
       }, { timeout: LOGIN_TIMEOUT }).catch(() => {});
       await page.waitForTimeout(2000);
       const stillPw = await page.locator('input[name="login[password]"]:visible').count();
-      // Not logged in if the form remains, or we're stuck in the unregistered (unpriced) state.
-      return stillPw === 0 && !/AuthenticatedNotRegistered/i.test(page.url());
+      // Success requires the SAME conditions as the wait predicate (its timeout is swallowed,
+      // so re-check here): password form gone, off the login page, AND past the transient
+      // OAuth state (?code= mid-exchange or AuthenticatedNotRegistered). Otherwise a stalled
+      // exchange would be marked logged-in and the first scan would hit the gated/$0 session.
+      const url = page.url();
+      const transient = /[?&]code=|AuthenticatedNotRegistered/i.test(url);
+      const onLoginPage = /customer\/account\/login/i.test(url);
+      return stillPw === 0 && !transient && !onLoginPage;
     };
     let ok = false;
     for (let i = 0; i < 3 && !ok; i += 1) {
