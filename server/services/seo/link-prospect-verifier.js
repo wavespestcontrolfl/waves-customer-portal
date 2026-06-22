@@ -125,9 +125,13 @@ async function reconcileByDomain(prospect) {
   // off one link and duplicate-Omega the same source_url. Bail → they await a known
   // live_url (profile reconcile / crawl) or manual reconciliation.
   if (parseQuality(prospect.quality_signals).cited_homepage) {
+    // Count ALL active homepage-cited placements for this directory — pending AND
+    // already live/indexed (NOT just pending): once one location row is live for the
+    // directory, a later pending sibling must STILL be treated as ambiguous (else it'd
+    // reconcile against the existing homepage backlink and mark a 2nd location live +
+    // duplicate-Omega the same source_url). >1 (i.e. this row has a sibling) → bail.
     const siblings = await db('seo_link_prospects')
-      .where({ status: 'placed' })
-      .whereNull('live_url')
+      .whereIn('status', ['placed', 'live', 'indexed'])
       .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [dom])
       .whereRaw("COALESCE(quality_signals->>'cited_homepage','') = 'true'")
       .count('* as c').first();
