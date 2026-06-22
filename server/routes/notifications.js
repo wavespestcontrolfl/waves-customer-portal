@@ -57,6 +57,9 @@ function normalizeContactInput(contact = {}) {
   };
 }
 
+// Delivery-channel options for per-notification channel selection.
+const CHANNEL_VALUES = ['sms', 'email', 'both'];
+
 const PREF_SELECT = [
   'appointment_confirmation',
   'service_reminder_72h',
@@ -73,7 +76,14 @@ const PREF_SELECT = [
   'payment_confirmation_sms',
   'appointment_notify_primary',
   'service_report_notify_primary',
+  'appointment_confirmation_channel',
+  'service_reminder_72h_channel',
+  'service_reminder_24h_channel',
 ];
+
+function channelValue(value) {
+  return CHANNEL_VALUES.includes(value) ? value : 'sms';
+}
 
 function preferencePayload(prefs = {}) {
   return {
@@ -92,6 +102,10 @@ function preferencePayload(prefs = {}) {
     paymentConfirmationSms: prefs.payment_confirmation_sms !== false,
     appointmentNotifyPrimary: prefs.appointment_notify_primary === true,
     serviceReportNotifyPrimary: prefs.service_report_notify_primary === true,
+    // Per-notification delivery channel (sms | email | both)
+    appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
+    serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
+    serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
   };
 }
 
@@ -129,6 +143,9 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   }
   if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
   if (updates.serviceReportNotifyPrimary !== undefined) dbUpdates.service_report_notify_primary = updates.serviceReportNotifyPrimary;
+  if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
+  if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
+  if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
   return dbUpdates;
 }
 
@@ -148,7 +165,20 @@ const ACCOUNT_PREF_LABELS = {
   billingContactName: 'Billing Contact Name',
   paymentConfirmationSms: 'Payment Confirmation Texts',
   serviceReportNotifyPrimary: 'Primary Account Service Report Copies',
+  appointmentConfirmationChannel: 'New Appointment Confirmation — Delivery',
+  serviceReminder72hChannel: '72-Hour Appointment Reminder — Delivery',
+  serviceReminder24hChannel: '24-Hour Service Reminder — Delivery',
 };
+
+// Preference keys whose value is a delivery channel (sms | email | both)
+// rather than an on/off toggle — displayed by name in the change log.
+const CHANNEL_PREF_KEYS = new Set([
+  'appointmentConfirmationChannel',
+  'serviceReminder72hChannel',
+  'serviceReminder24hChannel',
+]);
+
+const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email' };
 
 const DB_FIELD_BY_PREF = {
   appointmentConfirmation: 'appointment_confirmation',
@@ -166,10 +196,14 @@ const DB_FIELD_BY_PREF = {
   billingContactName: 'billing_contact_name',
   paymentConfirmationSms: 'payment_confirmation_sms',
   serviceReportNotifyPrimary: 'service_report_notify_primary',
+  appointmentConfirmationChannel: 'appointment_confirmation_channel',
+  serviceReminder72hChannel: 'service_reminder_72h_channel',
+  serviceReminder24hChannel: 'service_reminder_24h_channel',
 };
 
 function prefDisplayValue(key, value) {
   if (key === 'billingEmail' || key === 'billingContactName') return value || 'Not set';
+  if (CHANNEL_PREF_KEYS.has(key)) return CHANNEL_DISPLAY[channelValue(value)];
   return value === false ? 'Off' : 'On';
 }
 
@@ -181,9 +215,10 @@ function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, optio
     if (!label) continue;
     const dbField = DB_FIELD_BY_PREF[key];
     const oldRaw = dbField ? before?.[dbField] : undefined;
-    const oldValue = key === 'billingEmail' || key === 'billingContactName'
-      ? oldRaw || ''
-      : oldRaw !== false;
+    let oldValue;
+    if (key === 'billingEmail' || key === 'billingContactName') oldValue = oldRaw || '';
+    else if (CHANNEL_PREF_KEYS.has(key)) oldValue = channelValue(oldRaw);
+    else oldValue = oldRaw !== false;
     const newValue = afterPrefs?.[key];
     if (prefDisplayValue(key, oldValue) === prefDisplayValue(key, newValue)) continue;
     items.push({
@@ -334,6 +369,9 @@ router.put('/preferences', async (req, res, next) => {
       billingContactName: Joi.string().trim().max(120).allow('', null),
       paymentConfirmationSms: Joi.boolean(),
       serviceReportNotifyPrimary: Joi.boolean(),
+      appointmentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
+      serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES),
+      serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES),
     }).min(1);
 
     const updates = await schema.validateAsync(req.body);

@@ -89,6 +89,49 @@ describe('notification preference updates', () => {
     });
   });
 
+  test('maps per-notification delivery channels to their db columns', () => {
+    const updates = notificationPrefsDbUpdates(
+      {
+        appointmentConfirmationChannel: 'email',
+        serviceReminder72hChannel: 'both',
+        serviceReminder24hChannel: 'sms',
+      },
+      {},
+    );
+
+    expect(updates).toEqual({
+      appointment_confirmation_channel: 'email',
+      service_reminder_72h_channel: 'both',
+      service_reminder_24h_channel: 'sms',
+    });
+  });
+
+  test('coerces an unrecognized channel value to sms', () => {
+    const updates = notificationPrefsDbUpdates(
+      { serviceReminder24hChannel: 'pigeon' },
+      {},
+    );
+
+    expect(updates).toEqual({ service_reminder_24h_channel: 'sms' });
+  });
+
+  test('labels a delivery-channel change with its from/to channel names', () => {
+    const items = preferenceChangeItems(
+      { serviceReminder24hChannel: 'email' },
+      { service_reminder_24h_channel: 'sms' },
+      { serviceReminder24hChannel: 'email' },
+      { scope: 'Account' },
+    );
+
+    expect(items).toEqual([{
+      key: 'serviceReminder24hChannel',
+      label: '24-Hour Service Reminder — Delivery',
+      oldValue: 'Text',
+      newValue: 'Email',
+      scope: 'Account',
+    }]);
+  });
+
   test('labels a 72-hour reminder toggle for account.updated emails', () => {
     const items = preferenceChangeItems(
       { serviceReminder72h: false },
