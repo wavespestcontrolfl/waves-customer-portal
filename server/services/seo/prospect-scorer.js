@@ -37,6 +37,9 @@ const SIGNUP_INTENTS = new Set(['directory', 'citation', 'social']);
 // one of these or it strands in 'prospect' forever.
 const CLAIMABLE_LINK_TYPES = new Set(['editorial', 'resource', 'guest_post', 'haro', 'directory', 'citation', 'social']);
 
+// Every intent the classifier may emit (claimable + 'unknown').
+const VALID_INTENTS = new Set([...CLAIMABLE_LINK_TYPES, 'unknown']);
+
 // HARO-class platforms: you JOIN them, you don't cold-email them. Flagged so the
 // drafter never wastes a send pitching helpareporter.com itself.
 const HARO_PLATFORMS = new Set([
@@ -72,6 +75,15 @@ function classifyLinkType(domain = '', url = '') {
   if (/herald|tribune|patch\.com|gondolier|magazine|news|wwsb|abc7/i.test(d)) return 'editorial';
   if (/\/blog/i.test(u)) return 'editorial';
   return 'unknown';
+}
+
+// Normalize a model-emitted intent (e.g. 'Directory', 'guest-post', ' HARO ') to
+// the canonical enum BEFORE gating — an unrecognized form would otherwise be
+// treated as outreach and coerced to 'resource', cold-emailing a directory/HARO
+// target. Falls back to the heuristic when the value isn't an exact enum member.
+function normalizeIntent(raw, domain, url) {
+  const n = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return VALID_INTENTS.has(n) ? n : classifyLinkType(domain, url);
 }
 
 // ── Heuristic classifier (LLM fallback) ───────────────────────────────────────
@@ -161,7 +173,7 @@ ${JSON.stringify(list)}`;
     if (!hit) return heuristicClassify(c);
     return {
       domain: c.domain,
-      intent_class: hit.intent_class || classifyLinkType(c.domain, c.source_url),
+      intent_class: normalizeIntent(hit.intent_class, c.domain, c.source_url),
       relevance_0_100: Math.max(0, Math.min(100, Number(hit.relevance_0_100) || 0)),
       is_local_swfl: !!hit.is_local_swfl,
       lead_value_tier: Number(hit.lead_value_tier) || 0,

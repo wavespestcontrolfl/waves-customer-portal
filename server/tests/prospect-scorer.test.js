@@ -115,6 +115,17 @@ describe('classifyBatch LLM path', () => {
     expect(c.target_topic).toBe('wdo');
   });
 
+  test('normalizes a near-valid model intent (Directory / guest-post) instead of misrouting it', async () => {
+    const fake = {
+      messages: {
+        create: async () => ({ content: [{ text: '[{"i":0,"domain":"listingsite.com","intent_class":"Directory","relevance_0_100":30,"is_local_swfl":false,"lead_value_tier":4},{"i":1,"domain":"guestblog.com","intent_class":"guest-post","relevance_0_100":60,"is_local_swfl":true,"lead_value_tier":2}]' }] }),
+      },
+    };
+    const [a, b] = await scorer.classifyBatch([{ domain: 'listingsite.com' }, { domain: 'guestblog.com' }], { anthropic: fake });
+    expect(a.intent_class).toBe('directory'); // not coerced to resource → stays signup lane
+    expect(b.intent_class).toBe('guest_post');
+  });
+
   test('falls back to heuristic when the model errors', async () => {
     const boom = { messages: { create: async () => { throw new Error('500'); } } };
     const [c] = await scorer.classifyBatch([{ domain: 'helpareporter.com' }], { anthropic: boom });
