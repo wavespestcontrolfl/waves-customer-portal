@@ -131,10 +131,11 @@ class DataForSEO {
   // Every referring domain pointing at a target — one row per domain
   // (domain, rank, backlinks count, first/last seen). The cheap, correct
   // primitive for "every site that links to competitor X" (deep harvest).
-  async getReferringDomains(target, { limit = 1000 } = {}) {
+  async getReferringDomains(target, { limit = 1000, offset = 0 } = {}) {
     // No order_by — the referring_domains endpoint rejects it (40501 Invalid
     // Field). Callers sort client-side; DataForSEO returns highest-rank first.
-    return this.request('/backlinks/referring_domains/live', [{ target, limit }]);
+    // offset enables paging past the 1000/call cap (result carries total_count).
+    return this.request('/backlinks/referring_domains/live', [{ target, limit, offset }]);
   }
 
   // Bulk domain rank for up to 1000 targets in ONE call (credit discipline).

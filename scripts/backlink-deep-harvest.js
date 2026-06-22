@@ -37,6 +37,7 @@ const { DEFAULT_COMPETITOR_DOMAINS } = require('../server/services/seo/competito
 const HOME = 'https://wavespestcontrol.com/';
 const OWN_DOMAIN = 'wavespestcontrol.com';
 const SPAM_MAX = 40;          // drop domains at/above this DataForSEO spam score
+const MAX_REFERRING_PAGES = 6; // page cap per competitor (6000 ref domains) — bounds cost; logs PARTIAL if exceeded
 const TOPIC_KEYWORDS = {
   pest: ['pest-control', 'pest'], lawn: ['lawn', 'turf'], termite: ['termite'],
   wdo: ['wdo', 'wood-destroying'], mosquito: ['mosquito'], rodent: ['rodent', 'wildlife'],
@@ -100,24 +101,33 @@ async function harvest(db, args) {
   const ours = new Set((await db('seo_backlinks').where({ status: 'active' }).select('source_domain')).map((r) => normDomain(r.source_domain)).filter(Boolean));
   ours.add(OWN_DOMAIN);
 
-  // 1. aggregate referring domains across competitors
+  // 1. aggregate referring domains across competitors — PAGE through, since the
+  // endpoint caps at 1000/call and big competitors have more (via offset). This
+  // is the one-time full harvest, so don't silently grab only the first page.
   const agg = new Map();
   for (const comp of competitors) {
-    const resp = await dataforseo.getReferringDomains(comp, { limit: 1000 });
-    const rows = items(resp);
-    let kept = 0;
-    for (const it of rows) {
-      const domain = normDomain(it.domain || it.target);
-      if (!domain || domain === comp || ours.has(domain)) continue;
-      const rank = Number(it.rank) || 0;
-      const cur = agg.get(domain) || { domain, rank: 0, backlinks: 0, competitors: new Set() };
-      cur.rank = Math.max(cur.rank, rank);
-      cur.backlinks = Math.max(cur.backlinks, Number(it.backlinks) || 0);
-      cur.competitors.add(comp);
-      agg.set(domain, cur);
-      kept++;
+    let offset = 0, total = Infinity, fetched = 0, kept = 0;
+    for (let page = 0; page < MAX_REFERRING_PAGES && offset < total; page++) {
+      const result0 = (await dataforseo.getReferringDomains(comp, { limit: 1000, offset }))?.tasks?.[0]?.result?.[0];
+      const rows = result0?.items || [];
+      total = Number(result0?.total_count) || fetched + rows.length;
+      if (!rows.length) break;
+      for (const it of rows) {
+        const domain = normDomain(it.domain || it.target);
+        if (!domain || domain === comp || ours.has(domain)) continue;
+        const rank = Number(it.rank) || 0;
+        const cur = agg.get(domain) || { domain, rank: 0, backlinks: 0, competitors: new Set() };
+        cur.rank = Math.max(cur.rank, rank);
+        cur.backlinks = Math.max(cur.backlinks, Number(it.backlinks) || 0);
+        cur.competitors.add(comp);
+        agg.set(domain, cur);
+        kept++;
+      }
+      fetched += rows.length;
+      offset += 1000;
     }
-    console.log(`  ${comp}: ${rows.length} referring domains, ${kept} new candidates (running unique: ${agg.size})`);
+    const partial = total > fetched ? ` ⚠️ PARTIAL: ${total} total, capped at ${MAX_REFERRING_PAGES * 1000}` : '';
+    console.log(`  ${comp}: fetched ${fetched}/${total} referring domains, ${kept} new candidates${partial} (running unique: ${agg.size})`);
   }
 
   let candidates = [...agg.values()].sort((x, y) => y.rank - x.rank);
