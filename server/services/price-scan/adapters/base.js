@@ -16,8 +16,14 @@ const {
   extractSizeToken,
   mapAvailability,
   quantityToOz,
+  verifyMatch,
+  epaKey,
 } = require('../extract');
+const { isUnavailable } = require('../compare');
 const { convertToOz } = require('../../product-costing');
+
+// How many top-ranked search results to actually open + verify before giving up.
+const MAX_SEARCH_CANDIDATES = 4;
 
 // The oz-equivalent of the product we're scanning for, so the JSON-LD parser can
 // pick the matching variant offer on a multi-size page. packSizeValue/Unit are
@@ -140,25 +146,135 @@ async function firstProductLink(page, config) {
   }, sels);
 }
 
+// Tokens to match a product against a result slug: alphanumeric, >=2 chars, with
+// consecutive single letters merged so a slashed formulation code like "I/T" -> "it".
+function searchTokens(product) {
+  const s = (product && (product.searchQuery || product.vendorProductName || product.productName || product.name)) || '';
+  const raw = String(s).toLowerCase().match(/[a-z0-9]+/g) || [];
+  const merged = [];
+  let run = '';
+  for (const t of raw) {
+    if (t.length === 1 && /[a-z]/.test(t)) { run += t; continue; } // merge consecutive single LETTERS (I/T -> it); never digits, so "2,4-D" stays 2,4,d
+    if (run) { merged.push(run); run = ''; }
+    merged.push(t);
+  }
+  if (run) merged.push(run);
+  return [...new Set(merged.filter((t) => t.length >= 2))];
+}
+
+// Chemical-class words that appear in many product names but DON'T distinguish one
+// product from another of the same brand (every Bifen is an "insecticide"), and which
+// vendors often drop from the slug. Excluded from scoring so they can't tip a tie to
+// the wrong variant; the brand token below still does the real gating.
+const GENERIC_NAME_TOKENS = new Set([
+  'insecticide', 'insecticides', 'termiticide', 'herbicide', 'herbicides',
+  'fungicide', 'fungicides', 'miticide', 'pesticide', 'rodenticide', 'nematicide', 'fertilizer',
+]);
+
+// Alphanumeric segments of a product URL path, as a Set for EXACT-segment matching
+// (so "sc" matches a "sc" segment, not a substring of "celsius"). Strips the storefront
+// product-id suffix (DoMyOwn "...-p-12345.html") + extension first, so an id digit can't
+// masquerade as pack-size evidence (a "5 lb" token matching the "5" of "-p-5"); the
+// `-p-<id>` pattern is DoMyOwn-specific, so the strip is a harmless no-op elsewhere.
+function slugSegments(href) {
+  let path = String(href);
+  try { path = new URL(href).pathname; } catch { /* relative/garbage — match as-is */ }
+  path = path.replace(/\.html?$/i, '').replace(/-p-\d+$/i, '');
+  return new Set(path.toLowerCase().match(/[a-z0-9]+/g) || []);
+}
+
+// PURE: RANK the result links by how well their URL slug matches the product, best
+// first — a ranking, NOT a gate. Modern storefront search is a relevance-ranked widget
+// (a "Taurus SC" search lists Talstar above Taurus), so the caller opens the top few in
+// turn and lets verifyMatch (EPA / formulation / size) be the sole authority. A
+// brand-token (first >=3-char name token) hit is a heavy boost so the exact product
+// ranks first and the fast path verifies immediately; the most distinctive name +
+// pack-size tokens then order the rest ("bifen-it" over "bifen-xts", the size-specific
+// page over the generic one). Crucially, non-brand links are KEPT (ranked last), not
+// discarded — a generic-equivalent listing with a DIFFERENT brand but the SAME EPA reg
+// is exactly what verifyMatch is meant to accept, so it must still reach verification.
+// Returns [] only for an empty input.
+function rankedMatchingLinks(hrefs, product) {
+  const list = (hrefs || []).filter(Boolean);
+  if (!list.length) return [];
+  const nameToks = searchTokens(product);
+  if (!nameToks.length) return list.slice(0, 1); // no product context -> legacy first-link
+  const brand = nameToks.find((t) => t.length >= 3) || nameToks[0];
+  const scoreToks = nameToks.filter((t) => !GENERIC_NAME_TOKENS.has(t));
+  // Keep numeric size tokens of ANY length (a single-digit pack like "5 lb" or the
+  // "2"/"5" of "2.5 gal" is the differentiator between size variants); only single
+  // LETTERS are dropped as noise.
+  const sizeToks = [...new Set((String((product && product.quantity) || '').toLowerCase().match(/[a-z0-9]+/g) || [])
+    .filter((t) => !nameToks.includes(t) && (t.length >= 2 || /\d/.test(t))))];
+  const BRAND_BOOST = 1000; // brand-matched links always rank above non-brand ones
+  const scored = [];
+  for (const href of list) {
+    const seg = slugSegments(href);
+    const score = (seg.has(brand) ? BRAND_BOOST : 0)
+      + scoreToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0)
+      + sizeToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0);
+    scored.push({ href, score });
+  }
+  // Stable sort by score desc — preserves widget order for ties (e.g. same-brand
+  // variants we can't tell apart by slug, like Talstar P vs Talstar XTRA; or the
+  // non-brand tail where an EPA-equivalent may sit).
+  return scored.map((s, i) => ({ ...s, i })).sort((a, b) => (b.score - a.score) || (a.i - b.i)).map((s) => s.href);
+}
+
+// The single best slug match (the head of the ranked list), or null.
+function bestMatchingLink(hrefs, product) {
+  return rankedMatchingLinks(hrefs, product)[0] || null;
+}
+
+// PURE: the result links the caller should open + verify, in order. Normally the top
+// `cap` ranked links. But when those are ALL brand matches and a non-brand link exists
+// further down, APPEND the top non-brand link as one EXTRA candidate (budget cap+1)
+// rather than replacing the last brand page — dropping a brand variant could lose the
+// real size/EPA match (e.g. a Talstar-P-style variant whose distinguishing token isn't
+// in the slug). The loop tries the brand matches first and only opens this extra if
+// none of them verify, so a same-EPA generic equivalent still gets a shot at no cost to
+// the brand candidates. Only done for products with a valid EPA reg — a different-brand
+// page can be accepted solely on EPA + size, so for a non-EPA product (fertilizer/
+// adjuvant) a non-brand link can never verify and isn't worth opening.
+function selectSearchCandidates(hrefs, product, cap = MAX_SEARCH_CANDIDATES) {
+  const ranked = rankedMatchingLinks(hrefs, product);
+  if (ranked.length <= cap) return ranked;
+  const picked = ranked.slice(0, cap);
+  if (!epaKey(product && product.epaReg)) return picked;
+  const nameToks = searchTokens(product);
+  const brand = nameToks.find((t) => t.length >= 3) || nameToks[0];
+  const isBrand = (href) => !!brand && slugSegments(href).has(brand);
+  if (picked.every(isBrand)) {
+    const topNonBrand = ranked.find((href) => !isBrand(href));
+    if (topNonBrand && !picked.includes(topNonBrand)) picked.push(topNonBrand); // extra slot, not a swap
+  }
+  return picked;
+}
+
+// Collect every candidate result link from the page (deduped, in document order).
+async function collectResultLinks(page, config) {
+  const sels = config.productLinkSelectors && config.productLinkSelectors.length
+    ? config.productLinkSelectors
+    : ['a.product-link', '.product-item a', '.product a'];
+  return page.evaluate((selectors) => {
+    const seen = new Set();
+    const out = [];
+    for (const s of selectors) {
+      for (const a of document.querySelectorAll(s)) {
+        if (a && a.href && !seen.has(a.href)) { seen.add(a.href); out.push(a.href); }
+      }
+    }
+    return out;
+  }, sels);
+}
+
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
-  async function fetchCandidate(page, vendor, product) {
-    // 1. Resolve the product page URL.
-    let url = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
-    if (!url) {
-      const searchUrl = config.buildSearchUrl
-        ? config.buildSearchUrl(product, vendor)
-        : null;
-      if (!searchUrl) return null;
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
-      url = await firstProductLink(page, config);
-      if (!url) return null;
-    }
-
-    // 2. Load the product page and snapshot it. domcontentloaded (NOT
-    // networkidle — ad/analytics chatter means networkidle never fires on these
-    // storefronts); an optional short settle lets client-rendered prices paint.
+  // Open ONE product URL, snapshot it, and shape a candidate (or null if no usable
+  // priced offer at the target size). domcontentloaded (NOT networkidle — ad chatter
+  // never settles); an optional short settle lets client-rendered prices paint.
+  async function scrapeCandidate(page, vendor, product, url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
     if (config.settleMs) await page.waitForTimeout(config.settleMs);
     const sel = {
@@ -168,15 +284,15 @@ function makeAdapter(config) {
     };
     const snapshot = await page.evaluate(collectSnapshot, sel);
 
-    // 3. Parse with the pure helpers: size-aware JSON-LD first; DOM fallback only
-    // when JSON-LD carried no offers (offerFromSnapshot enforces the size gate so
-    // a default DOM variant can't be reported as the requested pack).
+    // Size-aware JSON-LD first; DOM fallback only when JSON-LD carried no offers
+    // (offerFromSnapshot enforces the size gate so a default variant can't be
+    // reported as the requested pack).
     const offer = offerFromSnapshot(snapshot, { targetOz: targetOzOf(product) });
     if (!offer || offer.price == null) return null;
 
-    // When JSON-LD priced the offer but didn't state availability, fall back to
-    // the DOM availability text — otherwise a sold-out page reports 'unknown'
-    // (which compare does NOT exclude) and can rank as a savings opportunity.
+    // When JSON-LD priced the offer but didn't state availability, fall back to the
+    // DOM availability text — otherwise a sold-out page reports 'unknown' (which
+    // compare does NOT exclude) and can rank as a savings opportunity.
     let availability = offer.availability || 'unknown';
     if (availability === 'unknown' && snapshot.availabilityText) {
       availability = mapAvailability(snapshot.availabilityText);
@@ -201,17 +317,71 @@ function makeAdapter(config) {
       competing_same_size: !!offer.competingSameSize,
       price_type: config.priceType || 'public',
       // The real vendors.id (UUID) the /report worker keys on — a DB vendor row
-      // provides `.id`. This is NOT the adapter slug (selectAdapterKey decides
-      // that from host/name/url; the two are independent).
+      // provides `.id`. This is NOT the adapter slug (selectAdapterKey decides that
+      // from host/name/url; the two are independent).
       vendor_id: vendor.vendor_id || vendor.id,
       vendor: vendor.name || vendor.vendor_id || vendor.id,
     };
+  }
+
+  async function fetchCandidate(page, vendor, product) {
+    // Direct URL (explicit vendor.url or a builder) — one shot.
+    const directUrl = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
+    if (directUrl) return scrapeCandidate(page, vendor, product, directUrl);
+
+    // Otherwise search the vendor and open the best matches.
+    const searchUrl = config.buildSearchUrl ? config.buildSearchUrl(product, vendor) : null;
+    if (!searchUrl) return null;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
+    // OPT-IN wait: only adapters whose results are injected by a client-side widget set
+    // searchWaitMs (DoMyOwn's Reflektion search). For server-rendered adapters the
+    // results are already in the DOM, so we must NOT block here — otherwise a no-match
+    // (or a stale search path) burns the full timeout per product, adding minutes to a
+    // serial multi-product run. waitForSelector returns as soon as a link appears, so a
+    // successful dynamic search is still fast; only a genuine no-match waits it out.
+    if (config.searchWaitMs) {
+      const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
+      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
+    }
+
+    // Search is fuzzy + relevance-ranked, and slug heuristics can't always tell
+    // same-brand variants apart (Talstar P vs Talstar XTRA). So open the top-ranked
+    // results in turn and let verifyMatch (EPA / formulation / size) pick the real
+    // one — returning the first that VERIFIES rather than betting on a single link.
+    const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
+    const candidates = selectSearchCandidates(await collectResultLinks(page, config), product, cap);
+    const wantsEpa = !!(product && product.epaReg);
+    let fallback = null; // best-ranked priced page, if nothing verifies (-> precise 'unverified')
+    let firstBuyable = null; // first BUYABLE name+size match lacking EPA confirmation
+    let firstUnbuyable = null; // first verified match that isn't buyable (compare drops it)
+    for (const url of candidates) {
+      const cand = await scrapeCandidate(page, vendor, product, url);
+      if (!cand) continue;
+      if (!fallback) fallback = cand;
+      const verdict = verifyMatch(
+        { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
+        product,
+      );
+      if (!verdict.matched) continue;
+      const buyable = !isUnavailable(cand); // out_of_stock / backorder can't be an opportunity
+      // Prefer an EPA-confirmed match — a single-letter formulation suffix the slug can't
+      // encode (catalog "Talstar P" vs page "Talstar Professional") lets a sibling like
+      // "Talstar XTRA" pass name+size on brand overlap alone — BUT only among BUYABLE
+      // pages: an out-of-stock EPA hit gets dropped by compare, so it must never beat an
+      // already-found buyable match. Ideal (EPA-ok AND buyable, or no EPA needed) wins now.
+      if ((!wantsEpa || verdict.signals.epa) && buyable) return cand;
+      if (buyable) { if (!firstBuyable) firstBuyable = cand; } // buyable but EPA not confirmed
+      else if (!firstUnbuyable) firstUnbuyable = cand; // verified but unbuyable
+    }
+    // A buyable match (can actually be an opportunity) beats a verified-but-unbuyable one
+    // (compare would drop it), which beats any priced page (a precise 'unverified' skip).
+    return firstBuyable || firstUnbuyable || fallback;
   }
 
   return { key: config.key, config, fetchCandidate };
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, firstProductLink, searchQuery, targetOzOf,
-  priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
+  makeAdapter, collectSnapshot, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
+  searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };
