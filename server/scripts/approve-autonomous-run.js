@@ -52,20 +52,10 @@ if (!RUN_ID) {
 
     if (run.skip_reason === 'named_competitor_review') {
       // Publish the reviewed draft (PR or live) + complete the opportunity.
+      // The runner atomically claims + publishes + owns the final opportunity/run
+      // state (done for live; parked as astro_pr_pending_merge for a PR).
       const runner = require('../services/content/autonomous-runner');
       const result = await runner.approveAndPublishNamedCompetitor(run.opportunity_id, { approvedBy: APPROVED_BY });
-      if (result.published_url) {
-        // Published live → complete the opportunity.
-        await db('opportunity_queue')
-          .where({ id: run.opportunity_id, status: 'pending_review' })
-          .update({ status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() });
-      } else {
-        // PR opened → keep parked as a normal PR-pending item so the PR poller
-        // verifies / indexes / completes the merge (marking it done orphans it).
-        await db('opportunity_queue')
-          .where({ id: run.opportunity_id, status: 'pending_review' })
-          .update({ skip_reason: 'astro_pr_pending_merge', updated_at: new Date() });
-      }
       console.log(`Named-competitor run ${RUN_ID} approved by ${APPROVED_BY} → ${result.published_url || result.astro_pr_url || result.publish_status || 'submitted'}`);
       return;
     }

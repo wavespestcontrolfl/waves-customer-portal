@@ -348,4 +348,37 @@ describe('comparison-table-gate', () => {
       { namedCompetitorEnabled: true });
     expect(titled.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Florida Pest Control/.test(f.message))).toBe(true);
   });
+
+  // ── Round-7 findings ──
+
+  test('R7-F2: an uncurated fact is caught even when row props are written values-before-label', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[{ values: ["90-day money-back guarantee","Re-treat between visits"], label: "Guarantee" }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
+  });
+
+  test('R7-F2: extractRows parses label/values in either order', () => {
+    expect(gate.extractRows('rows={[{ label: "A", values: ["1","2"] }]}')[0]).toEqual({ label: 'A', values: ['1', '2'] });
+    expect(gate.extractRows('rows={[{ values: ["1","2"], label: "A" }]}')[0]).toEqual({ label: 'A', values: ['1', '2'] });
+  });
+
+  test('R7-F3: a NEGATED competitor fact is not treated as supported', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[{ label: "Reach", values: ["Not national","Local"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
+    // claimSupported unit: negation rejected even though "national" is curated.
+    expect(gate.claimSupported('Not national', ['National (US)'])).toBe(false);
+    expect(gate.claimSupported('National (US)', ['National (US)'])).toBe(true);
+  });
+
+  test('R7-F5: disparaging a competitor by brand name (no provider noun) is caught (P0)', () => {
+    const r = gate.evaluate({ body: `Honestly, Orkin is the worst.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
 });

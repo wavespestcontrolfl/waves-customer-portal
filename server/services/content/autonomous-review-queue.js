@@ -118,40 +118,23 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}
     });
   } else if (normalizedDecision === 'approve_named_competitor') {
     assertNamedCompetitorReviewRun(run);
-    // Publish the reviewed draft (PR or live) via the autonomous runner, THEN
-    // complete the opportunity. Publish runs first so a gate/guard/publish
-    // failure leaves the item pending_review rather than falsely 'done'.
+    // The runner atomically claims the opportunity + run under the engine lock,
+    // publishes the reviewed draft, and OWNS the final opportunity/run state
+    // (done for a live publish; parked as astro_pr_pending_merge for a PR so the
+    // poller reconciles). We only append the reviewer note here; a gate/guard/
+    // publish failure throws and leaves the item parked for retry.
     const runner = require('./autonomous-runner');
-    const result = await runner.approveAndPublishNamedCompetitor(opportunityId, { approvedBy: reviewerName });
-    await db.transaction(async (trx) => {
-      if (result.published_url) {
-        // Published live → complete the opportunity.
-        await updatePendingReviewOpportunity(trx, opportunityId, {
-          status: 'done',
-          skip_reason: 'named_competitor_published',
-          completed_at: new Date(),
-          updated_at: new Date(),
-        });
-      } else {
-        // PR opened → keep it parked as a normal PR-pending item (status stays
-        // pending_review, skip_reason matches the run) so the existing PR poller
-        // verifies / indexes / completes the merge. Marking it done orphans it.
-        await updatePendingReviewOpportunity(trx, opportunityId, {
-          skip_reason: 'astro_pr_pending_merge',
-          updated_at: new Date(),
-        });
-      }
-      if (run?.id) {
-        await trx('autonomous_runs').where('id', run.id).update({
-          reviewer_notes: appendReviewerNote(run.reviewer_notes, {
-            decision: normalizedDecision,
-            reviewer: reviewerName,
-            note: cleanNote,
-          }),
-          updated_at: new Date(),
-        });
-      }
-    });
+    await runner.approveAndPublishNamedCompetitor(opportunityId, { approvedBy: reviewerName });
+    if (run?.id) {
+      await db('autonomous_runs').where('id', run.id).update({
+        reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+          decision: normalizedDecision,
+          reviewer: reviewerName,
+          note: cleanNote,
+        }),
+        updated_at: new Date(),
+      });
+    }
   } else if (normalizedDecision === 'requeue') {
     await db.transaction(async (trx) => {
       await updatePendingReviewOpportunity(trx, opportunityId, {

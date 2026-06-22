@@ -2151,6 +2151,18 @@ class AutonomousRunner {
   // is rejected because the run is no longer 'named_competitor_review'.
   async approveAndPublishNamedCompetitor(opportunityId, { approvedBy = 'operator' } = {}) {
     if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
+    // Serialize with runDaily / runCatchUp / admin run-now behind the engine
+    // advisory lock so the canary-cap read + publish can't interleave with
+    // another publisher and blow past the per-day/week caps or overlap publishes.
+    const result = await this._withEngineLock('approveNamedCompetitor',
+      () => this._approveNamedCompetitorLocked(opportunityId, { approvedBy }));
+    if (result && result.skipped && result.reason === 'engine_locked') {
+      const e = new Error('Autonomous publisher is busy; retry in a moment'); e.statusCode = 409; throw e;
+    }
+    return result;
+  }
+
+  async _approveNamedCompetitorLocked(opportunityId, { approvedBy = 'operator' } = {}) {
     const run = await db('autonomous_runs')
       .where('opportunity_id', opportunityId)
       .orderBy('claimed_at', 'desc')
@@ -2161,8 +2173,11 @@ class AutonomousRunner {
     }
     const draft = parseJsonMaybe(run.draft_payload);
     if (!draft || !draft.body) { const e = new Error('Stored draft is missing or empty'); e.statusCode = 422; throw e; }
-    const brief = await this._loadBriefRow(opportunityId);
-    if (!brief) { const e = new Error('Brief not found for this opportunity'); e.statusCode = 422; throw e; }
+    // Use the brief the reviewed draft was generated against (run.brief_id), not
+    // the latest — a requeue/recompose must not swap action_type/target while a
+    // stale approval publishes the old body.
+    const brief = await this._loadReviewedBrief(run);
+    if (!brief) { const e = new Error('Brief not found for this run'); e.statusCode = 422; throw e; }
 
     // Re-confirm the comparison gate still passes on the stored draft (defense
     // against a tampered draft_payload between parking and approval).
@@ -2177,61 +2192,94 @@ class AutonomousRunner {
       }
     }
 
-    // Same canary / publish-cap guards as the autonomous lane.
+    // Same canary / publish-cap guards as the autonomous lane (now serialized
+    // under the engine lock so the cap read is authoritative).
     const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};
     const guards = await this._evaluatePublishingGuards(run, brief, seoRes);
     if (!guards.ok) { const e = new Error(`Publishing guard blocked: ${guards.reason}`); e.statusCode = 409; e.details = guards.notes; throw e; }
 
-    // Atomically CLAIM the parked run before publishing, so two concurrent
-    // approvals (two admins, or the CLI racing the review API) can't both pass
-    // the prechecks and open duplicate Astro PRs / double-publish. The
-    // conditional UPDATE (WHERE still-parked) lets exactly one caller win; the
-    // loser sees 0 rows and bails. Released back to parked on a publish error.
-    const claimed = await db('autonomous_runs')
+    // Atomically CLAIM the OPPORTUNITY (still parked at named_competitor_review)
+    // AND the run before publishing. This guards against a concurrent
+    // dismiss/requeue or a stale CLI run publishing work the queue no longer
+    // approves, and against duplicate publishes. Both must win or we bail.
+    const oppClaimed = await db('opportunity_queue')
+      .where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_review' })
+      .update({ skip_reason: 'named_competitor_publishing', updated_at: new Date() });
+    if (!oppClaimed) {
+      const e = new Error('This opportunity is no longer parked for named-competitor review'); e.statusCode = 409; throw e;
+    }
+    const runClaimed = await db('autonomous_runs')
       .where({ id: run.id, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' })
       .update({ outcome: 'publishing_named_competitor', updated_at: new Date() });
-    if (!claimed) {
-      const e = new Error('This named-competitor review is already being approved/published'); e.statusCode = 409; throw e;
+    if (!runClaimed) {
+      await db('opportunity_queue').where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_publishing' })
+        .update({ skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+      const e = new Error('This named-competitor review is already being published'); e.statusCode = 409; throw e;
     }
+
+    const revertClaims = async () => {
+      await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
+        .update({ outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+      await db('opportunity_queue').where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_publishing' })
+        .update({ skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+    };
 
     let patch;
     try {
-      const runCtx = { ...run, opportunity_id: opportunityId };
-      patch = await this._publishAndDistribute(draft, brief, runCtx);
+      patch = await this._publishAndDistribute(draft, brief, { ...run, opportunity_id: opportunityId });
     } catch (err) {
-      // Release the claim so the operator can retry after fixing the cause.
-      await db('autonomous_runs')
-        .where({ id: run.id, outcome: 'publishing_named_competitor' })
-        .update({ outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() })
-        .catch(() => {});
+      await revertClaims(); // let the operator retry
       throw err;
     }
 
     const published = !!patch.published_url;
-    const update = {
-      published_url: patch.published_url || null,
-      astro_pr_url: patch.astro_pr_url || null,
-      indexnow_status: patch.indexnow_status || null,
-      link_tasks_queued: patch.link_tasks_queued || 0,
-      trust_build_approved_at: new Date(),
-      trust_build_approved_by: String(approvedBy || 'operator').slice(0, 100),
-      updated_at: new Date(),
-    };
-    if (published) {
-      update.outcome = 'completed_published';
-      update.skip_reason = null;
-      // Stamp the publish time so this counts against TODAY's / this week's
-      // canary publish caps (approving a draft parked on a prior day must not
-      // bypass _countPublishedSince).
-      update.completed_at = new Date();
-    } else {
-      // PR opened (or no live URL): park EXACTLY like the normal autonomous
-      // PR-open path so the existing PR poller verifies / indexes / completes
-      // the merge. Marking it done here would orphan the PR.
-      update.outcome = 'completed_pending_review';
-      update.skip_reason = patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url';
+    const runUpdate = published
+      ? {
+          outcome: 'completed_published', skip_reason: null,
+          published_url: patch.published_url, astro_pr_url: patch.astro_pr_url || null,
+          indexnow_status: patch.indexnow_status || null, link_tasks_queued: patch.link_tasks_queued || 0,
+          // Stamp publish time so it counts against today's / this week's caps.
+          completed_at: new Date(),
+          trust_build_approved_at: new Date(), trust_build_approved_by: String(approvedBy || 'operator').slice(0, 100),
+          updated_at: new Date(),
+        }
+      : {
+          // PR opened (or no live URL): park EXACTLY like the normal autonomous
+          // PR-open path so the existing PR poller reconciles the merge.
+          outcome: 'completed_pending_review',
+          skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url',
+          published_url: null, astro_pr_url: patch.astro_pr_url || null,
+          indexnow_status: patch.indexnow_status || null, link_tasks_queued: patch.link_tasks_queued || 0,
+          trust_build_approved_at: new Date(), trust_build_approved_by: String(approvedBy || 'operator').slice(0, 100),
+          updated_at: new Date(),
+        };
+    // The post is already live / its PR is open. If persistence fails, DO NOT
+    // leave the row stuck in the unwatched 'publishing_named_competitor' state —
+    // fall back to a minimal reconcilable state so the PR poller / audit can
+    // still find the durable astro_pr_url / published_url.
+    try {
+      await db('autonomous_runs').where('id', run.id).update(runUpdate);
+    } catch (err) {
+      logger.error(`[autonomous-runner] named-competitor run persist failed (run ${run.id}); writing reconcilable fallback: ${err.message}`);
+      const fallback = published
+        ? { outcome: 'completed_published', published_url: patch.published_url, completed_at: new Date(), updated_at: new Date() }
+        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, updated_at: new Date() };
+      await db('autonomous_runs').where('id', run.id).update(fallback)
+        .catch((e2) => logger.error(`[autonomous-runner] named-competitor run fallback persist ALSO failed (run ${run.id}); manual reconcile needed: ${e2.message}`));
     }
-    await db('autonomous_runs').where('id', run.id).update(update);
+    // Final opportunity state (we hold the 'named_competitor_publishing' claim).
+    try {
+      if (published) {
+        await db('opportunity_queue').where({ id: opportunityId })
+          .update({ status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() });
+      } else {
+        // Park as a normal PR-pending item so the PR poller reconciles the merge.
+        await db('opportunity_queue').where({ id: opportunityId })
+          .update({ status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() });
+      }
+    } catch (err) {
+      logger.error(`[autonomous-runner] named-competitor opportunity persist failed (opp ${opportunityId}); manual reconcile needed: ${err.message}`);
+    }
     return {
       published,
       published_url: patch.published_url || null,
@@ -2240,13 +2288,15 @@ class AutonomousRunner {
     };
   }
 
-  // Load + JSONB-parse the latest content_briefs row for an opportunity (the
-  // shape the astro-publisher consumes), for the approve-then-publish path.
-  async _loadBriefRow(opportunityId) {
-    const row = await db('content_briefs')
-      .where('opportunity_id', opportunityId)
-      .orderBy('version', 'desc')
-      .first();
+  // Load + JSONB-parse the brief the reviewed run was generated against
+  // (run.brief_id), falling back to the latest brief for the opportunity only
+  // when the run carries no brief_id. Shape consumed by the astro-publisher.
+  async _loadReviewedBrief(run) {
+    let row = null;
+    if (run?.brief_id) row = await db('content_briefs').where('id', run.brief_id).first();
+    if (!row && run?.opportunity_id) {
+      row = await db('content_briefs').where('opportunity_id', run.opportunity_id).orderBy('version', 'desc').first();
+    }
     if (!row) return null;
     const JSONB_COLS = [
       'score_breakdown', 'serp_signal', 'gsc_signal', 'customer_signal',

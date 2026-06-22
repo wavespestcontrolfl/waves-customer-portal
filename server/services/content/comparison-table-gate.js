@@ -149,16 +149,24 @@ function extractColumns(block) {
   return out;
 }
 
+// Parse row objects ORDER-INSENSITIVELY: match each { … } that contains a
+// values:[…] array (row objects carry no nested braces), then pull label +
+// values independently of their order or any extra props between them.
 function extractRows(block) {
   const rows = [];
-  const rowRe = /\{\s*label\s*:\s*(["'])([\s\S]*?)\1\s*,\s*values\s*:\s*\[([\s\S]*?)\]\s*\}/g;
+  const objRe = /\{[^{}]*\bvalues\s*:\s*\[[^\]]*\][^{}]*\}/g;
   let m;
-  while ((m = rowRe.exec(String(block || ''))) !== null) {
+  while ((m = objRe.exec(String(block || ''))) !== null) {
+    const obj = m[0];
+    const labelM = obj.match(/\blabel\s*:\s*(["'])([\s\S]*?)\1/);
+    const valsM = obj.match(/\bvalues\s*:\s*\[([\s\S]*?)\]/);
     const values = [];
-    const vre = /(["'])([\s\S]*?)\1/g;
-    let vm;
-    while ((vm = vre.exec(m[3])) !== null) values.push(vm[2]);
-    rows.push({ label: m[2], values });
+    if (valsM) {
+      const vre = /(["'])([\s\S]*?)\1/g;
+      let vm;
+      while ((vm = vre.exec(valsM[1])) !== null) values.push(vm[2]);
+    }
+    rows.push({ label: labelM ? labelM[2] : '', values });
   }
   return rows;
 }
@@ -185,15 +193,26 @@ function classifyOption(header) {
   return 'unclassified';
 }
 
+// Negation markers — a NEGATED claim ("Not national", "No recurring plans")
+// must NOT be treated as supported just because its non-negated words appear in
+// a curated attribute; it asserts the OPPOSITE of the curated source.
+const NEGATOR_RE = /\b(no|not|never|without|lacks?|cannot|can'?t|does\s?n'?t|do\s?n'?t|is\s?n'?t|are\s?n'?t|wo\s?n'?t|non)\b|n['’]t\b/i;
+
 /**
  * claimSupported(text, attrValues) → true iff EVERY significant word of `text`
  * appears in a single curated attribute value (subset match). Stricter than a
  * loose substring/overlap so a curated phrase with appended uncurated text
- * ("National (US); free termite inspections") is NOT treated as supported.
+ * ("National (US); free termite inspections") is NOT treated as supported. A
+ * negated claim is supported ONLY by an explicit (near-exact) curated value.
  */
 function claimSupported(text, attrValues) {
   const nt = normalize(text);
   if (!nt) return true;
+  if (NEGATOR_RE.test(String(text))) {
+    // Only an explicitly-curated value that itself matches the (negated) claim
+    // supports it — otherwise a negation of a curated fact would slip through.
+    return attrValues.some((av) => normalize(av) === nt);
+  }
   const words = nt.split(' ').filter((w) => w.length > 3);
   if (!words.length) return true; // only short / stop words — not a factual claim
   for (const av of attrValues) {
@@ -252,15 +271,33 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
     if (competitorFacts.isKnownCompetitor(nm)) known.add(competitorFacts.findCompetitor(nm).name);
     else unclassified.add(nm);
   }
-  // Negative reliability claims in prose/title/meta within proximity of a competitor.
+  // Prose/title/meta negatives within proximity of a NAMED competitor — these
+  // tie an insult/reliability claim to the brand even without a provider noun
+  // ("Orkin is the worst", "Orkin never answers the phone"), which the
+  // noun-based PROVIDER_DISPARAGEMENT_RE misses.
   const competitorNames = [...known, ...unknown];
   if (competitorNames.length) {
+    const nearCompetitor = (idx, len) => {
+      const window = scanText
+        .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
+        .toLowerCase();
+      return competitorNames.some((n) => window.includes(n.toLowerCase()));
+    };
+    // Disparaging adjective near a competitor name → P0.
+    const adjRe = new RegExp(`\\b(?:${NEG_ADJ})\\b`, 'ig');
+    let am;
+    while ((am = adjRe.exec(scanText)) !== null) {
+      if (nearCompetitor(am.index, am[0].length)) {
+        findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+          `Comparison draft disparages a named competitor ("${am[0].trim()}" near a competitor name). State neutral attributes only.`));
+        break;
+      }
+    }
+    // Negative service-reliability claim near a competitor name → P1 review.
     const negRe = new RegExp(PROVIDER_NEGATIVE_RE.source, 'ig');
     let nm;
     while ((nm = negRe.exec(scanText)) !== null) {
-      const start = Math.max(0, nm.index - PROVIDER_NEGATIVE_PROXIMITY);
-      const window = scanText.slice(start, nm.index + nm[0].length + PROVIDER_NEGATIVE_PROXIMITY);
-      if (competitorNames.some((n) => window.toLowerCase().includes(n.toLowerCase()))) {
+      if (nearCompetitor(nm.index, nm[0].length)) {
         findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
           `Comparison draft makes a negative service-reliability claim about a named provider ("${nm[0].trim()}"). Routed to human review — state neutral, verifiable attributes only.`));
         break;
@@ -283,6 +320,11 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
         known.add(name);
         blockKnown.add(name);
         const attrVals = competitorFacts.attributeValues(name);
+        // Fail closed: a table that names a competitor but whose rows we cannot
+        // parse must NOT pass unvalidated — its cells could claim anything.
+        if (rows.length === 0 && /\bvalues\s*:/.test(block)) {
+          unsupportedFacts.add(`${name} — (table rows could not be parsed for validation)`);
+        }
         for (const row of rows) {
           const cell = String(row.values[j] ?? '').trim();
           if (!cell || NEUTRAL_CELL_RE.test(cell)) continue;
