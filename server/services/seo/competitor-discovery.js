@@ -12,6 +12,7 @@
 
 const dataforseo = require('./dataforseo');
 const logger = require('../logger');
+const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 // Parrish isn't in DataForSEO's named-location DB (40501 on location_name), so
 // it's queried by coordinate (handled transparently by dataforseo.serpLocation).
@@ -65,9 +66,11 @@ const NATIONAL_CHAINS = new Set([
   'uslawns.com', 'masseyservices.com', 'trulynolen.com', 'crittercontrolsarasota.com',
 ]);
 
-// Our own properties (main + anything on the brand). Spokes are caught by the
-// substring check; the discovered list is reviewed before harvest regardless.
-const OWN_HOSTS = new Set(['wavespestcontrol.com']);
+// Our own properties — the hub + the canonical Astro spoke fleet (bradentonfl-
+// pestcontrol.com, sarasotafllawncare.com, waveslawncare.com, …). Spokes rank in
+// these same local SERPs, so without this they'd be harvested as "competitors"
+// and pollute seo_competitor_backlinks with self-referential data + waste budget.
+const OWN_HOSTS = new Set(['wavespestcontrol.com', ...SPOKE_SITE_KEYS]);
 
 function normHost(v) {
   const raw = String(v || '').trim().toLowerCase();
@@ -88,7 +91,7 @@ function inHostSet(host, set) {
 
 function isNonCompetitor(host, ownHosts = OWN_HOSTS) {
   if (!host || !host.includes('.')) return true;
-  if (ownHosts.has(host) || host.includes('wavespestcontrol')) return true;
+  if (inHostSet(host, ownHosts) || host.includes('wavespestcontrol')) return true;
   if (inHostSet(host, NON_COMPETITOR_HOSTS)) return true;
   if (/\.(gov|edu|mil)$/.test(host) || /\.blog$/.test(host)) return true;
   return false;

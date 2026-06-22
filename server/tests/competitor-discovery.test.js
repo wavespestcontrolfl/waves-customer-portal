@@ -65,6 +65,15 @@ describe('competitor-discovery', () => {
     expect(f('goodnewspestsolutions.com')).toBe(false);
   });
 
+  test('excludes the canonical Waves spoke fleet (own sites, not competitors)', () => {
+    const f = _internals.isNonCompetitor;
+    expect(f('bradentonflpestcontrol.com')).toBe(true);
+    expect(f('sarasotafllawncare.com')).toBe(true);
+    expect(f('waveslawncare.com')).toBe(true);
+    expect(f('veniceexterminator.com')).toBe(true);
+    expect(f('www.parrishpestcontrol.com'.replace(/^www\./, ''))).toBe(true);
+  });
+
   test('normHost strips www/m and scheme', () => {
     expect(_internals.normHost('https://www.Foo.com/x')).toBe('foo.com');
     expect(_internals.normHost('m.yelp.com')).toBe('yelp.com');
