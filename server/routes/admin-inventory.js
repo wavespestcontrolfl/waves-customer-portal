@@ -1088,8 +1088,10 @@ router.put('/vendors/:id', async (req, res, next) => {
       if (body[key] !== undefined) upd[key] = body[key];
     }
 
-    // Encrypt the password at rest (PGP-armored), or clear it — never store plaintext.
-    const pwAction = passwordWriteAction(body.loginPassword, !!vendorCredentialKey());
+    // Encrypt the password at rest (PGP-armored), or clear it — never store plaintext. A
+    // BLANK loginPassword means "unchanged" (the form always submits it), so clearing the
+    // saved credential requires the explicit clearLoginPassword flag.
+    const pwAction = passwordWriteAction(body.loginPassword, !!vendorCredentialKey(), body.clearLoginPassword === true);
     if (pwAction === 'clear') upd.login_password_encrypted = null;
     else if (pwAction === 'encrypt') upd.login_password_encrypted = encryptedPasswordRaw(db, body.loginPassword);
     else if (pwAction === 'reject') {

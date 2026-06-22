@@ -5,9 +5,16 @@ describe('passwordWriteAction', () => {
     expect(passwordWriteAction(undefined, true)).toBe('skip');
     expect(passwordWriteAction(undefined, false)).toBe('skip');
   });
-  test('empty string -> clear (set NULL)', () => {
-    expect(passwordWriteAction('', true)).toBe('clear');
-    expect(passwordWriteAction('', false)).toBe('clear');
+  test('BLANK -> skip, NOT clear (the form submits "" for an untouched password)', () => {
+    // Regression: a blank field must not wipe a saved credential when the operator edits
+    // other vendor fields without retyping the password.
+    expect(passwordWriteAction('', true)).toBe('skip');
+    expect(passwordWriteAction('', false)).toBe('skip');
+  });
+  test('explicit clearRequested -> clear (set NULL), regardless of the field', () => {
+    expect(passwordWriteAction('', true, true)).toBe('clear');
+    expect(passwordWriteAction(undefined, false, true)).toBe('clear');
+    expect(passwordWriteAction('whatever', true, true)).toBe('clear'); // clear flag wins
   });
   test('non-empty + key -> encrypt', () => {
     expect(passwordWriteAction('hunter2', true)).toBe('encrypt');
