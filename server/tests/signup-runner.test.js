@@ -2,7 +2,10 @@ jest.mock('../services/seo/link-prospect-worker', () => ({
   claim: jest.fn(),
   report: jest.fn(async () => ({ ok: true })),
   releaseClaims: jest.fn(async () => ({ released: 0 })),
-  businessProfile: () => ({ brand: 'Waves Pest Control', website: 'https://wavespestcontrol.com', contact_email: 'contact@wavespestcontrol.com', default_location_id: 'bradenton', locations: [{ id: 'bradenton', name: 'Bradenton, FL', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612' }] }),
+  businessProfile: () => ({ brand: 'Waves Pest Control', website: 'https://wavespestcontrol.com', contact_email: 'contact@wavespestcontrol.com', default_location_id: 'bradenton', locations: [
+    { id: 'bradenton', name: 'Bradenton, FL', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612' },
+    { id: 'sarasota', name: 'Sarasota, FL', address: '100 Main St, Sarasota, FL 34236', phone: '(941) 555-2000' },
+  ] }),
 }));
 jest.mock('../services/seo/browser-form-filler', () => ({ fillCitationForm: jest.fn() }));
 jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(async () => 'backlink-evidence/x.png') }));
@@ -61,9 +64,18 @@ describe('buildNap / parseAddress', () => {
   test('parses the canonical address line into structured fields', () => {
     expect(parseAddress('13649 Luxe Ave #110, Bradenton, FL 34211')).toEqual({ street: '13649 Luxe Ave #110', city: 'Bradenton', state: 'FL', zip: '34211' });
   });
-  test('assembles NAP from the business profile default location', () => {
+  test('assembles NAP from the default (primary) location when no prospect / no match', () => {
     const nap = buildNap(worker.businessProfile());
     expect(nap).toMatchObject({ business_name: 'Waves Pest Control', phone: '(941) 318-7612', address: { city: 'Bradenton', zip: '34211' } });
+  });
+  test('picks the per-location NAP when the prospect page maps to a GBP city', () => {
+    const nap = buildNap(worker.businessProfile(), { target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl', target_domain: 'citysquares.com' });
+    expect(nap).toMatchObject({ phone: '(941) 555-2000', address: { city: 'Sarasota', zip: '34236' } });
+    expect(nap.website).toBe('https://wavespestcontrol.com'); // always the homepage for citations
+  });
+  test('falls back to the primary NAP when the prospect maps to no known city', () => {
+    const nap = buildNap(worker.businessProfile(), { target_page: 'https://wavespestcontrol.com/', target_domain: 'citysquares.com' });
+    expect(nap.address.city).toBe('Bradenton');
   });
 });
 
@@ -113,6 +125,17 @@ describe('run — safety gates', () => {
     await runner.run({ allow: ['citysquares.com'] });
     expect(fillCitationForm).not.toHaveBeenCalled();
     expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]);
+  });
+  test('de-dupes by domain: two rows on the same directory → submit ONE, release the other', async () => {
+    worker.claim.mockResolvedValue([
+      prospect({ id: 'p1', target_page: 'https://wavespestcontrol.com/a' }),
+      prospect({ id: 'p2', target_page: 'https://wavespestcontrol.com/b' }), // same citysquares.com domain
+    ]);
+    fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: null, pending: true, screenshot: Buffer.from('png') });
+    const r = await runner.run({ allow: ['citysquares.com'] });
+    expect(fillCitationForm).toHaveBeenCalledTimes(1);     // only the first row for the domain
+    expect(r.placed).toBe(1);
+    expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]); // dupe released
   });
 });
 

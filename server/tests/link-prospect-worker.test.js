@@ -1,4 +1,18 @@
-const { mapReportToPatch, businessProfile } = require('../services/seo/link-prospect-worker');
+const { mapReportToPatch, businessProfile, effectiveAutomationPolicy } = require('../services/seo/link-prospect-worker');
+
+describe('link prospect worker — signup claim safety policy', () => {
+  test('signup claims default to submit_free (Hermes path with no policy can\'t lease parked rows)', () => {
+    expect(effectiveAutomationPolicy('signup', null)).toBe('submit_free');
+    expect(effectiveAutomationPolicy('signup', undefined)).toBe('submit_free');
+  });
+  test('an explicit policy is honored; "any" deliberately bypasses the filter', () => {
+    expect(effectiveAutomationPolicy('signup', 'needs_account')).toBe('needs_account');
+    expect(effectiveAutomationPolicy('signup', 'any')).toBeNull();
+  });
+  test('outreach lane has no automation_policy filter', () => {
+    expect(effectiveAutomationPolicy('outreach', null)).toBeNull();
+  });
+});
 
 describe('link prospect worker — report mapping', () => {
   test('placed records live_url/anchor/evidence, sets status=placed, releases lease', () => {

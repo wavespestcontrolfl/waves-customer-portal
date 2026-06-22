@@ -167,29 +167,43 @@ async function run({ limit = 100, dryRun = false, anthropic, fetchPageFn } = {})
 
   const byPolicy = {};
   const samples = [];
+  let skipped = 0; // rows the runner changed mid-loop (concurrency)
   for (const p of rows) {
     const c = await classifyOne(p, { anthropic: client, fetchPageFn });
     byPolicy[c.automation_policy] = (byPolicy[c.automation_policy] || 0) + 1;
     samples.push({ domain: p.target_domain, link_type: p.link_type, policy: c.automation_policy, category: c.directory_category, paid: c.requires_payment, account: c.requires_account, rel: c.offered_link_rel, src: c._source });
     if (!dryRun) {
-      await db('seo_link_prospects').where({ id: p.id }).update({
-        directory_category: c.directory_category,
-        requires_account: c.requires_account,
-        requires_email_verification: c.requires_email_verification,
-        requires_captcha: c.requires_captcha,
-        requires_payment: c.requires_payment,
-        detected_price_usd: c.detected_price_usd ?? null, // never undefined (Knex rejects undefined bindings)
-        recurring: c.recurring,
-        offered_link_rel: c.offered_link_rel,
-        automation_policy: c.automation_policy,
-        risk_level: c.risk_level,
-        last_classified_at: new Date(),
-        updated_at: new Date(),
-      });
+      // OPTIMISTIC concurrency: this loop snapshots rows once, but the daily runner
+      // (3:30am, overlapping the Sun 3:00am classifier) can claim/park a row mid-loop —
+      // parking sets automation_policy + stamps last_classified_at, claiming sets
+      // claimed_at. Only write if BOTH still match the snapshot, so we never revert a
+      // runtime safety reclassification (e.g. a runner-parked needs_account → submit_free).
+      const updated = await db('seo_link_prospects')
+        .where({ id: p.id })
+        .where('status', 'prospect')
+        .modify((qb) => {
+          if (p.claimed_at == null) qb.whereNull('claimed_at'); else qb.where('claimed_at', p.claimed_at);
+          if (p.last_classified_at == null) qb.whereNull('last_classified_at'); else qb.where('last_classified_at', p.last_classified_at);
+        })
+        .update({
+          directory_category: c.directory_category,
+          requires_account: c.requires_account,
+          requires_email_verification: c.requires_email_verification,
+          requires_captcha: c.requires_captcha,
+          requires_payment: c.requires_payment,
+          detected_price_usd: c.detected_price_usd ?? null, // never undefined (Knex rejects undefined bindings)
+          recurring: c.recurring,
+          offered_link_rel: c.offered_link_rel,
+          automation_policy: c.automation_policy,
+          risk_level: c.risk_level,
+          last_classified_at: new Date(),
+          updated_at: new Date(),
+        });
+      if (updated === 0) { skipped++; logger.info(`[signup-classifier] skipped ${p.target_domain} — row changed since snapshot (runner concurrency)`); }
     }
   }
-  logger.info(`[signup-classifier] classified ${rows.length}: ${JSON.stringify(byPolicy)}${dryRun ? ' (DRY-RUN)' : ''}`);
-  return { classified: rows.length, byPolicy, ...(dryRun ? { samples } : {}) };
+  logger.info(`[signup-classifier] classified ${rows.length - skipped}/${rows.length}${skipped ? ` (${skipped} skipped: concurrent change)` : ''}: ${JSON.stringify(byPolicy)}${dryRun ? ' (DRY-RUN)' : ''}`);
+  return { classified: rows.length - skipped, byPolicy, ...(skipped ? { skipped } : {}), ...(dryRun ? { samples } : {}) };
 }
 
 module.exports = { run, classifyOne };

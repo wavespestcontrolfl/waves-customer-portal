@@ -39,9 +39,23 @@ function parseQuality(q) {
  * Lease up to n unworked prospects of a lane, atomically. FOR UPDATE SKIP LOCKED
  * so parallel Hermes subagents never grab the same row.
  */
+// SAFETY DEFAULT for signup-lane claims: filter to the classifier's auto-safe lane
+// (automation_policy='submit_free') UNLESS the caller explicitly opts into another
+// policy. So the external Hermes worker — which calls claim({n,type}) with no policy —
+// can never lease a row the classifier/runner parked as needs_account / pay_and_submit /
+// skip. Pass automationPolicy:'any' to deliberately bypass the filter. Outreach lane is
+// unaffected (it has no automation_policy). Pure → unit-testable without the DB.
+function effectiveAutomationPolicy(type, automationPolicy) {
+  if (type === 'outreach') return null;
+  if (automationPolicy == null) return 'submit_free';
+  if (automationPolicy === 'any') return null;
+  return automationPolicy;
+}
+
 async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null, preview = false } = {}) {
   const types = type === 'outreach' ? OUTREACH_TYPES : SIGNUP_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
+  const effectivePolicy = effectiveAutomationPolicy(type, automationPolicy);
   // Normalize the optional domain allowlist (lowercase, strip scheme/www) so it
   // matches the SQL-normalized target_domain below.
   const domainAllow = Array.isArray(domains)
@@ -64,9 +78,10 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // than claiming+skipping them every run. External callers (Hermes) omit this and
     // do their own recipient research.
     if (requireContactEmail) q = q.whereNotNull('contact_email');
-    // The citation runner leases only prospects the classifier marked auto-safe
-    // (automation_policy='submit_free') — never account/payment/CAPTCHA-gated ones.
-    if (automationPolicy) q = q.where('automation_policy', automationPolicy);
+    // The citation runner (and, by the safety default above, the Hermes signup path)
+    // leases only prospects the classifier marked auto-safe — never account/payment/
+    // CAPTCHA-gated ones.
+    if (effectivePolicy) q = q.where('automation_policy', effectivePolicy);
     // Supervised-first: when a domain allowlist is supplied, claim ONLY those rows
     // (host-normalized match) so higher-ranked non-allowlisted rows aren't leased and
     // released every run, starving the allowlisted target. SECURITY note: this is the
@@ -284,5 +299,6 @@ async function releaseClaims(claims = []) {
 
 module.exports = {
   claim, report, sweepExpiredClaims, releaseClaims, mapReportToPatch, businessProfile, isValidEmail,
+  effectiveAutomationPolicy,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS,
 };

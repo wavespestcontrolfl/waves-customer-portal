@@ -27,6 +27,15 @@ describe('link prospect verifier target matching', () => {
     }, prospect)).toBe(false);
   });
 
+  test('signup-lane (citation) prospects reconcile against the HOMEPAGE, not target_page', () => {
+    const citation = { link_type: 'citation', target_page: 'https://wavespestcontrol.com/wdo-inspection/' };
+    // a homepage backlink — what a citation listing actually creates → matches
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/' }, citation)).toBe(true);
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://www.wavespestcontrol.com' }, citation)).toBe(true);
+    // a deep money-page backlink is NOT what a citation creates → must NOT match (homepage expected)
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/wdo-inspection/' }, citation)).toBe(false);
+  });
+
   test('normalizes comparable URLs consistently', () => {
     expect(_test.normalizeComparableUrl('https://www.wavespestcontrol.com/wdo-inspection/'))
       .toBe('wavespestcontrol.com/wdo-inspection');

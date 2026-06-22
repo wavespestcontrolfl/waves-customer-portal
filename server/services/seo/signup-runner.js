@@ -68,11 +68,36 @@ function validateSubmitUrl(rawUrl, allowedDomain) {
   return u.toString();
 }
 
-function buildNap(profile) {
-  const loc = (profile.locations || []).find((l) => l.id === profile.default_location_id) || (profile.locations || [])[0] || {};
+// City/id tokens to look for in a prospect's page/domain to map it to a GBP location
+// (e.g. a /pest-control-sarasota-fl money page or a sarasota-specific directory → Sarasota).
+function locationTokens(loc) {
+  const tokens = [];
+  if (loc.id) tokens.push(String(loc.id).toLowerCase());                 // 'lakewood-ranch'
+  const city = String(loc.name || '').split(',')[0].trim().toLowerCase(); // 'Sarasota, FL' → 'sarasota'
+  if (city) { tokens.push(city.replace(/\s+/g, '-'), city.replace(/\s+/g, '')); }
+  return [...new Set(tokens.filter(Boolean))];
+}
+
+// Pick the GBP location for a prospect: the one whose city/id token appears in the
+// prospect's target page/domain ("per-location when known"); otherwise the default
+// (primary) location. Citations must list the address/phone of the location being cited.
+function pickLocation(profile, prospect) {
+  const locs = profile.locations || [];
+  const def = locs.find((l) => l.id === profile.default_location_id) || locs[0] || {};
+  if (!prospect) return def;
+  const hay = `${prospect.target_page || ''} ${prospect.target_domain || ''}`.toLowerCase();
+  for (const loc of locs) {
+    if (loc.id === def.id) continue;
+    if (locationTokens(loc).some((t) => hay.includes(t))) return loc;
+  }
+  return def;
+}
+
+function buildNap(profile, prospect = null) {
+  const loc = pickLocation(profile, prospect);
   return {
     business_name: profile.brand,
-    website: profile.website,
+    website: profile.website, // citations link to the homepage (verifier reconciles homepage)
     email: profile.contact_email,
     phone: loc.phone || '',
     address: parseAddress(loc.address || WAVES_ADDRESS_LINE),
@@ -140,10 +165,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   const claimed = await worker.claim({ n: batchSize, type: 'signup', automationPolicy: 'submit_free', ...(dryRun ? { preview: true } : { domains: allowlist }) });
   if (!claimed.length) { logger.info('[signup-runner] no submit_free prospects to claim'); return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0 }; }
 
-  const nap = buildNap(worker.businessProfile());
+  const profile = worker.businessProfile();
   const counts = { claimed: claimed.length, placed: 0, blocked: 0, failed: 0, skipped: 0 };
   const samples = [];
   const releaseAtEnd = [];
+  const submittedDomains = new Set(); // one submission per directory domain per run
 
   for (let i = 0; i < claimed.length; i++) {
     const p = claimed[i];
@@ -153,6 +179,12 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     // Dry-run rows are PREVIEW-only (not leased) → just sample them; nothing to release.
     if (dryRun) { samples.push({ domain, submitUrl: rawUrl }); continue; }
     if (allowlist.length && !allowlist.includes(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
+
+    // ONE submission per directory domain per run: a citation directory creates one
+    // business profile per domain, so submitting a second row that shares the domain
+    // (different target_page) would be a duplicate listing / duplicate rejection. Release
+    // the extra row (no attempt consumed) so it's available next run if needed.
+    if (submittedDomains.has(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
 
     // SSRF: validate the ACTUAL navigated URL (target_url can differ from the
     // allowlisted target_domain) before launching a browser at it. An unsafe URL
@@ -167,6 +199,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       continue;
     }
 
+    // Committing to a real submission for this domain → claim the domain so no sibling
+    // row submits it again this run. (Parked-unsafe rows above don't claim it, so a
+    // sibling with a valid URL still gets its chance.)
+    submittedDomains.add(domain);
+    const nap = buildNap(profile, p); // per-location NAP (Sarasota/Venice/… when the page maps to one)
     const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic });
 
     // Run-level/environment/outage error (no LLM client, no browser, planning-LLM

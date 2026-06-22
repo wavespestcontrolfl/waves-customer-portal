@@ -29,6 +29,9 @@ const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
+// Signup-lane (citation) prospects: the runner submits the HOMEPAGE as the listing's
+// website, so their backlink targets the homepage — NOT prospect.target_page.
+const SIGNUP_LINK_TYPES = new Set(['directory', 'citation', 'social']);
 const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
 
 function stripUrl(u) {
@@ -68,7 +71,11 @@ function matchesTargetUrl(candidate, expected) {
 }
 
 function backlinkTargetsProspect(link, prospect) {
-  const expected = normalizeComparableUrl(prospect.target_page);
+  // Citations link to the homepage; reconcile signup-lane rows against the homepage so an
+  // approved homepage listing matches (else it never matches target_page → stays pending).
+  const expected = SIGNUP_LINK_TYPES.has(prospect.link_type)
+    ? normalizeComparableUrl(OUR_DOMAIN)
+    : normalizeComparableUrl(prospect.target_page);
   if (!expected) return false;
   const candidates = [
     link.target_url,
