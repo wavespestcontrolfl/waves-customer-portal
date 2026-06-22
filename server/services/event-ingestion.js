@@ -444,16 +444,24 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     messages: [{ role: 'user', content: wrapped }],
   });
   const text = response.content?.[0]?.text || '';
+  // Happy path: a complete {...} object. The regex needs a closing brace,
+  // so a response truncated before ANY object closed won't match here —
+  // that case falls through to recovery below rather than throwing blind.
   const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Claude did not return JSON for event extraction');
-  let parsed;
-  try {
-    parsed = JSON.parse(jsonMatch[0]);
-  } catch (err) {
-    // Defense-in-depth against truncation even with the raised cap:
-    // salvage the complete event objects instead of dropping the pull.
+  let parsed = null;
+  if (jsonMatch) {
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      parsed = null; // truncated/malformed — recover below
+    }
+  }
+  if (!parsed) {
+    // Defense-in-depth against truncation even with the raised cap (and
+    // against an outer object that never closed): salvage the complete
+    // event objects instead of dropping the whole pull.
     const recovered = recoverEventObjectsFromTruncatedJson(text);
-    if (!recovered) throw err;
+    if (!recovered) throw new Error('Claude did not return parseable JSON for event extraction');
     logger.warn(
       `[event-ingestion] recovered ${recovered.length} event(s) from truncated JSON for source ${source.id} (${source.name || source.feed_url})`,
     );

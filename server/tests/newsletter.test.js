@@ -433,6 +433,16 @@ describe('event ingestion recoverEventObjectsFromTruncatedJson — max_tokens-tr
     expect(events[0].title).toBe('Sale {50% off} [today]');
   });
 
+  test('recovers complete objects when the outer object/array never closes', () => {
+    // The /\{[\s\S]*\}/ happy-path match needs a closing brace; a response
+    // whose outer object is fully unterminated (no trailing ]}) slips past
+    // it, so recovery must still salvage the objects that did close.
+    const unterminated = '{"events":[{"title":"A"},{"title":"B"}';
+    const events = recoverEventObjectsFromTruncatedJson(unterminated);
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => e.title)).toEqual(['A', 'B']);
+  });
+
   test('returns null when there is no salvageable events array', () => {
     expect(recoverEventObjectsFromTruncatedJson('not json at all')).toBeNull();
     expect(recoverEventObjectsFromTruncatedJson('{"events":[')).toBeNull();
