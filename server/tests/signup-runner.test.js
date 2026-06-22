@@ -90,21 +90,22 @@ describe('run — safety gates', () => {
     expect(r.note).toBe('no_allowlist');
     expect(worker.claim).not.toHaveBeenCalled();
   });
-  test('dry-run claims all submit_free (no domain filter)', async () => {
+  test('dry-run uses a READ-ONLY preview claim (no lease/write)', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: true, allow: ['citysquares.com'] });
-    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', automationPolicy: 'submit_free' });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', automationPolicy: 'submit_free', preview: true });
   });
   test('live run pushes the allowlist into the claim query', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: false, allow: ['citysquares.com'] });
     expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', automationPolicy: 'submit_free', domains: ['citysquares.com'] });
   });
-  test('dry-run previews + releases, never submits', async () => {
+  test('dry-run previews, never submits, and never leases/releases (no writes)', async () => {
     worker.claim.mockResolvedValue([prospect()]);
     const r = await runner.run({ dryRun: true, allow: ['citysquares.com'] });
     expect(fillCitationForm).not.toHaveBeenCalled();
-    expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p1', lease_token: '2026-06-22T00:00:00.000Z' }]);
+    expect(worker.releaseClaims).not.toHaveBeenCalled(); // preview rows aren't leased → nothing to release
+    expect(mockUpdate).not.toHaveBeenCalled();
     expect(r.samples[0]).toMatchObject({ domain: 'citysquares.com' });
   });
   test('non-allowlisted claimed prospects are released, not submitted', async () => {
@@ -180,6 +181,18 @@ describe('run — outcomes', () => {
     expect(r.failed).toBe(0);                           // no per-prospect attempts consumed
     expect(worker.report).not.toHaveBeenCalled();       // never reports failed
     expect(fillCitationForm).toHaveBeenCalledTimes(1);  // stops at the first run-level error
+    expect(worker.releaseClaims).toHaveBeenCalledWith([
+      { id: 'p1', lease_token: '2026-06-22T00:00:00.000Z' },
+      { id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' },
+    ]);
+  });
+  test('a planning LLM outage (llm_error) is run-level → batch abort + release, no attempts burned', async () => {
+    worker.claim.mockResolvedValue([prospect({ id: 'p1' }), prospect({ id: 'p2' })]);
+    fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'llm_error' });
+    const r = await runner.run({ allow: ['citysquares.com'] });
+    expect(r.aborted).toBe('llm_error');
+    expect(r.failed).toBe(0);
+    expect(worker.report).not.toHaveBeenCalled();
     expect(worker.releaseClaims).toHaveBeenCalledWith([
       { id: 'p1', lease_token: '2026-06-22T00:00:00.000Z' },
       { id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' },

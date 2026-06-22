@@ -39,7 +39,7 @@ function parseQuality(q) {
  * Lease up to n unworked prospects of a lane, atomically. FOR UPDATE SKIP LOCKED
  * so parallel Hermes subagents never grab the same row.
  */
-async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null } = {}) {
+async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null, preview = false } = {}) {
   const types = type === 'outreach' ? OUTREACH_TYPES : SIGNUP_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
   // Normalize the optional domain allowlist (lowercase, strip scheme/www) so it
@@ -82,12 +82,17 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       // An explicit-but-empty allowlist matches nothing (don't silently claim all).
       q = q.whereRaw('1 = 0');
     }
-    const rows = await q
+    const base = q
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('domain_rating', 'desc')
-      .limit(limit)
-      .forUpdate()
-      .skipLocked();
+      .limit(limit);
+
+    // Read-only preview (dry-run): return matching rows WITHOUT leasing them — no
+    // claimed_at/claimed_by write, no lease_token — so a dry run honors its no-writes
+    // contract and never strands rows until the stale sweep.
+    if (preview) return (await base).map((r) => ({ ...r }));
+
+    const rows = await base.forUpdate().skipLocked();
 
     if (rows.length === 0) return [];
     const now = new Date();

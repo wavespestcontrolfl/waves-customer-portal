@@ -208,9 +208,12 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
         let ok = false;
         try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
         if (!ok) {
-          // If we abort the SUBMIT itself (form POST or the post-submit navigation to an
-          // off-host/unpinned endpoint), record it — the submission did not land.
-          try { if (submitPhase && (req.isNavigationRequest() || req.method() === 'POST')) submitAborted = true; } catch { /* noop */ }
+          // Only an aborted SUBMISSION request (a body-bearing POST/PUT/PATCH — the form
+          // post itself going off-host) means nothing landed. A GET navigation we abort
+          // here is just an off-host CONFIRMATION redirect AFTER the post already
+          // succeeded on the pinned host → that stays on the pending-placement path,
+          // NOT skip (the listing may well have been created).
+          try { if (submitPhase && !['GET', 'HEAD', 'OPTIONS'].includes(String(req.method() || 'GET').toUpperCase())) submitAborted = true; } catch { /* noop */ }
           return route.abort();
         }
         return route.continue();
@@ -233,7 +236,15 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     await page.waitForTimeout(1500);
 
     const shot1 = (await page.screenshot({ fullPage: true, type: 'png' }));
-    const plan = await callVision(client, shot1.toString('base64'), planPrompt(nap));
+    let plan;
+    try {
+      plan = await callVision(client, shot1.toString('base64'), planPrompt(nap));
+    } catch (e) {
+      // The planning LLM call failed BEFORE any form interaction (timeout/5xx/outage/bad
+      // model override) — environmental, not this prospect's fault. RUN-LEVEL so the
+      // runner aborts the batch + releases rather than burning the prospect's attempts.
+      return { outcome: 'failed', errorCode: 'llm_error', screenshot: shot1, notes: `planning call failed: ${String(e.message).slice(0, 120)}` };
+    }
     if (!plan || typeof plan !== 'object') return { outcome: 'failed', errorCode: 'plan_parse', screenshot: shot1, notes: 'no plan' };
     // FAIL-CLOSED full-schema validation BEFORE touching the page. A malformed/injected
     // plan (blocked omitted/false/'' , non-boolean form_present, non-array actions, or an

@@ -22,13 +22,14 @@ const db = require('../../models/db');
 const worker = require('./link-prospect-worker');
 const { fillCitationForm } = require('./browser-form-filler');
 const { uploadEvidence } = require('./signup-evidence');
-const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname / hostResolvesPublic
+const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
 
-// Filler errorCodes that are RUN-LEVEL (environment/config), identical for every
-// prospect and NOT the prospect's fault — a misconfigured cron must abort the batch +
-// release claims rather than burn each allowlisted prospect's attempts to MAX_ATTEMPTS.
-const RUN_LEVEL_ERRORS = new Set(['no_anthropic', 'no_browser']);
+// Filler errorCodes that are RUN-LEVEL (environment/outage), identical for every
+// prospect and NOT the prospect's fault — a misconfigured/degraded run must abort the
+// batch + release claims rather than burn each allowlisted prospect's attempts to
+// MAX_ATTEMPTS. llm_error = the planning Anthropic call failed (timeout/5xx/outage).
+const RUN_LEVEL_ERRORS = new Set(['no_anthropic', 'no_browser', 'llm_error']);
 
 const CATEGORY = 'Pest Control';
 const DESCRIPTION = 'Family-owned pest control and lawn care serving Southwest Florida — pest, lawn, mosquito, termite, and rodent control.';
@@ -46,21 +47,24 @@ function parseAddress(line) {
 }
 
 /**
- * SSRF guard for the navigated submit URL. `target_url` is untrusted and may differ
- * from the (operator-allowlisted) `target_domain`, so before we point a real browser
- * at it — and ship its screenshot to Anthropic — require: http(s) only (no file:,
- * data:, etc.), the host to EQUAL the allowlisted domain, not a localhost/intranet/
- * IP-literal host, and DNS that resolves to a public address (no metadata/private IP).
- * Returns the canonical URL string, or null to reject. The browser layer adds a
- * per-request abort + off-host redirect check as defense in depth.
+ * SHAPE/host guard for the navigated submit URL. `target_url` is untrusted and may
+ * differ from the (operator-allowlisted) `target_domain`, so reject anything that isn't
+ * http(s) on the EXACT allowlisted host and not a localhost/intranet/IP-literal host.
+ * These are PERMANENT-unsafe conditions → the runner parks them (skip).
+ *
+ * NOTE: this is deliberately SYNC and does NO DNS. The authoritative public-IP /
+ * rebinding check is the browser layer's resolvePublicIps + DNS pinning (which fails
+ * closed before launch). Doing DNS here too conflated a transient resolver blip with a
+ * truly unsafe URL and permanently skipped valid prospects — so a host that doesn't
+ * resolve public now surfaces as the filler's retryable host_not_public, not a skip.
+ * Returns the canonical URL string, or null to reject.
  */
-async function validateSubmitUrl(rawUrl, allowedDomain) {
+function validateSubmitUrl(rawUrl, allowedDomain) {
   let u;
   try { u = new URL(String(rawUrl || '')); } catch { return null; }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
   if (!allowedDomain || normDomain(u.hostname) !== allowedDomain) return null;
   if (ssrf.isBlockedHostname(u.hostname)) return null;
-  if (!(await ssrf.hostResolvesPublic(u.hostname))) return null;
   return u.toString();
 }
 
@@ -132,8 +136,8 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 
   // Live runs push the allowlist into the claim so only allowlisted rows are leased
   // (no starving the supervised target by claiming+releasing higher-ranked rows).
-  // Dry-run claims all submit_free rows to preview the full triage.
-  const claimed = await worker.claim({ n: batchSize, type: 'signup', automationPolicy: 'submit_free', ...(dryRun ? {} : { domains: allowlist }) });
+  // Dry-run uses a READ-ONLY preview (no lease/write) to show the full triage.
+  const claimed = await worker.claim({ n: batchSize, type: 'signup', automationPolicy: 'submit_free', ...(dryRun ? { preview: true } : { domains: allowlist }) });
   if (!claimed.length) { logger.info('[signup-runner] no submit_free prospects to claim'); return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0 }; }
 
   const nap = buildNap(worker.businessProfile());
@@ -146,13 +150,15 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     const domain = normDomain(p.target_domain);
     const rawUrl = p.target_url || `https://${domain}/`;
 
+    // Dry-run rows are PREVIEW-only (not leased) → just sample them; nothing to release.
+    if (dryRun) { samples.push({ domain, submitUrl: rawUrl }); continue; }
     if (allowlist.length && !allowlist.includes(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
-    if (dryRun) { samples.push({ domain, submitUrl: rawUrl }); releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
 
     // SSRF: validate the ACTUAL navigated URL (target_url can differ from the
-    // allowlisted target_domain) before launching a browser at it. An unsafe/off-host
-    // URL is parked (→ skip) so we stop re-claiming it; never navigated.
-    const submitUrl = await validateSubmitUrl(rawUrl, domain);
+    // allowlisted target_domain) before launching a browser at it. An unsafe URL
+    // (bad scheme / host mismatch / localhost-literal) is PERMANENT → parked (skip).
+    // A host that can't resolve public is handled later by the filler (retryable).
+    const submitUrl = validateSubmitUrl(rawUrl, domain);
     if (!submitUrl) {
       logger.warn(`[signup-runner] unsafe/non-allowlisted submit URL for ${domain} — parking (skip)`);
       await leaseGuardedReclassify(p, { automation_policy: 'skip' });

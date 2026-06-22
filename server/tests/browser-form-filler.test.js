@@ -195,6 +195,16 @@ describe('fillCitationForm', () => {
     expect(launched).toBe(false);
   });
 
+  test('P1: a planning LLM-call failure → llm_error (run-level; the runner aborts the batch, no attempt burned)', async () => {
+    const anthropic = { messages: { create: async () => { throw new Error('anthropic 503'); } } }; // plan call throws
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([]),
+      anthropic,
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('llm_error');
+  });
+
   test('P1: a browser launch failure → no_browser (run-level; the runner aborts the batch)', async () => {
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => { throw new Error("Executable doesn't exist; run npx playwright install"); },
