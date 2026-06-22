@@ -9,6 +9,8 @@ const {
   normalizeLimit,
   normalizeStatus,
   parseJsonMaybe,
+  reviewActions,
+  isNamedCompetitorReviewRun,
   summarizeDraft,
   summarizeGates,
   summarizeSeoCompletion,
@@ -40,6 +42,32 @@ describe('autonomous-review-queue read model helpers', () => {
   test('comparison_ok is null when the comparison gate did not run', () => {
     expect(summarizeGates({ ok: true }, { ok: true }, {}).comparison_ok).toBeNull();
     expect(summarizeGates({ ok: true }, { ok: true }).comparison_ok).toBeNull();
+  });
+
+  test('named-competitor review runs are approve-and-publish, not trust-build credit', () => {
+    const named = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'named_competitor_review' };
+    expect(isNamedCompetitorReviewRun(named)).toBe(true);
+    expect(isTrustBuildRun(named)).toBe(false); // must NOT be approvable via trust-build (that wouldn't publish)
+
+    const trust = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_3' };
+    expect(isNamedCompetitorReviewRun(trust)).toBe(false);
+    expect(isTrustBuildRun(trust)).toBe(true);
+
+    // Shadow / wrong-outcome runs are not approvable.
+    expect(isNamedCompetitorReviewRun({ ...named, shadow_mode: true })).toBe(false);
+  });
+
+  test('reviewActions exposes can_approve_named_competitor only for those pending runs', () => {
+    const opp = { status: 'pending_review' };
+    const named = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'named_competitor_review' };
+    const a = reviewActions({ opportunity: opp, run: named });
+    expect(a.can_approve_named_competitor).toBe(true);
+    expect(a.can_approve_trust_build).toBe(false);
+
+    const trust = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_3' };
+    const b = reviewActions({ opportunity: opp, run: trust });
+    expect(b.can_approve_named_competitor).toBe(false);
+    expect(b.can_approve_trust_build).toBe(true);
   });
 
   test('parses JSON columns with fallback', () => {

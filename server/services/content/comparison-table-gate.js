@@ -45,6 +45,17 @@ const DISPARAGEMENT_RE = /\b(scams?|rip[\s-]?offs?|ripoffs?|overpriced|goug\w*|i
 // provider-disparagement inside a comparison table cell ("Worst follow-up").
 const TABLE_DISPARAGEMENT_RE = /\b(worst|terrible|awful|horrible|useless|inferior|sub[\s-]?par|pathetic|mediocre)\b/i;
 
+// Provider-DIRECTED disparagement anywhere in the draft (incl. title/meta/prose),
+// where an evaluative negative is tied to a provider noun — "worst pest control
+// companies", "national chains are unreliable". Targeted (adj adjacent to a
+// provider noun, either order) so "worst infestation" / "the best time" don't trip.
+const NEG_ADJ = 'worst|terrible|awful|horrible|unreliable|useless|inferior|sub[\\s-]?par|pathetic|mediocre|lousy|sloppy|incompetent|shady|dishonest|untrustworthy';
+const PROVIDER_NOUN = 'pest control|exterminators?|lawn (?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?';
+const PROVIDER_DISPARAGEMENT_RE = new RegExp([
+  `\\b(?:${NEG_ADJ})\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
+  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${NEG_ADJ})\\b`,
+].join('|'), 'i');
+
 // Negative service-reliability claims about a provider. Flagged inside table
 // blocks OR in prose/title/meta when within PROXIMITY of a named competitor.
 const PROVIDER_NEGATIVE_RE = /\b(unreliable|unresponsive|no[\s-]?shows?|never (?:answers?|calls?|shows?)\b|hard to reach|leaves? you waiting|ghosts? you|won'?t call (?:you )?back|don'?t show up)\b/i;
@@ -95,10 +106,12 @@ const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorpor
 const CATEGORY_OPTION_RE = /\b(national|nationwide|chains?|franchises?|big[\s-]?box|corporate|regional|local(?:ly)?|independent|small(?:er)?|diy|do[\s-]it[\s-]yourself|self[\s-]?treat\w*|home(?:owner)?|store[\s-]bought|over[\s-]the[\s-]counter|professionals?|pros?|quarterly|monthly|annual|seasonal|one[\s-]?time|one[\s-]?off|recurring|reactive|preventive|preventative|on[\s-]demand|subscription|plans?|programs?|packages?|services?|options?|untreated|no treatment|ignoring it|what (?:to|you))\b/i;
 const OWN_BRAND_RE = /\bwaves\b/i;
 
-// Cell value affirms the row criterion → the CLAIM is the row label.
-const AFFIRMATIVE_CELL_RE = /^(yes|y|✓|✔|included|standard|available|offered|both|always|✅)$/i;
+// Cell value affirms the row criterion → the CLAIM is the row label (so an
+// uncurated row label like "Free termite inspections | Free" is validated, not
+// waved through as a neutral mark).
+const AFFIRMATIVE_CELL_RE = /^(yes|y|✓|✔|included|standard|available|offered|both|always|free|✅)$/i;
 // Cell value is a neutral/negative mark → no factual claim about the competitor.
-const NEUTRAL_CELL_RE = /^(no|n|n\/?a|none|n\.a\.|—|–|-|\*|✗|✘|x|varies|varies?\.?|quote[\s-]?based|optional|sometimes|limited|tbd|maybe|\$+|free|never|❌)$/i;
+const NEUTRAL_CELL_RE = /^(no|n|n\/?a|none|n\.a\.|—|–|-|\*|✗|✘|x|varies|varies?\.?|quote[\s-]?based|optional|sometimes|limited|tbd|maybe|\$+|never|❌)$/i;
 
 function finding(severity, code, message) {
   return { severity, code, message };
@@ -209,10 +222,10 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   const unsupportedFacts = new Set();
 
   // ── Whole-text scans (body + title/meta) ──
-  const disp = scanText.match(DISPARAGEMENT_RE);
+  const disp = scanText.match(DISPARAGEMENT_RE) || scanText.match(PROVIDER_DISPARAGEMENT_RE);
   if (disp) {
     findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-      `Comparison draft contains disparaging language about a provider ("${disp[0]}"). State attributes, never insults.`));
+      `Comparison draft contains disparaging language about a provider ("${disp[0].trim()}"). State attributes, never insults — in the table, the prose, or the title/meta.`));
   }
   const rank = scanText.match(RANKING_RE);
   if (rank) {

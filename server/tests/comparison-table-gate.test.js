@@ -310,4 +310,29 @@ describe('comparison-table-gate', () => {
     expect(gate.evaluate({ body: `DIY sprays are unreliable on termites.\n\n${CATEGORY_TABLE}` }, {})
       .findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
   });
+
+  // ── Round-5 findings ──
+
+  test('R5-2a: an uncurated fact behind a "Free" cell (treated as affirmative) is rejected', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[{ label: "Free termite inspections", values: ["Free","Quote-based"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
+  });
+
+  test('R5-3: provider-directed disparagement in the title/prose is caught (P0)', () => {
+    const titled = gate.evaluate(
+      { body: CATEGORY_TABLE, frontmatter: { title: 'Worst pest control companies in Venice' } },
+      { namedCompetitorEnabled: true });
+    expect(titled.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+
+    const prose = gate.evaluate({ body: `National chains are unreliable and overpromise.\n\n${CATEGORY_TABLE}` }, {});
+    expect(prose.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+
+    // "worst infestation" (not provider-directed) is still safe.
+    expect(gate.evaluate({ body: `The worst infestation we saw was termites.\n\n${CATEGORY_TABLE}` }, {})
+      .findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
 });

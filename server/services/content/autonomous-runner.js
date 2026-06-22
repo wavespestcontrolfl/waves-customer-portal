@@ -2140,6 +2140,94 @@ class AutonomousRunner {
     return Number(row?.count || 0);
   }
 
+  // ── Approve-then-publish for named-competitor comparisons ──
+  // A clean named-competitor comparison NEVER auto-publishes; it parks as
+  // completed_pending_review / 'named_competitor_review'. A human approves it
+  // here, which publishes the EXACT reviewed draft (not a re-draft) through the
+  // same astro-publisher path, after re-confirming the comparison gate + the
+  // canary/cap publishing guards. Returns the publish outcome; throws (with a
+  // statusCode) on any guard/gate/publish failure so the caller leaves the
+  // opportunity pending. Idempotent-ish: a second approval after a live publish
+  // is rejected because the run is no longer 'named_competitor_review'.
+  async approveAndPublishNamedCompetitor(opportunityId, { approvedBy = 'operator' } = {}) {
+    if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
+    const run = await db('autonomous_runs')
+      .where('opportunity_id', opportunityId)
+      .orderBy('claimed_at', 'desc')
+      .first();
+    if (!run) { const e = new Error('No autonomous run found for this opportunity'); e.statusCode = 404; throw e; }
+    if (run.outcome !== 'completed_pending_review' || run.skip_reason !== 'named_competitor_review' || run.shadow_mode === true) {
+      const e = new Error('Only a live named-competitor review run can be approved-and-published'); e.statusCode = 400; throw e;
+    }
+    const draft = parseJsonMaybe(run.draft_payload);
+    if (!draft || !draft.body) { const e = new Error('Stored draft is missing or empty'); e.statusCode = 422; throw e; }
+    const brief = await this._loadBriefRow(opportunityId);
+    if (!brief) { const e = new Error('Brief not found for this opportunity'); e.statusCode = 422; throw e; }
+
+    // Re-confirm the comparison gate still passes on the stored draft (defense
+    // against a tampered draft_payload between parking and approval).
+    const gate = getComparisonTableGate();
+    if (gate) {
+      let namedEnabled = false;
+      try { namedEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedEnabled = false; }
+      const g = gate.evaluate(draft, { namedCompetitorEnabled: namedEnabled });
+      if (!g.pass) {
+        const codes = (g.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => f.code).join('; ');
+        const e = new Error(`Comparison-table gate no longer passes: ${codes}`); e.statusCode = 409; throw e;
+      }
+    }
+
+    // Same canary / publish-cap guards as the autonomous lane.
+    const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};
+    const guards = await this._evaluatePublishingGuards(run, brief, seoRes);
+    if (!guards.ok) { const e = new Error(`Publishing guard blocked: ${guards.reason}`); e.statusCode = 409; e.details = guards.notes; throw e; }
+
+    // Publish the reviewed draft through the existing astro-publisher path.
+    const runCtx = { ...run, opportunity_id: opportunityId };
+    const patch = await this._publishAndDistribute(draft, brief, runCtx);
+
+    const published = !!patch.published_url;
+    const outcome = published ? 'completed_published' : 'completed_pending_review';
+    const skipReason = published ? null : (patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url');
+    await db('autonomous_runs').where('id', run.id).update({
+      outcome,
+      skip_reason: skipReason,
+      published_url: patch.published_url || null,
+      astro_pr_url: patch.astro_pr_url || null,
+      indexnow_status: patch.indexnow_status || null,
+      link_tasks_queued: patch.link_tasks_queued || 0,
+      trust_build_approved_at: new Date(),
+      trust_build_approved_by: String(approvedBy || 'operator').slice(0, 100),
+      updated_at: new Date(),
+    });
+    return {
+      published,
+      published_url: patch.published_url || null,
+      astro_pr_url: patch.astro_pr_url || null,
+      publish_status: patch.publish_status || null,
+    };
+  }
+
+  // Load + JSONB-parse the latest content_briefs row for an opportunity (the
+  // shape the astro-publisher consumes), for the approve-then-publish path.
+  async _loadBriefRow(opportunityId) {
+    const row = await db('content_briefs')
+      .where('opportunity_id', opportunityId)
+      .orderBy('version', 'desc')
+      .first();
+    if (!row) return null;
+    const JSONB_COLS = [
+      'score_breakdown', 'serp_signal', 'gsc_signal', 'customer_signal',
+      'conversion_signal', 'required_sections', 'schema_types',
+      'internal_links_to_add', 'voice_constraints', 'facts_pack', 'target_sites',
+    ];
+    const out = { ...row };
+    for (const k of JSONB_COLS) {
+      if (typeof out[k] === 'string') { try { out[k] = JSON.parse(out[k]); } catch (_) { /* leave as-is */ } }
+    }
+    return out;
+  }
+
   async _publishAndDistribute(draft, brief, run) {
     const out = {};
     const publisher = getAstroPublisher();
@@ -2601,6 +2689,12 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
   if (Number(refreshed || 0) < 1) return null;
 
   return { id: existing.id, inserted: false, refreshed: true };
+}
+
+function parseJsonMaybe(value, fallback = null) {
+  if (value == null) return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
 }
 
 function firstReturnedId(rows) {

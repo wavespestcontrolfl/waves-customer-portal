@@ -9,7 +9,7 @@ const logger = require('../logger');
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const ALLOWED_STATUSES = new Set(['pending_review', 'pending', 'claimed', 'done', 'skipped', 'expired']);
-const ALLOWED_DECISIONS = new Set(['requeue', 'dismiss', 'approve_trust_build']);
+const ALLOWED_DECISIONS = new Set(['requeue', 'dismiss', 'approve_trust_build', 'approve_named_competitor']);
 
 async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMIT } = {}) {
   const normalizedStatus = normalizeStatus(status);
@@ -115,6 +115,31 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}
         }),
         updated_at: new Date(),
       });
+    });
+  } else if (normalizedDecision === 'approve_named_competitor') {
+    assertNamedCompetitorReviewRun(run);
+    // Publish the reviewed draft (PR or live) via the autonomous runner, THEN
+    // complete the opportunity. Publish runs first so a gate/guard/publish
+    // failure leaves the item pending_review rather than falsely 'done'.
+    const runner = require('./autonomous-runner');
+    const result = await runner.approveAndPublishNamedCompetitor(opportunityId, { approvedBy: reviewerName });
+    await db.transaction(async (trx) => {
+      await updatePendingReviewOpportunity(trx, opportunityId, {
+        status: 'done',
+        skip_reason: result.published_url ? 'named_competitor_published' : 'named_competitor_pr_open',
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+      if (run?.id) {
+        await trx('autonomous_runs').where('id', run.id).update({
+          reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+            decision: normalizedDecision,
+            reviewer: reviewerName,
+            note: cleanNote,
+          }),
+          updated_at: new Date(),
+        });
+      }
     });
   } else if (normalizedDecision === 'requeue') {
     await db.transaction(async (trx) => {
@@ -264,25 +289,43 @@ function reviewActions({ opportunity, run }) {
     can_requeue: pendingReview,
     can_dismiss: pendingReview,
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
+    can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };
 }
 
 function isTrustBuildRun(run) {
-  // Approvable pending-review runs: the trust-build ramp AND named-competitor
-  // comparisons (which never auto-publish — a human approves each one). Both use
-  // the same approve action / approve-autonomous-run.js script.
   return !!(
     run
     && run.outcome === 'completed_pending_review'
     && run.shadow_mode === false
-    && (/^trust_build_\d+_of_\d+$/.test(String(run.skip_reason || ''))
-      || run.skip_reason === 'named_competitor_review')
+    && /^trust_build_\d+_of_\d+$/.test(String(run.skip_reason || ''))
+  );
+}
+
+// A named-competitor comparison parked for mandatory human review. Approving it
+// PUBLISHES the reviewed draft (approve_named_competitor) rather than granting
+// trust-build credit — a human signs off on every competitor naming.
+function isNamedCompetitorReviewRun(run) {
+  return !!(
+    run
+    && run.outcome === 'completed_pending_review'
+    && run.shadow_mode === false
+    && run.skip_reason === 'named_competitor_review'
   );
 }
 
 function assertTrustBuildRun(run) {
   if (!isTrustBuildRun(run)) {
     const err = new Error('Only live trust-build pending-review runs can be approved');
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
+}
+
+function assertNamedCompetitorReviewRun(run) {
+  if (!isNamedCompetitorReviewRun(run)) {
+    const err = new Error('Only a live named-competitor review run can be approved-and-published');
     err.statusCode = 400;
     err.isOperational = true;
     throw err;
@@ -441,6 +484,7 @@ module.exports = {
   updatePendingReviewOpportunity,
   reviewActions,
   isTrustBuildRun,
+  isNamedCompetitorReviewRun,
   summarizeDraft,
   summarizeSeoCompletion,
   summarizeGates,

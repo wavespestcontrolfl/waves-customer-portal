@@ -221,8 +221,8 @@ choose; never fake a ranking or trash a competitor. Two modes:
      gate hard-blocks an unlisted or business-looking name — and a name found via
      web search is NOT allowed unless it is in the tool's list). Add a caption
      with attribution + an "as of" date, e.g. caption="Attributes as of June
-     2026, per each company's public website." Named-competitor posts go through
-     human review (the trust-build approval ramp) before they can publish — so
+     2026, per each company's public website." EVERY named-competitor post is
+     held for human review and publishes only when a person approves it — so
      prefer category mode unless the brief specifically needs named businesses.
 RULES for either mode (the comparison-table publish gate enforces these — a
 violation routes the whole draft to review and wastes the run):

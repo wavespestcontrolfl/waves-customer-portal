@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 /**
- * Mark a completed_pending_review autonomous run as trust-build approved.
+ * Approve a completed_pending_review autonomous run after operator review.
+ *
+ * Two parked kinds are handled:
+ *   - trust_build_<n>_of_<m> → stamp trust-build credit (the draft itself is not
+ *     published; credit graduates the action type toward auto-publish).
+ *   - named_competitor_review → PUBLISH the reviewed draft (PR or live) via the
+ *     autonomous runner, then complete the opportunity. A human signs off on
+ *     every competitor naming.
  *
  * Usage:
  *   node server/scripts/approve-autonomous-run.js --id=<run_uuid> --by=adam
@@ -31,28 +38,46 @@ if (!RUN_ID) {
 
 (async function main() {
   try {
-    const updated = await db('autonomous_runs')
+    const run = await db('autonomous_runs')
       .where('id', RUN_ID)
       .where('outcome', 'completed_pending_review')
       .where('shadow_mode', false)
-      // Approvable pending-review runs: trust-build ramp + named-competitor
-      // comparisons (which never auto-publish — a human approves each one).
-      .where((qb) => qb
-        .where('skip_reason', 'like', 'trust_build_%')
-        .orWhere('skip_reason', 'named_competitor_review'))
-      .update({
-        trust_build_approved_at: new Date(),
-        trust_build_approved_by: APPROVED_BY,
-        updated_at: new Date(),
-      });
+      .first();
 
-    if (!updated) {
-      console.error(`No live trust_build completed_pending_review autonomous run found for id=${RUN_ID}`);
+    if (!run) {
+      console.error(`No live completed_pending_review autonomous run found for id=${RUN_ID}`);
       process.exitCode = 1;
       return;
     }
 
-    console.log(`Approved autonomous run ${RUN_ID} for trust-build credit by ${APPROVED_BY}`);
+    if (run.skip_reason === 'named_competitor_review') {
+      // Publish the reviewed draft (PR or live) + complete the opportunity.
+      const runner = require('../services/content/autonomous-runner');
+      const result = await runner.approveAndPublishNamedCompetitor(run.opportunity_id, { approvedBy: APPROVED_BY });
+      await db('opportunity_queue')
+        .where({ id: run.opportunity_id, status: 'pending_review' })
+        .update({
+          status: 'done',
+          skip_reason: result.published_url ? 'named_competitor_published' : 'named_competitor_pr_open',
+          completed_at: new Date(),
+          updated_at: new Date(),
+        });
+      console.log(`Named-competitor run ${RUN_ID} approved by ${APPROVED_BY} → ${result.published_url || result.astro_pr_url || result.publish_status || 'submitted'}`);
+      return;
+    }
+
+    if (/^trust_build_\d+_of_\d+$/.test(String(run.skip_reason || ''))) {
+      await db('autonomous_runs').where('id', RUN_ID).update({
+        trust_build_approved_at: new Date(),
+        trust_build_approved_by: APPROVED_BY,
+        updated_at: new Date(),
+      });
+      console.log(`Approved autonomous run ${RUN_ID} for trust-build credit by ${APPROVED_BY}`);
+      return;
+    }
+
+    console.error(`Run ${RUN_ID} is parked as '${run.skip_reason}', which is not an approvable kind (expected trust_build_* or named_competitor_review)`);
+    process.exitCode = 1;
   } finally {
     await db.destroy().catch(() => {});
   }
