@@ -440,12 +440,6 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isPositiveNumber(product.marginDivisor) || Number(product.marginDivisor) >= 1) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.marginDivisor must be positive and less than 1`);
     }
-    if (product.floorBeforeVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorBeforeVolumeDiscount)) {
-      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorBeforeVolumeDiscount must be non-negative`);
-    }
-    if (product.floorAfterVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
-      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorAfterVolumeDiscount must be non-negative`);
-    }
   }
 
   const palm = PALM || {};
@@ -1310,8 +1304,6 @@ async function syncConstantsFromDB(dbInstance) {
         setNumber(target, 'containerOz', data.containerOz ?? data.container_oz ?? data.bottleOz ?? data.bottle_oz, Number);
         setNumber(target, 'productOzPer10SqFt', data.productOzPer10SqFt ?? data.product_oz_per_10_sqft, Number);
         setNumber(target, 'marginDivisor', data.marginDivisor ?? data.margin_divisor, Number);
-        setNumber(target, 'floorBeforeVolumeDiscount', data.floorBeforeVolumeDiscount ?? data.floor_before_volume_discount, money);
-        setNumber(target, 'floorAfterVolumeDiscount', data.floorAfterVolumeDiscount ?? data.floor_after_volume_discount, money);
         setBoolean(target, 'requiresLabelConfirmation', data.requiresLabelConfirmation ?? data.requires_label_confirmation);
         setBoolean(target, 'requiresCertificateOfCompliance', data.requiresCertificateOfCompliance ?? data.requires_certificate_of_compliance);
         setStringArray(target, 'warnings', data.warnings);
