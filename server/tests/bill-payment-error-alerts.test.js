@@ -124,13 +124,14 @@ describe('bill-payment-error-alerts', () => {
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('suppresses the benign 409 "already in progress" conflict without writing a row or notifying', async () => {
+  test('alerts on a 409 it is handed (suppression of benign in-progress 409s is the call site’s job)', async () => {
+    // The alerter no longer suppresses by status code — the /setup route only
+    // reports a 409 when it is NOT in progress (a recoverable card
+    // requires_action conflict where the customer is stuck), and other routes
+    // (e.g. /consent) report actionable 409s. Anything that reaches here should
+    // alert.
     const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
 
-    // Mirrors the real WPC-2026-0190 case: customer started an ACH bank payment
-    // (sits in `processing` for days), then reloaded the pay link / returned
-    // from the bank redirect — /setup 409s against the in-flight PaymentIntent.
-    // That is not a failure, so it must never raise a "bill payment error" alert.
     const result = await alertBillPaymentError({
       invoice: {
         id: 'inv_123',
@@ -144,48 +145,7 @@ describe('bill-payment-error-alerts', () => {
       message: 'Invoice payment is already in progress',
       statusCode: 409,
       source: 'server',
-    });
-
-    expect(result).toEqual({ notified: false, skipped: true, reason: 'payment_in_progress_conflict' });
-    // Early return — no audit row, no admin notification.
-    expect(dbMock).not.toHaveBeenCalledWith('bill_payment_error_alerts');
-    expect(triggerNotification).not.toHaveBeenCalled();
-  });
-
-  test('isInProgressConflict matches only a 409 from the setup/update_amount phases', () => {
-    const { __private } = require('../services/bill-payment-error-alerts');
-    const { isInProgressConflict } = __private;
-
-    // 409 from the PI-lifecycle phases → benign in-progress conflict.
-    expect(isInProgressConflict({ statusCode: 409, phase: 'setup' })).toBe(true);
-    expect(isInProgressConflict({ statusCode: '409', phase: 'update_amount' })).toBe(true);
-    // 409 from other phases is an ACTIONABLE failure that must still alert
-    // (e.g. /consent PM-mismatch / not-consent-eligible after the customer paid).
-    expect(isInProgressConflict({ statusCode: 409, phase: 'consent' })).toBe(false);
-    expect(isInProgressConflict({ statusCode: 409, phase: 'confirm' })).toBe(false);
-    expect(isInProgressConflict({ statusCode: 409 })).toBe(false);
-    // Non-409 is never an in-progress conflict regardless of phase.
-    expect(isInProgressConflict({ statusCode: 400, phase: 'setup' })).toBe(false);
-    expect(isInProgressConflict({ statusCode: 500, phase: 'setup' })).toBe(false);
-    expect(isInProgressConflict({})).toBe(false);
-  });
-
-  test('still alerts on a consent-phase 409 (actionable save-method failure)', async () => {
-    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
-
-    const result = await alertBillPaymentError({
-      invoice: {
-        id: 'inv_123',
-        invoice_number: 'WPC-2026-0100',
-        customer_id: 'cust_123',
-        total: '125.50',
-        stripe_payment_intent_id: 'pi_123',
-      },
-      phase: 'consent',
-      methodCategory: 'card',
-      message: 'Submitted payment method does not match the charged card',
-      statusCode: 409,
-      source: 'server',
+      metadata: { recoverable_conflict: true },
     });
 
     expect(result).toEqual({ notified: true, alertId: 'alert-1' });
