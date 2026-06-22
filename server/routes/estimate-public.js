@@ -3264,15 +3264,25 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     && billingRecurring.length > 0
     && isAnnualPrepayEligibleServiceMix(recurring, oneTimeItems);
   const annualPrepayWaivesMembership = showMembershipFee;
-  const prepayDiscountRate = prepayEligibleMix && !hasWaveGuardMembership ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
-  const prepayDiscountAmount = Math.round(annualTotal * prepayDiscountRate * 100) / 100;
-  const prepayDiscountPctLabel = `${Math.round(ANNUAL_PREPAY_DISCOUNT_PCT * 100)}%`;
+  // Use the converter's shared calc so the displayed total === the invoiced total,
+  // including the non-discountable margin floor clamp (effective rate may be < the
+  // configured % for margin-protected mixes).
+  const prepayResolved = require('../services/estimate-converter').resolveAnnualPrepayInvoiceTotal({
+    baseAnnual: annualTotal,
+    recurringServices: recurring,
+    estimateData: estData,
+  });
+  const prepayDiscountAmount = annualPrepayWaivesMembership ? 0 : prepayResolved.discount;
+  const prepayDiscountRate = annualPrepayWaivesMembership ? 0 : prepayResolved.rate;
+  const prepayDiscountPctLabel = `${Math.round(prepayDiscountRate * 100)}%`;
   // Annual prepay is offered to NEW customers only (unchanged invariant) and only
   // when it carries an incentive: the setup waiver (pest/mosquito) or the prepay
   // discount (no-fee services). Existing members stay pay-per-application only.
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
     && (annualPrepayWaivesMembership || prepayDiscountAmount > 0);
-  const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal - prepayDiscountAmount) * 100) / 100);
+  const prepayInvoiceTotal = annualPrepayWaivesMembership
+    ? annualTotal
+    : Math.max(0, prepayResolved.amount);
   const existingAppointment = est.existingAppointment || null;
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
     ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
@@ -6045,19 +6055,16 @@ router.put('/:token/accept', async (req, res, next) => {
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
     // annualPrepayInvoiceAmount is the UNDISCOUNTED recurring annual (the base the
-    // converter needs). For post-accept customer/admin messaging we must quote the
-    // amount actually invoiced: non-pest/mosquito mixes are discounted by
-    // ANNUAL_PREPAY_DISCOUNT_PCT (the converter applies it; mirror it here so the
-    // copy never quotes the raw annual). Pest/mosquito keep the full annual.
-    const annualPrepayMixHasFeeService = (Array.isArray(recurringSvcList) ? recurringSvcList : []).some((svc) => {
-      const key = recurringServiceKey(svc);
-      return key === 'pest_control' || key === 'mosquito';
-    });
-    const annualPrepayDisplayAmount = annualPrepayInvoiceAmount == null
-      ? null
-      : (annualPrepayMixHasFeeService
-        ? annualPrepayInvoiceAmount
-        : Math.round(annualPrepayInvoiceAmount * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100);
+    // converter needs). For post-accept customer/admin messaging AND the API
+    // response we must quote the amount actually invoiced — the converter's shared
+    // calc applies the discount and the margin-floor clamp, so this always matches.
+    const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
+      ? require('../services/estimate-converter').resolveAnnualPrepayInvoiceTotal({
+        baseAnnual: annualPrepayInvoiceAmount,
+        recurringServices: recurringSvcList,
+        estimateData: estData,
+      }).amount
+      : null;
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
     const acceptedFrequencyKey = selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey;
     const acceptedServiceTierKey = selectedFrequency?.billingFrequencyKey ? selectedFrequency.key : null;
@@ -6935,7 +6942,7 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceKind,
       invoiceServiceLabel,
       billingTerm,
-      prepayInvoiceAmount: annualPrepayInvoiceAmount,
+      prepayInvoiceAmount: annualPrepayDisplayAmount,
       bookingUrl,
       treatAsOneTime,
       reservationCommitted,

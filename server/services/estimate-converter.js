@@ -599,6 +599,23 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
   return calculateAnnualPrepayAmount(monthlyRate);
 }
 
+// Single source of truth for the annual-prepay invoice amount, shared by the
+// converter (billing), the public estimate render, and the accept response so the
+// displayed/messaged total always equals the invoice the converter creates.
+// Non-pest/mosquito mixes take ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual;
+// the non-discountable recurring floor (margin-protected non-lawn lines) still
+// clamps the result, so callers never quote a total below what is actually billed.
+function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], estimateData = {} } = {}) {
+  const base = Math.round((Number(baseAnnual) || 0) * 100) / 100;
+  if (!(base > 0)) return { amount: 0, discount: 0, rate: 0 };
+  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
+  const discounted = Math.round(base * (1 - discountRate) * 100) / 100;
+  const floor = nonDiscountableRecurringAnnualFloor(estimateData);
+  const amount = Math.max(discounted, floor);
+  const discount = Math.max(0, Math.round((base - amount) * 100) / 100);
+  return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000 };
+}
+
 function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
   if (!Array.isArray(recurringServices) || recurringServices.length === 0) return false;
   if (billingTerm === 'prepay_annual') return true;
@@ -1188,20 +1205,18 @@ const EstimateConverter = {
         monthlyRate,
       });
       // Mixes without a WaveGuard setup fee (lawn/termite/rodent/tree/palm) take
-      // ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual instead of the setup
-      // waiver. Pest/mosquito mixes keep the waiver and get no extra discount.
-      // Keyed on SERVICE TYPE (not shouldIncludeWaveGuardSetupFeeForRecurring),
-      // so an existing pest/mosquito member — whose setup is waived — still does
-      // NOT receive the 5% discount.
-      const prepayMixHasFeeService = recurringMixHasMembershipFeeService(recurringServicesForConversion);
-      const prepayDiscountRate = prepayMixHasFeeService ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
-      const annualPrepayAmountRaw = Math.round(annualPrepayBase * (1 - prepayDiscountRate) * 100) / 100;
-      const nonDiscountableFloor = nonDiscountableRecurringAnnualFloor(estimateData);
+      // the prepay discount off the recurring annual instead of the setup waiver;
+      // pest/mosquito keep the waiver and no extra discount. Shared with the public
+      // render + accept response so all three quote the same (floor-clamped) total.
+      const prepayResolved = resolveAnnualPrepayInvoiceTotal({
+        baseAnnual: annualPrepayBase,
+        recurringServices: recurringServicesForConversion,
+        estimateData,
+      });
       const annualPrepayAmount = billingTerm === 'prepay_annual'
-        ? Math.max(annualPrepayAmountRaw, nonDiscountableFloor)
-        : annualPrepayAmountRaw;
-      const prepayDiscountApplied = prepayDiscountRate > 0
-        && annualPrepayAmount < Math.round(annualPrepayBase * 100) / 100;
+        ? prepayResolved.amount
+        : annualPrepayBase;
+      const prepayDiscountApplied = prepayResolved.discount > 0;
       const standardFirstApplicationAmount = billingTerm === 'standard'
         ? resolveFirstApplicationAmount({
           firstApplicationAmount: opts.firstApplicationAmount,
@@ -1521,6 +1536,7 @@ module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
+module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
 module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConversion;
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;

@@ -7,6 +7,7 @@ const {
   nonDiscountableRecurringAnnualFloor,
   resolveFirstApplicationAmount,
   resolveAnnualPrepayDraftAmount,
+  resolveAnnualPrepayInvoiceTotal,
   recurringServicesFromEstimateData,
   shouldAttachScheduledServiceToStandardDraftInvoice,
   shouldIncludeWaveGuardSetupFeeForRecurring,
@@ -98,6 +99,33 @@ describe('estimate converter annual prepay amount', () => {
       recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
       estimateData: { membershipSnapshot: { isExistingCustomer: true } },
     })).toBe(false);
+  });
+
+  test('resolveAnnualPrepayInvoiceTotal: 5% for no-fee mixes, none for pest/mosquito, floor-clamped', () => {
+    // No-fee mix (lawn): 5% off; lawn lines are excluded from the floor.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
+      estimateData: { result: { lineItems: [] } },
+    })).toEqual({ amount: 627, discount: 33, rate: 0.05 });
+
+    // Pest/mosquito: setup-waiver path, no extra discount.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { result: { lineItems: [] } },
+    })).toEqual({ amount: 660, discount: 0, rate: 0 });
+
+    // No-fee mix with a non-discountable (non-lawn) line: the margin floor caps the
+    // 5% so the invoiced/displayed total never dips below the protected amount.
+    const floored = resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'tree_shrub', name: 'Tree & Shrub' }],
+      estimateData: { result: { lineItems: [{ service: 'tree_shrub', annual: 650, discountable: false }] } },
+    });
+    expect(floored.amount).toBe(650); // max(627, 650)
+    expect(floored.discount).toBe(10); // 660 - 650, less than a full 5%
+    expect(floored.rate).toBeCloseTo(0.0152, 4);
   });
 
   test('all recurring pay-per-application accepts create invoices', () => {
