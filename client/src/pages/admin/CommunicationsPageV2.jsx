@@ -197,7 +197,6 @@ const TABS = [
     key: "events",
     label: "Events",
     Icon: Zap,
-    className: "hidden md:inline-flex",
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "calls", label: "Calls", Icon: PhoneCall },
@@ -206,19 +205,16 @@ const TABS = [
     key: "templates",
     label: "Message Templates",
     Icon: FileText,
-    className: "hidden md:inline-flex",
   },
   {
     key: "csr",
     label: "CSR Coach",
     Icon: Headphones,
-    className: "hidden md:inline-flex",
   },
   {
     key: "notifications",
     label: "Notifications",
     Icon: Bell,
-    className: "hidden md:inline-flex",
   },
 ];
 const SMS_LOG_PAGE_SIZE = 500;
