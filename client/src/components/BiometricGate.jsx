@@ -43,9 +43,16 @@ export default function BiometricGate({ children }) {
     try {
       ok = await authenticateBiometric('Unlock Waves');
     } finally {
-      setLocked(!ok);
       setChecking(false);
       promptInFlightRef.current = false;
+      // Only clear the lock on a success that finished with the app still in the
+      // foreground. If a real background landed during the prompt, its visibility
+      // listener has already re-locked — don't let a stale success overwrite that
+      // newer lock and expose content on the next return.
+      const stillForeground = typeof document === 'undefined' || document.visibilityState === 'visible';
+      const unlocked = ok && stillForeground;
+      setLocked(!unlocked);
+      lockedRef.current = !unlocked;
       // Keep ignoring app-state changes briefly to swallow the trailing foreground
       // event the biometric sheet emits when it closes. Track the timer so a later
       // prompt cancels this one (above) rather than letting it clear suppression
@@ -64,6 +71,17 @@ export default function BiometricGate({ children }) {
   useEffect(() => {
     if (!isNativeApp()) return undefined;
     attempt();
+    // A genuine background hides the webview document. The iOS biometric sheet does
+    // NOT (the app stays foreground), so this fires only on a real background — making
+    // it the authoritative signal that a fresh unlock is required on return, and it
+    // can't be confused with the Face ID prompt's own resign/activate churn.
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden' && isNativeApp() && hasSessionToken()) {
+        setLocked(true);
+        lockedRef.current = true;
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     let listener;
     import('@capacitor/app')
       .then(({ App }) => App.addListener('appStateChange', ({ isActive }) => {
@@ -75,16 +93,18 @@ export default function BiometricGate({ children }) {
           // unlocked must never kick off another Face ID prompt.
           if (lockedRef.current) attempt();
         } else if (hasSessionToken()) {
-          // ALWAYS lock on background — even during a prompt's suppression window —
-          // to cover the app-switcher snapshot and ensure a real background here
-          // can't leave content unlocked on the next foreground.
+          // ALWAYS lock on resign (willResignActive) — even during a prompt's
+          // suppression window — to cover the app-switcher snapshot.
           setLocked(true);
           lockedRef.current = true;
         }
       }))
       .then((l) => { listener = l; })
       .catch(() => {});
-    return () => { try { listener?.remove?.(); } catch { /* noop */ } };
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      try { listener?.remove?.(); } catch { /* noop */ }
+    };
   }, [attempt]);
 
   // While locked, fully gate the still-mounted content — not just visually. Mark
