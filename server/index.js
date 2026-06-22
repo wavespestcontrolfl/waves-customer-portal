@@ -285,6 +285,7 @@ app.use('/l', require('./routes/public-shortlinks'));
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
+app.use('/api/push', require('./routes/push'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
