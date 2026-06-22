@@ -1133,6 +1133,8 @@ export function calculateEstimate(inputs) {
     trenchingWarrantyTier,
     trenchingLabelConfirmed,
     boracareSqft: bcSqft,
+    boracareWallLinearFt: bcWallLF,
+    boracareWallHeightFt: bcWallHeight,
     preslabSqft: psSqft,
     preslabWarranty,
     preslabVolume,
@@ -2133,21 +2135,33 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Bora-Care ───────────────────────────────────────────── */
-  if (svcBoracare && !isCommercial && bcSqft > 0) {
+  // Wall spraying: linear ft of wall × height → treatable area, folded into the
+  // BoraCare area (same coverage/labor/margin). Default 8 ft when height omitted.
+  // Coerce both components to numbers first — callers (e.g. the legacy
+  // EstimatePage path) may spread raw string form values, and string + number
+  // would concatenate ("1200" + 0 → "12000") and grossly over-price the job.
+  const bcAtticSqft = Number(bcSqft) > 0 ? Number(bcSqft) : 0;
+  const bcWallLinear = Number(bcWallLF) > 0 ? Number(bcWallLF) : 0;
+  const bcWallSqft = bcWallLinear > 0
+    ? bcWallLinear * (Number(bcWallHeight) > 0 ? Number(bcWallHeight) : 8)
+    : 0;
+  const bcTotalSqft = bcAtticSqft + bcWallSqft;
+  if (svcBoracare && !isCommercial && bcTotalSqft > 0) {
     hasOT = true;
     const BC_GAL = 91.98, BC_COV = 275, BC_EQUIP = 17.50;
-    const gal = Math.max(3, Math.ceil(bcSqft / BC_COV));
+    const gal = Math.max(3, Math.ceil(bcTotalSqft / BC_COV));
     // v1.5: raised labor cap from 6 to 10 hrs — 4,500+ sf attics are multi-day in SWFL heat
-    const isMultiDay = bcSqft > 4500;
+    const isMultiDay = bcTotalSqft > 4500;
     const lhr = isMultiDay
-      ? Math.min(10, Math.max(6, 1.5 + bcSqft / 800))  // more aggressive rate for large attics
-      : Math.min(6, Math.max(2, 1.5 + bcSqft / 1000));
+      ? Math.min(10, Math.max(6, 1.5 + bcTotalSqft / 800))  // more aggressive rate for large attics
+      : Math.min(6, Math.max(2, 1.5 + bcTotalSqft / 1000));
     const cost = gal * BC_GAL + lhr * LABOR + BC_EQUIP;
     const fp = otP(Math.round(cost / 0.45));
-    const detail = '~' + bcSqft.toLocaleString() + ' sf | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
-    otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft, gal, lhr, isMultiDay });
+    const wallNote = bcWallSqft > 0 ? ' (incl. ' + bcWallSqft.toLocaleString() + ' sf wall)' : '';
+    const detail = '~' + bcTotalSqft.toLocaleString() + ' sf' + wallNote + ' | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
+    otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft: bcTotalSqft, gal, lhr, isMultiDay });
   } else if (svcBoracare && !isCommercial) {
-    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft required', quoteRequired: true });
+    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft or wall linear ft required', quoteRequired: true });
   }
 
   /* ── Pre-Slab Termiticide ────────────────────────────────── */

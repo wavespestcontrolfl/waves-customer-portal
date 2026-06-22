@@ -1999,6 +1999,8 @@ export default function EstimateToolViewV2({
     bedbugHeatScope: "ROOMS_ONLY",
     bedbugSubcontractCost: "",
     boracareSqft: "",
+    boracareWallLinearFt: "",
+    boracareWallHeightFt: "",
     preslabSqft: "",
     preslabProductKey: "termidor_sc",
     preslabLabelConfirmed: false,
@@ -2998,6 +3000,12 @@ export default function EstimateToolViewV2({
       const trenchingDirtLF = parseNonNegativeNumber(form.trenchingDirtLF);
       const trenchingConcretePct = parseNonNegativeNumber(form.trenchingConcretePct);
       const boracareSqft = parsePositiveNumber(form.boracareSqft);
+      // Send raw (trimmed) Bora-Care measurements rather than parsed numbers: a
+      // present-but-invalid entry (e.g. "-5") must reach the engine so its
+      // invalid-measurement review path runs instead of being silently dropped.
+      const boracareSqftRaw = String(form.boracareSqft ?? "").trim() || undefined;
+      const boracareWallLinearFt = String(form.boracareWallLinearFt ?? "").trim() || undefined;
+      const boracareWallHeightFt = String(form.boracareWallHeightFt ?? "").trim() || undefined;
       const preslabSqft = parsePositiveNumber(form.preslabSqft);
       const propertyPalmCount = parsePositiveInteger(form.palmCount);
       const palmTreatmentCountBlank = String(form.palmTreatmentCount || "").trim() === "";
@@ -3056,7 +3064,9 @@ export default function EstimateToolViewV2({
         trenchingDepthFt: form.trenchingDepthFt || "1",
         trenchingWarrantyTier: form.trenchingWarrantyTier || "one_year_retreat",
         trenchingLabelConfirmed: !!form.trenchingLabelConfirmed,
-        boracareSqft,
+        boracareSqft: boracareSqftRaw,
+        boracareWallLinearFt,
+        boracareWallHeightFt,
         preslabSqft,
         preslabProductKey: form.preslabProductKey || "termidor_sc",
         preslabLabelConfirmed: !!form.preslabLabelConfirmed,
@@ -3202,7 +3212,18 @@ export default function EstimateToolViewV2({
           profile.homeSqFt / (profile.stories || 1),
         );
       if (trenchingPerimeterLF) profile.perimeterLF = trenchingPerimeterLF;
-      if (boracareSqft) profile.atticSqFt = boracareSqft;
+      if (boracareSqft) {
+        profile.atticSqFt = boracareSqft;
+      } else if (form.svcBoracare) {
+        // Wall-spray (or attic-cleared) Bora-Care quote: don't inherit a stale
+        // lookup attic value, or a wall-only job would be priced as attic+wall.
+        // An invalid attic entry is still sent raw via options (boracareSqft) so
+        // the server flags it for review rather than dropping it.
+        delete profile.atticSqFt;
+        delete profile.atticAreaSqFt;
+        delete profile.rawWoodSqFt;
+        delete profile.woodTreatmentSqFt;
+      }
       if (preslabSqft) profile.slabSqFt = preslabSqft;
       profile.pool = form.hasPool === "YES" ? "YES" : "NO";
       profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
@@ -3232,7 +3253,11 @@ export default function EstimateToolViewV2({
         selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
       const preSlabOnly =
         selectedServices.length === 1 && selectedServices[0] === "PRESLAB";
-      if (!bedBugOnly && !preSlabOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      // Bora-Care is priced from attic/raw-wood sqft or wall linear ft, not the
+      // home/lot footprint, so a Bora-Care-only quote must not be gated on it.
+      const boraCareOnly =
+        selectedServices.length === 1 && selectedServices[0] === "BORACARE";
+      if (!bedBugOnly && !preSlabOnly && !boraCareOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -3614,6 +3639,8 @@ export default function EstimateToolViewV2({
       fleaExteriorAreaSource: "UNKNOWN",
       fleaExteriorZones: [],
       boracareSqft: "",
+      boracareWallLinearFt: "",
+      boracareWallHeightFt: "",
       preslabSqft: "",
       preslabProductKey: "termidor_sc",
       preslabLabelConfirmed: false,
@@ -3815,8 +3842,8 @@ export default function EstimateToolViewV2({
       !form.trenchingEstimateFromFootprint
       ? "Trenching needs measured perimeter LF before pricing."
       : null,
-    form.svcBoracare && !parsePositiveNumber(form.boracareSqft)
-      ? "Bora-Care needs attic/raw wood sqft."
+    form.svcBoracare && !parsePositiveNumber(form.boracareSqft) && !parsePositiveNumber(form.boracareWallLinearFt)
+      ? "Bora-Care needs attic/raw wood sqft or wall linear ft."
       : null,
     form.svcPreslab && !parsePositiveNumber(form.preslabSqft)
       ? "Pre-Slab Termiticide Treatment needs slab sqft."
@@ -5183,13 +5210,29 @@ export default function EstimateToolViewV2({
                     </>
                   )}
                   {form.svcBoracare && (
-                    <FieldV2 label="Attic / Raw Wood Sq Ft">
-                      <InputV2
-                        k="boracareSqft"
-                        type="number"
-                        placeholder="Admin-entered"
-                      />
-                    </FieldV2>
+                    <>
+                      <FieldV2 label="Attic / Raw Wood Sq Ft">
+                        <InputV2
+                          k="boracareSqft"
+                          type="number"
+                          placeholder="Admin-entered"
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Wall Linear Ft (spray)">
+                        <InputV2
+                          k="boracareWallLinearFt"
+                          type="number"
+                          placeholder="Linear ft of wall"
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Wall Height (ft)">
+                        <InputV2
+                          k="boracareWallHeightFt"
+                          type="number"
+                          placeholder="Default 8"
+                        />
+                      </FieldV2>
+                    </>
                   )}
                   {form.svcPreslab && (
                     <>

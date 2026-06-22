@@ -271,6 +271,66 @@ describe('termite measurement overrides and safeguards', () => {
     expect(missing.manualReviewReasons).toContain('missing_boracare_attic_sqft');
   });
 
+  test('BoraCare folds wall spraying (linear ft × height) into the treated area', () => {
+    // Wall-only job: 100 LF × default 8 ft = 800 sqft. No attic input required.
+    const wallOnly = priceBoraCare({}, { wallLinearFt: 100 });
+    expect(wallOnly.quoteRequired).toBe(false);
+    expect(wallOnly.atticSqFt).toBeNull();
+    expect(wallOnly.wallLinearFt).toBe(100);
+    expect(wallOnly.wallHeightFt).toBe(8);
+    expect(wallOnly.wallSqFt).toBe(800);
+    expect(wallOnly.totalSqFt).toBe(800);
+    expect(wallOnly.manualReviewReasons).not.toContain('missing_boracare_attic_sqft');
+    // Matches a pure 800-sqft area run through the existing math.
+    const equiv800 = priceBoraCare(800);
+    expect(wallOnly.gallons).toBe(equiv800.gallons);
+    expect(wallOnly.price).toBe(equiv800.price);
+
+    // Custom wall height overrides the 8 ft default.
+    const tallWall = priceBoraCare({}, { wallLinearFt: 100, wallHeightFt: 10 });
+    expect(tallWall.wallHeightFt).toBe(10);
+    expect(tallWall.totalSqFt).toBe(1000);
+
+    // Attic + wall combine; price matches the summed area.
+    const combined = priceBoraCare({ atticSqFt: 1200 }, { wallLinearFt: 100, wallHeightFt: 8 });
+    expect(combined.atticSqFt).toBe(1200);
+    expect(combined.wallSqFt).toBe(800);
+    expect(combined.totalSqFt).toBe(2000);
+    expect(combined.price).toBe(priceBoraCare(2000).price);
+
+    // Invalid wall linear ft flags review but still prices the attic portion.
+    const badWall = priceBoraCare({ atticSqFt: 2000 }, { wallLinearFt: -5 });
+    expect(badWall.totalSqFt).toBe(2000);
+    expect(badWall.requiresManualReview).toBe(true);
+    expect(badWall.manualReviewReasons).toContain('invalid_boracare_wall_linear_ft');
+
+    // Invalid wall height defaults to 8 ft but still flags review.
+    const badHeight = priceBoraCare({}, { wallLinearFt: 100, wallHeightFt: 0 });
+    expect(badHeight.wallHeightFt).toBe(8);
+    expect(badHeight.totalSqFt).toBe(800);
+    expect(badHeight.requiresManualReview).toBe(true);
+    expect(badHeight.manualReviewReasons).toContain('invalid_boracare_wall_height_defaulted');
+
+    // A rejected attic value with valid walls must stay visible for review —
+    // not be silently treated as merely absent.
+    const badAtticWithWall = priceBoraCare({ atticSqFt: -10 }, { wallLinearFt: 100 });
+    expect(badAtticWithWall.totalSqFt).toBe(800);
+    expect(badAtticWithWall.requiresManualReview).toBe(true);
+    expect(badAtticWithWall.manualReviewReasons).toContain('invalid_boracare_attic_sqft');
+
+    // A truly missing attic with valid walls prices cleanly (no review noise).
+    const wallNoAttic = priceBoraCare({}, { wallLinearFt: 100 });
+    expect(wallNoAttic.requiresManualReview).toBe(false);
+    expect(wallNoAttic.manualReviewReasons).toHaveLength(0);
+
+    // Route flow: attic + wall both arrive via options (manual override). An
+    // invalid attic option with valid walls must still flag review.
+    const invalidAtticOption = priceBoraCare({}, { atticSqFt: -10, wallLinearFt: 100 });
+    expect(invalidAtticOption.totalSqFt).toBe(800);
+    expect(invalidAtticOption.requiresManualReview).toBe(true);
+    expect(invalidAtticOption.manualReviewReasons).toContain('invalid_boracare_attic_sqft');
+  });
+
   test('Pre-Slab Termiticide normalizes products and aliases', () => {
     expect(normalizePreSlabTermiticideProduct('termidor_sc').productKey).toBe('termidor_sc');
     expect(normalizePreSlabTermiticideProduct('termidor sc').productKey).toBe('termidor_sc');

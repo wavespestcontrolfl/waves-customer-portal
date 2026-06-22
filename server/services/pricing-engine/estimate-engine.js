@@ -842,7 +842,16 @@ function generateEstimate(input) {
   }
   const boraCareService = services.boraCare || services.bora_care;
   if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control')) {
-    const result = priceBoraCare(property, serviceOptions(boraCareService));
+    const boraCareOptions = serviceOptions(boraCareService);
+    // Wall-spray measurements may arrive via service options (route path) or at
+    // the top level of the estimate input (direct generateEstimate callers).
+    // The property profile does not carry them, so merge the top-level fields
+    // into the options the engine reads.
+    const result = priceBoraCare(property, {
+      ...boraCareOptions,
+      wallLinearFt: boraCareOptions.wallLinearFt ?? input.boraCareWallLinearFt,
+      wallHeightFt: boraCareOptions.wallHeightFt ?? input.boraCareWallHeightFt,
+    });
     lineItems.push(result);
   }
   const canonicalPreSlabService = services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab;
