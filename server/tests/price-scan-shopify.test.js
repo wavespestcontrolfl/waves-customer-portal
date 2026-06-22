@@ -38,6 +38,13 @@ describe('shopify handleOf / baseOrigin', () => {
     expect(baseOrigin({ website: 'chemicalwarehouse.com' })).toBe('https://chemicalwarehouse.com');
     expect(baseOrigin({ website: 'www.seedbarn.com/' })).toBe('https://www.seedbarn.com');
   });
+  test('baseOrigin FAILS CLOSED on non-allowlisted / spoofed hosts (SSRF guard)', () => {
+    // userinfo spoof: real host is attacker.example
+    expect(baseOrigin({ website: 'https://chemicalwarehouse.com@attacker.example' })).toBeNull();
+    expect(baseOrigin({ website: 'https://attacker.example' })).toBeNull();
+    expect(baseOrigin({ website: 'https://chemicalwarehouse.com.evil.com' })).toBeNull(); // suffix spoof
+    expect(baseOrigin({ url: 'http://169.254.169.254/' })).toBeNull(); // metadata endpoint
+  });
 });
 
 describe('registry resolves Shopify stores to the shopify adapter', () => {

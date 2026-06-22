@@ -14,15 +14,31 @@ const { convertToOz } = require('../../product-costing');
 const DEFAULT_TIMEOUT = 20000;
 const MAX_CANDIDATES = 4;
 
-// The storefront base origin for this vendor (e.g. https://chemicalwarehouse.com). The
-// website column is operator-editable and may be a bare host ("chemicalwarehouse.com") with
-// no scheme — assume https for those rather than returning null (which would silently yield
-// no candidate for a vendor that otherwise resolves to this adapter).
+// Approved Shopify storefront hosts. The weekly scan navigates the server browser to this
+// origin, and the registry selects Shopify by a loose substring match on operator-editable
+// vendor data — so the adapter MUST anchor the actual hostname to this allowlist before
+// navigating. (Blocks userinfo spoofs like https://chemicalwarehouse.com@attacker.example,
+// whose real host is attacker.example.) Add a host here when onboarding a new Shopify store.
+const SHOPIFY_HOSTS = ['chemicalwarehouse.com', 'seedworldusa.com', 'seedbarn.com', 'gciturfacademy.com', 'intermountainturf.com'];
+
+function isApprovedShopifyHost(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  return SHOPIFY_HOSTS.some((base) => h === base || h.endsWith(`.${base}`));
+}
+
+// The storefront base origin for this vendor (e.g. https://chemicalwarehouse.com). Accepts a
+// bare host (operator-editable website may omit the scheme) by assuming https. Returns null —
+// FAIL CLOSED — unless the parsed hostname is on the approved allowlist, so a tampered URL
+// can never point the scan's browser at an arbitrary host.
 function baseOrigin(vendor) {
   const src = String((vendor && (vendor.website || vendor.url)) || '').trim();
   if (!src) return null;
-  try { return new URL(src).origin; } catch (e) { /* maybe a scheme-less host */ }
-  try { return new URL(`https://${src}`).origin; } catch (e) { return null; }
+  let u = null;
+  try { u = new URL(src); } catch (e) { /* maybe a scheme-less host */ }
+  if (!u) { try { u = new URL(`https://${src}`); } catch (e) { return null; } }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (!isApprovedShopifyHost(u.hostname)) return null;
+  return u.origin;
 }
 
 // Pull the product handle out of a /products/<handle> URL (absolute or relative).
@@ -130,4 +146,5 @@ module.exports = {
   variantsFromShopify,
   handleOf,
   baseOrigin,
+  isApprovedShopifyHost,
 };
