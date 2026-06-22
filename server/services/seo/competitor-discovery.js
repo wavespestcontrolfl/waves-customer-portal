@@ -52,7 +52,11 @@ const NON_COMPETITOR_HOSTS = new Set([
   'pestworld.org', 'npmapestworld.org', 'npma.org', 'mosquito.org', 'indeed.com',
   'glassdoor.com', 'ziprecruiter.com', 'careerexplorer.com', 'nytimes.com',
   'sites.google.com', 'jobbersites.com', 'blogspot.com', 'wordpress.com', 'medium.com',
-  'scgov.net', 'broward.org', 'mymanatee.org',
+  'scgov.net', 'broward.org', 'mymanatee.org', 'craigslist.org',
+  // nonprofits / gov-ish-.com / product retailers that rank for wildlife/pest
+  // queries but are NOT service competitors (and some have huge profiles —
+  // biologicaldiversity.org alone has ~20k referring domains).
+  'biologicaldiversity.org', 'myfwc.com', 'arbico-organics.com', 'humanesociety.org',
 ]);
 
 // National/regional FRANCHISES — real competitors, but their backlink profiles
