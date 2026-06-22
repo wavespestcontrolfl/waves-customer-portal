@@ -3714,6 +3714,26 @@ export default function EstimatesPageV2() {
     }
   }, [searchParams, setSearchParams, readLeadPrefill]);
 
+  // Drop lead/customer prefill once the operator leaves the Create Estimate
+  // tab, so the next blank "Create Estimate" doesn't reopen seeded with the
+  // previous customer's address/contact (EstimateToolViewV2 seeds its form
+  // from the initial* props). Mobile + desktop now share the tab header; this
+  // replaces the old mobile-only clearPrefill() the create/back handlers ran.
+  // onCreateFromAddress sets prefill and switches to "new" in the same batch,
+  // so this only fires on an actual move away from the create tab.
+  useEffect(() => {
+    if (activeTab === "new" || !hasPrefill) return;
+    setPrefill({
+      leadId: "",
+      customerId: "",
+      address: "",
+      customerName: "",
+      customerPhone: "",
+      customerEmail: "",
+      serviceInterest: "",
+    });
+  }, [activeTab, hasPrefill]);
+
   const selectTab = useCallback(
     (key) => {
       setActiveTab(key);
