@@ -106,6 +106,7 @@ export default function TechSocialPostPage() {
   const [captions, setCaptions] = useState(null); // { instagram, facebook, tiktok, gbp }
   const [validation, setValidation] = useState({});
   const [resolvedLocation, setResolvedLocation] = useState(null);
+  const [genModel, setGenModel] = useState(null); // actual caption model, for the audit row
   const [selected, setSelected] = useState(() => new Set(PLATFORMS.map((p) => p.key)));
   const [publishResults, setPublishResults] = useState(null);
 
@@ -157,6 +158,7 @@ export default function TechSocialPostPage() {
       setCaptions(data.captions || null);
       setValidation(data.validation || {});
       setResolvedLocation(data.location || null);
+      setGenModel(data.model || null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -173,7 +175,7 @@ export default function TechSocialPostPage() {
         method: 'POST',
         body: JSON.stringify({
           photo: { data: photo.base64, mimeType: photo.mimeType },
-          captions, platforms, locationId: resolvedLocation?.id, techNote,
+          captions, platforms, locationId: resolvedLocation?.id, techNote, model: genModel,
         }),
       });
       setPublishResults(data);
@@ -193,7 +195,7 @@ export default function TechSocialPostPage() {
 
   const reset = () => {
     setPhoto(null); setTechNote(''); setLocationId(''); setCaptions(null); setValidation({});
-    setResolvedLocation(null); setSelected(new Set(PLATFORMS.map((p) => p.key)));
+    setResolvedLocation(null); setGenModel(null); setSelected(new Set(PLATFORMS.map((p) => p.key)));
     setPublishResults(null); setError(''); setNotice('');
   };
 

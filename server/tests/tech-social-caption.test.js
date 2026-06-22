@@ -135,4 +135,9 @@ describe('buildPostLogRow', () => {
     const row = buildPostLogRow({ ...base, techNote: '', results: [{ success: true }] });
     expect(row.title).toContain('Venice');
   });
+
+  test('records the actual caption model, null when unknown (never hardcoded)', () => {
+    expect(buildPostLogRow({ ...base, model: 'claude-sonnet-4-6', results: [{ success: true }] }).ai_model).toBe('claude-sonnet-4-6');
+    expect(buildPostLogRow({ ...base, results: [{ success: true }] }).ai_model).toBeNull();
+  });
 });

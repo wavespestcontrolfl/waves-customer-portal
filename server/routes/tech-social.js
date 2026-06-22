@@ -26,7 +26,6 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const captionService = require('../services/tech-social-caption');
 const social = require('../services/social-media');
@@ -58,7 +57,10 @@ function selectPublishPlatforms(requested) {
 }
 
 // Build the social_media_posts audit row from a publish result. Pure + testable.
-function buildPostLogRow({ techNote, captions, results, imageUrl, location }) {
+// `model` is the ACTUAL caption-generation model (carried from /generate, which
+// may fall back VOICE→FLAGSHIP); null when unknown (e.g. manually supplied
+// captions) — never hardcode a tier here, it makes ai_model unreliable.
+function buildPostLogRow({ techNote, captions, results, imageUrl, location, model }) {
   const anySuccess = results.some((r) => r && r.success);
   const anyDryRun = results.some((r) => r && r.dryRun);
   // A preflight skip (paused/disabled/no-caption/validation) is NOT a platform
@@ -73,7 +75,7 @@ function buildPostLogRow({ techNote, captions, results, imageUrl, location }) {
     platforms_posted: JSON.stringify(results),
     image_url: imageUrl || null,
     status,
-    ai_model: MODELS.VOICE,
+    ai_model: model || null,
     published_content: JSON.stringify(captions || {}),
   };
 }
@@ -137,7 +139,7 @@ router.post('/publish', async (req, res, next) => {
     if (!techSocialEnabled()) {
       return res.status(403).json({ error: 'Field social posting is not enabled' });
     }
-    const { photo, captions, platforms, locationId } = req.body || {};
+    const { photo, captions, platforms, locationId, model } = req.body || {};
     if (!captions || typeof captions !== 'object') {
       return res.status(400).json({ error: 'No captions to publish' });
     }
@@ -191,7 +193,17 @@ router.post('/publish', async (req, res, next) => {
       imageUrl = await social.uploadImageToS3(photo.data, `tech-field-${crypto.randomUUID()}.jpg`);
     }
 
+    // Photo-first flow: if the tech submitted a photo but it couldn't be hosted,
+    // do NOT publish text-only posts describing a photo the public won't see —
+    // fail every planned native platform with a clear reason. (Dry-run skips
+    // hosting by design and postToSingle no-ops, so it's exempt.)
+    const photoHostingFailed = !!(plan.length && photo && photo.data && !dryRun && !imageUrl);
+
     for (const { platform, content } of plan) {
+      if (photoHostingFailed) {
+        results.push({ platform, success: false, error: 'Field photo could not be hosted — not publishing (check SOCIAL_MEDIA_CDN_DOMAIN / S3)' });
+        continue;
+      }
       if (platform === 'instagram' && !imageUrl && !dryRun) {
         results.push({ platform, success: false, error: 'Instagram needs a hosted image (set SOCIAL_MEDIA_CDN_DOMAIN)' });
         continue;
@@ -212,6 +224,7 @@ router.post('/publish', async (req, res, next) => {
     await logPost(buildPostLogRow({
       techNote: typeof req.body.techNote === 'string' ? req.body.techNote : '',
       captions, results, imageUrl, location,
+      model: typeof model === 'string' ? model : null,
     }));
 
     // Keep the shared consecutive-failure alert current — tech-field posts land
