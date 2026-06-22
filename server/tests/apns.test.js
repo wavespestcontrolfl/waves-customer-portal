@@ -54,8 +54,15 @@ describe('classifyApnsResponse', () => {
     expect(r.ok).toBe(false);
     expect(r.expired).toBe(true);
   });
-  test('400 BadDeviceToken → expired', () => {
-    expect(classifyApnsResponse(400, 'BadDeviceToken').expired).toBe(true);
+  test('400 BadDeviceToken → failed but NOT expired (could be a config/env mismatch)', () => {
+    const r = classifyApnsResponse(400, 'BadDeviceToken');
+    expect(r.ok).toBe(false);
+    expect(r.expired).toBe(false);
+    expect(r.reason).toBe('BadDeviceToken');
+  });
+  test('400 DeviceTokenNotForTopic → failed but NOT expired (topic/bundle-id mismatch)', () => {
+    const r = classifyApnsResponse(400, 'DeviceTokenNotForTopic');
+    expect(r.expired).toBe(false);
   });
   test('transient server error → failed, not expired', () => {
     const r = classifyApnsResponse(503, 'ServiceUnavailable');

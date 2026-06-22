@@ -80,13 +80,19 @@ function buildApnsPayload(notification = {}) {
 }
 
 /**
- * Pure: classify an APNs HTTP response. A dead token (410 Unregistered, or a
- * 400 BadDeviceToken/DeviceTokenNotForTopic) is reported as `expired` so the
- * caller deactivates the row — mirrors the web-push 410/404 handling.
+ * Pure: classify an APNs HTTP response.
+ *
+ * Only `410 Unregistered` is treated as `expired` (deactivate the row) — that's
+ * the one reliable "this token is dead" signal (app uninstalled / token rotated),
+ * mirroring the web-push 410/404 handling. BadDeviceToken / DeviceTokenNotForTopic
+ * are deliberately NOT expired: Apple also returns them for a server
+ * environment/topic mismatch (wrong APNS_PRODUCTION host or APNS_BUNDLE_ID), so
+ * deactivating on them would let one misconfig wipe every valid iOS subscription
+ * on the first send. Those surface as a normal (non-expiring) failure instead.
  */
 function classifyApnsResponse(status, reason) {
   if (status === 200) return { ok: true };
-  if (status === 410 || reason === 'Unregistered' || reason === 'BadDeviceToken' || reason === 'DeviceTokenNotForTopic') {
+  if (status === 410 || reason === 'Unregistered') {
     return { ok: false, expired: true, reason: reason || 'unregistered' };
   }
   return { ok: false, expired: false, reason: reason || `apns_status_${status || 0}` };
