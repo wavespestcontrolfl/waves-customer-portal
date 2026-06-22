@@ -271,13 +271,20 @@ export default function StatementPayPage() {
   const [setupError, setSetupError] = useState(null);
   const [paid, setPaid] = useState(false);
   const [payNotice, setPayNotice] = useState(null); // recovery message across a PI reset
-  // Stripe redirect return (3DS / ACH bank-redirect): the PI is already
-  // submitted, so DON'T re-run /setup (which would 409 against the now-
-  // processing PI and show a false "payment already in progress" error).
-  const [redirectStatus] = useState(() => {
+  // Stripe redirect return (3DS / ACH bank-redirect). Stripe appends
+  // `payment_intent_client_secret` + `redirect_status` to the return URL. We do
+  // NOT trust the param alone: a stale/bookmarked return URL would otherwise
+  // suppress the retry form even after an ACH failure reverted the statement back
+  // to payable. Instead we RETRIEVE the PaymentIntent and trust its real status —
+  // `done` only when it's actually succeeded/processing, else `retry` (show form).
+  const [redirectClientSecret] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("payment_intent_client_secret"); } catch { return null; }
+  });
+  const [redirectStatusParam] = useState(() => {
     try { return new URLSearchParams(window.location.search).get("redirect_status"); } catch { return null; }
   });
-  const redirectSubmitted = redirectStatus === "succeeded" || redirectStatus === "processing";
+  const hasRedirect = !!redirectClientSecret;
+  const [redirectCheck, setRedirectCheck] = useState(null); // null | 'checking' | 'done' | 'retry'
 
   // A card /finalize attempt left the PI at the surcharged amount; drop it and
   // re-run /setup to mint a fresh BASE-amount PI before another attempt (so a
@@ -298,10 +305,36 @@ export default function StatementPayPage() {
     return () => { alive = false; };
   }, [token]);
 
+  // Resolve a Stripe redirect return by RETRIEVING the PaymentIntent (its real
+  // status is authoritative — the statement's GET status lags the webhook, and a
+  // stale return URL must not pin a since-reverted statement on "submitted").
+  useEffect(() => {
+    if (!data || !hasRedirect || redirectCheck) return;
+    let alive = true;
+    setRedirectCheck("checking");
+    (async () => {
+      try {
+        const stripe = await getStripe(setup?.publishableKey || data.publishableKey);
+        const { paymentIntent, error: piError } = await stripe.retrievePaymentIntent(redirectClientSecret);
+        if (!alive) return;
+        if (piError) throw piError;
+        const st = paymentIntent?.status;
+        setRedirectCheck(st === "succeeded" || st === "processing" ? "done" : "retry");
+      } catch {
+        // Couldn't verify — trust the param only as a last resort (a real return),
+        // else fall through to the form.
+        if (alive) setRedirectCheck(redirectStatusParam === "succeeded" || redirectStatusParam === "processing" ? "done" : "retry");
+      }
+    })();
+    return () => { alive = false; };
+  }, [data, hasRedirect, redirectCheck, redirectClientSecret, redirectStatusParam, setup]);
+
   // Create the PaymentIntent once we know the statement is payable.
   useEffect(() => {
     if (!data || paid || setup || setupError) return;
-    if (redirectSubmitted) return; // returned from a Stripe redirect — already submitted
+    // Wait out a redirect verification; only mint a PI if the redirect didn't
+    // actually submit (redirectCheck === 'retry'), or there's no redirect at all.
+    if (hasRedirect && redirectCheck !== "retry") return;
     if (!data.statement?.payable) return;
     let alive = true;
     fetch(`${API_BASE}/pay/statement/${token}/setup`, {
@@ -317,7 +350,7 @@ export default function StatementPayPage() {
       })
       .catch(() => { if (alive) setSetupError("Could not start the payment."); });
     return () => { alive = false; };
-  }, [data, token, paid, setup, setupError, redirectSubmitted]);
+  }, [data, token, paid, setup, setupError, hasRedirect, redirectCheck]);
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
@@ -340,13 +373,28 @@ export default function StatementPayPage() {
 
   const { statement, billTo, lines } = data;
 
+  // Verifying a redirect return — hold the optimistic state until the PI status
+  // is known (so a stale return URL can't briefly flash "submitted").
+  if (hasRedirect && (redirectCheck === null || redirectCheck === "checking")) {
+    return shell(
+      <BrandCard>
+        <SerifHeading style={{ marginBottom: 12 }}>Confirming your payment…</SerifHeading>
+        <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
+          One moment while we confirm your payment for statement {statement.number}.
+        </p>
+      </BrandCard>,
+    );
+  }
+
   // One "submitted, receipt to follow" terminal state for every success path —
-  // an inline confirm (paid), a Stripe redirect return (3DS / ACH bank-redirect),
-  // an ACH still processing, or a return visit to an already-settled statement.
-  // Honest for card (instant) and ACH (days) alike: settlement + the receipt are
-  // the webhook's job, so we don't claim "settled" while ACH is still clearing.
+  // an inline confirm (paid), a VERIFIED Stripe redirect return (PI succeeded/
+  // processing), an ACH still processing, or a return visit to an already-settled
+  // statement. Honest for card (instant) and ACH (days) alike: settlement + the
+  // receipt are the webhook's job, so we don't claim "settled" while ACH clears.
+  // `redirectCheck === 'done'` is gated on the RETRIEVED PI status, not the URL
+  // param, so a since-reverted statement falls through to the retry form instead.
   const submitted =
-    paid || redirectSubmitted || statement.status === "paid" || statement.status === "processing";
+    paid || redirectCheck === "done" || statement.status === "paid" || statement.status === "processing";
 
   if (submitted) {
     return shell(
