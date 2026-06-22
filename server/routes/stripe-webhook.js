@@ -632,12 +632,15 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
     const paymentMethod = methodType === 'us_bank_account' ? 'ach' : 'card';
     const actualTotalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
 
-    await db.transaction(async (trx) => {
+    // Returns true ONLY when this PI left the statement `paid` (a fresh settle or
+    // an idempotent already-paid) — every anomaly path returns false so the
+    // post-txn dunning-stop never fires on a still-unpaid statement.
+    const settledNow = await db.transaction(async (trx) => {
       // Same per-statement money lock as disputes/refunds — serialize settlement
       // against any concurrent/out-of-order clawback on this statement.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
       const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
-      if (!stmt) { logger.warn(`[stripe-webhook] statement ${statementId} not found for PI ${piId}`); return; }
+      if (!stmt) { logger.warn(`[stripe-webhook] statement ${statementId} not found for PI ${piId}`); return false; }
 
       // Active-PI binding FIRST — before the idempotent-paid shortcut. Settle (or
       // no-op) only when the statement's stored PI is exactly this PI (NON-NULL
@@ -648,9 +651,9 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
       if (String(stmt.stripe_payment_intent_id || '') !== String(piId)) {
         await recordStatementPaymentIssue(paymentIntent, statementId, `orphan/stale success: PI ${piId}, active ${stmt.stripe_payment_intent_id || 'none'} (status ${stmt.status}) — manual refund/review`);
         logger.warn(`[stripe-webhook] statement S-${statementId} non-active-PI success ${piId} (active ${stmt.stripe_payment_intent_id || 'none'})`);
-        return;
+        return false;
       }
-      if (stmt.status === 'paid') return; // idempotent — THIS PI already settled
+      if (stmt.status === 'paid') return true; // idempotent — THIS PI already settled (dunning may stop)
 
       // Fail closed on UNVERIFIED card funding: surcharge must derive from the
       // ACTUAL confirmed funding, but paymentDetailsFromIntent swallows Stripe
@@ -661,7 +664,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
       if (methodType !== 'us_bank_account' && !funding) {
         await recordStatementPaymentIssue(paymentIntent, statementId, `unverified card funding (lookup failed) for PI ${piId} — surcharge can't be validated, manual review`);
         logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} unverified card funding — not settling`);
-        return;
+        return false;
       }
 
       // Surcharge correctness: recompute the expected total for the ACTUAL
@@ -675,7 +678,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
       if (Math.abs(actualTotalCents - expectedTotalCents) > 1) {
         await recordStatementPaymentIssue(paymentIntent, statementId, `surcharge mismatch: charged ${actualTotalCents}c, expected ${expectedTotalCents}c for ${methodType}/${funding || 'n/a'} — manual review`);
         logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} surcharge mismatch (charged ${actualTotalCents}c, expected ${expectedTotalCents}c) — not settling`);
-        return;
+        return false;
       }
 
       await Settle.settleStatementPaid(statementId, {
@@ -691,13 +694,19 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
         cardFunding: funding,
         source: 'stripe_webhook',
       }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
+      return true;
     });
-    logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
-    // Stop any statement-level dunning now that it's paid (best-effort, outside
-    // the money txn — the dunning eligibility filter already excludes `paid`, so
-    // this is just hygiene and never gates settlement).
-    await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
-      .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
+    // Only when this PI actually left the statement paid — never on an anomaly
+    // path (orphan/stale PI, unverified funding, surcharge quarantine), which all
+    // leave the statement sent/viewed + unpaid (dunning must keep collecting).
+    if (settledNow) {
+      logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+      // Stop any statement-level dunning now that it's paid (best-effort, outside
+      // the money txn — the eligibility filter already excludes `paid`, so this is
+      // just hygiene and never gates settlement).
+      await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
+        .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
+    }
   } else if (eventType === 'processing') {
     // Re-read the CURRENT PI status before marking processing — a stale/retried
     // processing event can arrive AFTER payment_failed/canceled, and re-marking
