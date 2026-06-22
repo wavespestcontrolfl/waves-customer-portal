@@ -130,6 +130,9 @@ const COMPETITORS = [
     // detecting it case-insensitively would false-flag ordinary rodent copy.
     name: 'Rodent Solutions Inc',
     aliases: ['rodent solutions inc.'],
+    // Case-sensitive: matches "Rodent Solutions" / "Rodent Solutions, Inc."
+    // (capitalized brand) but NOT lower-case generic "rodent solutions" copy.
+    aliasesCS: ['Rodent Solutions'],
     attributes: {
       reach: { value: 'Local (Southwest Florida)', source: 'https://rodentsolutioninc.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://rodentsolutioninc.com', asOf: '2026-06-22' },
@@ -227,16 +230,17 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// name/alias → canonical competitor record (allowlist only).
+// name/alias → canonical competitor record (allowlist only). Includes
+// `aliasesCS` (case-sensitive aliases) so findCompetitor() resolves them too.
 const ALLOWLIST_INDEX = new Map();
 for (const c of COMPETITORS) {
   ALLOWLIST_INDEX.set(normalize(c.name), c);
   for (const a of c.aliases || []) ALLOWLIST_INDEX.set(normalize(a), c);
+  for (const a of c.aliasesCS || []) ALLOWLIST_INDEX.set(normalize(a), c);
 }
 
-// Every recognizable business token (canonical display name) we can detect:
-// the allowlist names/aliases plus the detection-only signals. Sorted longest
-// first so "Massey Services" matches before the shorter "Massey".
+// Case-INSENSITIVE detectable tokens: allowlist names/aliases + detection-only
+// signals. Sorted longest-first so "Massey Services" matches before "Massey".
 const DETECTABLE_NAMES = (() => {
   const set = new Set();
   for (const c of COMPETITORS) {
@@ -244,6 +248,15 @@ const DETECTABLE_NAMES = (() => {
     for (const a of c.aliases || []) set.add(a);
   }
   for (const s of COMPETITOR_BRAND_SIGNALS) set.add(s);
+  return [...set].sort((a, b) => b.length - a.length);
+})();
+
+// Case-SENSITIVE detectable tokens: for brand names built from otherwise-generic
+// words (e.g. "Rodent Solutions") — matched only when capitalized, so ordinary
+// lower-case copy ("compare rodent solutions") is NOT treated as a competitor.
+const DETECTABLE_NAMES_CS = (() => {
+  const set = new Set();
+  for (const c of COMPETITORS) for (const a of c.aliasesCS || []) set.add(a);
   return [...set].sort((a, b) => b.length - a.length);
 })();
 
@@ -287,11 +300,17 @@ function findBusinessMentions(text) {
   if (!haystack) return [];
   const out = new Map(); // key → { name, inAllowlist }
   const claimedRanges = []; // [start,end) already attributed to a longer name
-  for (const display of DETECTABLE_NAMES) {
+  // Case-insensitive tokens + case-sensitive ones (generic-word brands), merged
+  // longest-first so the longest match wins regardless of which list it came from.
+  const candidates = [
+    ...DETECTABLE_NAMES.map((display) => ({ display, ci: true })),
+    ...DETECTABLE_NAMES_CS.map((display) => ({ display, ci: false })),
+  ].sort((a, b) => b.display.length - a.display.length);
+  for (const { display, ci } of candidates) {
     // Escape regex metachars, then let any whitespace match between words so
     // "Truly Nolen" matches "Truly  Nolen" / a line-wrapped mention too.
     const pattern = escapeRegExp(display).replace(/ /g, '\\s+');
-    const re = new RegExp(`\\b${pattern}\\b`, 'ig');
+    const re = new RegExp(`\\b${pattern}\\b`, ci ? 'ig' : 'g');
     let m;
     while ((m = re.exec(haystack)) !== null) {
       const start = m.index;

@@ -147,19 +147,28 @@ function extractComparisonBlocks(body) {
   return blocks;
 }
 
+// A quoted string LITERAL that tolerates escaped quotes: the (?:\\.|…)
+// alternation consumes an escaped char so `'Keller\'s Pest Control'` is read in
+// full rather than truncated at the \'. Group 1 = quote char, group 2 = body.
+const QUOTED_STR = "(['\"])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1";
+function unescapeStr(s) { return String(s).replace(/\\(.)/g, '$1'); }
+// Pull all quoted-string literals (unescaped) out of an array/fragment.
+function quotedStrings(fragment) {
+  const out = [];
+  const re = new RegExp(QUOTED_STR, 'g');
+  let m;
+  while ((m = re.exec(String(fragment || ''))) !== null) out.push(unescapeStr(m[2]));
+  return out;
+}
+
 function extractCaption(block) {
-  const m = String(block || '').match(/caption\s*=\s*\{?\s*(["'])([\s\S]*?)\1/i);
-  return m ? m[2] : '';
+  const m = String(block || '').match(new RegExp(`caption\\s*=\\s*\\{?\\s*${QUOTED_STR}`, 'i'));
+  return m ? unescapeStr(m[2]) : '';
 }
 
 function extractColumns(block) {
   const m = String(block || '').match(/columns\s*=\s*\{?\s*\[([\s\S]*?)\]/i);
-  if (!m) return [];
-  const out = [];
-  const re = /(["'])([\s\S]*?)\1/g;
-  let mm;
-  while ((mm = re.exec(m[1])) !== null) out.push(mm[2]);
-  return out;
+  return m ? quotedStrings(m[1]) : [];
 }
 
 // Parse row objects ORDER-INSENSITIVELY and regardless of QUOTED keys: match
@@ -172,15 +181,9 @@ function extractRows(block) {
   let m;
   while ((m = objRe.exec(String(block || ''))) !== null) {
     const obj = m[0];
-    const labelM = obj.match(/["']?label["']?\s*:\s*(["'])([\s\S]*?)\1/);
+    const labelM = obj.match(new RegExp(`["']?label["']?\\s*:\\s*${QUOTED_STR}`));
     const valsM = obj.match(/["']?values["']?\s*:\s*\[([\s\S]*?)\]/);
-    const values = [];
-    if (valsM) {
-      const vre = /(["'])([\s\S]*?)\1/g;
-      let vm;
-      while ((vm = vre.exec(valsM[1])) !== null) values.push(vm[2]);
-    }
-    rows.push({ label: labelM ? labelM[2] : '', values });
+    rows.push({ label: labelM ? unescapeStr(labelM[2]) : '', values: valsM ? quotedStrings(valsM[1]) : [] });
   }
   return rows;
 }
@@ -269,6 +272,11 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   const metaText = ['title', 'meta_description', 'metaTitle', 'metaDescription']
     .map((k) => fm[k]).filter(Boolean).map(String).join('\n');
   const scanText = metaText ? `${body}\n${metaText}` : body;
+  // For NAME detection only, drop double quotes AND backslashes (so an embedded-
+  // quote brand like All "U" Need Pest Control — or its escaped \"U\" form — is
+  // read as one name, not a "Need Pest Control" fragment). Apostrophes are kept
+  // (Keller's). Disparagement/ranking scans keep the original scanText.
+  const nameScanText = scanText.replace(/[\\"“”]/g, ' ');
 
   const known = new Set();
   const unknown = new Set();
@@ -289,17 +297,17 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
     findings.push(finding('P1', 'COMPARISON_RIGGED_RANKING',
       `Comparison draft uses ranking/superlative framing ("${rank[0].trim()}"). Present neutral trade-offs — do not declare a winner, in the table, the prose, or the title/meta.`));
   }
-  for (const m of competitorFacts.findBusinessMentions(scanText)) {
+  for (const m of competitorFacts.findBusinessMentions(nameScanText)) {
     (m.inAllowlist ? known : unknown).add(m.name);
   }
-  for (const m of scanText.matchAll(providerNameRe('g'))) {
+  for (const m of nameScanText.matchAll(providerNameRe('g'))) {
     const nm = m[1].trim();
     if (OWN_BRAND_RE.test(nm)) continue;
     if (competitorFacts.isKnownCompetitor(nm)) known.add(competitorFacts.findCompetitor(nm).name);
     else unclassified.add(nm);
   }
   // Legal-entity-marked business names ("Bob's Bugs LLC") anywhere in the draft.
-  for (const m of scanText.matchAll(legalEntityRe('g'))) {
+  for (const m of nameScanText.matchAll(legalEntityRe('g'))) {
     const nm = m[1].trim();
     if (OWN_BRAND_RE.test(nm)) continue;
     if (competitorFacts.isKnownCompetitor(nm)) known.add(competitorFacts.findCompetitor(nm).name);

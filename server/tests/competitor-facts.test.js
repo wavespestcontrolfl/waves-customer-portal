@@ -42,6 +42,17 @@ describe('competitor-facts', () => {
     expect(cf.findBusinessMentions('compared with All “U” Need Pest Control').some((m) => m.inAllowlist && /All U Need/.test(m.name))).toBe(true);
   });
 
+  test('case-sensitive aliasesCS: capitalized "Rodent Solutions" is a competitor; lower-case generic copy is not', () => {
+    // The brand is built from otherwise-generic words, so it is detected only
+    // when capitalized. Normalized lookups stay case-insensitive...
+    expect(cf.findCompetitor('Rodent Solutions')?.id).toBe('rodent-solutions');
+    expect(cf.isKnownCompetitor('Rodent Solutions')).toBe(true);
+    // ...but free-text detection requires the capitalized brand form.
+    expect(cf.findBusinessMentions('We compared with Rodent Solutions in Venice.')
+      .some((m) => m.inAllowlist && m.name === 'Rodent Solutions Inc')).toBe(true);
+    expect(cf.findBusinessMentions('compare rodent solutions before choosing a plan.')).toHaveLength(0);
+  });
+
   test('a non-allowlisted business is not known', () => {
     expect(cf.isKnownCompetitor('Hulett')).toBe(false); // detectable signal, not allowlisted
     expect(cf.isKnownCompetitor('Some Random LLC')).toBe(false);
