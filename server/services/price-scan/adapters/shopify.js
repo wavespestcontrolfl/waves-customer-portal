@@ -73,10 +73,12 @@ async function fetchCandidate(page, vendor, product) {
 
   const vid = vendor.vendor_id || vendor.id;
   const vname = vendor.name || vendor.vendor_id || vendor.id;
+  const wantsEpa = !!(product && product.epaReg);
   // Search is fuzzy/relevance-ranked, so open the top candidates and VERIFY each (name/EPA/
-  // size) before trusting it — a wrong same-size product ranked first must not block the real
-  // match. Prefer a verified BUYABLE match; else a verified-but-unbuyable; else the best
-  // priced+size-matched page (a precise 'unverified' skip downstream).
+  // size) before trusting it — a wrong same-size SIBLING ranked first must not block the real
+  // match. Prefer EPA-confirmed + buyable; then a buyable name+size match; then a verified-
+  // but-unbuyable; then the best priced+size-matched page (a precise 'unverified' skip).
+  let firstBuyable = null;
   let firstUnbuyable = null;
   let fallback = null;
   for (const link of links) {
@@ -98,19 +100,26 @@ async function fetchCandidate(page, vendor, product) {
       }
       continue;
     }
+    // Strip the product description to text so a body EPA reg can corroborate the match
+    // (distinguishing same-brand siblings, e.g. Bifen I/T vs Bifen XTS).
+    const bodyText = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000) || null;
     const cand = {
       price: offer.price, currency: 'USD', availability: offer.availability,
-      name: data.title || null, quantity: offer.quantity, source_url: productUrl,
+      name: data.title || null, quantity: offer.quantity, source_url: productUrl, text: bodyText,
       competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: vid, vendor: vname,
     };
-    const verdict = verifyMatch({ name: cand.name, text: null, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);
+    const verdict = verifyMatch({ name: cand.name, text: bodyText, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);
     if (verdict.matched) {
-      if (!isUnavailable(cand)) return cand; // verified + buyable -> done
-      if (!firstUnbuyable) firstUnbuyable = cand; // verified but out of stock
+      const buyable = !isUnavailable(cand);
+      // EPA-confirmed + buyable is ideal; a same-brand sibling that only passes name+size must
+      // not win when the product has an EPA reg an EPA-confirmed candidate could match later.
+      if ((!wantsEpa || verdict.signals.epa) && buyable) return cand;
+      if (buyable) { if (!firstBuyable) firstBuyable = cand; }
+      else if (!firstUnbuyable) firstUnbuyable = cand;
     }
-    if (!fallback) fallback = cand; // priced + size-matched, verify pending -> precise 'unverified'
+    if (!fallback) fallback = cand; // priced + size-matched, unverified -> precise 'unverified' skip
   }
-  return firstUnbuyable || fallback;
+  return firstBuyable || firstUnbuyable || fallback;
 }
 
 module.exports = {
