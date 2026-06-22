@@ -42,6 +42,19 @@ describe('toScanSpec', () => {
     const b = toScanSpec(baselineRow({ siteone_quantity: null, container_size: null }), VENDORS, null);
     expect(b.product.quantity).toBe('78 oz'); // unit_size_oz -> "78 oz"
   });
+  test('the "Each (1)" placeholder does NOT shadow the real catalog size', () => {
+    // Real prod data: vendor_pricing.quantity is the placeholder "Each (1)" while the
+    // actual pack lives in container_size / unit_size_oz. The placeholder can't normalize
+    // to oz, so it must fall through — otherwise verifyMatch + $/oz have nothing to use.
+    const s = toScanSpec(baselineRow({ siteone_quantity: 'Each (1)', container_size: '2.5 gal', unit_size_oz: 320 }), VENDORS, null);
+    expect(s.product.quantity).toBe('2.5 gal');
+    expect(s.product.baseline.quantity).toBe('2.5 gal'); // baseline can't keep the placeholder either
+  });
+  test('placeholder with no real size column anywhere -> null (honestly unscannable)', () => {
+    const s = toScanSpec(baselineRow({ siteone_quantity: 'Each (1)', container_size: null, unit_size_oz: null }), VENDORS, null);
+    expect(s.product.quantity).toBeNull();
+    expect(s.product.baseline.quantity).toBeNull();
+  });
 });
 
 describe('assembleScanSpecs', () => {

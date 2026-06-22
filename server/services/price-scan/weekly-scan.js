@@ -14,6 +14,20 @@ const logger = require('../logger');
 const { runScanMany } = require('./scanner');
 const { createDraft } = require('./price-match-draft');
 const { selectAdapterKey } = require('./adapters/registry');
+const { quantityToOz } = require('./extract');
+
+// A pack size is only usable if it normalizes to oz — that's exactly what verifyMatch's
+// size gate and the per-unit ($/oz) comparison need. In practice vendor_pricing.quantity
+// is often the catalog placeholder "Each (1)" (the real size lives in
+// products_catalog.container_size / unit_size_oz; the unit is split into
+// vendor_pricing.unit), and a count like "1 station" is a device, not a measure. None of
+// those can be compared, so they must NOT shadow a real size column. Returns the trimmed
+// string when it parses, else null.
+function realPackSize(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return null;
+  return quantityToOz(s) != null ? s : null;
+}
 
 // How many top-spend products to scan per run. Kept modest — each product is scraped
 // across every scrapable vendor, so this bounds total live page loads.
@@ -96,9 +110,13 @@ async function scrapableVendors(db) {
 // Each vendor's URL (host-validated, optional) is looked up in urlByVendorId; without
 // one the adapter searches that vendor by name.
 function toScanSpec(row, vendors = [], urlByVendorId = null) {
-  const quantity = row.siteone_quantity
-    || row.container_size
-    || (row.unit_size_oz ? `${row.unit_size_oz} oz` : null);
+  // Prefer SiteOne's own pack, but only when it's a REAL size — "Each (1)" must fall
+  // through to the structured catalog size (container_size, then unit_size_oz) instead of
+  // shadowing it, otherwise the scanner can't size-match or compute $/oz.
+  const siteonePack = realPackSize(row.siteone_quantity);
+  const quantity = siteonePack
+    || realPackSize(row.container_size)
+    || (row.unit_size_oz ? `${Number(row.unit_size_oz)} oz` : null);
   const product = {
     product_id: row.id,
     name: row.name,
@@ -109,7 +127,7 @@ function toScanSpec(row, vendors = [], urlByVendorId = null) {
     baseline: {
       vendor: 'SiteOne',
       price: Number(row.siteone_price),
-      quantity: row.siteone_quantity || quantity,
+      quantity: siteonePack || quantity,
     },
   };
   const vlist = (vendors || []).map((v) => ({
