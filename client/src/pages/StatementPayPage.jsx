@@ -41,7 +41,7 @@ function SummaryRow({ label, value, strong }) {
 }
 
 // ── Stripe Elements + surcharge flow ──────────────────────────────
-function StatementPaymentForm({ token, publishableKey, clientSecret, paymentIntentId, baseAmount, surchargeRateBps, onSuccess }) {
+function StatementPaymentForm({ token, publishableKey, clientSecret, paymentIntentId, baseAmount, surchargeRateBps, billingName, billingEmail, onSuccess, onFinalizeFailed }) {
   const mountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
@@ -86,10 +86,18 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
         });
         if (cancelled) return;
         elementsRef.current = elements;
+        // Seed billing details — us_bank_account (ACH) confirmation REQUIRES a
+        // name + email; the statement only knows the AP contact (company + AP
+        // email), so prefill those so a bank-transfer confirm doesn't fail for
+        // missing billing details.
+        const billingDetails = {};
+        if (billingName) billingDetails.name = billingName;
+        if (billingEmail) billingDetails.email = billingEmail;
         const paymentElement = elements.create("payment", {
           layout: { type: "accordion", defaultCollapsed: false, radios: true, spacedAccordionItems: true },
           paymentMethodOrder: ["card", "us_bank_account"],
           wallets: { applePay: "never", googlePay: "never" },
+          ...(Object.keys(billingDetails).length ? { defaultValues: { billingDetails } } : {}),
         });
         paymentElement.on("ready", () => { if (!cancelled) setReady(true); });
         paymentElement.on("change", (event) => {
@@ -162,10 +170,19 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
   }, [processing, token, onSuccess]);
 
   // Card: Step 2 — apply surcharge + confirm. Settles via webhook, not here.
+  //
+  // /finalize updates the shared PI to base+surcharge before confirming. So on
+  // ANY failure here the PI is left at the card-surcharged amount — a subsequent
+  // attempt (retry card, or switch to ACH which carries no surcharge) on that same
+  // PI would charge the wrong amount and fail webhook amount-agreement. Every
+  // failure path therefore calls `onFinalizeFailed`, which resets the statement
+  // back to a fresh BASE-amount PaymentIntent (re-running /setup) before another
+  // attempt. We do NOT reset on quote/ACH failures — those never mutate the PI.
   const handleFinalize = useCallback(async () => {
     if (!quote || processing) return;
     setProcessing(true);
     setElementError(null);
+    const fail = (message) => onFinalizeFailed?.(message || "Payment was not completed. Please try again.");
     try {
       const res = await fetch(`${API_BASE}/pay/statement/${token}/finalize`, {
         method: "POST",
@@ -173,35 +190,28 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
         body: JSON.stringify({ quoteToken: quote.quoteToken }),
       });
       const result = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(result.error || "Payment failed.");
+      if (!res.ok) { fail(result.error || "Payment failed."); return; }
 
       if (result.requiresAction && result.clientSecret) {
         const { error: actionError, paymentIntent: actionPI } = await stripeRef.current.handleNextAction({ clientSecret: result.clientSecret });
-        if (actionError) { setElementError(actionError.message); setProcessing(false); return; }
+        if (actionError) { fail(actionError.message); return; }
         if (actionPI && (actionPI.status === "succeeded" || actionPI.status === "processing")) {
           onSuccess?.({ id: actionPI.id, status: actionPI.status });
           return;
         }
-        setElementError("Payment could not be completed. Please try again.");
-        setProcessing(false);
+        fail("Payment could not be completed. Please try again.");
         return;
       }
 
       if (result.status === "succeeded" || result.status === "processing") {
         onSuccess?.({ id: result.paymentIntentId, status: result.status });
       } else {
-        setElementError("Payment was not completed. Please try again or use another method.");
-        setProcessing(false);
-        setAwaitingConfirm(false);
-        setQuote(null);
+        fail("Payment was not completed. Please try again or use another method.");
       }
     } catch (err) {
-      setElementError(err.message || "Payment failed.");
-      setProcessing(false);
-      setAwaitingConfirm(false);
-      setQuote(null);
+      fail(err.message || "Payment failed.");
     }
-  }, [quote, processing, token, onSuccess]);
+  }, [quote, processing, token, onSuccess, onFinalizeFailed]);
 
   if (loadFailed) {
     return (
@@ -260,6 +270,16 @@ export default function StatementPayPage() {
   const [setup, setSetup] = useState(null);
   const [setupError, setSetupError] = useState(null);
   const [paid, setPaid] = useState(false);
+  const [payNotice, setPayNotice] = useState(null); // recovery message across a PI reset
+
+  // A card /finalize attempt left the PI at the surcharged amount; drop it and
+  // re-run /setup to mint a fresh BASE-amount PI before another attempt (so a
+  // retry or a switch to ACH can't charge the stale surcharged total).
+  const resetPaymentIntent = (message) => {
+    setPayNotice(message || null);
+    setSetupError(null);
+    setSetup(null); // re-triggers the setup effect → fresh base PI + remounted form
+  };
 
   useEffect(() => {
     let alive = true;
@@ -365,6 +385,9 @@ export default function StatementPayPage() {
         </div>
       </div>
 
+      {payNotice && (
+        <p style={{ fontSize: 14, color: COLORS.red, marginBottom: 12, lineHeight: 1.5 }}>{payNotice}</p>
+      )}
       {setupError ? (
         <p style={{ fontSize: 15, color: COLORS.red, lineHeight: 1.55 }}>
           {setupError} Please refresh, or call us — <HelpPhoneLink tone="dark" inline />.
@@ -379,7 +402,10 @@ export default function StatementPayPage() {
           paymentIntentId={setup.paymentIntentId}
           baseAmount={setup.baseAmount ?? statement.total}
           surchargeRateBps={data.surchargeRateBps}
+          billingName={billTo?.company || null}
+          billingEmail={billTo?.ap_email || null}
           onSuccess={() => setPaid(true)}
+          onFinalizeFailed={resetPaymentIntent}
         />
       )}
 
