@@ -206,6 +206,16 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     dateTo,
     excludeServiceIds: [service.id],
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
+    // HARD time preference must enter slot GENERATION, not just post-filtering:
+    // find-time emits only each gap's earliest-feasible start, so an empty day
+    // with an afternoon preference would yield a single 08:00 candidate that the
+    // post-filter drops — never generating the valid 13:00 start. Floor the gap's
+    // earliest start at the window start so a preferred-time candidate is emitted.
+    // The window UPPER bound + the preferred-DAY constraint stay post-filters
+    // (each date is enumerated separately, so day filtering can't collapse a gap).
+    ...(prefs.preferred_time_window
+      ? { earliestStartMin: prefs.preferred_time_window.startMin }
+      : {}),
     // NOTE: occupancy keeps find-time's default ['cancelled'] so it stays
     // consistent with SmartRebooker's overlap check (which treats 'rescheduled'
     // as a conflict). Excluding it here would propose slots apply then rejects.

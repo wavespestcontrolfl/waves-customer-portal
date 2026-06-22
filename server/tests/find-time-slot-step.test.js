@@ -34,3 +34,22 @@ test('slotStepMinutes:60 snaps every start up to the hour', async () => {
   }
   expect(slots[0].start_time).toBe('09:00'); // 08:01 rounded up to the next hour
 });
+
+test('earliestStartMin floors the gap start so a later preferred-time slot is generated', async () => {
+  // Empty day: without the floor this gap collapses to ~08:01. An afternoon
+  // preference (13:00) must still produce a candidate AT 13:00, not be lost.
+  const { slots } = await findAvailableSlots({ ...BASE, earliestStartMin: 13 * 60 });
+  expect(slots.length).toBeGreaterThan(0);
+  expect(slots[0].start_time).toBe('13:00');
+});
+
+test('earliestStartMin past what fits before day close yields no slot (correctly)', async () => {
+  // 16:30 floor + 60 min duration = 17:30 > 17:00 close → the gap can't fit it.
+  const { slots } = await findAvailableSlots({ ...BASE, earliestStartMin: 16 * 60 + 30 });
+  expect(slots.length).toBe(0);
+});
+
+test('earliestStartMin default (0) is a no-op — identical legacy behavior', async () => {
+  const { slots } = await findAvailableSlots(BASE);
+  expect(slots[0].start_time).toBe('08:01');
+});

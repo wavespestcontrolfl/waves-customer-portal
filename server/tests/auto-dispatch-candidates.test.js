@@ -135,6 +135,19 @@ describe('findValidCandidateSlots', () => {
     expect(drops.preferred_day).toBe(2); // Thu + Mon dropped
   });
 
+  test('pushes the explicit preferred-time window START into find-time (earliestStartMin) so a later preferred slot is generated, not just post-filtered', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [] });
+    const amOnly = { service_category: 'general', blackout: null, preferred_time_window: { startMin: 780, endMin: 1020 } };
+    await findValidCandidateSlots(SERVICE, amOnly, ctx());
+    expect(findAvailableSlots.mock.calls[0][0].earliestStartMin).toBe(780);
+  });
+
+  test('does NOT set earliestStartMin when there is no explicit time preference (default time stays soft)', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [] });
+    await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
+    expect(findAvailableSlots.mock.calls[0][0].earliestStartMin).toBeUndefined();
+  });
+
   test('HARD-drops slots outside the customer\'s EXPLICIT preferred time window', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [
