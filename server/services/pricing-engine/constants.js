@@ -1132,6 +1132,14 @@ const SPECIALTY = {
     equipCost: 17.50,
     marginDivisor: 0.45,  // 55% target margin
     defaultWallHeightFt: 8,  // measurement default for wall spraying (linear ft × height → sqft)
+    // Wall-spray (linear-ft) jobs have no attic-access overhead, so they skip
+    // the 3-gallon / 2-hour attic floors and price on actual gallons + actual
+    // labor, never below minJobPrice (covers the truck roll). Owner decision
+    // 2026-06-22: a 20 LF × 8 ft (160 sqft, ~30 min) job should land ~$282, not
+    // the attic-floored $808. wallLaborSqFtPerHour is anchored to that 30-min
+    // estimate (160 sqft ÷ 320 ≈ 0.5 hr).
+    minJobPrice: 150,
+    wallLaborSqFtPerHour: 320,
   },
   preSlabTermidor: {
     bottleCost: 152.10,

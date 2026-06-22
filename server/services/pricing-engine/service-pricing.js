@@ -4356,13 +4356,22 @@ function priceBoraCare(input, options = {}) {
     };
   }
 
-  const gallons = Math.max(3, Math.ceil(totalSqFt / SPECIALTY.boraCare.coverage));
+  // A wall-only job (linear-ft spray, no attic/raw-wood input) has none of the
+  // attic-access overhead the floors were built for, so it prices on actual
+  // gallons + actual labor and is floored at minJobPrice instead. Attic jobs
+  // (attic-only or attic+wall) keep the proven 3-gallon / 2-hour floors.
+  const wallOnly = !hasAttic;
+  const gallonsFloor = wallOnly ? 1 : 3;
+  const gallons = Math.max(gallonsFloor, Math.ceil(totalSqFt / SPECIALTY.boraCare.coverage));
   const isMultiDay = totalSqFt > 4500;
   const laborHrs = isMultiDay
     ? Math.min(10, Math.max(6, 1.5 + totalSqFt / 800))
-    : Math.min(6, Math.max(2, 1.5 + totalSqFt / 1000));
+    : wallOnly
+      ? Math.min(6, totalSqFt / SPECIALTY.boraCare.wallLaborSqFtPerHour)
+      : Math.min(6, Math.max(2, 1.5 + totalSqFt / 1000));
   const cost = gallons * SPECIALTY.boraCare.galCost + laborHrs * GLOBAL.LABOR_RATE + SPECIALTY.boraCare.equipCost;
-  const price = Math.round(cost / SPECIALTY.boraCare.marginDivisor);
+  const rawPrice = Math.round(cost / SPECIALTY.boraCare.marginDivisor);
+  const price = wallOnly ? Math.max(SPECIALTY.boraCare.minJobPrice, rawPrice) : rawPrice;
 
   return {
     ...baseResult,

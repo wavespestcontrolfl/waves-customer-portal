@@ -281,10 +281,27 @@ describe('termite measurement overrides and safeguards', () => {
     expect(wallOnly.wallSqFt).toBe(800);
     expect(wallOnly.totalSqFt).toBe(800);
     expect(wallOnly.manualReviewReasons).not.toContain('missing_boracare_attic_sqft');
-    // Matches a pure 800-sqft area run through the existing math.
+    // Wall-only jobs price on actual gallons + actual labor (no attic 3-gal /
+    // 2-hr floors): 800 sqft → 3 gal, 800/320 = 2.5 hr.
+    expect(wallOnly.gallons).toBe(3);
+    expect(wallOnly.laborHrs).toBe(2.5);
+    expect(wallOnly.price).toBe(847);
+    // The same area through the attic path keeps its 2-hr-floored labor curve,
+    // so a wall-only job must NOT equal the attic-equivalent price.
     const equiv800 = priceBoraCare(800);
-    expect(wallOnly.gallons).toBe(equiv800.gallons);
-    expect(wallOnly.price).toBe(equiv800.price);
+    expect(wallOnly.price).not.toBe(equiv800.price);
+
+    // A small wall job no longer inherits the attic 3-gallon / 2-hour floors:
+    // 20 LF × 8 ft = 160 sqft → 1 gal, 0.5 hr, ~$282 (was $808).
+    const smallWall = priceBoraCare({}, { wallLinearFt: 20, wallHeightFt: 8 });
+    expect(smallWall.totalSqFt).toBe(160);
+    expect(smallWall.gallons).toBe(1);
+    expect(smallWall.laborHrs).toBe(0.5);
+    expect(smallWall.price).toBe(282);
+
+    // minJobPrice floors a truck-roll: a tiny wall job never prices below $150.
+    const tinyWall = priceBoraCare({}, { wallLinearFt: 1, wallHeightFt: 1 });
+    expect(tinyWall.price).toBeGreaterThanOrEqual(150);
 
     // Custom wall height overrides the 8 ft default.
     const tallWall = priceBoraCare({}, { wallLinearFt: 100, wallHeightFt: 10 });

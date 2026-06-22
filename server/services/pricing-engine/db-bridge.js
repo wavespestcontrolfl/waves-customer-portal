@@ -1247,6 +1247,8 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.boraCare, 'coverage', bc.bc_cov ?? bc.coverage, Number);
       setNumber(constants.SPECIALTY.boraCare, 'equipCost', bc.bc_equip ?? bc.equipCost, Number);
       setNumber(constants.SPECIALTY.boraCare, 'marginDivisor', bc.marginDivisor ?? bc.margin_divisor, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', bc.min_job_price ?? bc.minJobPrice, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'wallLaborSqFtPerHour', bc.wall_labor_sqft_per_hr ?? bc.wallLaborSqFtPerHour, Number);
     }
     if (config.onetime_preslab) {
       const ps = config.onetime_preslab;
