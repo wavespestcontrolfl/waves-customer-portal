@@ -19,6 +19,7 @@ async function authenticate(req, res, next) {
 
     const customer = await db('customers')
       .where({ id: decoded.customerId, active: true })
+      .whereNull('deleted_at')
       .first();
 
     if (!customer) {
