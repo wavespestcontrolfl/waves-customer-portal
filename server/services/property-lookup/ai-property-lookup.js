@@ -768,6 +768,10 @@ function buildCadastralRecord(parcel, address) {
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
     stories: coerceInt(parcel.stories, 1, 4),
     propertyType: useDescType || dorUcPropertyType(parcel.dorUseCode),
+    // County-assessed pool flag (tri-state). For a new build where county GIS is
+    // the only public-record hit, this carries the pool into pest/mosquito
+    // pricing instead of leaving it for vision to (maybe) catch.
+    hasPool: parcel.poolFlag ?? null,
     source: parcel.sourceUrl || null,
     confidence: 'high',
     county: parcel.county,
@@ -848,6 +852,26 @@ function attachParcelMeta(merged, parcel) {
 // Non-detached residential types the county land-use description captures but
 // the PAO building-type text / numeric DOR code flatten to "Single Family".
 const COUNTY_GIS_SPECIFIC_TYPES = new Set(['Townhome', 'Interior Townhome', 'Condo', 'Duplex', 'Multifamily']);
+
+// mergePropertyRecords keeps _raw from the WINNING record, so when a PAO record
+// wins the tie the county GIS land-use description is dropped — and a commercial
+// / municipal / common-area GIS use would no longer reach detectCategory (which
+// reads _raw.landUse), letting a generic PAO type price the parcel as
+// residential. Carry the GIS land-use onto the merged record (append, never
+// clobber) so the commercial-routing signal survives regardless of which record
+// won. No-op for FDOR parcels (no landUse). (codex P1)
+function preserveCountyGisLandUse(merged, cadastralRecord) {
+  const gisLandUse = cadastralRecord?._raw?.landUse;
+  if (!merged || !gisLandUse) return merged;
+  merged._raw = merged._raw || {};
+  const existing = merged._raw.landUse;
+  if (!existing) {
+    merged._raw.landUse = gisLandUse;
+  } else if (!String(existing).toLowerCase().includes(String(gisLandUse).toLowerCase())) {
+    merged._raw.landUse = `${existing} ${gisLandUse}`;
+  }
+  return merged;
+}
 
 // A merged type the GIS description is allowed to UPGRADE — blank, or the
 // generic residential label the PAO building-type text / DOR code report for
@@ -1266,6 +1290,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
 
   if (countyRecord && hasCountyPricingCore(countyRecord)) {
     const merged = mergePropertyRecords([countyRecord, cadastralRecord].filter(Boolean), searchAddress);
+    preserveCountyGisLandUse(merged, cadastralRecord);
     return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
@@ -1283,10 +1308,8 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   ].filter(Boolean);
 
   if (!records.length) return null;
-  return attachParcelMeta(
-    applyCountyGisTypeOverride(mergePropertyRecords(records, searchAddress), cadastralRecord),
-    parcel,
-  );
+  const merged = preserveCountyGisLandUse(mergePropertyRecords(records, searchAddress), cadastralRecord);
+  return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
 async function searchManateeParcel(address, timeoutMs, startedAt = Date.now()) {
@@ -3176,6 +3199,7 @@ module.exports = {
     applyCountyGisTypeOverride,
     attachParcelMeta,
     buildCadastralRecord,
+    preserveCountyGisLandUse,
     buildPropertyDataQuality,
     canonicalLookupAddress,
     canUseParcelGis,

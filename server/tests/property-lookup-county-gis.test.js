@@ -25,7 +25,9 @@ const {
   _private: { paoParcelIdFrom },
 } = countyGis;
 
-const { buildCadastralRecord, applyCountyGisTypeOverride, mergePropertyRecords } = aiPrivate;
+const {
+  buildCadastralRecord, applyCountyGisTypeOverride, mergePropertyRecords, preserveCountyGisLandUse,
+} = aiPrivate;
 
 // A square ring (WGS84 lng/lat) around the test point, so pickParcelFeature's
 // point-in-polygon test matches and polygonAreaSqft is > 0.
@@ -294,6 +296,47 @@ describe('buildCadastralRecord with a county GIS parcel', () => {
       expect(profile.isCommercial).toBe(true);
       expect(profile.propertyType).toBe('Commercial');
     }
+  });
+
+  test('commercial GIS land-use survives a PAO-wins merge and still routes commercial (codex P1)', () => {
+    // GIS says Commercial; PAO has pricing core and wins the merge, so its _raw
+    // is the base — preserveCountyGisLandUse must carry the GIS land-use across.
+    const gis = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '500 MAIN ST', situsCity: 'BRADENTON', situsZip: '34205',
+      lotSqft: 20000, dorUseCode: '11', landUseDescription: 'Commercial Retail (1100)',
+      sourceUrl: 'https://gis.manateepao.gov/x', gisProvider: 'manatee_gis',
+    }, 'addr');
+    // Stand-in PAO record with pricing core + generic residential _raw.
+    const pao = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '500 MAIN ST', situsCity: 'BRADENTON', situsZip: '34205',
+      lotSqft: 20000, livingAreaSqft: 3000, yearBuilt: 2010, dorUseCode: '01',
+      sourceUrl: 'https://www.manateepao.gov/x',
+    }, 'addr');
+    pao.propertyType = 'Single Family';
+
+    const merged = mergePropertyRecords([pao, gis], 'addr');
+    preserveCountyGisLandUse(merged, gis);
+    expect(String(merged._raw.landUse).toLowerCase()).toContain('commercial');
+    const profile = buildEnrichedProfile(merged, {}, 27.4, -82.4);
+    expect(profile.category).toBe('COMMERCIAL');
+  });
+
+  test('county-assessed pool flag is carried as hasPool (codex P2)', () => {
+    const withPool = buildCadastralRecord({
+      county: 'Manatee', parcelId: '1', situsAddress: '1 A ST', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 7200, livingAreaSqft: 2000, yearBuilt: 2021, dorUseCode: '01',
+      landUseDescription: 'Single Family Residential (1554)', poolFlag: true,
+      sourceUrl: 'https://gis.manateepao.gov/x', gisProvider: 'manatee_gis',
+    }, 'addr');
+    expect(withPool.hasPool).toBe(true);
+    expect(withPool._fieldEvidence.hasPool[0].sourceType).toBe('county');
+
+    const noFlag = buildCadastralRecord({
+      county: 'Manatee', parcelId: '2', situsAddress: '2 A ST', situsCity: 'BRADENTON', situsZip: '34202',
+      lotSqft: 7200, livingAreaSqft: 2000, yearBuilt: 2021, dorUseCode: '01',
+      sourceUrl: 'https://services9.arcgis.com/x/Florida_Statewide_Cadastral/FeatureServer/0',
+    }, 'addr');
+    expect(noFlag.hasPool).toBeNull(); // FDOR has no pool flag → tri-state null
   });
 
   test('a residential paired villa is NOT misrouted to commercial', () => {
