@@ -138,6 +138,7 @@ function toScanSpec(row, vendors = [], urlByVendorId = null) {
   const vlist = (vendors || []).map((v) => ({
     vendor_id: v.id,
     name: v.name,
+    website: v.website || null, // storefront base — the generic Shopify adapter needs it
     url: (urlByVendorId && urlByVendorId.get && urlByVendorId.get(v.id)) || null,
   }));
   return { product, vendors: vlist, spend: Number(row.monthly_cost_estimate) || 0 };

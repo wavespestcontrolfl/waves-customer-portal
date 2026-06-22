@@ -31,8 +31,8 @@ describe('toScanSpec', () => {
       baseline: { vendor: 'SiteOne', price: 95, quantity: '78 oz' },
     });
     expect(vendors).toEqual([
-      { vendor_id: 'dmo', name: 'DoMyOwn', url: 'https://www.domyown.com/p-1817.html' },
-      { vendor_id: 'sol', name: 'Solutions Pest & Lawn', url: null }, // no URL -> search-by-name
+      { vendor_id: 'dmo', name: 'DoMyOwn', website: 'https://www.domyown.com', url: 'https://www.domyown.com/p-1817.html' },
+      { vendor_id: 'sol', name: 'Solutions Pest & Lawn', website: 'https://www.solutionsstores.com', url: null }, // no URL -> search-by-name
     ]);
     expect(spend).toBe(120);
   });

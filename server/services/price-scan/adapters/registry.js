@@ -7,11 +7,14 @@ const HOST_MAP = [
   { test: /solutionsstores\.com|solutions\s*pest|solutionsstores/i, key: 'solutions' },
   { test: /keystonepestsolutions|keystone\s*pest|keystone/i, key: 'keystone' },
   { test: /veseris\.com|veseris/i, key: 'veseris' },
+  // Shopify storefronts — one generic adapter (reads /products/<handle>.js) serves them all;
+  // matched by explicit host since "is Shopify" can't be inferred from a vendor name.
+  { test: /chemicalwarehouse\.com|seedworldusa\.com|seedbarn\.com|gciturfacademy\.com|intermountainturf\.com/i, key: 'shopify' },
 ];
 
-// vendor: { name?, host?, url? }
+// vendor: { name?, host?, url?, website? }
 function selectAdapterKey(vendor = {}) {
-  const hay = `${vendor.host || ''} ${vendor.url || ''} ${vendor.name || ''}`.trim();
+  const hay = `${vendor.host || ''} ${vendor.url || ''} ${vendor.website || ''} ${vendor.name || ''}`.trim();
   if (!hay) return 'generic';
   for (const { test, key } of HOST_MAP) if (test.test(hay)) return key;
   return 'generic';
@@ -24,6 +27,7 @@ const ADAPTER_LOADERS = {
   solutions: () => require('./solutions'),
   keystone: () => require('./keystone'),
   veseris: () => require('./veseris'), // B2B login adapter (account pricing)
+  shopify: () => require('./shopify'), // generic Shopify storefront (base URL from vendor.website)
   generic: () => require('./generic'),
 };
 
