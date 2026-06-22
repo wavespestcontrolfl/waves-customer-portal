@@ -40,6 +40,9 @@ const CLAIMABLE_LINK_TYPES = new Set(['editorial', 'resource', 'guest_post', 'ha
 // Every intent the classifier may emit (claimable + 'unknown').
 const VALID_INTENTS = new Set([...CLAIMABLE_LINK_TYPES, 'unknown']);
 
+// Money-page topics the harvest can resolve (keyed lowercase). Anything else → 'general'.
+const VALID_TOPICS = new Set(['general', 'pest', 'lawn', 'termite', 'wdo', 'mosquito', 'rodent']);
+
 // HARO-class platforms: you JOIN them, you don't cold-email them. Flagged so the
 // drafter never wastes a send pitching helpareporter.com itself.
 const HARO_PLATFORMS = new Set([
@@ -84,6 +87,14 @@ function classifyLinkType(domain = '', url = '') {
 function normalizeIntent(raw, domain, url) {
   const n = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   return VALID_INTENTS.has(n) ? n : classifyLinkType(domain, url);
+}
+
+// Canonicalize the model's target_topic (e.g. 'WDO', 'Termite') to the lowercase
+// enum the harvest's money-page lookup keys on — else it falls through to the
+// homepage instead of the intended service page.
+function normalizeTopic(raw) {
+  const n = String(raw || '').trim().toLowerCase();
+  return VALID_TOPICS.has(n) ? n : 'general';
 }
 
 // ── Heuristic classifier (LLM fallback) ───────────────────────────────────────
@@ -178,7 +189,7 @@ ${JSON.stringify(list)}`;
       is_local_swfl: !!hit.is_local_swfl,
       lead_value_tier: Number(hit.lead_value_tier) || 0,
       is_haro_platform: !!hit.is_haro_platform || HARO_PLATFORMS.has(String(c.domain).toLowerCase()),
-      target_topic: hit.target_topic || 'general',
+      target_topic: normalizeTopic(hit.target_topic),
       suggested_anchor: hit.suggested_anchor || null,
       reason: hit.reason || 'llm',
     };

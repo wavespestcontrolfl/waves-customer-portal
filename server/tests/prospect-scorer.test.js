@@ -118,12 +118,14 @@ describe('classifyBatch LLM path', () => {
   test('normalizes a near-valid model intent (Directory / guest-post) instead of misrouting it', async () => {
     const fake = {
       messages: {
-        create: async () => ({ content: [{ text: '[{"i":0,"domain":"listingsite.com","intent_class":"Directory","relevance_0_100":30,"is_local_swfl":false,"lead_value_tier":4},{"i":1,"domain":"guestblog.com","intent_class":"guest-post","relevance_0_100":60,"is_local_swfl":true,"lead_value_tier":2}]' }] }),
+        create: async () => ({ content: [{ text: '[{"i":0,"domain":"listingsite.com","intent_class":"Directory","relevance_0_100":30,"is_local_swfl":false,"lead_value_tier":4,"target_topic":"Bogus"},{"i":1,"domain":"guestblog.com","intent_class":"guest-post","relevance_0_100":60,"is_local_swfl":true,"lead_value_tier":2,"target_topic":"WDO"}]' }] }),
       },
     };
     const [a, b] = await scorer.classifyBatch([{ domain: 'listingsite.com' }, { domain: 'guestblog.com' }], { anthropic: fake });
     expect(a.intent_class).toBe('directory'); // not coerced to resource → stays signup lane
+    expect(a.target_topic).toBe('general');    // unknown topic → general
     expect(b.intent_class).toBe('guest_post');
+    expect(b.target_topic).toBe('wdo');        // 'WDO' canonicalized → matches /wdo money page
   });
 
   test('falls back to heuristic when the model errors', async () => {
