@@ -19,6 +19,7 @@ const {
   verifyMatch,
   epaKey,
 } = require('../extract');
+const { isUnavailable } = require('../compare');
 const { convertToOz } = require('../../product-costing');
 
 // How many top-ranked search results to actually open + verify before giving up.
@@ -350,8 +351,9 @@ function makeAdapter(config) {
     const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
     const candidates = selectSearchCandidates(await collectResultLinks(page, config), product, cap);
     const wantsEpa = !!(product && product.epaReg);
-    let fallback = null; // best-ranked priced page, if nothing verifies
-    let firstMatch = null; // first name+size match, used only if no EPA-confirmed one
+    let fallback = null; // best-ranked priced page, if nothing verifies (-> precise 'unverified')
+    let firstBuyable = null; // first BUYABLE name+size match lacking EPA confirmation
+    let firstUnbuyable = null; // first verified match that isn't buyable (compare drops it)
     for (const url of candidates) {
       const cand = await scrapeCandidate(page, vendor, product, url);
       if (!cand) continue;
@@ -360,18 +362,20 @@ function makeAdapter(config) {
         { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
         product,
       );
-      if (verdict.matched) {
-        // Prefer an EPA-confirmed match. A single-letter formulation suffix the slug
-        // can't encode (catalog "Talstar P" vs page "Talstar Professional") means a
-        // sibling like "Talstar XTRA" can satisfy name+size on brand overlap alone —
-        // so don't stop on the first name+size hit; keep looking for the page whose
-        // EPA reg actually matches. (No EPA to disambiguate -> first match is best.)
-        if (!wantsEpa || verdict.signals.epa) return cand;
-        if (!firstMatch) firstMatch = cand;
-      }
+      if (!verdict.matched) continue;
+      const buyable = !isUnavailable(cand); // out_of_stock / backorder can't be an opportunity
+      // Prefer an EPA-confirmed match — a single-letter formulation suffix the slug can't
+      // encode (catalog "Talstar P" vs page "Talstar Professional") lets a sibling like
+      // "Talstar XTRA" pass name+size on brand overlap alone — BUT only among BUYABLE
+      // pages: an out-of-stock EPA hit gets dropped by compare, so it must never beat an
+      // already-found buyable match. Ideal (EPA-ok AND buyable, or no EPA needed) wins now.
+      if ((!wantsEpa || verdict.signals.epa) && buyable) return cand;
+      if (buyable) { if (!firstBuyable) firstBuyable = cand; } // buyable but EPA not confirmed
+      else if (!firstUnbuyable) firstUnbuyable = cand; // verified but unbuyable
     }
-    // EPA-confirmed > first name+size match > top priced page (-> precise 'unverified').
-    return firstMatch || fallback;
+    // A buyable match (can actually be an opportunity) beats a verified-but-unbuyable one
+    // (compare would drop it), which beats any priced page (a precise 'unverified' skip).
+    return firstBuyable || firstUnbuyable || fallback;
   }
 
   return { key: config.key, config, fetchCandidate };
