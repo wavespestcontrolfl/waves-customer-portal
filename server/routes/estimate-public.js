@@ -16,7 +16,7 @@ const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/con
 const slotReservation = require('../services/slot-reservation');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
-const { PEST, ONE_TIME } = require('../services/pricing-engine/constants');
+const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
 const {
@@ -1872,11 +1872,11 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
 }
 
 function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
+  // Every recurring service mix can prepay the year now: pest/mosquito waive the
+  // WaveGuard setup, all other recurring services take a prepay discount off the
+  // recurring annual. Only one-time-only (no recurring) estimates are ineligible.
   const recurringRows = Array.isArray(recurring) ? recurring : [];
-  if (!recurringRows.length) return false;
-  if (recurringRows.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) return true;
-  return hasOnlyLawnCareServiceMix(recurringRows, oneTimeItems)
-    || hasOnlyTermiteBaitServiceMix(recurringRows, oneTimeItems);
+  return recurringRows.length > 0;
 }
 
 function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
@@ -3152,13 +3152,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>-${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
     : '';
 
-  // WaveGuard Membership. Recurring pest, lawn-care-only, and termite-bait
-  // station estimates include the $99 membership; one-off and non-WaveGuard
-  // recurring add-ons do not.
+  // WaveGuard Membership setup ($99). Applies only to recurring Pest or Mosquito
+  // mixes; lawn, termite-bait, rodent-bait, tree & shrub, and palm carry no setup
+  // fee (they get a 5% annual-prepay discount instead). A mix containing pest or
+  // mosquito always charges the setup — the 5% never stacks on top.
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
   // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const hasWaveGuardMembership = !!pestRecurring || hasOnlyLawnCareServices || hasOnlyTermiteBaitServices;
+  const hasRecurringMosquito = recurring.some((svc) => recurringServiceKey(svc) === 'mosquito');
+  const hasWaveGuardMembership = !!pestRecurring || hasRecurringMosquito;
   const membershipFee = hasWaveGuardMembership
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
@@ -3254,16 +3256,48 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         : (standardInvoiceCopy.hasFirstApplication
             ? `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`
             : escapeHtml(pageCopy.noPaymentCopy)));
-  const showAnnualPrepayOption = showMembershipFee;
+  // Annual prepay shows for ANY recurring estimate with an annual total. The
+  // incentive depends on the mix: pest/mosquito waive the WaveGuard setup;
+  // every other recurring service takes ANNUAL_PREPAY_DISCOUNT_PCT off the
+  // recurring annual (never one-time installs, which aren't in annualTotal).
+  const prepayEligibleMix = !quoteRequired && !locked && annualTotal > 0
+    && billingRecurring.length > 0
+    && isAnnualPrepayEligibleServiceMix(recurring, oneTimeItems);
   const annualPrepayWaivesMembership = showMembershipFee;
-  const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
-  const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
+  // Use the converter's shared calc so the displayed total === the invoiced total,
+  // including the non-discountable margin floor clamp (effective rate may be < the
+  // configured % for margin-protected mixes).
+  const prepayResolved = require('../services/estimate-converter').resolveAnnualPrepayInvoiceTotal({
+    baseAnnual: annualTotal,
+    recurringServices: recurring,
+    estimateData: estData,
+  });
+  const prepayDiscountAmount = annualPrepayWaivesMembership ? 0 : prepayResolved.discount;
+  const prepayDiscountRate = annualPrepayWaivesMembership ? 0 : prepayResolved.rate;
+  const prepayDiscountPctLabel = `${Math.round(prepayDiscountRate * 100)}%`;
+  // Annual prepay is offered to NEW customers only (unchanged invariant) and only
+  // when it carries an incentive: the setup waiver (pest/mosquito) or the prepay
+  // discount (no-fee services). Existing members stay pay-per-application only.
+  const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
+    && (annualPrepayWaivesMembership || prepayDiscountAmount > 0);
+  const prepayInvoiceTotal = annualPrepayWaivesMembership
+    ? annualTotal
+    : Math.max(0, prepayResolved.amount);
   const existingAppointment = est.existingAppointment || null;
-  const prepayMembershipSummaryHtml = showMembershipFee
-    ? (annualPrepayWaivesMembership
-      ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
-      : `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(membershipFee)}</strong></div>`)
-    : '';
+  const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
+    ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
+    : (prepayDiscountAmount > 0
+      ? `<div class="payment-summary-row discount"><span>Prepay discount (${prepayDiscountPctLabel})</span><strong>-${fmtMoney(prepayDiscountAmount)}</strong></div>`
+      : '');
+  // Prepay body/button copy is incentive-aware: the per-service pageCopy still
+  // says "waive the setup", which is only accurate for the fee services. No-fee
+  // services advertise the prepay discount instead.
+  const prepayBodyCopy = annualPrepayWaivesMembership || prepayDiscountAmount <= 0
+    ? pageCopy.prepayBody
+    : `Choose the 12-month plan up front and save ${prepayDiscountPctLabel}; we send the annual invoice automatically after confirmation.`;
+  const prepayButtonSubCopy = annualPrepayWaivesMembership || prepayDiscountAmount <= 0
+    ? pageCopy.prepayButtonSub
+    : `Approve annual prepay and save ${prepayDiscountPctLabel} on the recurring annual.`;
   const showBillingCard = !quoteRequired && !locked && billingRecurring.length > 0;
   const requirePaymentSetupBeforeSlots = showBillingCard;
   const standardInvoiceLede = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
@@ -3301,15 +3335,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <div class="payment-choice">
         <div class="payment-choice-head">
           <h3>${escapeHtml(pageCopy.prepayTitle)}</h3>
-          ${annualPrepayWaivesMembership ? `<span class="payment-choice-badge primary">Setup waived</span>` : ''}
+          ${annualPrepayWaivesMembership
+            ? `<span class="payment-choice-badge primary">Setup waived</span>`
+            : (prepayDiscountAmount > 0 ? `<span class="payment-choice-badge primary">Save ${prepayDiscountPctLabel}</span>` : '')}
         </div>
-        <p class="payment-choice-body">${escapeHtml(pageCopy.prepayBody)}</p>
+        <p class="payment-choice-body">${escapeHtml(prepayBodyCopy)}</p>
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
-          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
+        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -4069,7 +4105,7 @@ ${shellTopBar()}
           <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span></button>
           <div class="pay-pref-note" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</div>
         </div>
-        ${showMembershipFee ? `<div class="pay-pref-choice"><button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">${escapeHtml(pageCopy.prepayTitle)}</span></button><div class="pay-pref-note">${escapeHtml(pageCopy.prepayButtonSub)}</div></div>` : ''}
+        ${showAnnualPrepayOption ? `<div class="pay-pref-choice"><button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">${escapeHtml(pageCopy.prepayTitle)}</span></button><div class="pay-pref-note">${escapeHtml(prepayButtonSubCopy)}</div></div>` : ''}
       </div>
     </div>
     <div id="review-area" style="display:none">
@@ -4195,13 +4231,13 @@ ${shellQuestionsBar()}
       el.textContent = fmt(annual);
     });
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
-      const membershipDue = Number(el.dataset.prepayMembershipDue || 0);
-      const invoiceTotal = Math.max(0, Math.round((annual + membershipDue) * 100) / 100);
+      const discountRate = Number(el.dataset.prepayDiscountRate || 0);
+      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
       el.textContent = fmt(invoiceTotal);
     });
     document.querySelectorAll('[data-prepay-copy-total]').forEach((el) => {
-      const membershipDue = Number(el.dataset.prepayMembershipDue || 0);
-      const invoiceTotal = Math.max(0, Math.round((annual + membershipDue) * 100) / 100);
+      const discountRate = Number(el.dataset.prepayDiscountRate || 0);
+      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
       el.textContent = fmt(invoiceTotal);
     });
     let firstVisitTotal = 0;
@@ -6018,6 +6054,17 @@ router.put('/:token/accept', async (req, res, next) => {
     const annualPrepayInvoiceAmount = annualPrepaySelected
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
+    // annualPrepayInvoiceAmount is the UNDISCOUNTED recurring annual (the base the
+    // converter needs). For post-accept customer/admin messaging AND the API
+    // response we must quote the amount actually invoiced — the converter's shared
+    // calc applies the discount and the margin-floor clamp, so this always matches.
+    const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
+      ? require('../services/estimate-converter').resolveAnnualPrepayInvoiceTotal({
+        baseAnnual: annualPrepayInvoiceAmount,
+        recurringServices: recurringSvcList,
+        estimateData: estData,
+      }).amount
+      : null;
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
     const acceptedFrequencyKey = selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey;
     const acceptedServiceTierKey = selectedFrequency?.billingFrequencyKey ? selectedFrequency.key : null;
@@ -6457,7 +6504,7 @@ router.put('/:token/accept', async (req, res, next) => {
         }
         invoiceModeResult = true;
         invoiceIdResult = annualPrepayConversionResult.draftInvoiceId;
-        invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayInvoiceAmount || null;
+        invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayDisplayAmount || null;
         invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
         invoiceServiceLabelResult = 'Annual prepay';
         invoiceKindResult = 'annual_prepay';
@@ -6641,7 +6688,7 @@ router.put('/:token/accept', async (req, res, next) => {
             }
           }
         } else if (annualPrepaySelected) {
-          const amountText = annualPrepayInvoiceAmount != null ? ` for ${fmtMoney(annualPrepayInvoiceAmount)}` : '';
+          const amountText = annualPrepayDisplayAmount != null ? ` for ${fmtMoney(annualPrepayDisplayAmount)}` : '';
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
             {
@@ -6844,7 +6891,7 @@ router.put('/:token/accept', async (req, res, next) => {
         reservationCommitted,
         bookingUrl,
         billingTerm,
-        annualPrepayAmount: annualPrepayInvoiceAmount,
+        annualPrepayAmount: annualPrepayDisplayAmount,
       });
       await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
@@ -6878,7 +6925,7 @@ router.put('/:token/accept', async (req, res, next) => {
           invoicePayUrl,
           reservationCommitted,
           billingTerm,
-          annualPrepayAmount: annualPrepayInvoiceAmount,
+          annualPrepayAmount: annualPrepayDisplayAmount,
         }),
       });
     } catch (e) {
@@ -6895,7 +6942,7 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceKind,
       invoiceServiceLabel,
       billingTerm,
-      prepayInvoiceAmount: annualPrepayInvoiceAmount,
+      prepayInvoiceAmount: annualPrepayDisplayAmount,
       bookingUrl,
       treatAsOneTime,
       reservationCommitted,
@@ -7770,16 +7817,16 @@ function normalizeOneTimeBreakdown(estData) {
   addRows(oneTime?.items);
   if (nestedOneTime && nestedOneTime !== oneTime) addRows(nestedOneTime.items);
   const membershipFee = Number(oneTime?.membershipFee ?? nestedOneTime?.membershipFee);
-  // WaveGuard setup fee only applies when recurring pest is part of the
-  // estimate. Lawn-only / T&S-only / mosquito-only estimates never carry it,
+  // WaveGuard setup fee only applies when recurring pest or mosquito is part of
+  // the estimate. Lawn / termite-bait / rodent-bait / T&S / palm never carry it,
   // even if a stale membershipFee was cached in oneTime.
   const recurringServicesForFee = Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
   const hasRecurringPest = recurringServicesForFee.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
-  const hasRecurringTermiteBait = recurringServicesForFee.some((s) => recurringServiceKey(s) === 'termite_bait');
+  const hasRecurringMosquito = recurringServicesForFee.some((s) => recurringServiceKey(s) === 'mosquito');
   const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
-  if (Number.isFinite(membershipFee) && membershipFee > 0 && (hasRecurringPest || hasRecurringTermiteBait) && !hasExplicitWaveGuardSetup) {
+  if (Number.isFinite(membershipFee) && membershipFee > 0 && (hasRecurringPest || hasRecurringMosquito) && !hasExplicitWaveGuardSetup) {
     addRows([{
       service: 'waveguard_setup',
       name: 'WaveGuard setup',
@@ -7829,14 +7876,14 @@ function normalizeOneTimeBreakdown(estData) {
 
   const rowTotal = rows.reduce((sum, row) => sum + row.amount, 0);
   const rawExplicitTotal = Number(oneTime?.total ?? nestedOneTime?.total);
-  // If we suppressed the WaveGuard setup row above (non-pest estimate with a
-  // stale membershipFee cached in oneTime.total), strip that fee from the
+  // If we suppressed the WaveGuard setup row above (non-pest/mosquito estimate
+  // with a stale membershipFee cached in oneTime.total), strip that fee from the
   // explicit total so the difference logic doesn't resurface it as a generic
   // "Other one-time services" charge.
   const suppressedMembershipFee = Number.isFinite(membershipFee)
     && membershipFee > 0
     && !hasRecurringPest
-    && !hasRecurringTermiteBait
+    && !hasRecurringMosquito
     ? membershipFee
     : 0;
   const explicitTotal = Number.isFinite(rawExplicitTotal)
@@ -9642,6 +9689,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   ));
   const hasRecurringPest = recurringKeys.includes('pest_control')
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
+  const hasRecurringMosquito = recurringKeys.includes('mosquito');
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
   const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
   const recurringRows = recurringServiceRowsByKey(recurringServices);
@@ -9671,7 +9719,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: key === 'pest_control',
       frequencies,
-      setupFee: (key === 'pest_control' || key === 'termite_bait') ? waveGuardSetupFee : null,
+      setupFee: (key === 'pest_control' || key === 'mosquito') ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
     })];
@@ -9694,7 +9742,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
           isRecurring: true,
           isPest: key === 'pest_control',
           frequencies: sectionFrequencies,
-          setupFee: (key === 'pest_control' || (key === 'termite_bait' && !hasRecurringPestSection)) ? waveGuardSetupFee : null,
+          setupFee: (key === 'pest_control' || (key === 'mosquito' && !hasRecurringPestSection)) ? waveGuardSetupFee : null,
           oneTimeBreakdown,
           quoteRequired: payload.quoteRequired === true,
         });
@@ -9712,7 +9760,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: hasRecurringPest,
       frequencies,
-      setupFee: hasRecurringPest ? waveGuardSetupFee : null,
+      setupFee: (hasRecurringPest || hasRecurringMosquito) ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
       memberKeys: recurringKeys, // badge eligibility reflects the bundle's actual services
@@ -9728,7 +9776,7 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: fallbackCategory === 'pest_control',
       frequencies,
-      setupFee: fallbackCategory === 'pest_control' ? waveGuardSetupFee : null,
+      setupFee: (fallbackCategory === 'pest_control' || fallbackCategory === 'mosquito') ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
     })];
@@ -10137,7 +10185,9 @@ async function buildPricingBundle(estimate) {
     // pest carries a roach type) is NOT waivable — it covers the heavier
     // visit-1 cost regardless of customer churn.
     const firstVisitFees = [];
-    if (annualPrepayEligible) {
+    // The WaveGuard setup fee only applies to recurring pest/mosquito mixes — the
+    // other recurring services are prepay-eligible too but carry no setup fee.
+    if (annualPrepayEligible && (hasPest || recurringKeys.includes('mosquito'))) {
       firstVisitFees.push({
         service: 'waveguard_setup',
         amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,

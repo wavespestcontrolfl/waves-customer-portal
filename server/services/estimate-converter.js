@@ -10,7 +10,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
-const { WAVEGUARD } = require('./pricing-engine/constants');
+const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT } = require('./pricing-engine/constants');
 const {
   inferFrequencyKeyFromEstimateData,
   resolveBillingCadence,
@@ -548,6 +548,19 @@ function isTermiteBaitOneTimeItem(item = {}) {
     || (raw.includes('termite') && /(bait|station|install|trelona|advance)/.test(raw));
 }
 
+// Service-type predicate (independent of existing-customer status): the WaveGuard
+// $99 setup is a Pest/Mosquito membership fee. Lawn, termite-bait, rodent-bait,
+// tree & shrub, and palm carry no setup fee — they earn the annual-prepay discount
+// instead. This drives the prepay-discount decision (which must not depend on the
+// existing-customer waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
+// existing-customer waiver on top for the actual setup invoice.
+function recurringMixHasMembershipFeeService(recurringServices = []) {
+  const keys = (Array.isArray(recurringServices) ? recurringServices : [])
+    .map(recurringServiceKey)
+    .filter(Boolean);
+  return keys.includes('pest_control') || keys.includes('mosquito');
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
@@ -555,20 +568,8 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
-  const keys = recurring.map(recurringServiceKey).filter(Boolean);
-  if (keys.includes('pest_control')) return true;
-
-  const oneTimeItems = estimateOneTimeItemsFromData(estimateData);
-  const hasPestOneTime = oneTimeItems.some(isGeneralPestOneTimeItem);
-  if (hasPestOneTime) return false;
-
-  if (keys.every((key) => key === 'lawn_care')) {
-    return oneTimeItems.every(isLawnCareOneTimeItem);
-  }
-  if (keys.every((key) => key === 'termite_bait')) {
-    return oneTimeItems.every(isTermiteBaitOneTimeItem);
-  }
-  return false;
+  // Pest/Mosquito mixes always charge the setup (no 5% stacking).
+  return recurringMixHasMembershipFeeService(recurring);
 }
 
 function isNonDiscountableRecurringLine(item = {}) {
@@ -596,6 +597,23 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
   const annual = parseFloat(annualTotal);
   if (Number.isFinite(annual) && annual > 0) return Math.round(annual * 100) / 100;
   return calculateAnnualPrepayAmount(monthlyRate);
+}
+
+// Single source of truth for the annual-prepay invoice amount, shared by the
+// converter (billing), the public estimate render, and the accept response so the
+// displayed/messaged total always equals the invoice the converter creates.
+// Non-pest/mosquito mixes take ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual;
+// the non-discountable recurring floor (margin-protected non-lawn lines) still
+// clamps the result, so callers never quote a total below what is actually billed.
+function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], estimateData = {} } = {}) {
+  const base = Math.round((Number(baseAnnual) || 0) * 100) / 100;
+  if (!(base > 0)) return { amount: 0, discount: 0, rate: 0 };
+  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
+  const discounted = Math.round(base * (1 - discountRate) * 100) / 100;
+  const floor = nonDiscountableRecurringAnnualFloor(estimateData);
+  const amount = Math.max(discounted, floor);
+  const discount = Math.max(0, Math.round((base - amount) * 100) / 100);
+  return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000 };
 }
 
 function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
@@ -1179,15 +1197,26 @@ const EstimateConverter = {
     let invoiceDelivery = null;
     let annualPrepayTermId = null;
     try {
-      const annualPrepayAmountRaw = resolveAnnualPrepayDraftAmount({
+      // Base recurring annual (undiscounted): resolveAnnualPrepayInvoiceAmount never
+      // applies the prepay discount, so this is always the pre-discount figure.
+      const annualPrepayBase = resolveAnnualPrepayDraftAmount({
         prepayInvoiceAmount: opts.prepayInvoiceAmount,
         annualTotal: estimate.annual_total,
         monthlyRate,
       });
-      const nonDiscountableFloor = nonDiscountableRecurringAnnualFloor(estimateData);
+      // Mixes without a WaveGuard setup fee (lawn/termite/rodent/tree/palm) take
+      // the prepay discount off the recurring annual instead of the setup waiver;
+      // pest/mosquito keep the waiver and no extra discount. Shared with the public
+      // render + accept response so all three quote the same (floor-clamped) total.
+      const prepayResolved = resolveAnnualPrepayInvoiceTotal({
+        baseAnnual: annualPrepayBase,
+        recurringServices: recurringServicesForConversion,
+        estimateData,
+      });
       const annualPrepayAmount = billingTerm === 'prepay_annual'
-        ? Math.max(annualPrepayAmountRaw, nonDiscountableFloor)
-        : annualPrepayAmountRaw;
+        ? prepayResolved.amount
+        : annualPrepayBase;
+      const prepayDiscountApplied = prepayResolved.discount > 0;
       const standardFirstApplicationAmount = billingTerm === 'standard'
         ? resolveFirstApplicationAmount({
           firstApplicationAmount: opts.firstApplicationAmount,
@@ -1209,16 +1238,23 @@ const EstimateConverter = {
           const termMonthlyRate = monthlyRate > 0
             ? monthlyRate
             : Math.round((annualAmount / 12) * 100) / 100;
+          const prepayDiscountPctLabel = `${Math.round(ANNUAL_PREPAY_DISCOUNT_PCT * 100)}%`;
+          const prepayLineDescription = prepayDiscountApplied
+            ? `WaveGuard ${tier || 'Bronze'} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
+            : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
+          const prepayNotes = prepayDiscountApplied
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
+            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`;
           const inv = await InvoiceService.create({
             database,
             customerId,
             title: `WaveGuard ${tier || 'Bronze'} — Annual Prepay (12 months)`,
             lineItems: [{
-              description: `WaveGuard Membership — 12 months prepaid (setup fee waived)`,
+              description: prepayLineDescription,
               quantity: 1,
               unit_price: annualAmount,
             }],
-            notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`,
+            notes: prepayNotes,
             dueDate: etDateString(),
           });
           draftInvoiceId = inv?.id || null;
@@ -1500,6 +1536,7 @@ module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
+module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
 module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConversion;
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;

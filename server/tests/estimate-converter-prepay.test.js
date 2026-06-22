@@ -7,6 +7,7 @@ const {
   nonDiscountableRecurringAnnualFloor,
   resolveFirstApplicationAmount,
   resolveAnnualPrepayDraftAmount,
+  resolveAnnualPrepayInvoiceTotal,
   recurringServicesFromEstimateData,
   shouldAttachScheduledServiceToStandardDraftInvoice,
   shouldIncludeWaveGuardSetupFeeForRecurring,
@@ -57,42 +58,74 @@ describe('estimate converter annual prepay amount', () => {
     expect(determineTier(0, false)).toEqual(expect.objectContaining({ tier: 'none' }));
   });
 
-  test('WaveGuard setup services trigger setup invoices', () => {
-    expect(hasWaveGuardSetupService([
-      { service: 'palm_injection', name: 'Palm Injection', waveGuardDiscountEligible: false },
-      { service: 'rodent_bait', name: 'Rodent Bait Stations', waveGuardDiscountEligible: false },
-    ])).toBe(false);
-
+  test('WaveGuard setup fee applies to recurring pest/mosquito mixes only', () => {
+    // $99 setup applies only to recurring Pest or Mosquito mixes.
     expect(hasWaveGuardSetupService([
       { service: 'pest_control', name: 'Pest Control' },
     ])).toBe(true);
     expect(hasWaveGuardSetupService([
-      { service: 'lawn_care', name: 'Lawn Care' },
+      { service: 'mosquito', name: 'Mosquito Control' },
     ])).toBe(true);
+    // Everything else carries no setup fee (5% annual-prepay discount instead).
+    expect(hasWaveGuardSetupService([
+      { service: 'lawn_care', name: 'Lawn Care' },
+    ])).toBe(false);
     expect(hasWaveGuardSetupService([
       { service: 'termite_bait', name: 'Termite Bait Stations' },
+    ])).toBe(false);
+    expect(hasWaveGuardSetupService([
+      { service: 'palm_injection', name: 'Palm Injection', waveGuardDiscountEligible: false },
+      { service: 'rodent_bait', name: 'Rodent Bait Stations', waveGuardDiscountEligible: false },
+    ])).toBe(false);
+    expect(hasWaveGuardSetupService([
+      { service: 'tree_shrub', name: 'Tree & Shrub' },
+    ])).toBe(false);
+    // Mixes containing pest or mosquito always charge the setup (no 5% stacking).
+    expect(hasWaveGuardSetupService([
+      { service: 'lawn_care', name: 'Lawn Care' },
+      { service: 'pest_control', name: 'Pest Control' },
     ])).toBe(true);
+    expect(hasWaveGuardSetupService([
+      { service: 'lawn_care', name: 'Lawn Care' },
+      { service: 'mosquito', name: 'Mosquito Control' },
+    ])).toBe(true);
+    // Lawn + tree (no pest/mosquito) → no setup.
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
       { service: 'tree_shrub', name: 'Tree & Shrub' },
     ])).toBe(false);
-    expect(hasWaveGuardSetupService([
-      { service: 'mosquito', name: 'Mosquito Control' },
-    ])).toBe(false);
+    // Existing pest members never pay the setup again, even with pest present.
     expect(shouldIncludeWaveGuardSetupFeeForRecurring({
-      recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
-      estimateData: { oneTime: { items: [{ service: 'one_time_pest', name: 'Pest Control' }] } },
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { membershipSnapshot: { isExistingCustomer: true } },
     })).toBe(false);
-    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+  });
+
+  test('resolveAnnualPrepayInvoiceTotal: 5% for no-fee mixes, none for pest/mosquito, floor-clamped', () => {
+    // No-fee mix (lawn): 5% off; lawn lines are excluded from the floor.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
       recurringServices: [{ service: 'lawn_care', name: 'Lawn Care' }],
-      estimateData: {
-        result: {
-          oneTime: {
-            specItems: [{ service: 'tree_shrub', name: 'Tree & Shrub treatment' }],
-          },
-        },
-      },
-    })).toBe(false);
+      estimateData: { result: { lineItems: [] } },
+    })).toEqual({ amount: 627, discount: 33, rate: 0.05 });
+
+    // Pest/mosquito: setup-waiver path, no extra discount.
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'pest_control', name: 'Pest Control' }],
+      estimateData: { result: { lineItems: [] } },
+    })).toEqual({ amount: 660, discount: 0, rate: 0 });
+
+    // No-fee mix with a non-discountable (non-lawn) line: the margin floor caps the
+    // 5% so the invoiced/displayed total never dips below the protected amount.
+    const floored = resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 660,
+      recurringServices: [{ service: 'tree_shrub', name: 'Tree & Shrub' }],
+      estimateData: { result: { lineItems: [{ service: 'tree_shrub', annual: 650, discountable: false }] } },
+    });
+    expect(floored.amount).toBe(650); // max(627, 650)
+    expect(floored.discount).toBe(10); // 660 - 650, less than a full 5%
+    expect(floored.rate).toBeCloseTo(0.0152, 4);
   });
 
   test('all recurring pay-per-application accepts create invoices', () => {

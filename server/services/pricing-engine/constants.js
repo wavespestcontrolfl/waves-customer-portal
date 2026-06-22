@@ -7,6 +7,15 @@
 const PROCESSING_ADJUSTMENT = 1.00;
 const r = (val) => Math.round(val * PROCESSING_ADJUSTMENT); // Retained wrapper; multiplier is 1.00
 
+// Annual-prepay incentive for service mixes that carry no WaveGuard setup fee
+// (lawn, termite-bait, rodent-bait, tree & shrub, palm). Pest/mosquito mixes
+// keep the $99-setup waiver instead and never stack this. Off the recurring
+// annual only — never one-time installs. Env-overridable (e.g. 0.05 = 5%).
+const ANNUAL_PREPAY_DISCOUNT_PCT = (() => {
+  const env = parseFloat(process.env.ANNUAL_PREPAY_DISCOUNT_PCT);
+  return Number.isFinite(env) && env >= 0 && env < 1 ? env : 0.05;
+})();
+
 // ── Global Constants ──────────────────────────────────────────
 const GLOBAL = {
   LABOR_RATE: 35.00,          // $/hr loaded (wages + benefits + WC + vehicle + insurance)
@@ -1676,4 +1685,5 @@ module.exports = {
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT,
   PROCESSING_ADJUSTMENT,
+  ANNUAL_PREPAY_DISCOUNT_PCT,
 };

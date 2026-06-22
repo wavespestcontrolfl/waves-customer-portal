@@ -1270,7 +1270,9 @@ describe('public estimate one-time breakdown', () => {
       }),
     ]));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
-      showWaveGuardSetupFee: false,
+      // Mosquito is a WaveGuard-membership service (setup fee + tier), but it is
+      // not pest, so the pest-specific add-on gates stay off.
+      showWaveGuardSetupFee: true,
       showPestRecurringAddOns: false,
       showOneTimePestAddOns: false,
     }));
@@ -1663,15 +1665,11 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(payload.annualPrepayEligible).toBe(true);
-    expect(payload.setupFee).toEqual(expect.objectContaining({
+    // Lawn-only carries no WaveGuard setup fee — prepay earns a 5% discount, not a
+    // setup waiver — so no waveguard_setup fee is exposed.
+    expect(payload.setupFee).toBeNull();
+    expect(payload.firstVisitFees).not.toContainEqual(expect.objectContaining({
       service: 'waveguard_setup',
-      amount: 99,
-      waivedWithPrepay: true,
-    }));
-    expect(payload.firstVisitFees).toContainEqual(expect.objectContaining({
-      service: 'waveguard_setup',
-      amount: 99,
-      waivedWithPrepay: true,
     }));
   });
 
@@ -1727,7 +1725,7 @@ describe('public estimate one-time breakdown', () => {
     ]);
   });
 
-  test('public pricing bundle exposes waived WaveGuard setup for termite bait stations', async () => {
+  test('public pricing bundle: termite bait stations carry no setup fee but stay prepay-eligible', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-termite-bait-prepay-test',
       estimate_data: {
@@ -1764,34 +1762,25 @@ describe('public estimate one-time breakdown', () => {
       waveguard_tier: 'Bronze',
     });
 
+    // Termite carries no WaveGuard setup fee under the unified model, but it is
+    // still annual-prepay eligible (5% discount). A stale cached $99 membership
+    // fee is netted out via a one_time_adjustment so it is never charged; the
+    // bait-station install stays a separate one-time charge.
     expect(payload.annualPrepayEligible).toBe(true);
-    expect(payload.setupFee).toEqual(expect.objectContaining({
+    expect(payload.setupFee).toBeNull();
+    expect(payload.firstVisitFees).not.toContainEqual(expect.objectContaining({
       service: 'waveguard_setup',
-      amount: 99,
-      waivedWithPrepay: true,
-    }));
-    expect(payload.firstVisitFees).toContainEqual(expect.objectContaining({
-      service: 'waveguard_setup',
-      amount: 99,
-      waivedWithPrepay: true,
     }));
     expect(payload.services[0]).toEqual(expect.objectContaining({
       key: 'termite_bait',
-      setupFee: expect.objectContaining({
-        service: 'waveguard_setup',
-        amount: 99,
-        waivedWithPrepay: true,
-      }),
+      setupFee: null,
     }));
-    expect(payload.renderFlags.showWaveGuardSetupFee).toBe(true);
+    expect(payload.renderFlags.showWaveGuardSetupFee).toBe(false);
     expect(payload.oneTimeBreakdown.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ service: 'termite_bait_installation', amount: 556 }),
-      expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
+      expect.objectContaining({ service: 'one_time_adjustment', amount: -99 }),
     ]));
-    expect(payload.oneTimeBreakdown.items).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ service: 'one_time_adjustment' }),
-    ]));
-    expect(payload.oneTimeBreakdown.total).toBe(655);
+    expect(payload.oneTimeBreakdown.total).toBe(556);
   });
 
   test('classifies fallback-saved native roach initial by service key', async () => {
@@ -4081,7 +4070,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('data-first-visit-total>$115.20</strong>');
   });
 
-  test('server-rendered monthly service-tier setup invoice excludes first application from invoice total', () => {
+  test('server-rendered lawn pay-per-application invoice is the first application with no setup fee', () => {
     const html = renderPage('monthly-tier-token', {
       status: 'sent',
       customerName: 'Jane Customer',
@@ -4115,13 +4104,16 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
+    // Lawn carries no WaveGuard setup fee — the pay-per-application card shows the
+    // first application (billed after completion) with no setup line and no
+    // confusing "Invoice total" sum.
     expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total data-first-visit-amount="73.33">$73.33</strong></div>');
-    expect(html).toContain('<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="99">$99</strong></div>');
-    expect(html).toContain('Invoice includes WaveGuard setup ($99).');
-    expect(html).toContain('we open the $99 setup invoice');
-    expect(html).toContain('const invoiceFirstVisitTotal = STANDARD_INVOICE_HAS_FIRST_APPLICATION && firstVisitTotal > 0 ? firstVisitTotal : 0;');
-    expect(html).not.toContain('setup + first application ($172.33)');
-    expect(html).not.toContain('totaling $172.33');
+    expect(html).not.toContain('WaveGuard Membership Setup');
+    expect(html).not.toContain('<span>Invoice total</span>');
+    expect(html).not.toContain('Invoice includes WaveGuard setup');
+    expect(html).not.toContain('we open the $99 setup invoice');
+    // Prepay is still offered, now with a 5% discount: $660 → $627.
+    expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.05">$627');
   });
 
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
@@ -4176,18 +4168,23 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Weed, fungus, chinch, and turf-stress observations');
     expect(html).not.toContain('Treatment timing adjusted for Southwest Florida conditions');
     expect(html).not.toContain('Lawn notes carried forward for future visits');
-    expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
+    // Lawn carries no WaveGuard setup fee — no setup line, nothing to waive.
+    expect(html).not.toContain('WaveGuard Membership Setup');
+    expect(html).not.toContain('<strong><s>$99</s> $0</strong>');
     expect(html).toContain('Pay the 12-month plan in full');
-    expect(html).toContain('we send the annual invoice automatically after confirmation and waive the setup.');
+    // Prepay incentive is a 5% discount off the recurring annual, not a setup waiver.
+    expect(html).toContain('Choose the 12-month plan up front and save 5%; we send the annual invoice automatically after confirmation.');
+    expect(html).toContain('Prepay discount (5%)');
+    expect(html).toContain('Save 5%');
     expect(html).not.toContain('Net setup fee: $0');
-    expect(html).toContain('<strong><s>$99</s> $0</strong>');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
     expect(html).not.toContain('<strong>-$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
-    expect(html).toContain('data-prepay-membership-due="0">$660</strong>');
-    expect(html).toContain('data-prepay-copy-total data-prepay-membership-due="0">$660</span>');
+    // Annual plan total $660 → prepay invoice $627 (5% off the recurring annual).
+    expect(html).toContain('data-prepay-discount-rate="0.05">$627</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-discount-rate="0.05">$627</span>');
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
-    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 660;');
+    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 627;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
     expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be available for optional payment after confirmation.");
     expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
@@ -4509,9 +4506,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('185 linear ft');
     expect(html).toContain('Pick your first termite protection visit');
     expect(html).toContain('Choose how you want to pay');
-    expect(html).toContain('WaveGuard Membership Setup');
-    expect(html).toContain('<s>$99</s> $0');
-    expect(html).toContain('Setup waived');
+    // Termite carries no WaveGuard setup fee; prepay earns a 5% discount instead.
+    // The bait-station install stays a separate one-time charge, never discounted.
+    expect(html).not.toContain('WaveGuard Membership Setup');
+    expect(html).not.toContain('<s>$99</s> $0');
+    expect(html).toContain('Save 5%');
+    expect(html).toContain('Prepay discount (5%)');
     expect(html).toContain('One-time items (billed separately)');
     expect(html).toContain('Termite bait installation');
     expect(html).toContain('One-time total</strong></td><td style="text-align:right"><strong>$420</strong>');
@@ -5385,31 +5385,26 @@ describe('public estimate one-time breakdown', () => {
     })).toBe(209.61);
   });
 
-  test('annual prepay eligibility is limited to estimates that offer it', () => {
+  test('annual prepay eligibility covers every recurring service mix', () => {
+    // Under the unified model every recurring mix can prepay (pest/mosquito waive
+    // the setup, all others take the 5% discount).
     expect(isAnnualPrepayEligibleServiceMix([
       { name: 'Pest Control' },
     ], [])).toBe(true);
-
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'lawn_care', name: 'Lawn Care' },
-    ], [
-      { name: 'WaveGuard Membership Setup' },
-    ])).toBe(true);
-
-    expect(isAnnualPrepayEligibleServiceMix([
-      { service: 'lawn_care', name: 'Lawn Care' },
-    ], [
-      { service: 'waveguard_setup', name: 'WaveGuard setup' },
-    ])).toBe(true);
-
+    ], [])).toBe(true);
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'mosquito', name: 'Mosquito' },
-    ], [])).toBe(false);
-
+    ], [])).toBe(true);
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'tree_shrub', name: 'Tree & Shrub' },
       { service: 'palm_injection', name: 'Palm Injection' },
-    ], [])).toBe(false);
+    ], [])).toBe(true);
+    // One-time-only estimates (no recurring rows) remain ineligible.
+    expect(isAnnualPrepayEligibleServiceMix([], [
+      { service: 'one_time_pest', name: 'One-Time Pest' },
+    ])).toBe(false);
   });
 
   test('accept active guard rejects terminal and past-expiry estimates', () => {

@@ -96,7 +96,8 @@ describe('estimate converter annual prepay orchestration', () => {
     expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'customer-1',
       prepayInvoiceId: 'invoice-1',
-      prepayAmount: 660,
+      // Lawn-only mix → 5% annual-prepay discount: 660 → 627.
+      prepayAmount: 627,
     }));
     expect(invoiceService.voidInvoice).toHaveBeenCalledWith('invoice-1');
   });
