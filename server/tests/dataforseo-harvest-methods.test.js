@@ -33,4 +33,15 @@ describe('dataforseo harvest methods', () => {
     expect(calls[0].endpoint).toBe('/backlinks/bulk_spam_score/live');
     expect(calls[0].body[0].targets).toEqual(['a.com', 'b.com']);
   });
+
+  test('serpOrganic uses location_name for a place and location_coordinate for "lat,lng"', async () => {
+    await dataforseo.serpOrganic('pest control', 'Bradenton,Florida,United States');
+    expect(calls[0].body[0].location_name).toBe('Bradenton,Florida,United States');
+    expect(calls[0].body[0].location_coordinate).toBeUndefined();
+    await dataforseo.serpOrganic('pest control', '27.5743,-82.4276');
+    expect(calls[1].body[0].location_coordinate).toBe('27.5743,-82.4276,20'); // radius appended (lat,lng,radius)
+    expect(calls[1].body[0].location_name).toBeUndefined();
+    await dataforseo.serpOrganic('pest control', '27.5743,-82.4276,15'); // explicit radius preserved
+    expect(calls[2].body[0].location_coordinate).toBe('27.5743,-82.4276,15');
+  });
 });

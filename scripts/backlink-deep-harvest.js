@@ -32,6 +32,7 @@ const knex = require('knex');
 const { etDateString } = require('../server/utils/datetime-et');
 const dataforseo = require('../server/services/seo/dataforseo');
 const scorer = require('../server/services/seo/prospect-scorer');
+const discovery = require('../server/services/seo/competitor-discovery');
 const { DEFAULT_COMPETITOR_DOMAINS } = require('../server/services/seo/competitor-gap-miner')._internals;
 
 const HOME = 'https://wavespestcontrol.com/';
@@ -45,15 +46,34 @@ const TOPIC_KEYWORDS = {
 
 // ── args ─────────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const a = { mode: 'harvest', dryRun: false, limit: null, competitors: null, promoteMin: 50 };
+  const a = { mode: 'harvest', dryRun: false, limit: null, competitors: null, promoteMin: 50, discover: false, includeNational: false };
   for (const arg of argv.slice(2)) {
     if (arg === '--dry-run') a.dryRun = true;
+    else if (arg === '--discover') a.discover = true; // augment harvest competitors with SERP-discovered ones
+    else if (arg === '--include-national') a.includeNational = true; // also harvest national franchises (high-cost/low local yield)
     else if (arg.startsWith('--mode=')) a.mode = arg.split('=')[1];
     else if (arg.startsWith('--limit=')) a.limit = parseInt(arg.split('=')[1], 10) || null;
     else if (arg.startsWith('--promote-min=')) a.promoteMin = Number(arg.split('=')[1]) || 50;
     else if (arg.startsWith('--competitors=')) a.competitors = arg.split('=')[1].split(',').map((s) => s.trim()).filter(Boolean);
   }
   return a;
+}
+
+// Discover local competitors from the market SERPs (read-only). Returns the
+// ranked discovered list; logs a review table.
+async function runDiscovery() {
+  console.log(`\n[discover] scraping local SERPs (${discovery.MARKETS.map((m) => m.label).join(', ')}) × ${discovery.SERVICE_KEYWORDS.length} service keywords…`);
+  if (!dataforseo.configured) throw new Error('DATAFORSEO_LOGIN/PASSWORD not set');
+  const found = await discovery.discoverCompetitors();
+  const local = found.filter((c) => !c.national);
+  const national = found.filter((c) => c.national);
+  const row = (c) => console.log(`   ${String(c.appearances).padStart(3)}×  pos${String(c.bestPosition).padStart(3)}  ${c.domain.padEnd(34)} [${c.markets.length}mkt ${c.sources.join('/')}]`);
+  console.log(`[discover] ${found.length} competitor domains — ${local.length} LOCAL/regional, ${national.length} national franchises (excluding directories/gov/marketplaces/our own):\n`);
+  console.log(`  ── LOCAL / regional (harvested by default) ──`);
+  local.forEach(row);
+  console.log(`\n  ── NATIONAL franchises (harvested only with --include-national) ──`);
+  national.forEach(row);
+  return found;
 }
 
 function makeDb() {
@@ -91,7 +111,16 @@ async function resolveMoneyPages(topics) {
 
 // ── harvest ──────────────────────────────────────────────────────────────────
 async function harvest(db, args) {
-  const competitors = (args.competitors || DEFAULT_COMPETITOR_DOMAINS).map(normDomain).filter(Boolean);
+  let base = args.competitors || DEFAULT_COMPETITOR_DOMAINS;
+  if (args.discover) {
+    // Union the curated list with whoever ranks locally right now. National
+    // franchises are excluded unless --include-national (low local-partner yield).
+    const found = await runDiscovery();
+    const add = found.filter((c) => args.includeNational || !c.national).map((c) => c.domain);
+    console.log(`\n[harvest] adding ${add.length} discovered competitor(s)${args.includeNational ? ' (incl. national)' : ' (local only)'} to the ${base.length} curated`);
+    base = [...base, ...add];
+  }
+  const competitors = [...new Set(base.map(normDomain).filter(Boolean))];
   console.log(`\n[harvest] competitors (${competitors.length}): ${competitors.join(', ')}`);
   if (!dataforseo.configured) throw new Error('DATAFORSEO_LOGIN/PASSWORD not set');
 
@@ -130,9 +159,13 @@ async function harvest(db, args) {
     console.log(`  ${comp}: fetched ${fetched}/${total} referring domains, ${kept} new candidates${partial} (running unique: ${agg.size})`);
   }
 
-  let candidates = [...agg.values()].sort((x, y) => y.rank - x.rank);
-  console.log(`[harvest] ${candidates.length} unique candidate domains after exclude-existing`);
-  if (args.limit) { candidates = candidates.slice(0, args.limit); console.log(`[harvest] limited to ${candidates.length} for this run`); }
+  // OVERLAP-FIRST: a domain linking to MANY of our competitors is the strongest
+  // local-partner/hub signal (local directory, news, "preferred vendors" page),
+  // so prioritize it over raw DR — and make sure it survives --limit. DR breaks ties.
+  let candidates = [...agg.values()].sort((x, y) => (y.competitors.size - x.competitors.size) || (y.rank - x.rank));
+  const multi = candidates.filter((c) => c.competitors.size >= 2).length;
+  console.log(`[harvest] ${candidates.length} unique candidate domains after exclude-existing (${multi} link to ≥2 competitors — the local-hub signal)`);
+  if (args.limit) { candidates = candidates.slice(0, args.limit); console.log(`[harvest] limited to ${candidates.length} for this run (highest-overlap first)`); }
 
   // 2. bulk spam scores → drop spam/PBN
   const spam = new Map();
@@ -311,12 +344,18 @@ async function rescore(db, args) {
 // ── main ─────────────────────────────────────────────────────────────────────
 (async () => {
   const args = parseArgs(process.argv);
-  console.log(`backlink-deep-harvest mode=${args.mode} dryRun=${args.dryRun} limit=${args.limit ?? '∞'}`);
+  console.log(`backlink-deep-harvest mode=${args.mode} dryRun=${args.dryRun} limit=${args.limit ?? '∞'}${args.discover ? ' +discover' : ''}`);
+  // discover is SERP-only — no DB / no writes.
+  if (args.mode === 'discover') {
+    try { await runDiscovery(); }
+    catch (err) { console.error(`\n[deep-harvest] FAILED: ${err.stack || err.message}`); process.exitCode = 1; }
+    return;
+  }
   const db = makeDb();
   try {
     if (args.mode === 'harvest') await harvest(db, args);
     else if (args.mode === 'rescore') await rescore(db, args);
-    else throw new Error(`unknown --mode=${args.mode} (use harvest|rescore)`);
+    else throw new Error(`unknown --mode=${args.mode} (use harvest|rescore|discover)`);
   } catch (err) {
     console.error(`\n[deep-harvest] FAILED: ${err.stack || err.message}`);
     process.exitCode = 1;
