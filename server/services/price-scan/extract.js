@@ -347,6 +347,26 @@ function normalizeSizeLabel(label) {
   return String(label == null ? '' : label).replace(/(\d)\s*gms?\b/gi, '$1 gram');
 }
 
+// Some storefronts render each purchasable size as an option "card" whose text is
+// "<label> (<size>) $<price>" — e.g. "jug (2.5 gal) $299.98", "box (4 x 30g tubes) $26.98"
+// (DoMyOwn). Parse the parenthesized size + the price into the same {size, price,
+// availabilityRaw} shape pickVariantOffer consumes. A card flagged sold out -> OutOfStock.
+// Pure + unit-tested; the adapter only collects the raw card texts in the browser.
+function variantsFromOptionCards(texts) {
+  const out = [];
+  for (const raw of texts || []) {
+    const t = String(raw == null ? '' : raw);
+    const sizeM = t.match(/\(([^)]+)\)/);
+    const priceM = t.match(/\$\s*([\d,]+(?:\.\d+)?)/);
+    if (!sizeM || !priceM) continue;
+    const price = Number(priceM[1].replace(/,/g, ''));
+    if (!Number.isFinite(price) || price <= 0) continue;
+    const availabilityRaw = /out of stock|sold out|unavailable|backorder/i.test(t) ? 'OutOfStock' : null;
+    out.push({ size: sizeM[1].trim(), price, availabilityRaw });
+  }
+  return out;
+}
+
 // Pick the variant whose stated size matches the requested pack. These size-explicit
 // variants are AUTHORITATIVE (each price is tied to a size), so we match exactly and
 // never guess a different one. `variants`: [{ size, price, availabilityRaw? }]. Among
@@ -397,17 +417,24 @@ function pickVariantOffer(variants, opts = {}) {
 function offerFromSnapshot(snapshot = {}, opts = {}) {
   const jsonLd = snapshot.jsonLd || [];
 
+  // Size-explicit variants come either from a structured config (Magento jsonConfig ->
+  // snapshot.variants) or from option-card text (DoMyOwn -> snapshot.optionCardTexts).
+  const variants = (Array.isArray(snapshot.variants) && snapshot.variants.length)
+    ? snapshot.variants
+    : variantsFromOptionCards(snapshot.optionCardTexts);
+
   // Variant-explicit offers win on a size-specific scan: a multi-variant page whose
   // JSON-LD/title omit the size is no longer abandoned. If no variant matches our size we
   // fall THROUGH to the (conservative) JSON-LD/DOM path rather than returning null, so a
   // flaky/empty variant scrape can't suppress a legitimate single-offer match.
-  if (opts.targetOz && opts.targetOz > 0 && Array.isArray(snapshot.variants) && snapshot.variants.length) {
-    const variant = pickVariantOffer(snapshot.variants, opts);
+  if (opts.targetOz && opts.targetOz > 0 && variants.length) {
+    const variant = pickVariantOffer(variants, opts);
     if (variant) {
       variant.name = (typeof snapshot.title === 'string' && snapshot.title) || null;
       // Do NOT promote page-level availabilityText onto a variant: on a multi-variant page
       // that text is the default selection's stock, not the matched child's. Per-child
-      // availability already came from the jsonConfig salable map (collectSnapshot).
+      // availability already came from the variant source (jsonConfig salable map, or the
+      // option card's own sold-out text).
       return variant;
     }
   }
@@ -611,6 +638,7 @@ module.exports = {
   extractJsonLdOffer,
   extractDomPrice,
   pickVariantOffer,
+  variantsFromOptionCards,
   normalizeSizeLabel,
   offerFromSnapshot,
   extractSizeToken,

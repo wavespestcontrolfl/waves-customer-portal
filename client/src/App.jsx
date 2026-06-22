@@ -100,6 +100,8 @@ import AdminLoginPage from './pages/AdminLoginPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
+import BiometricGate from './components/BiometricGate';
+import { isNativeApp } from './native/platform';
 import AdminReviewsPage from './pages/admin/ReviewsPage';
 import AdminDispatchPage from './pages/admin/AdminDispatchPage';
 import AdminInventoryPage from './pages/admin/InventoryPage';
@@ -277,6 +279,7 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <InstallPrompt />
+        <BiometricGate>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
@@ -301,14 +304,14 @@ export default function App() {
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
-          <Route path="/admin/login" element={<AdminLoginPage />} />
-          <Route path="/tech" element={<TechLayout />}>
+          <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
+          <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
             <Route index element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading...</div>}><TechHomePage /></Suspense>} />
             <Route path="estimate" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><TechEstimatorPage /></Suspense>} />
             <Route path="protocols" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading protocols...</div>}><TechProtocolsPage /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn diagnostic...</div>}><TechLawnDiagnosticPage /></Suspense>} />
           </Route>
-          <Route path="/admin" element={<PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
+          <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
             <Route path="dashboard" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dashboard...</div>}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<AdminCustomersPage />} />
@@ -386,6 +389,7 @@ export default function App() {
             }
           />
         </Routes>
+        </BiometricGate>
       </BrowserRouter>
     </AuthProvider>
   );

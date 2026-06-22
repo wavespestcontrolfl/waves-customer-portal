@@ -33,6 +33,8 @@ import {
   DialogFooter,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
+import PayerDetailSheet from "./PayerDetailSheet";
+import PayerArAgingDialog from "./PayerArAgingDialog";
 
 const TERMS = [
   { value: "due_on_receipt", label: "Due on receipt" },
@@ -70,6 +72,8 @@ export default function PayersPage() {
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [detailPayer, setDetailPayer] = useState(null); // open the statements/AR sheet
+  const [arOpen, setArOpen] = useState(false); // cross-payer AR aging dialog
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -105,6 +109,25 @@ export default function PayersPage() {
   }
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // Open a payer's statements/AR sheet from the AR worklist (which only has an
+  // id). Use the loaded row if present; otherwise fetch it (it may be filtered
+  // out of the current list, e.g. inactive).
+  async function openDetailById(id) {
+    setArOpen(false);
+    const found = payers.find((p) => p.id === id);
+    if (found) {
+      setDetailPayer(found);
+      return;
+    }
+    try {
+      const r = await adminFetch(`/admin/payers/${id}`);
+      const d = await r.json();
+      if (d?.payer) setDetailPayer(d.payer);
+    } catch {
+      /* ignore — sheet just won't open */
+    }
+  }
 
   async function save() {
     if (!form.display_name.trim()) {
@@ -144,7 +167,12 @@ export default function PayersPage() {
             that invoice to them.
           </p>
         </div>
-        <Button onClick={openNew}>New payer</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" onClick={() => setArOpen(true)}>
+            AR aging
+          </Button>
+          <Button onClick={openNew}>New payer</Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-3 mb-3 flex-wrap">
@@ -194,9 +222,13 @@ export default function PayersPage() {
                 payers.map((p) => (
                   <TR key={p.id}>
                     <TD>
-                      <div className="font-medium text-zinc-900">
+                      <button
+                        type="button"
+                        onClick={() => setDetailPayer(p)}
+                        className="font-medium text-zinc-900 hover:underline text-left"
+                      >
                         {p.display_name}
-                      </div>
+                      </button>
                       {p.company_name && p.company_name !== p.display_name && (
                         <div className="text-12 text-zinc-500">
                           {p.company_name}
@@ -318,8 +350,9 @@ export default function PayersPage() {
             </div>
             {form.payment_terms !== "due_on_receipt" && (
               <p className="text-12 text-zinc-500">
-                Net terms (consolidated monthly statements) are coming in Phase
-                2. For now every payer is invoiced per visit.
+                Net terms consolidate this payer&rsquo;s visits onto a monthly
+                statement billed to the AP inbox. Open the payer to close, send,
+                reconcile, and track AR on its statements.
               </p>
             )}
             <div className="flex flex-col gap-2 pt-1">
@@ -366,6 +399,21 @@ export default function PayersPage() {
             </Button>
           </DialogFooter>
         </Dialog>
+      )}
+
+      {detailPayer && (
+        <PayerDetailSheet
+          payer={detailPayer}
+          onClose={() => setDetailPayer(null)}
+          onChanged={load}
+        />
+      )}
+
+      {arOpen && (
+        <PayerArAgingDialog
+          onClose={() => setArOpen(false)}
+          onSelectPayer={openDetailById}
+        />
       )}
     </div>
   );

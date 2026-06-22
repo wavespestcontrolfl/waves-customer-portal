@@ -144,6 +144,10 @@ class ApiClient {
     });
   }
 
+  deleteAccount() {
+    return this.request('/auth/account', { method: 'DELETE' });
+  }
+
   // ---- Services ----
   getServices(params = {}) {
     const query = new URLSearchParams(params).toString();

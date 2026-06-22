@@ -6,6 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   convertInventoryQuantity,
@@ -1071,8 +1072,9 @@ router.put('/vendors/:id', async (req, res, next) => {
     const upd = { updated_at: new Date() };
     const body = req.body;
 
-    // Map camelCase to snake_case
-    const keyMap = { loginUsername: 'login_username', loginEmail: 'login_email', loginPassword: 'login_password_encrypted',
+    // Map camelCase to snake_case. loginPassword is handled SEPARATELY below (encrypted) —
+    // it must never be written to the DB in plaintext, so it's intentionally absent here.
+    const keyMap = { loginUsername: 'login_username', loginEmail: 'login_email',
       accountNumber: 'account_number', loginUrl: 'login_url', scrapingEnabled: 'price_scraping_enabled',
       scrapingPriority: 'scraping_priority', scrapeSchedule: 'scrape_schedule',
       syncMethod: 'sync_method', credentialStatus: 'credential_status',
@@ -1084,6 +1086,19 @@ router.put('/vendors/:id', async (req, res, next) => {
     }
     for (const key of ['notes', 'website', 'active']) {
       if (body[key] !== undefined) upd[key] = body[key];
+    }
+
+    // Encrypt the password at rest (PGP-armored), or clear it — never store plaintext. A
+    // BLANK loginPassword means "unchanged" (the form always submits it), so clearing the
+    // saved credential requires the explicit clearLoginPassword flag.
+    const pwAction = passwordWriteAction(body.loginPassword, !!vendorCredentialKey(), body.clearLoginPassword === true);
+    if (pwAction === 'clear') upd.login_password_encrypted = null;
+    else if (pwAction === 'encrypt') upd.login_password_encrypted = encryptedPasswordRaw(db, body.loginPassword);
+    else if (pwAction === 'reject') {
+      return res.status(500).json({
+        error: 'credential_key_missing',
+        message: 'Cannot store a vendor password: set VENDOR_CREDENTIAL_KEY (or DATA_HYGIENE_VAULT_KEY) so it can be encrypted at rest.',
+      });
     }
 
     await db('vendors').where({ id: req.params.id }).update(upd);

@@ -17,6 +17,8 @@ import {
   setupIntentIncompleteMessage,
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
+import { isNativeApp } from '../native/platform';
+import { captureCameraPhoto } from '../native/camera';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -9742,6 +9744,20 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     e.target.value = '';
   };
 
+  // Native iOS shell: use the Capacitor camera/photo picker instead of the
+  // <input type="file"> (more reliable inside a WKWebView). If the Camera plugin
+  // isn't in this build (older binary loading newer web code), fall back to the
+  // file input so the photo tile never silently does nothing. User cancel = no-op.
+  const handleNativePhoto = async () => {
+    if (photosRemaining <= 0) return;
+    const result = await captureCameraPhoto();
+    if (result.photo) {
+      setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
+    } else if (result.unavailable) {
+      fileRef.current?.click();
+    }
+  };
+
   const removePhoto = (idx) => {
     setPhotos(prev => prev.filter((_, i) => i !== idx));
   };
@@ -10168,7 +10184,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   {photosRemaining > 0 && (
                     <button
                       type="button"
-                      onClick={() => fileRef.current?.click()}
+                      onClick={isNativeApp() ? handleNativePhoto : () => fileRef.current?.click()}
                       style={{
                         minHeight: 92,
                         borderRadius: 8,
@@ -11367,6 +11383,47 @@ export default function PortalPage() {
                       <Icon name="door" size={16} strokeWidth={2} />
                     </span>
                     <span style={{ fontSize: 14, fontWeight: 850 }}>Sign Out</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!window.confirm('Delete your Waves account? This permanently removes your access to the app and your portal account. For questions about active service or billing, please contact us first — this can’t be undone from the app.')) return;
+                      try {
+                        await api.deleteAccount();
+                        logout();
+                        setShowMenu(false);
+                      } catch (e) {
+                        window.alert('Sorry — we couldn’t delete your account just now. Please try again or contact support.');
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '11px 8px',
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      color: PORTAL_SHELL.muted,
+                      fontFamily: FONTS.body,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span style={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: 8,
+                      background: `${PORTAL_SHELL.muted}14`,
+                      color: PORTAL_SHELL.muted,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}>
+                      <Icon name="warning" size={16} strokeWidth={2} />
+                    </span>
+                    <span style={{ fontSize: 14, fontWeight: 850 }}>Delete Account</span>
                   </button>
                 </div>
               </div>

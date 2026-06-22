@@ -452,4 +452,50 @@ router.post('/select-property', authenticate, async (req, res, next) => {
   }
 });
 
+// =========================================================================
+// DELETE /api/auth/account — customer self-service account deletion
+// (Apple App Store Guideline 5.1.1(v) requires in-app account deletion.)
+//
+// Soft-deletes every property profile under the account via the existing
+// `deleted_at` column — which the login (activeCustomerByPhone), token auth
+// (middleware/auth), and property queries already exclude — so the customer
+// immediately loses all access. Billing/service records are retained for the
+// owner's offboarding (financial/legal retention); the hard purge is a separate
+// admin step governed by Waves' retention policy.
+// =========================================================================
+router.delete('/account', authenticate, async (req, res, next) => {
+  try {
+    const customerId = req.customerId;
+    const accountId = req.accountId || accountIdForCustomer(req.customer);
+
+    const query = db('customers').whereNull('deleted_at');
+    if (accountId) {
+      query.where(function () {
+        this.where('account_id', accountId).orWhere('id', customerId);
+      });
+    } else {
+      query.where('id', customerId);
+    }
+    const deletedProfiles = await query.update({ deleted_at: db.fn.now() });
+
+    logger.warn(`[auth] account self-deletion: customer=${customerId} account=${accountId} profiles=${deletedProfiles}`);
+
+    // Best-effort owner notification — never block the deletion on it.
+    try {
+      const PushService = require('../services/push-notifications');
+      await PushService.sendToAdmins({
+        title: 'Customer deleted their account',
+        body: `An account self-deleted ${deletedProfiles} profile(s) from the app. Review billing/offboarding.`,
+        url: '/admin/customers',
+      });
+    } catch (notifyErr) {
+      logger.warn(`[auth] admin notify (account deletion) failed: ${notifyErr.message}`);
+    }
+
+    res.json({ success: true, deletedProfiles });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
