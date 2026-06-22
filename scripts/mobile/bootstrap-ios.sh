@@ -64,7 +64,11 @@ if [ -f "$PLIST" ]; then
   set_plist NSFaceIDUsageDescription "Unlock the Waves app with Face ID."
   set_plist NSCameraUsageDescription "Take photos of pests or lawn issues to share with your technician."
   set_plist NSPhotoLibraryUsageDescription "Attach photos from your library to share with your technician."
-  echo "==> Info.plist usage strings set (Face ID, camera, photo library) ✓"
+  # Required too: Capacitor Camera's getPhoto can reject up front if any usage
+  # key it expects is missing (incl. the photo-library ADD key), which camera.js
+  # would otherwise see as a cancel — so set all of them.
+  set_plist NSPhotoLibraryAddUsageDescription "Save photos you attach for your technician."
+  echo "==> Info.plist usage strings set (Face ID, camera, photo library R/W) ✓"
 fi
 
 echo
