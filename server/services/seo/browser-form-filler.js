@@ -88,8 +88,13 @@ function isGloballyRoutable(ip) {
     if (ssrf.isPrivateIp(ip)) return false; // ::1, ::, fc/fd (ULA), fe80::/10 (link-local), v4-mapped private
     const h = ip.toLowerCase();
     if (h.startsWith('ff')) return false;                              // ff00::/8 multicast
-    if (h.startsWith('2001:db8')) return false;                        // 2001:db8::/32 documentation
-    if (h.startsWith('2001:0db8')) return false;
+    // IPv4-translation / tunneling prefixes EMBED an IPv4 in the v6 address — a hostile
+    // AAAA like 64:ff9b::a9fe:a9fe (169.254.169.254) would otherwise pass and pin Chromium
+    // at internal/metadata IPv4 in a NAT64/6to4-routed env. Reject them outright.
+    if (h.startsWith('64:ff9b:') || h === '64:ff9b::' || h.startsWith('64:ff9b::')) return false; // NAT64 (RFC6052/8215)
+    if (h.startsWith('2002:')) return false;                           // 6to4 (RFC3056)
+    if (h.startsWith('2001:0:') || h.startsWith('2001:0000:')) return false; // Teredo (RFC4380)
+    if (h.startsWith('2001:db8') || h.startsWith('2001:0db8')) return false; // 2001:db8::/32 documentation
     if (h === '::1' || h === '::') return false;
     return true;
   }
@@ -358,7 +363,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       await page.waitForTimeout(1500);
       shot2 = await page.screenshot({ fullPage: true, type: 'png' });
       verify = await callVision(client, shot2.toString('base64'),
-        'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection (validation error, "required field", a login/CAPTCHA/payment wall, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}');
+        'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection OR a next-step gate that wasn\'t completed (validation error, "required field", a login/CAPTCHA/payment wall, a phone/SMS verification step, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}');
     } catch (e) {
       logger.warn(`[form-filler] post-submit verification failed for ${expectedHost}: ${e.message}`);
     }
@@ -367,8 +372,11 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // URL. Keep the model's claimed URL only as a non-fetched, on-host evidence note.
     const claimedLive = verify && typeof verify.live_url === 'string' && /^https?:\/\//.test(verify.live_url) ? verify.live_url : null;
     const onHostClaim = claimedLive && hostMatchesExpected(hostOf(claimedLive), expectedHost) ? claimedLive : null;
-    const confirmed = !!(verify && (verify.success || verify.pending));
-    const rejected = !confirmed && !!(verify && verify.rejected);
+    // STRICT booleans only — the verifier output is LLM/page-influenced, so a string
+    // "false"/"true" must NOT be truthy-coerced into a confirmation. Anything that isn't
+    // exactly `true` is treated as not-that-state (→ falls through to the evidence path).
+    const confirmed = !!verify && (verify.success === true || verify.pending === true);
+    const rejected = !confirmed && !!verify && verify.rejected === true;
     const placed = (msg) => ({ outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2 || shot1, notes: [(verify && verify.notes) || msg, onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200) });
 
     // EVIDENCE-based outcome (not "a click happened"). placed (no-retry → no dup) ONLY

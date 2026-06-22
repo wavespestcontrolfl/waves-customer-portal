@@ -134,6 +134,19 @@ describe('fillCitationForm', () => {
     expect(r.errorCode).toBe('submit_blocked');
   });
 
+  test('P2: a STRING "true" from the verifier is NOT treated as confirmed (strict booleans only)', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([]), // no submit request dispatched
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: 'true', pending: 'false', rejected: 'false', live_url: null }, // strings, not booleans
+      ),
+    }));
+    // "true" !== true → not confirmed, and nothing reached the host → must NOT be placed
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('no_submit_evidence');
+  });
+
   test('P2: a clear post-submit REJECTION page → submit_rejected, not placed (verifier won’t poll a phantom)', async () => {
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://x.com/submit' } }),
@@ -424,6 +437,12 @@ describe('resolvePublicIps (DNS pin source, fail-closed)', () => {
     expect(await resolvePublicIps('224.0.0.1')).toEqual([]);    // multicast
     expect(await resolvePublicIps('240.0.0.1')).toEqual([]);    // reserved
     expect(await resolvePublicIps('1.1.1.1')).toEqual(['1.1.1.1']); // genuinely global → kept
+  });
+  test('P1: rejects IPv4-translating/tunneling IPv6 prefixes (NAT64/6to4/Teredo embed an IPv4)', async () => {
+    expect(await resolvePublicIps('64:ff9b::a9fe:a9fe')).toEqual([]);   // NAT64 embedding 169.254.169.254
+    expect(await resolvePublicIps('2002:c0a8:0101::')).toEqual([]);     // 6to4 embedding 192.168.1.1
+    expect(await resolvePublicIps('2001:0:abcd::')).toEqual([]);        // Teredo
+    expect(await resolvePublicIps('2606:4700:4700::1111')).toEqual(['2606:4700:4700::1111']); // genuine global IPv6 → kept
   });
   test('empty host → []', async () => {
     expect(await resolvePublicIps('')).toEqual([]);
