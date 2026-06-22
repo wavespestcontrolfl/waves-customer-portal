@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken } from '../native/platform';
 import { authenticateBiometric } from '../native/biometric';
 
@@ -17,6 +17,8 @@ import { authenticateBiometric } from '../native/biometric';
 export default function BiometricGate({ children }) {
   const [locked, setLocked] = useState(() => isNativeApp() && hasSessionToken());
   const [checking, setChecking] = useState(false);
+  const contentRef = useRef(null);
+  const unlockBtnRef = useRef(null);
 
   const attempt = useCallback(async () => {
     if (!isNativeApp() || !hasSessionToken()) { setLocked(false); return; }
@@ -45,10 +47,30 @@ export default function BiometricGate({ children }) {
     return () => { try { listener?.remove?.(); } catch { /* noop */ } };
   }, [attempt]);
 
+  // While locked, fully gate the still-mounted content — not just visually. Mark
+  // it `inert` (blocks pointer/keyboard/focus + hides from AT) and move focus to
+  // the unlock control, so VoiceOver / hardware keyboard / a pre-background focus
+  // can't reach account content behind the overlay.
+  useEffect(() => {
+    const el = contentRef.current;
+    if (el) {
+      try { el.inert = locked; } catch { /* very old webview without inert */ }
+    }
+    if (locked) {
+      const id = setTimeout(() => { try { unlockBtnRef.current?.focus(); } catch { /* noop */ } }, 0);
+      return () => clearTimeout(id);
+    }
+    return undefined;
+  }, [locked]);
+
   // Children stay mounted (route state preserved); the lock is an overlay on top.
+  // The container is made inert while locked (see effect above) so the hidden
+  // content is non-interactive and invisible to assistive tech, not just covered.
   return (
     <>
-      {children}
+      <div ref={contentRef} aria-hidden={locked ? true : undefined}>
+        {children}
+      </div>
       {locked && (
         <div style={{
           position: 'fixed', inset: 0, background: '#0f1923', color: '#e2e8f0',
@@ -67,6 +89,7 @@ export default function BiometricGate({ children }) {
           </div>
           <button
             type="button"
+            ref={unlockBtnRef}
             onClick={attempt}
             disabled={checking}
             style={{
