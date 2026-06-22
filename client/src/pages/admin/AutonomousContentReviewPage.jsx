@@ -233,7 +233,9 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     try {
       const next = await adminFetch(`/admin/content/autonomous/review/${selectedId}/decision`, {
         method: "POST",
-        body: { decision, note: reviewNote },
+        // Bind the decision to the run currently displayed — the server rejects
+        // it if a requeue/re-run replaced it since this view loaded.
+        body: { decision, note: reviewNote, run_id: selected?.run?.id || null },
       });
       setDetail(next.item);
       setReviewNote("");

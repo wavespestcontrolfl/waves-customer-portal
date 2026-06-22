@@ -400,4 +400,31 @@ describe('comparison-table-gate', () => {
     const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
   });
+
+  // ── Round-9 findings ──
+
+  test('R9-B1: a short/numeric uncurated competitor fact ("24/7") is rejected', () => {
+    expect(gate.claimSupported('24/7', ['National (US)'])).toBe(false);
+    expect(gate.claimSupported('24/7', ['24/7 phone support'])).toBe(true); // curated → ok
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","DIY"]}
+      rows={[{ label: "Availability", values: ["24/7","No"] }]}
+      caption="Attributes as of June 2026, per company website." />`;
+    expect(gate.evaluate({ body: t }, { namedCompetitorEnabled: true })
+      .findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
+  });
+
+  test('R9-B3: an allowlisted competitor named in a CELL (not the header) is flagged', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","National chain","DIY"]}
+      rows={[{ label: "Example", values: ["Orkin offers same-day service","No"] }]}
+      caption="As of June 2026, per company website." />`;
+    expect(gate.evaluate({ body: t }, { namedCompetitorEnabled: true })
+      .findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /cell\/row/.test(f.message))).toBe(true);
+  });
+
+  test('R9-B5: a business with a less-common suffix ("HomeTeam Pest Defense") is recognized', () => {
+    const r = gate.evaluate({ body: `Compared with HomeTeam Pest Defense in Venice.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /HomeTeam Pest Defense/.test(f.message))).toBe(true);
+  });
 });

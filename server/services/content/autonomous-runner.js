@@ -2283,9 +2283,15 @@ class AutonomousRunner {
     // Final opportunity state. PR-open MUST land at pending_review +
     // astro_pr_pending_merge (the exact state the PR poller reconciles); if the
     // update fails, retry that minimal state once so the PR isn't orphaned (A6).
+    // Keep the opportunity's skip_reason in lockstep with the run's so the queue
+    // never shows a phantom PR-pending item the poller will never reconcile: a
+    // PR-open → astro_pr_pending_merge; a no-PR/no-live result (e.g. a refresh
+    // 'no_changes') → publisher_no_live_url (actionable in review, not pollable).
     const oppFinal = published
       ? { status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() }
-      : { status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() };
+      : patch.astro_pr_url
+        ? { status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() }
+        : { status: 'pending_review', skip_reason: 'publisher_no_live_url', updated_at: new Date() };
     try {
       await db('opportunity_queue').where({ id: opportunityId }).update(oppFinal);
     } catch (err) {

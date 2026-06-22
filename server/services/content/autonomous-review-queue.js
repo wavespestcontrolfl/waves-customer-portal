@@ -78,7 +78,7 @@ async function getReviewItem(opportunityId) {
   return buildReviewItem({ opportunity, brief, run, includeDraftBody: true });
 }
 
-async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}) {
+async function decideReviewItem(opportunityId, { decision, note, reviewer, expectedRunId = null } = {}) {
   const normalizedDecision = normalizeDecision(decision);
   const reviewerName = normalizeReviewer(reviewer);
   const cleanNote = normalizeNote(note);
@@ -95,6 +95,16 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}
     .where('opportunity_id', opportunityId)
     .orderBy('claimed_at', 'desc')
     .first();
+
+  // Bind the decision to the run the operator was looking at. If a requeue / re-run
+  // replaced it since the detail view loaded, reject so a stale view can't
+  // approve-and-publish a draft the operator never reviewed.
+  if (expectedRunId && run && run.id !== expectedRunId) {
+    const err = new Error('This item changed since you opened it (a newer run replaced the reviewed one); refresh and review again');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
 
   if (normalizedDecision === 'approve_trust_build') {
     assertTrustBuildRun(run);

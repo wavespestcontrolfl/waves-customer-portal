@@ -94,7 +94,11 @@ const RANKING_RE = new RegExp([
 // Control" is a business-name pattern, not a generic phrase, so a location lead
 // + industry suffix in prose/title must still be flagged for review.
 const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year';
-const PROVIDER_NAME_SRC = `\\b((?!(?:${GENERIC_LEAD_EXCLUSIONS})\\b)[A-Z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:Pest Control|Pest Management|Pest Solutions?|Pest Services?|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest))\\b`;
+// Broad pest-industry suffix set so business names with less-common suffixes
+// (e.g. "HomeTeam Pest Defense", "Gulf Coast Termite Specialists") are still
+// recognized — a proper-noun lead + any of these.
+const INDUSTRY_SUFFIX_SRC = '(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+(?:Control|Management|Solutions?|Services?|Defen[sc]e|Prevention|Elimination|Experts?|Pros?|Patrol|Squad|Busters?|Brigade|Specialists?|Defenders?)|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest';
+const PROVIDER_NAME_SRC = `\\b((?!(?:${GENERIC_LEAD_EXCLUSIONS})\\b)[A-Z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`;
 function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
 
 // A legal-entity-marked business name ("Bob's Bugs LLC", "Acme Exterminators Inc")
@@ -105,7 +109,7 @@ function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
 const LEGAL_ENTITY_NAME_SRC = `\\b([A-Z][A-Za-z0-9&'.\\-]*(?:\\s+[A-Za-z0-9&'.\\-]+){0,3}\\s+(?:LLC|L\\.L\\.C\\.|Inc\\.?|Incorporated|Corp\\.?|Co\\.|Bros\\.?|Brothers|& Sons?))\\b`;
 function legalEntityRe(flags) { return new RegExp(LEGAL_ENTITY_NAME_SRC, flags); }
 
-const INDUSTRY_SUFFIX_RE = /\b(pest (?:control|management|solutions?|services?)|exterminat(?:or|ors|ing)|termite (?:&|and) pest|environmental(?: pest)?|lawn (?:&|and) pest)\b/i;
+const INDUSTRY_SUFFIX_RE = new RegExp(`\\b(${INDUSTRY_SUFFIX_SRC})\\b`, 'i');
 const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/;
 const CATEGORY_OPTION_RE = /\b(national|nationwide|chains?|franchises?|big[\s-]?box|corporate|regional|local(?:ly)?|independent|small(?:er)?|diy|do[\s-]it[\s-]yourself|self[\s-]?treat\w*|home(?:owner)?|store[\s-]bought|over[\s-]the[\s-]counter|professionals?|pros?|quarterly|monthly|annual|seasonal|one[\s-]?time|one[\s-]?off|recurring|reactive|preventive|preventative|on[\s-]demand|subscription|plans?|programs?|packages?|services?|options?|untreated|no treatment|ignoring it|what (?:to|you))\b/i;
 const OWN_BRAND_RE = /\bwaves\b/i;
@@ -215,7 +219,13 @@ function claimSupported(text, attrValues) {
     return attrValues.some((av) => normalize(av) === nt);
   }
   const words = nt.split(' ').filter((w) => w.length > 3);
-  if (!words.length) return true; // only short / stop words — not a factual claim
+  if (!words.length) {
+    // A value made only of short / numeric tokens ("24/7", "A+ rating" → "a
+    // rating") is still a factual CLAIM (trivial yes/no marks are filtered by
+    // the caller), so require it to appear verbatim in a curated attribute —
+    // never auto-pass for lack of long words.
+    return attrValues.some((av) => { const na = normalize(av); return na && na.includes(nt); });
+  }
   for (const av of attrValues) {
     const na = normalize(av);
     if (!na) continue;
@@ -342,6 +352,14 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
         unclassified.add(opt.trim());
       }
     });
+    // An allowlisted competitor named inside a row LABEL or CELL (not as an
+    // option header) carries an unvalidated claim ("Orkin offers same-day
+    // service") the per-column validator never checks — flag it. Only the
+    // column header may name a competitor.
+    const cellText = rows.flatMap((r) => [r.label, ...(r.values || [])]).filter(Boolean).join(' \n ');
+    for (const m of competitorFacts.findBusinessMentions(cellText)) {
+      if (m.inAllowlist) unsupportedFacts.add(`${m.name} — named in a table cell/row (only the column header may name a competitor)`);
+    }
     // Known competitors named in the block text (not just headers).
     for (const m of competitorFacts.findBusinessMentions(block)) {
       if (m.inAllowlist) blockKnown.add(m.name);
