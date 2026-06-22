@@ -4106,14 +4106,54 @@ describe('public estimate one-time breakdown', () => {
 
     // Lawn carries no WaveGuard setup fee — the pay-per-application card shows the
     // first application (billed after completion) with no setup line and no
-    // confusing "Invoice total" sum.
-    expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total data-first-visit-amount="73.33">$73.33</strong></div>');
+    // confusing "Invoice total" sum. The visit row is qualified "billed after
+    // completion" so it never reads as an unsummed line above a total.
+    expect(html).toContain('<div class="payment-summary-row"><span>First service visit <span class="summary-row-note">billed after completion</span></span><strong data-first-visit-total data-first-visit-amount="73.33">$73.33</strong></div>');
     expect(html).not.toContain('WaveGuard Membership Setup');
     expect(html).not.toContain('<span>Invoice total</span>');
     expect(html).not.toContain('Invoice includes WaveGuard setup');
     expect(html).not.toContain('we open the $99 setup invoice');
     // Prepay is still offered, now with a 5% discount: $660 → $627.
     expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.05">$627');
+  });
+
+  test('monthly-billed pest tier: $99 setup, first visit billed-after, no contradictory Invoice total', () => {
+    // The first visit is billed on the monthly plan (not upfront), so it must NOT
+    // read as an unsummed line above an "Invoice total $99" that excludes it — the
+    // exact confusion a prospect flagged.
+    const html = renderPage('pest-monthly-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 55,
+      annualTotal: 660,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      pricingFrequencies: [{
+        key: 'monthly',
+        label: 'Monthly',
+        monthly: 55,
+        annual: 660,
+        perTreatment: 62.67,
+        visitsPerYear: 12,
+        billingFrequencyKey: 'monthly',
+        selected: true,
+      }],
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 55, perTreatment: 62.67, visitsPerYear: 12 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pestTiers: [{ label: 'Monthly', mo: 55, ann: 660, pa: 62.67, apps: 12 }] },
+      },
+    });
+
+    // Pest still carries the $99 setup.
+    expect(html).toContain('<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>$99</strong></div>');
+    // First-visit row is qualified "billed after completion" (billed on the plan, not now).
+    expect(html).toContain('<span>First service visit <span class="summary-row-note">billed after completion</span></span>');
+    // No "Invoice total" row that would contradict by excluding the visit price.
+    expect(html).not.toContain('<span>Invoice total</span>');
   });
 
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
