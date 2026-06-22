@@ -4190,6 +4190,10 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('your lawn care estimate');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
+    // High-level "how we measured" context + the "we'll re-run it" trust callout.
+    expect(html).toContain('cross-referenced to pin down your treatable lawn area');
+    expect(html).toContain('Built to match your real lawn');
+    expect(html).toContain('re-run it so your plan always reflects your actual turf');
     expect(html).toContain('Grass type');
     expect(html).toContain('St. Augustine');
     expect(html).toContain('Choose how you want to pay');

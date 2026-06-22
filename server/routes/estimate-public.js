@@ -2489,7 +2489,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
           : 'Waves AI reviewed your property before pricing this estimate')));
   const intelligenceBody = isLawnOnly
     ? (satelliteUrl || metrics.length
-      ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
+      ? 'This isn’t a rough guess. We pull your parcel from county property records — lot dimensions, building footprint, and paved surfaces — then run a computer-vision analysis of high-resolution aerial imagery that identifies your turf and separates out the house, driveway, landscape beds, pool, and hardscape. Those two independent measurements are cross-referenced to pin down your treatable lawn area — the exact figure your plan is priced on, so you only pay for the grass we actually treat.'
       : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your lawn care plan.')
     : (isTreeShrubOnly
       ? (satelliteUrl || metrics.length
@@ -3590,6 +3590,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ${intelligence.metrics.length ? `<div class="ai-grid">
       ${intelligence.metrics.map((m) => `<div class="ai-metric"><div class="ai-metric-label">${escapeHtml(m.label)}</div><div class="ai-metric-val">${escapeHtml(m.value)}</div></div>`).join('')}
     </div>` : ''}${showYourWorkHtml}
+    ${hasOnlyLawnCareServices && intelligence.metrics.length ? `<div class="ai-measure-note">
+      <div class="ai-measure-note-title">Built to match your real lawn</div>
+      <p>Every measurement is cross-checked against your property records for accuracy. If anything&rsquo;s changed recently &mdash; trees removed, beds expanded &mdash; just tell us and we&rsquo;ll re-run it so your plan always reflects your actual turf.</p>
+    </div>` : ''}
     ${intelligence.signals.length ? `<div class="intelligence-signals">
       ${intelligence.signals.map((signal) => `<div class="intelligence-signal">${escapeHtml(signal)}</div>`).join('')}
     </div>` : ''}
@@ -3756,6 +3760,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .intelligence-signals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px}
   @media(max-width:760px){.intelligence-header{display:grid}.intelligence-signals{grid-template-columns:1fr}}
   .intelligence-signal{border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;background:#fff;padding:10px 12px;color:#3F4A65;font-size:16px;line-height:1.45}
+  .ai-measure-note{margin-top:14px;background:#F8FCFE;border:1px solid #CFE7F5;border-left:4px solid #009CDE;border-radius:10px;padding:12px 14px}
+  .ai-measure-note-title{font-size:13px;font-weight:800;color:#065A8C;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+  .ai-measure-note p{margin:0;color:#3F4A65;font-size:14px;line-height:1.55}
   .wg-member-card{display:grid;gap:14px}
   .wg-member-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .wg-member-header h2{margin-bottom:0}
