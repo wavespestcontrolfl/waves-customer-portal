@@ -160,24 +160,38 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   // Fail-closed: if it doesn't resolve public, never launch.
   const ips = await resolveHostIps(expectedHost);
   if (!ips || !ips.length) return { outcome: 'failed', errorCode: 'host_not_public', notes: `${expectedHost} did not resolve to a public IP` };
-  const pinnedIp = ips[0];
+  // Prefer an IPv4 address; --host-resolver-rules requires an IPv6 replacement to be
+  // bracketed ([addr]) — an unbracketed v6 is ignored/misparsed, so Chromium would
+  // fall back to its own lookup and reopen the rebinding gap this pin closes.
+  const rawIp = ips.find((ip) => net.isIPv4(ip)) || ips[0];
+  const pinnedIp = net.isIPv6(rawIp) ? `[${rawIp}]` : rawIp;
   const hostResolverRules = `MAP ${expectedHost} ${pinnedIp},MAP www.${expectedHost} ${pinnedIp}`;
 
   let browser;
   try {
     browser = await launchBrowser({ hostResolverRules });
-    const context = await browser.newContext();
+    // serviceWorkers:'block' — context.route() does NOT intercept requests made from a
+    // Service Worker, so a registered SW would be an egress hole around the one-host
+    // guard. Block SWs so route() is the complete HTTP(S) boundary.
+    const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage();
-    // EGRESS LOCK: the browser may contact ONLY the pinned allowlisted host (apex/www).
-    // Every other request — off-host sub-resource, redirect, unpinned sub-domain — is
-    // aborted BEFORE it connects, so nothing unpinned is resolved and there is no
-    // off-host channel for a hostile page to exfiltrate through or pivot internally.
+    // EGRESS LOCK (HTTP/S): the browser may contact ONLY the pinned allowlisted host
+    // (apex/www). Every other request — off-host sub-resource, redirect, unpinned
+    // sub-domain — is aborted BEFORE it connects, so nothing unpinned is resolved and
+    // there is no off-host channel for a hostile page to exfiltrate through or pivot.
     if (typeof context.route === 'function') {
       await context.route('**/*', (route) => {
         let ok = false;
         try { ok = requestAllowed({ url: route.request().url(), expectedHost }); } catch { ok = false; }
         return ok ? route.continue() : route.abort();
       });
+    }
+    // EGRESS LOCK (WebSockets): route() doesn't cover WS, which would otherwise be an
+    // off-host exfiltration channel. Citation forms never need a socket, so close every
+    // WS connection the page tries to open.
+    if (typeof context.routeWebSocket === 'function') {
+      try { await context.routeWebSocket('**/*', (ws) => { try { ws.close(); } catch { /* noop */ } }); }
+      catch (e) { logger.warn(`[form-filler] routeWebSocket setup failed: ${e.message}`); }
     }
     await page.goto(submitUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
     // Off-host redirect guard: if the page navigated away from the allowlisted host,
@@ -208,12 +222,15 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // final 'submit' is sliced off and run separately. Non-vocab actions (click/upload)
     // aren't in ALLOWED_ACTIONS and are skipped (never submit early).
     for (const act of plan.actions.slice(0, -1)) {
-      if (!act || !ALLOWED_ACTIONS.has(act.action) || !act.selector) continue;
+      if (!act || !ALLOWED_ACTIONS.has(act.action) || act.action === 'submit') continue; // non-vocab (click/upload) or a stray submit → skip
+      // A vocab field action (fill/select/check) with NO selector can't be performed —
+      // fail closed (abort before submit) rather than silently skip and submit a
+      // partially-blank listing.
+      if (!act.selector) return { outcome: 'failed', errorCode: 'field_action_failed', screenshot: shot1, notes: `${act.action} action missing selector (not submitted)` };
       try {
         if (act.action === 'fill') await page.fill(act.selector, String(act.value ?? ''));
         else if (act.action === 'select') await page.selectOption(act.selector, String(act.value ?? ''));
         else if (act.action === 'check') await page.check(act.selector);
-        else continue; // 'submit' can't appear here (validated single + last)
         await page.waitForTimeout(250 + Math.random() * 500);
       } catch (e) {
         logger.warn(`[form-filler] pre-submit ${act.action} ${act.selector} failed: ${e.message}`);
@@ -232,10 +249,20 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit click failed (not submitted): ${e.message}` };
     }
 
-    await page.waitForTimeout(1500);
-    const shot2 = (await page.screenshot({ fullPage: true, type: 'png' }));
-    const verify = await callVision(client, shot2.toString('base64'),
-      'Did the previous business-listing submission SUCCEED? Look for a confirmation/thank-you, a moderation/"pending review" notice, or a created listing URL. Return ONLY JSON: {"success":bool,"pending":bool,"live_url":"url or null","notes":"≤15 words"}');
+    // Submit landed → from here ANY error still yields a PENDING placement, never a
+    // retryable failure (a retry could duplicate the listing). Verification is
+    // best-effort: if the wait/screenshot/model call throws, we still report pending
+    // rather than letting it fall to the outer catch (which would report failed).
+    let verify = null;
+    let shot2 = null;
+    try {
+      await page.waitForTimeout(1500);
+      shot2 = await page.screenshot({ fullPage: true, type: 'png' });
+      verify = await callVision(client, shot2.toString('base64'),
+        'Did the previous business-listing submission SUCCEED? Look for a confirmation/thank-you, a moderation/"pending review" notice, or a created listing URL. Return ONLY JSON: {"success":bool,"pending":bool,"live_url":"url or null","notes":"≤15 words"}');
+    } catch (e) {
+      logger.warn(`[form-filler] post-submit verification failed for ${expectedHost} (still reporting pending): ${e.message}`);
+    }
     // The submit WAS clicked → ALWAYS report a PENDING placement (never failed/retry,
     // even when the confirmation is unrecognized — a retry could duplicate a listing
     // that actually succeeded). We do NOT store a model-/page-supplied live_url: the

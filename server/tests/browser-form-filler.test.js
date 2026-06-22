@@ -2,7 +2,8 @@ const { fillCitationForm, _internals } = require('../services/seo/browser-form-f
 
 // Fake Playwright page/browser that records actions and serves canned screenshots.
 // failFillSel: a selector whose fill() throws, to exercise the fail-closed pre-submit path.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null } = {}) {
+// ctxOpts: an object that captures the newContext(options); wsLog: records routeWebSocket patterns.
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, ctxOpts = null, wsLog = null } = {}) {
   const page = {
     goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
     url: () => landedUrl,
@@ -13,7 +14,8 @@ function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel 
     click: async (sel) => actionsLog.push(['click', sel]),
   };
   const ctx = { newPage: async () => page, route: async () => {} };
-  return { newContext: async () => ctx, close: async () => {} };
+  if (wsLog) ctx.routeWebSocket = async (pattern) => { wsLog.push(pattern); };
+  return { newContext: async (opts) => { if (ctxOpts) Object.assign(ctxOpts, opts || {}); return ctx; }, close: async () => {} };
 }
 // Fake Claude: first call (plan) then second call (verify).
 function fakeAnthropic(planObj, verifyObj) {
@@ -91,6 +93,59 @@ describe('fillCitationForm', () => {
     expect(r.pending).toBe(true);
     expect(r.notes).toContain('unconfirmed');
     expect(log).toContainEqual(['click', '#go']); // submit did happen
+  });
+
+  test('P1: a post-submit verification THROW still yields placed+pending (never falls to retryable failed)', async () => {
+    const log = [];
+    let n = 0;
+    // plan returns on call 1; the verify call (2) throws → must NOT become a retryable failure
+    const anthropic = { messages: { create: async () => { n += 1; if (n === 1) return { content: [{ text: JSON.stringify({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }) }] }; throw new Error('anthropic 500'); } } };
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({ launchBrowser: async () => fakeBrowser(log), anthropic }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
+    expect(log).toContainEqual(['click', '#go']); // the submit DID happen → never retry
+  });
+
+  test('P2: a pre-submit field action missing its selector → fail-closed (not submitted)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('field_action_failed');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined(); // never submitted
+  });
+
+  test('P1: blocks service workers + arms a websocket egress guard (channels route() cannot cover)', async () => {
+    const ctxOpts = {}; const wsLog = [];
+    await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { ctxOpts, wsLog }),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(ctxOpts.serviceWorkers).toBe('block');
+    expect(wsLog).toContain('**/*'); // WebSocket routing armed
+  });
+
+  test('P1: an IPv6 pinned host is bracketed in --host-resolver-rules', async () => {
+    let rules = null;
+    await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+      resolveHostIps: async () => ['2606:4700:4700::1111'],
+      launchBrowser: async (opts) => { rules = opts && opts.hostResolverRules; return fakeBrowser([]); },
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    });
+    expect(rules).toContain('[2606:4700:4700::1111]');
+  });
+
+  test('prefers an IPv4 address for the pin when both v4 and v6 resolve', async () => {
+    let rules = null;
+    await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+      resolveHostIps: async () => ['2606:4700:4700::1111', '203.0.113.7'],
+      launchBrowser: async (opts) => { rules = opts && opts.hostResolverRules; return fakeBrowser([]); },
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    });
+    expect(rules).toContain('MAP x.com 203.0.113.7');
+    expect(rules).not.toContain('[');
   });
 
   test('P1: model-emitted clicks are never executed (only fill/select/check + final submit)', async () => {
