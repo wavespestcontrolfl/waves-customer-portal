@@ -1,23 +1,24 @@
 /**
- * Native (iOS) push registration for the Capacitor shell.
+ * Native (iOS + Android) push registration for the Capacitor shell.
  *
  * Uses the real Capacitor plugin APIs. `@capacitor/core` is web-safe — its
  * `isNativePlatform()` returns false in a browser — and gates everything. The
  * heavier `@capacitor/push-notifications` is dynamically imported only on the
  * native platform; importing it is what registers its JS proxy on
- * `window.Capacitor.Plugins` (compiling the native pod alone does NOT — Codex
+ * `window.Capacitor.Plugins` (compiling the native plugin alone does NOT — Codex
  * P1 on #1963). On the web this module is an inert no-op.
  *
  * Flow:
- *   1. requestPermissions() → register() (registers with APNs)
- *   2. 'registration' event fires with the APNs device token
- *   3. POST the token to the backend (platform='ios'). A fresh install lands on
- *      /login unauthenticated, so if no JWT exists yet the token is cached and
- *      flushNativePushToken() (wired into the auth flow) posts it after login.
+ *   1. requestPermissions() → register() (registers with APNs on iOS, FCM on Android)
+ *   2. 'registration' event fires with the device token (APNs token / FCM token)
+ *   3. POST the token to the backend with the REAL platform ('ios'|'android') so it
+ *      routes to APNs vs FCM. A fresh install lands on /login unauthenticated, so if
+ *      no JWT exists yet the token is cached and flushNativePushToken() (wired into
+ *      the auth flow) posts it after login.
  *
  * The web push path (lib/push-subscribe.js + /admin/push/subscribe) is untouched.
  */
-import { isNativeApp } from './platform';
+import { isNativeApp, nativePlatform } from './platform';
 
 export { isNativeApp };
 
@@ -41,11 +42,16 @@ async function postToken(token) {
     pendingToken = token;
     return;
   }
+  // Post the real platform so the backend routes iOS tokens to APNs and Android
+  // tokens to FCM. (On Android, Capacitor's 'registration' event delivers an FCM
+  // token here.) Default to 'ios' for anything non-Android (this only runs on a
+  // native platform — initNativePush gates on isNativeApp).
+  const platform = nativePlatform() === 'android' ? 'android' : 'ios';
   try {
     const res = await fetch('/api/push/native-subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify({ platform: 'ios', token, deviceInfo: 'iOS · WavesApp' }),
+      body: JSON.stringify({ platform, token, deviceInfo: `${platform} · WavesApp` }),
     });
     if (!res.ok) {
       console.warn('[nativePush] token registration returned', res.status);

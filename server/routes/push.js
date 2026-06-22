@@ -47,6 +47,11 @@ router.post('/native-subscribe', async (req, res, next) => {
       .merge({
         customer_id: row.customer_id,
         role: row.role,
+        // Re-point platform + payload too, so a token previously stored under the
+        // wrong platform (e.g. an old build that posted 'ios' on Android) self-heals
+        // to the correct APNs/FCM routing on its next registration.
+        platform: row.platform,
+        subscription_data: row.subscription_data,
         device_info: row.device_info,
         active: true,
       })
