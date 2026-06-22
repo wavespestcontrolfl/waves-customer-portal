@@ -473,6 +473,8 @@ function generateEstimate(input) {
     atticAreaSqFt: input.atticAreaSqFt,
     rawWoodSqFt: input.rawWoodSqFt,
     woodTreatmentSqFt: input.woodTreatmentSqFt,
+    boraCareWallLinearFt: input.boraCareWallLinearFt,
+    boraCareWallHeightFt: input.boraCareWallHeightFt,
     slabSqFt: input.slabSqFt,
     foundationSqFt: input.foundationSqFt,
     buildingSlabSqFt: input.buildingSlabSqFt,

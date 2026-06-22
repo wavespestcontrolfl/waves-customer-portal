@@ -540,6 +540,53 @@ function resolveBoraCareSqFt(input, options = {}) {
   });
 }
 
+// Wall spraying is measured by linear feet of wall run, converted to treatable
+// area via wall height (linear ft × height). The result is folded into the
+// BoraCare area so coverage/labor/margin math is unchanged. Returns wallSqFt 0
+// (and no warnings) when no wall input is present — walls are optional.
+function resolveBoraCareWallSqFt(input, options = {}) {
+  const property = input && typeof input === 'object' ? input : {};
+  const linearRaw = collectManualOverride(options, ['wallLinearFt', 'boraCareWallLinearFt', 'wallLinealFt', 'wallLF'])
+    ?? (hasValue(property.wallLinearFt) ? property.wallLinearFt : undefined)
+    ?? (hasValue(property.boraCareWallLinearFt) ? property.boraCareWallLinearFt : undefined);
+
+  if (!hasValue(linearRaw)) {
+    return { wallSqFt: 0, wallLinearFt: null, wallHeightFt: null, source: 'none', warnings: [], invalid: false };
+  }
+
+  const linear = parsePositiveMeasurement(linearRaw);
+  if (linear === null) {
+    return {
+      wallSqFt: 0,
+      wallLinearFt: null,
+      wallHeightFt: null,
+      source: 'invalid',
+      warnings: ['invalid_boracare_wall_linear_ft'],
+      invalid: true,
+    };
+  }
+
+  const heightRaw = collectManualOverride(options, ['wallHeightFt', 'boraCareWallHeightFt'])
+    ?? (hasValue(property.wallHeightFt) ? property.wallHeightFt : undefined)
+    ?? (hasValue(property.boraCareWallHeightFt) ? property.boraCareWallHeightFt : undefined);
+
+  const warnings = [];
+  let height = parsePositiveMeasurement(heightRaw);
+  if (height === null) {
+    if (hasValue(heightRaw)) warnings.push('invalid_boracare_wall_height_defaulted');
+    height = SPECIALTY.boraCare.defaultWallHeightFt;
+  }
+
+  return {
+    wallSqFt: linear * height,
+    wallLinearFt: linear,
+    wallHeightFt: height,
+    source: 'wall_linear_ft',
+    warnings,
+    invalid: false,
+  };
+}
+
 function resolvePreSlabSqFt(input, options = {}) {
   if (typeof input !== 'object' && hasValue(input)) {
     const parsed = parsePositiveMeasurement(input);
@@ -4231,24 +4278,57 @@ function priceTrenching(property = {}, options = {}) {
 
 function priceBoraCare(input, options = {}) {
   const measurement = resolveBoraCareSqFt(input, options);
+  const wall = resolveBoraCareWallSqFt(input, options);
+
+  const hasAttic = measurement.value !== null;
+  const hasWall = wall.wallSqFt > 0;
+  // Attic input was provided (valid or invalid) when the resolver landed on a
+  // source other than the synthetic 'missing'. When walls cover the job, a
+  // missing attic measurement is expected and must not be surfaced as noise.
+  const atticProvided = measurement.source !== 'missing';
+  const suppressAtticGaps = hasWall && !atticProvided;
+
+  const warnings = [...wall.warnings];
+  const manualReviewReasons = [];
+  if (!suppressAtticGaps) {
+    warnings.push(...measurement.warnings);
+    manualReviewReasons.push(...measurement.manualReviewReasons);
+  }
+  if (wall.invalid) manualReviewReasons.push('invalid_boracare_wall_linear_ft');
+
+  const requiresMeasurement = !hasAttic && !hasWall;
+  const requiresManualReview = wall.invalid || (!suppressAtticGaps && measurement.requiresManualReview);
+
+  const atticSqFt = hasAttic ? measurement.value : null;
+  const wallSqFt = hasWall ? wall.wallSqFt : null;
+  const totalSqFt = (hasAttic ? measurement.value : 0) + (hasWall ? wall.wallSqFt : 0);
+
   const baseResult = {
     service: 'bora_care',
-    atticSqFt: measurement.value,
+    atticSqFt,
     atticSqFtSource: measurement.source,
     atticSqFtWasManualOverride: measurement.wasManualOverride,
+    wallLinearFt: wall.wallLinearFt,
+    wallHeightFt: wall.wallHeightFt,
+    wallSqFt,
+    totalSqFt: requiresMeasurement ? null : totalSqFt,
     measurements: {
-      atticSqFt: measurementObject(measurement.value, measurement.source),
+      atticSqFt: measurementObject(atticSqFt, measurement.source),
+      wallLinearFt: measurementObject(wall.wallLinearFt, wall.source),
+      wallSqFt: measurementObject(wallSqFt, wall.source),
+      totalSqFt: measurementObject(requiresMeasurement ? null : totalSqFt, hasWall ? 'computed_attic_plus_wall' : measurement.source),
     },
-    measurementWarnings: measurement.warnings,
-    requiresMeasurement: measurement.requiresMeasurement,
-    requiresManualReview: measurement.requiresManualReview,
-    manualReviewReasons: measurement.manualReviewReasons,
+    measurementWarnings: uniqueList(warnings),
+    requiresMeasurement,
+    requiresManualReview,
+    manualReviewReasons: uniqueList(manualReviewReasons),
     inputSourceSummary: {
       atticSqFt: measurement.source,
+      wallLinearFt: wall.source,
     },
   };
 
-  if (measurement.value === null) {
+  if (requiresMeasurement) {
     return {
       ...baseResult,
       gallons: null,
@@ -4260,12 +4340,11 @@ function priceBoraCare(input, options = {}) {
     };
   }
 
-  const atticSqFt = measurement.value;
-  const gallons = Math.max(3, Math.ceil(atticSqFt / SPECIALTY.boraCare.coverage));
-  const isMultiDay = atticSqFt > 4500;
+  const gallons = Math.max(3, Math.ceil(totalSqFt / SPECIALTY.boraCare.coverage));
+  const isMultiDay = totalSqFt > 4500;
   const laborHrs = isMultiDay
-    ? Math.min(10, Math.max(6, 1.5 + atticSqFt / 800))
-    : Math.min(6, Math.max(2, 1.5 + atticSqFt / 1000));
+    ? Math.min(10, Math.max(6, 1.5 + totalSqFt / 800))
+    : Math.min(6, Math.max(2, 1.5 + totalSqFt / 1000));
   const cost = gallons * SPECIALTY.boraCare.galCost + laborHrs * GLOBAL.LABOR_RATE + SPECIALTY.boraCare.equipCost;
   const price = Math.round(cost / SPECIALTY.boraCare.marginDivisor);
 

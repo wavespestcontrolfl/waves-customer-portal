@@ -1131,6 +1131,7 @@ const SPECIALTY = {
     coverage: 275,  // sqft/gal
     equipCost: 17.50,
     marginDivisor: 0.45,  // 55% target margin
+    defaultWallHeightFt: 8,  // measurement default for wall spraying (linear ft × height → sqft)
   },
   preSlabTermidor: {
     bottleCost: 152.10,

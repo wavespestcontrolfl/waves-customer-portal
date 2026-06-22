@@ -2362,8 +2362,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     dirtLF: measurementValue(o.trenchingDirtLF, o.trenchingDirtLf, o.dirtLF),
     concretePct: measurementValue(o.trenchingConcretePct, o.concretePct),
   };
+  const boraCareWallLinearFt = measurementValue(o.boracareWallLinearFt, o.boraCareWallLinearFt, o.wallLinearFt);
+  const boraCareWallHeightFt = measurementValue(o.boracareWallHeightFt, o.boraCareWallHeightFt, o.wallHeightFt);
   const boraCareMeasurements = {
     atticSqFt: measurementValue(o.boracareSqft, o.boraCareSqFt, o.atticSqFt, o.rawWoodSqFt),
+    wallLinearFt: boraCareWallLinearFt,
+    wallHeightFt: boraCareWallHeightFt,
   };
   const preSlabMeasurements = {
     slabSqFt: measurementValue(o.preslabSqft, o.preSlabSqFt, o.slabSqFt),
@@ -2498,6 +2502,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('BORACARE')) {
     services.boraCare = {
       atticSqFt: o.boracareSqft,
+      wallLinearFt: boraCareWallLinearFt,
+      wallHeightFt: boraCareWallHeightFt,
       measurements: boraCareMeasurements,
     };
   }
