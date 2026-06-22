@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const gbp = require('../services/google-business');
+const linkedin = require('../services/linkedin');
 const logger = require('../services/logger');
 const { recordAuditEvent } = require('../services/audit-log');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -154,6 +155,92 @@ router.get('/google/callback', async (req, res) => {
   } catch (err) {
     logger.error(`GBP OAuth callback failed: ${err.message}`);
     res.status(500).send(`OAuth failed: ${err.message}`);
+  }
+});
+
+// =========================================================================
+// LinkedIn OAuth — single owned company page (mirrors the GBP nonce pattern)
+// =========================================================================
+const LINKEDIN_OAUTH_STATE_PREFIX = 'linkedin.oauth_state:';
+const LINKEDIN_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+async function createLinkedInOAuthState(technicianId) {
+  const state = crypto.randomBytes(32).toString('base64url');
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - LINKEDIN_OAUTH_STATE_TTL_MS);
+  // Sweep expired pending states so rows don't accumulate.
+  await db('system_settings')
+    .where('key', 'like', `${LINKEDIN_OAUTH_STATE_PREFIX}%`)
+    .andWhere('updated_at', '<', cutoff)
+    .del();
+  await db('system_settings').insert({
+    key: `${LINKEDIN_OAUTH_STATE_PREFIX}${state}`,
+    value: JSON.stringify({
+      state,
+      technicianId: technicianId || null,
+      expiresAt: new Date(now.getTime() + LINKEDIN_OAUTH_STATE_TTL_MS).toISOString(),
+    }),
+    category: 'integrations',
+    description: 'LinkedIn OAuth one-time state',
+    created_at: now,
+    updated_at: now,
+  });
+  return state;
+}
+
+async function consumeLinkedInOAuthState(rawState) {
+  const state = String(rawState || '');
+  if (!state) throw new Error('Invalid or expired OAuth state');
+  const key = `${LINKEDIN_OAUTH_STATE_PREFIX}${state}`;
+  const row = await db('system_settings').where({ key }).first();
+  const saved = parseJsonObject(row?.value);
+  const expiresAt = saved.expiresAt ? new Date(saved.expiresAt) : null;
+  if (!saved.state || saved.state !== state || !expiresAt || expiresAt < new Date()) {
+    if (row) await db('system_settings').where({ key }).del();
+    logger.warn('[admin-settings] LinkedIn OAuth callback rejected: invalid or expired state');
+    throw new Error('Invalid or expired OAuth state');
+  }
+  await db('system_settings').where({ key }).del(); // one-time use
+  return true;
+}
+
+// GET /api/admin/settings/linkedin/auth-url — SPA fetches this (bearer), then
+// navigates the browser to the returned LinkedIn consent URL. Mirrors GBP.
+router.get('/linkedin/auth-url', adminAuthenticate, requireAdmin, async (req, res) => {
+  try {
+    if (!linkedin.configured) {
+      return res.status(400).json({ error: 'LinkedIn not configured — set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET.' });
+    }
+    const state = await createLinkedInOAuthState(req.technicianId);
+    res.json({ url: linkedin.getAuthUrl(state) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/settings/linkedin/callback — LinkedIn redirects here (public).
+router.get('/linkedin/callback', async (req, res) => {
+  try {
+    const { code, state, error, error_description } = req.query;
+    if (error) return res.status(400).send(`LinkedIn authorization failed: ${error_description || error}`);
+    if (!code) return res.status(400).send('Missing authorization code');
+    await consumeLinkedInOAuthState(state);
+    await linkedin.handleCallback(code);
+    logger.info('[admin-settings] LinkedIn OAuth connected');
+    const clientUrl = publicPortalUrl();
+    res.redirect(`${clientUrl}/admin/settings?tab=integrations&linkedinOAuth=success`);
+  } catch (err) {
+    logger.error(`LinkedIn OAuth callback failed: ${err.message}`);
+    res.status(500).send(`OAuth failed: ${err.message}`);
+  }
+});
+
+// GET /api/admin/settings/linkedin/status — connection status for the UI.
+router.get('/linkedin/status', adminAuthenticate, requireAdmin, async (req, res) => {
+  try {
+    res.json(await linkedin.getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

@@ -12,8 +12,9 @@
  *   FACEBOOK_PAGE_ID           — Facebook page ID
  *   FACEBOOK_ACCESS_TOKEN      — Long-lived page access token
  *   INSTAGRAM_ACCOUNT_ID       — Instagram business account ID
- *   LINKEDIN_COMPANY_ID        — LinkedIn company page ID
- *   LINKEDIN_ACCESS_TOKEN      — LinkedIn OAuth token
+ *   LINKEDIN_*                 — handled by services/linkedin.js (OAuth):
+ *                                LINKEDIN_CLIENT_ID/SECRET/COMPANY_ID. The old
+ *                                static LINKEDIN_ACCESS_TOKEN path is retired.
  *   GOOGLE_MAPS_API_KEY        — Already set for GBP
  *   GEMINI_API_KEY             — For AI image generation (optional)
  */
@@ -36,7 +37,7 @@ try {
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
-const LINKEDIN_COMPANY_ID = process.env.LINKEDIN_COMPANY_ID;
+// LinkedIn auth/company-id now lives in services/linkedin.js (OAuth), not here.
 
 // ── Feature Flags ──
 // Credentials make a platform *available*, not *active*.
@@ -52,6 +53,7 @@ const SOCIAL_FLAGS = {
   get facebookEnabled() { return socialFlag('SOCIAL_FACEBOOK_ENABLED'); },
   get instagramEnabled() { return socialFlag('SOCIAL_INSTAGRAM_ENABLED'); },
   get gbpEnabled() { return socialFlag('SOCIAL_GBP_ENABLED'); },
+  get linkedinEnabled() { return socialFlag('SOCIAL_LINKEDIN_ENABLED'); },
   get dryRun() { return socialFlag('SOCIAL_DRY_RUN'); },
 };
 
@@ -205,12 +207,14 @@ const PLATFORM_FLAG_MAP = {
   facebook: 'facebookEnabled',
   instagram: 'instagramEnabled',
   gbp: 'gbpEnabled',
+  linkedin: 'linkedinEnabled',
 };
 
 const PLATFORM_ENV_REQS = {
   facebook: ['FACEBOOK_ACCESS_TOKEN', 'FACEBOOK_PAGE_ID'],
   instagram: ['FACEBOOK_ACCESS_TOKEN', 'INSTAGRAM_ACCOUNT_ID'],
   gbp: [],
+  linkedin: [], // OAuth tokens live in system_settings (like GBP), not env
 };
 
 async function assertSocialPublishingReady(platform, locationId) {
@@ -257,6 +261,22 @@ async function assertSocialPublishingReady(platform, locationId) {
     // before postToGBP fails for the unconfigured target.
     if (locationId && !(await gbpService.isLocationConfigured(locationId))) {
       return { ready: false, reason: `GBP location "${locationId}" has no usable credentials (client ID/secret + refresh token)` };
+    }
+  }
+
+  // LinkedIn OAuth tokens live in system_settings (written by the admin connect
+  // flow), so like GBP they can't be a static env check — verify connection here.
+  if (platform === 'linkedin') {
+    const linkedin = require('./linkedin');
+    if (!linkedin.configured) {
+      return { ready: false, reason: 'LinkedIn client credentials not configured (LINKEDIN_CLIENT_ID/SECRET)' };
+    }
+    const status = await linkedin.getStatus();
+    if (!status.connected) {
+      return { ready: false, reason: 'LinkedIn not connected — authorize in Settings → Integrations' };
+    }
+    if (!status.companyId) {
+      return { ready: false, reason: 'LINKEDIN_COMPANY_ID not set' };
     }
   }
 
@@ -803,51 +823,13 @@ async function postToInstagram(caption, imageUrl) {
   return { platform: 'instagram', postId: data.id, success: true, mediaContainerId: container.id, mediaStatus: containerStatus.status_code };
 }
 
-async function postToLinkedIn(text, link, title, description, imageUrl) {
-  const token = process.env.LINKEDIN_ACCESS_TOKEN;
-  if (!token) throw new Error('LINKEDIN_ACCESS_TOKEN not configured');
-
-  const body = {
-    author: `urn:li:organization:${LINKEDIN_COMPANY_ID}`,
-    lifecycleState: 'PUBLISHED',
-    specificContent: {
-      'com.linkedin.ugc.ShareContent': {
-        shareCommentary: { text },
-        shareMediaCategory: link ? 'ARTICLE' : 'NONE',
-        media: link ? [{
-          status: 'READY',
-          originalUrl: link,
-          title: { text: title || '' },
-          description: { text: (description || '').substring(0, 200) },
-        }] : [],
-      },
-    },
-    visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' },
-  };
-
-  const res = await fetch('https://api.linkedin.com/v2/ugcPosts', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'X-Restli-Protocol-Version': '2.0.0',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`LinkedIn API ${res.status}: ${err}`);
-  }
-  const headerId = res.headers.get('x-restli-id');
-  let bodyId = null;
-  try {
-    const data = await res.json();
-    bodyId = data?.id || null;
-  } catch { /* empty body */ }
-  const postId = headerId || bodyId;
-  logger.info(`[social] LinkedIn post created: ${postId}`);
-  return { platform: 'linkedin', postId, success: true };
+// LinkedIn posting goes through the OAuth-backed service (services/linkedin.js):
+// stored company-page tokens + the versioned Posts API (/rest/posts). The legacy
+// env-token ugcPosts path is retired. imageUrl is accepted for call-site
+// compatibility but unused (LinkedIn image posts need the Images API — deferred).
+async function postToLinkedIn(text, link, title, description, imageUrl) { // eslint-disable-line no-unused-vars
+  const linkedin = require('./linkedin');
+  return linkedin.createPost({ text, link, title, description });
 }
 
 async function postToGBP(locationId, summary, link, imageUrl) {
@@ -1214,8 +1196,9 @@ const SocialMediaService = {
       },
       {
         key: 'linkedin',
-        enabled: false,
-        reason: 'Disabled',
+        enabled: SOCIAL_FLAGS.linkedinEnabled && require('./linkedin').configured,
+        reason: !SOCIAL_FLAGS.linkedinEnabled ? 'Disabled'
+          : 'LinkedIn not configured (LINKEDIN_CLIENT_ID/SECRET)',
       },
     ].filter((platform) => requestedPlatforms.has(platform.key));
 
@@ -1272,6 +1255,9 @@ const SocialMediaService = {
           } else {
             platformResults.push({ platform: 'instagram', skipped: 'No public image URL' });
           }
+        } else if (p.key === 'linkedin') {
+          const r = await postToLinkedIn(content, link, title, description, generatedImageUrl);
+          platformResults.push({ ...r, content });
         }
       } catch (err) {
         logger.error(`[social] ${p.key} post failed: ${err.message}`);
@@ -1403,13 +1389,10 @@ const SocialMediaService = {
     if (await isPausedByAdmin()) {
       return { platform, success: false, error: 'Automation is paused' };
     }
-    const flagMap = { facebook: 'facebookEnabled', instagram: 'instagramEnabled', gbp: 'gbpEnabled' };
+    const flagMap = { facebook: 'facebookEnabled', instagram: 'instagramEnabled', gbp: 'gbpEnabled', linkedin: 'linkedinEnabled' };
     const flagKey = flagMap[platform];
     if (flagKey && !SOCIAL_FLAGS[flagKey]) {
       return { platform, success: false, error: `${platform} is disabled` };
-    }
-    if (platform === 'linkedin') {
-      return { platform, success: false, error: 'LinkedIn is disabled' };
     }
 
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
@@ -1441,6 +1424,7 @@ const SocialMediaService = {
     }
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
     if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
+    if (platform === 'linkedin') return postToLinkedIn(text, link, title, description, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
   },
 
