@@ -5,8 +5,18 @@
  * findAvailableSlots) over the eligible date window, then applies the HARD
  * constraints auto-dispatch adds on top:
  *   - drop any slot inside the customer's blackout window
+ *   - drop any slot NOT on the customer's EXPLICIT preferred day (portal pref)
+ *   - drop any slot OUTSIDE the customer's EXPLICIT preferred time window (portal)
  *   - drop any technician whose capability row for the service category is
  *     explicitly deactivated (capability is otherwise a soft scoring factor)
+ *
+ * Owner directive 2026-06-21: route efficiency is the optimization driver, but a
+ * customer's portal scheduling preference OVERRIDES it. So an explicit preferred
+ * day/time is a HARD filter here — route can only pick the most efficient slot
+ * AMONG slots that honor the preference, never move the visit off it. The
+ * service-type DEFAULT time window (pest→AM, lawn→mid-AM) is NOT a customer
+ * preference and is left to soft scoring (scoring.js), so route stays free to
+ * optimize around it when the customer set no time.
  *
  * Also computes the CURRENT placement's marginal drive cost (detour the visit
  * adds to its present day/route) so the scorer can measure improvement.
@@ -37,10 +47,39 @@ function inBlackout(dateStr, blackout) {
   return !!(blackout && dateStr >= blackout.start && dateStr <= blackout.end);
 }
 
+// Weekday 0=Sun..6=Sat of a YYYY-MM-DD calendar date, tz-independent (noon UTC).
+// Mirrors scoring.js weekdayOf so the HARD day filter and the soft day score
+// agree on which weekday a candidate falls on.
+function weekdayOf(dateStr) {
+  const d = new Date(`${String(dateStr).split('T')[0]}T12:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d.getUTCDay();
+}
+
 // find-time suppresses Sundays by default but NOT Saturdays; honor skip_weekends.
 function isSaturday(dateStr) {
-  const d = new Date(`${String(dateStr).split('T')[0]}T12:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.getUTCDay() === 6;
+  return weekdayOf(dateStr) === 6;
+}
+
+// HARD: the customer set an explicit preferred day in the portal and this slot
+// is not on it. preferred_day_indexes is empty when the customer has no day
+// preference (→ no filter; route is free to pick any day).
+function violatesPreferredDay(dateStr, prefs) {
+  const dayIdx = prefs.preferred_day_indexes;
+  if (!dayIdx || dayIdx.length === 0) return false;
+  const dow = weekdayOf(dateStr);
+  return dow == null || !dayIdx.includes(dow);
+}
+
+// HARD: the customer set an explicit preferred time in the portal and this
+// slot's start falls outside it. Uses preferred_time_window (the EXPLICIT pref),
+// NOT effective/default — the service-type default window is soft scoring only.
+// Boundary semantics mirror scoring.js: [startMin, endMin).
+function violatesPreferredTime(startTime, prefs) {
+  const win = prefs.preferred_time_window;
+  if (!win) return false;
+  const startMin = hhmmToMin(startTime);
+  if (startMin == null) return false; // unparseable start → don't hard-drop
+  return startMin < win.startMin || startMin >= win.endMin;
 }
 
 /**
@@ -136,7 +175,7 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   if (dateFrom > dateTo) {
     // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
     const current = await computeCurrentPlacement(service, prefs, ctx);
-    return { current, candidates: [] };
+    return { current, candidates: [], drops: null, feasible: 0 };
   }
   const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
   const category = prefs.service_category;
@@ -174,14 +213,22 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   });
 
   const slots = (res && res.slots) || [];
+  // Drop tally — why feasible slots were rejected. Surfaced to the audit so an
+  // empty candidate set reads as "honored the customer's preference, nothing
+  // better available" rather than an opaque NO_VALID_SLOT.
+  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0 };
   const candidates = [];
   for (const slot of slots) {
-    if (inBlackout(slot.date, prefs.blackout)) continue;                // HARD: blackout
-    if (siblingDates.has(slot.date)) continue;                          // HARD: same-series occurrence that day
-    if (service.skip_weekends === true && isSaturday(slot.date)) continue; // HARD: skip_weekends series
+    if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; continue; }       // HARD: blackout
+    if (siblingDates.has(slot.date)) { drops.sibling++; continue; }                  // HARD: same-series occurrence that day
+    if (service.skip_weekends === true && isSaturday(slot.date)) { drops.weekend++; continue; } // HARD: skip_weekends series
+    // HARD: explicit portal preferences override route efficiency. Route may
+    // only optimize among slots on the customer's preferred day + time window.
+    if (violatesPreferredDay(slot.date, prefs)) { drops.preferred_day++; continue; }
+    if (violatesPreferredTime(slot.start_time, prefs)) { drops.preferred_time++; continue; }
     const techId = slot.technician && slot.technician.id;
     const cap = ctx.capabilityFor(techId, category);
-    if (cap === 'deactivated') continue;                                // HARD: tech turned off for this category
+    if (cap === 'deactivated') { drops.deactivated++; continue; }                    // HARD: tech turned off for this category
     candidates.push({
       is_current: false,
       date: slot.date,
@@ -203,7 +250,14 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   // filters, score only the top survivors to bound cost.
   const scored = candidates.slice(0, ctx.scoreCap || SCORE_CAP);
   const current = await computeCurrentPlacement(service, prefs, ctx);
-  return { current, candidates: scored };
+  return { current, candidates: scored, drops, feasible: slots.length };
 }
 
-module.exports = { findValidCandidateSlots, computeCurrentPlacement, inBlackout, _internals: { hhmmToMin } };
+module.exports = {
+  findValidCandidateSlots,
+  computeCurrentPlacement,
+  inBlackout,
+  violatesPreferredDay,
+  violatesPreferredTime,
+  _internals: { hhmmToMin, weekdayOf },
+};

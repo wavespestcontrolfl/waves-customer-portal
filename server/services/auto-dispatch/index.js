@@ -193,12 +193,20 @@ async function runAutoDispatch(opts = {}) {
           capabilityFor,
           topN: 60,
         };
-        const { current, candidates } = await findValidCandidateSlots(service, prefs, ctx);
+        const { current, candidates, drops } = await findValidCandidateSlots(service, prefs, ctx);
         totals.evaluated++;
 
         const prefsSnapshot = prefs.raw_snapshot;
         if (!current || candidates.length === 0) {
-          await audit.logDecision(runId, { action: 'no_change', service, reason_code: 'NO_VALID_SLOT', reason_description: 'No valid candidate slot found', prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary } });
+          // When an explicit portal preference is the reason nothing survived,
+          // say so — a HARD preferred-day/time filter dropping every feasible
+          // slot is the override working as designed, not a failure to optimize.
+          const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
+          const reasonCode = prefDropped ? 'NO_SLOT_MATCHING_PREFERENCE' : 'NO_VALID_SLOT';
+          const reasonDescription = prefDropped
+            ? 'No candidate slot honored the customer\'s explicit day/time preference'
+            : 'No valid candidate slot found';
+          await audit.logDecision(runId, { action: 'no_change', service, reason_code: reasonCode, reason_description: reasonDescription, prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops } });
           continue;
         }
 

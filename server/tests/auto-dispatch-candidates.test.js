@@ -5,7 +5,12 @@ jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.
 jest.mock('../services/route-optimizer', () => ({ HQ: { lat: 27.39, lng: -82.39 }, haversine: () => 1 }));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { findValidCandidateSlots, inBlackout } = require('../services/auto-dispatch/candidate-slots');
+const {
+  findValidCandidateSlots,
+  inBlackout,
+  violatesPreferredDay,
+  violatesPreferredTime,
+} = require('../services/auto-dispatch/candidate-slots');
 
 function neighborDbStub() {
   // computeCurrentPlacement + the same-series sibling query — return none.
@@ -111,5 +116,84 @@ describe('findValidCandidateSlots', () => {
     const r = await findValidCandidateSlots({ ...SERVICE, lat: null, lng: null }, prefs, ctx());
     expect(r.candidates).toEqual([]);
     expect(findAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  // 2026-08-05 = Wed, 08-06 = Thu, 08-10 = Mon (matches the Saturday test's labels).
+  test('HARD-drops slots not on the customer\'s EXPLICIT preferred day (route cannot override)', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        // Thursday slot has the LOWEST detour — route would pick it, but the
+        // customer explicitly chose Wednesday, so it must be dropped.
+        { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 }, // Thu
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 9, total_drive_minutes: 30, stops_that_day: 3, score: 9 }, // Wed
+        { date: '2026-08-10', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 }, // Mon
+      ],
+    });
+    const wedOnly = { service_category: 'general', blackout: null, preferred_day_indexes: [3] };
+    const { candidates, drops } = await findValidCandidateSlots(SERVICE, wedOnly, ctx());
+    expect(candidates.map((c) => c.date)).toEqual(['2026-08-05']); // only Wednesday survives
+    expect(drops.preferred_day).toBe(2); // Thu + Mon dropped
+  });
+
+  test('HARD-drops slots outside the customer\'s EXPLICIT preferred time window', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 }, // afternoon — out
+        { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 9, total_drive_minutes: 30, stops_that_day: 3, score: 9 }, // morning — in
+      ],
+    });
+    // explicit morning window [08:00, 12:00)
+    const amOnly = { service_category: 'general', blackout: null, preferred_time_window: { startMin: 480, endMin: 720 } };
+    const { candidates, drops } = await findValidCandidateSlots(SERVICE, amOnly, ctx());
+    expect(candidates.map((c) => c.date)).toEqual(['2026-08-06']);
+    expect(drops.preferred_time).toBe(1);
+  });
+
+  test('service-type DEFAULT time window is SOFT — does NOT hard-drop afternoon slots', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
+        { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 },
+      ],
+    });
+    // No explicit pref; only a service-type default window is present (soft).
+    const defaultOnly = {
+      service_category: 'general', blackout: null,
+      preferred_day_indexes: [], preferred_time_window: null,
+      default_time_window: { startMin: 480, endMin: 600 },
+      effective_time_window: { startMin: 480, endMin: 600 },
+    };
+    const { candidates, drops } = await findValidCandidateSlots(SERVICE, defaultOnly, ctx());
+    expect(candidates.map((c) => c.date).sort()).toEqual(['2026-08-05', '2026-08-06']); // both kept
+    expect(drops.preferred_day).toBe(0);
+    expect(drops.preferred_time).toBe(0);
+  });
+});
+
+describe('violatesPreferredDay', () => {
+  test('no explicit day pref → never violates (route free to pick any day)', () => {
+    expect(violatesPreferredDay('2026-08-05', { preferred_day_indexes: [] })).toBe(false);
+    expect(violatesPreferredDay('2026-08-05', {})).toBe(false);
+  });
+  test('explicit day pref → violates unless the slot falls on a preferred weekday', () => {
+    const wed = { preferred_day_indexes: [3] }; // Wednesday
+    expect(violatesPreferredDay('2026-08-05', wed)).toBe(false); // Wed — ok
+    expect(violatesPreferredDay('2026-08-06', wed)).toBe(true);  // Thu — violates
+  });
+});
+
+describe('violatesPreferredTime', () => {
+  const am = { preferred_time_window: { startMin: 480, endMin: 720 } }; // [08:00,12:00)
+  test('no explicit time pref → never violates', () => {
+    expect(violatesPreferredTime('13:00', { preferred_time_window: null })).toBe(false);
+  });
+  test('explicit window → [start,end) boundary semantics', () => {
+    expect(violatesPreferredTime('08:00', am)).toBe(false); // start inclusive
+    expect(violatesPreferredTime('11:00', am)).toBe(false);
+    expect(violatesPreferredTime('12:00', am)).toBe(true);  // end exclusive
+    expect(violatesPreferredTime('07:00', am)).toBe(true);
+  });
+  test('unparseable start time → not hard-dropped', () => {
+    expect(violatesPreferredTime(null, am)).toBe(false);
   });
 });
