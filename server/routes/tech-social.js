@@ -343,11 +343,25 @@ router.post('/publish', async (req, res, next) => {
       }
     }
 
+    // Don't leave an orphan: if a photo was hosted but no platform actually
+    // published, delete it so a customer field photo isn't left publicly
+    // fetchable — and don't record the (now-deleted) URL in the audit row.
+    const anyPublished = results.some((r) => r && r.success);
+    if (imageUrl && !anyPublished) {
+      await social.deleteSocialImage(imageUrl).catch(() => {});
+      imageUrl = null;
+    }
+
+    // Audit ONLY the validated captions (those that passed content + PII checks
+    // and were attempted) — never persist a PII-rejected caption to history.
+    const loggedCaptions = {};
+    for (const item of plan) loggedCaptions[item.platform] = item.content;
+
     const location = WAVES_LOCATIONS.find((l) => l.id === locationId) || null;
     await logPost(buildPostLogRow({
       techNote: typeof req.body.techNote === 'string' ? req.body.techNote : '',
-      captions, results, imageUrl, location,
-      model: typeof model === 'string' ? model : null,
+      captions: loggedCaptions, results, imageUrl, location,
+      model: typeof model === 'string' ? model.slice(0, 80) : null, // ai_model is varchar(80)
       publishId: typeof publishId === 'string' ? publishId : null,
     }));
 

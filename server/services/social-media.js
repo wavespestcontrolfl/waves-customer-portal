@@ -1465,6 +1465,26 @@ const SocialMediaService = {
   generateImage,
 };
 
+// Delete a previously hosted social image (CDN URL → S3 key). Used to clean up a
+// field photo when every publish attempt failed, so an orphaned customer photo
+// isn't left publicly fetchable.
+async function deleteSocialImage(url) {
+  if (!url || !config.s3.accessKeyId || !config.s3.bucket) return;
+  try {
+    const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+    const key = new URL(url).pathname.replace(/^\/+/, '');
+    if (!key) return;
+    const s3 = new S3Client({
+      region: config.s3.region,
+      credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
+    });
+    await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+    logger.info(`[social] deleted hosted image ${key}`);
+  } catch (err) {
+    logger.warn(`[social] deleteSocialImage failed: ${err.message}`);
+  }
+}
+
 module.exports = SocialMediaService;
 module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 module.exports.isPausedByAdmin = isPausedByAdmin;
@@ -1480,3 +1500,4 @@ module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
 module.exports.buildSocialFailureAlert = buildSocialFailureAlert;
 // Reused by tech-social-caption.js so field-photo captions share one brand voice.
 module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;
+module.exports.deleteSocialImage = deleteSocialImage;
