@@ -3000,8 +3000,11 @@ export default function EstimateToolViewV2({
       const trenchingDirtLF = parseNonNegativeNumber(form.trenchingDirtLF);
       const trenchingConcretePct = parseNonNegativeNumber(form.trenchingConcretePct);
       const boracareSqft = parsePositiveNumber(form.boracareSqft);
-      const boracareWallLinearFt = parsePositiveNumber(form.boracareWallLinearFt);
-      const boracareWallHeightFt = parsePositiveNumber(form.boracareWallHeightFt);
+      // Send the raw (trimmed) wall values rather than a parsed number: a
+      // present-but-invalid entry (e.g. "-5") must reach the engine so its
+      // invalid-measurement review path runs instead of being silently dropped.
+      const boracareWallLinearFt = String(form.boracareWallLinearFt ?? "").trim() || undefined;
+      const boracareWallHeightFt = String(form.boracareWallHeightFt ?? "").trim() || undefined;
       const preslabSqft = parsePositiveNumber(form.preslabSqft);
       const propertyPalmCount = parsePositiveInteger(form.palmCount);
       const palmTreatmentCountBlank = String(form.palmTreatmentCount || "").trim() === "";

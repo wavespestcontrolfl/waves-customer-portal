@@ -303,6 +303,25 @@ describe('termite measurement overrides and safeguards', () => {
     expect(badWall.totalSqFt).toBe(2000);
     expect(badWall.requiresManualReview).toBe(true);
     expect(badWall.manualReviewReasons).toContain('invalid_boracare_wall_linear_ft');
+
+    // Invalid wall height defaults to 8 ft but still flags review.
+    const badHeight = priceBoraCare({}, { wallLinearFt: 100, wallHeightFt: 0 });
+    expect(badHeight.wallHeightFt).toBe(8);
+    expect(badHeight.totalSqFt).toBe(800);
+    expect(badHeight.requiresManualReview).toBe(true);
+    expect(badHeight.manualReviewReasons).toContain('invalid_boracare_wall_height_defaulted');
+
+    // A rejected attic value with valid walls must stay visible for review —
+    // not be silently treated as merely absent.
+    const badAtticWithWall = priceBoraCare({ atticSqFt: -10 }, { wallLinearFt: 100 });
+    expect(badAtticWithWall.totalSqFt).toBe(800);
+    expect(badAtticWithWall.requiresManualReview).toBe(true);
+    expect(badAtticWithWall.manualReviewReasons).toContain('invalid_boracare_attic_sqft');
+
+    // A truly missing attic with valid walls prices cleanly (no review noise).
+    const wallNoAttic = priceBoraCare({}, { wallLinearFt: 100 });
+    expect(wallNoAttic.requiresManualReview).toBe(false);
+    expect(wallNoAttic.manualReviewReasons).toHaveLength(0);
   });
 
   test('Pre-Slab Termiticide normalizes products and aliases', () => {

@@ -2137,11 +2137,15 @@ export function calculateEstimate(inputs) {
   /* ── Bora-Care ───────────────────────────────────────────── */
   // Wall spraying: linear ft of wall × height → treatable area, folded into the
   // BoraCare area (same coverage/labor/margin). Default 8 ft when height omitted.
+  // Coerce both components to numbers first — callers (e.g. the legacy
+  // EstimatePage path) may spread raw string form values, and string + number
+  // would concatenate ("1200" + 0 → "12000") and grossly over-price the job.
+  const bcAtticSqft = Number(bcSqft) > 0 ? Number(bcSqft) : 0;
   const bcWallLinear = Number(bcWallLF) > 0 ? Number(bcWallLF) : 0;
   const bcWallSqft = bcWallLinear > 0
     ? bcWallLinear * (Number(bcWallHeight) > 0 ? Number(bcWallHeight) : 8)
     : 0;
-  const bcTotalSqft = (bcSqft > 0 ? bcSqft : 0) + bcWallSqft;
+  const bcTotalSqft = bcAtticSqft + bcWallSqft;
   if (svcBoracare && !isCommercial && bcTotalSqft > 0) {
     hasOT = true;
     const BC_GAL = 91.98, BC_COV = 275, BC_EQUIP = 17.50;

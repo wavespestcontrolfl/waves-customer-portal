@@ -551,7 +551,7 @@ function resolveBoraCareWallSqFt(input, options = {}) {
     ?? (hasValue(property.boraCareWallLinearFt) ? property.boraCareWallLinearFt : undefined);
 
   if (!hasValue(linearRaw)) {
-    return { wallSqFt: 0, wallLinearFt: null, wallHeightFt: null, source: 'none', warnings: [], invalid: false };
+    return { wallSqFt: 0, wallLinearFt: null, wallHeightFt: null, source: 'none', warnings: [], invalid: false, heightInvalid: false };
   }
 
   const linear = parsePositiveMeasurement(linearRaw);
@@ -563,6 +563,7 @@ function resolveBoraCareWallSqFt(input, options = {}) {
       source: 'invalid',
       warnings: ['invalid_boracare_wall_linear_ft'],
       invalid: true,
+      heightInvalid: false,
     };
   }
 
@@ -571,9 +572,15 @@ function resolveBoraCareWallSqFt(input, options = {}) {
     ?? (hasValue(property.boraCareWallHeightFt) ? property.boraCareWallHeightFt : undefined);
 
   const warnings = [];
+  let heightInvalid = false;
   let height = parsePositiveMeasurement(heightRaw);
   if (height === null) {
-    if (hasValue(heightRaw)) warnings.push('invalid_boracare_wall_height_defaulted');
+    // A provided-but-invalid height (0, negative, non-numeric) defaults to 8 ft
+    // but is flagged for review so the bad measurement is not silently priced.
+    if (hasValue(heightRaw)) {
+      warnings.push('invalid_boracare_wall_height_defaulted');
+      heightInvalid = true;
+    }
     height = SPECIALTY.boraCare.defaultWallHeightFt;
   }
 
@@ -584,6 +591,7 @@ function resolveBoraCareWallSqFt(input, options = {}) {
     source: 'wall_linear_ft',
     warnings,
     invalid: false,
+    heightInvalid,
   };
 }
 
@@ -4283,10 +4291,15 @@ function priceBoraCare(input, options = {}) {
   const hasAttic = measurement.value !== null;
   const hasWall = wall.wallSqFt > 0;
   // Attic input was provided (valid or invalid) when the resolver landed on a
-  // source other than the synthetic 'missing'. When walls cover the job, a
-  // missing attic measurement is expected and must not be surfaced as noise.
-  const atticProvided = measurement.source !== 'missing';
-  const suppressAtticGaps = hasWall && !atticProvided;
+  // source other than the synthetic 'missing'. An invalid property value also
+  // resolves to source 'missing', so check the review reasons to tell a truly
+  // absent attic apart from a rejected one — only the former may be suppressed.
+  const atticInvalid = measurement.manualReviewReasons.includes('invalid_boracare_attic_sqft')
+    || measurement.warnings.includes('invalid_boracare_attic_sqft');
+  const atticTrulyMissing = measurement.source === 'missing' && !atticInvalid;
+  // When walls cover the job, a missing attic measurement is expected and must
+  // not be surfaced as noise — but a rejected attic value still needs review.
+  const suppressAtticGaps = hasWall && atticTrulyMissing;
 
   const warnings = [...wall.warnings];
   const manualReviewReasons = [];
@@ -4295,9 +4308,12 @@ function priceBoraCare(input, options = {}) {
     manualReviewReasons.push(...measurement.manualReviewReasons);
   }
   if (wall.invalid) manualReviewReasons.push('invalid_boracare_wall_linear_ft');
+  if (wall.heightInvalid) manualReviewReasons.push('invalid_boracare_wall_height_defaulted');
 
   const requiresMeasurement = !hasAttic && !hasWall;
-  const requiresManualReview = wall.invalid || (!suppressAtticGaps && measurement.requiresManualReview);
+  const requiresManualReview = wall.invalid
+    || wall.heightInvalid
+    || (!suppressAtticGaps && measurement.requiresManualReview);
 
   const atticSqFt = hasAttic ? measurement.value : null;
   const wallSqFt = hasWall ? wall.wallSqFt : null;
