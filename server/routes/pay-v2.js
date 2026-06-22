@@ -261,7 +261,16 @@ router.post('/:token/setup', async (req, res, next) => {
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
-      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+      // The invoice already flipped to `processing` — an ACH debit in flight.
+      // This is the same benign in-progress state as the createInvoicePaymentIntent
+      // 409 below, and it can be hit by a fresh-return race (the webhook flips
+      // the status between the page's initial GET and this POST). Carry
+      // `inProgress: true` so the pay page shows the "bank payment processing"
+      // state instead of a red error.
+      if (invoice.status === 'processing') {
+        return res.status(409).json({ error: err.message, inProgress: true });
+      }
+      return res.status(400).json({ error: err.message });
     }
 
     const result = await StripeService.createInvoicePaymentIntent(invoice.id, { saveCard: !!saveCard, cardOnly: !!cardOnly });
@@ -279,6 +288,31 @@ router.post('/:token/setup', async (req, res, next) => {
       status: result.status,
     });
   } catch (err) {
+    // A 409 means the invoice already has a live PaymentIntent. Two cases,
+    // distinguished by `inProgress` (set by createInvoicePaymentIntent only when
+    // money is genuinely in flight — a live payment row or a
+    // processing/succeeded PI):
+    //   • inProgress  → an ACH bank debit still `processing`, or a reload /
+    //     bank-redirect return. NOT a failure: no admin alert, and the pay page
+    //     shows the customer the "bank payment processing" state.
+    //   • !inProgress → a recoverable conflict (e.g. a card PI stuck in
+    //     requires_action after an abandoned 3DS). The customer is stuck —
+    //     the same PI keeps 409ing on reload — so STILL raise the admin alert
+    //     so an operator can intervene, even though we return the 409 cleanly.
+    if (err.statusCode === 409) {
+      if (!err.inProgress) {
+        logger.warn(`[pay-v2] Setup 409 (recoverable conflict) for invoice ${invoice?.id || req.params.token}: ${err.message}`);
+        reportBillPaymentError(req, {
+          invoice,
+          phase: 'setup',
+          methodCategory: 'card',
+          error: err,
+          statusCode: 409,
+          metadata: { save_card: !!req.body?.saveCard, recoverable_conflict: true },
+        });
+      }
+      return res.status(409).json({ error: err.message, inProgress: !!err.inProgress });
+    }
     logger.error(`[pay-v2] Setup error: ${err.message}`);
     reportBillPaymentError(req, {
       invoice,
@@ -288,9 +322,6 @@ router.post('/:token/setup', async (req, res, next) => {
       statusCode: err.statusCode || 500,
       metadata: { save_card: !!req.body?.saveCard },
     });
-    if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message });
-    }
     next(err);
   }
 });

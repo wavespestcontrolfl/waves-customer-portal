@@ -113,9 +113,11 @@ function paymentErrorPayload(err, extra = {}) {
   };
 }
 
-function serverReportedError(message) {
+function serverReportedError(message, { status = null, inProgress = false } = {}) {
   const err = new Error(message || 'Payment error');
   err.serverReported = true;
+  if (status != null) err.status = status;
+  err.inProgress = !!inProgress;
   return err;
 }
 
@@ -1102,6 +1104,14 @@ export default function PayPageV2() {
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  // Set when /setup reports an in-flight payment (409 + inProgress) — most often
+  // an ACH bank debit still `processing`. We render a self-contained "bank
+  // payment processing" state here rather than navigating to /receipt, whose
+  // processing copy is driven only by local invoice/payment rows that can lag
+  // the webhook on a fresh return (the customer would otherwise see a neutral
+  // receipt). This flag comes from the server's live PI read, so it's accurate
+  // even before the local rows catch up.
+  const [bankProcessing, setBankProcessing] = useState(false);
   // Guards POST /setup to once per (token, saveCard): the partial-credit display
   // sync below mutates `data`, which would otherwise re-run the setup effect and
   // re-POST /setup — churning the just-minted PaymentIntent (the second call sees
@@ -1119,7 +1129,15 @@ export default function PayPageV2() {
       .catch((e) => { setError(e.message); setLoading(false); });
   }, [token]);
 
-  // Stripe redirect return (3DS, bank redirect)
+  // Stripe redirect return (3DS, bank redirect).
+  //
+  // We deliberately do NOT special-case `redirect_status=processing` here: the
+  // URL param can't be trusted (a bookmarked/stale return), and the browser can
+  // arrive before the webhook flips invoices.status, so jumping straight to the
+  // receipt would race into its neutral state. The ACH-return case is instead
+  // handled server-authoritatively by the /setup effect below — its 409 carries
+  // an `inProgress` flag (set only when Stripe confirms the PI is actually
+  // processing/succeeded), and only then do we route to the receipt.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const redirectStatus = params.get('redirect_status');
@@ -1175,7 +1193,12 @@ export default function PayPageV2() {
     })
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
-        if (!r.ok) throw serverReportedError(setup.error || 'Failed to initialize payment');
+        if (!r.ok) {
+          throw serverReportedError(setup.error || 'Failed to initialize payment', {
+            status: r.status,
+            inProgress: setup.inProgress,
+          });
+        }
         return setup;
       })
       .then((setup) => {
@@ -1224,6 +1247,19 @@ export default function PayPageV2() {
         setPaymentState('ready');
       })
       .catch((err) => {
+        // A 409 with inProgress means the server confirmed (via a live PI read)
+        // that money is genuinely in flight — most often an ACH bank debit still
+        // `processing` (clears over several business days). Showing a red
+        // "payment already in progress" error here is what made customers retry
+        // repeatedly; show the calm "bank payment processing" state instead. A
+        // 409 WITHOUT inProgress is a recoverable conflict (e.g. a card PI stuck
+        // in requires_action after an abandoned 3DS) — fall through to show the
+        // error so the customer can retry.
+        if (err.status === 409 && err.inProgress) {
+          setBankProcessing(true);
+          setPaymentState('idle');
+          return;
+        }
         // Allow a retry: the guard was set before the POST to stop the
         // partial-credit sync from re-posting an IN-FLIGHT setup, but a failed
         // setup must be retryable (else the customer is stuck until a reload).
@@ -1370,6 +1406,28 @@ export default function PayPageV2() {
               Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
               covered by your account credit, so there's no payment to make. Thanks for being a
               Waves customer! Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+            </p>
+          </BrandCard>
+        </div>
+      </WavesShell>
+    );
+  }
+
+  // An ACH bank payment is already in flight for this invoice (server confirmed
+  // via a live PaymentIntent read). Show a calm, self-contained confirmation
+  // instead of the pay form or a scary "already in progress" error — the debit
+  // clears over a few business days and the receipt is emailed when it settles.
+  if (bankProcessing) {
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
+          <BrandCard>
+            <SerifHeading style={{ marginBottom: 12 }}>Your bank payment is processing</SerifHeading>
+            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+              We’ve got a bank (ACH) payment in progress for invoice{' '}
+              {data.invoice?.invoiceNumber || data.invoice?.invoice_number || ''}. Bank transfers
+              take a few business days to clear — there’s nothing more you need to do, and we’ll
+              email your receipt once it settles. Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
             </p>
           </BrandCard>
         </div>
