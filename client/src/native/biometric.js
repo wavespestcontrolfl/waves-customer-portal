@@ -3,24 +3,46 @@ import { isNativeApp } from './platform';
 /**
  * Face ID / Touch ID app-lock helper (native only).
  *
- * Dynamic-imports @aparajita/capacitor-biometric-auth so the web build stays
- * inert. Fails OPEN (returns true = unlocked) on the web, when the device has
- * no biometry enrolled, or when biometry is unavailable — we never want to lock
- * a customer out of their account because of a hardware/enrollment gap. Only an
- * explicit failed/cancelled biometric prompt returns false.
+ * Fails OPEN (returns true = unlocked) whenever biometry can't actually run: on
+ * the web, when the native plugin isn't present in this build, when biometry is
+ * unavailable, or when nothing is enrolled. This matters because the shell loads
+ * the LIVE portal (capacitor.config.json) — a web deploy of this code can run
+ * inside an OLDER installed binary that doesn't yet bundle the BiometricAuth
+ * native plugin, and we must never trap a logged-in customer behind a lock they
+ * can't clear. Only an explicit failed/cancelled biometric PROMPT (plugin
+ * present and actually ran) returns false (stay locked).
  */
 let biometryUnavailable = false;
 
 export async function authenticateBiometric(reason = 'Unlock Waves') {
   if (!isNativeApp()) return true;
   if (biometryUnavailable) return true;
+
+  // Load the plugin. Missing in this build (older binary, newer web code) → open.
+  let BiometricAuth;
   try {
-    const { BiometricAuth } = await import('@aparajita/capacitor-biometric-auth');
+    ({ BiometricAuth } = await import('@aparajita/capacitor-biometric-auth'));
+  } catch {
+    biometryUnavailable = true;
+    return true;
+  }
+
+  // Probe availability. A throw here means the native plugin isn't implemented
+  // in this build (or biometry is unusable) → fail open, don't lock out.
+  try {
     const info = await BiometricAuth.checkBiometry();
     if (!info?.isAvailable) {
-      biometryUnavailable = true; // no Face ID/Touch ID enrolled — don't gate
+      biometryUnavailable = true;
       return true;
     }
+  } catch {
+    biometryUnavailable = true;
+    return true;
+  }
+
+  // Plugin present and biometry available — now an explicit prompt. Only a real
+  // cancel/failure keeps the app locked.
+  try {
     await BiometricAuth.authenticate({
       reason,
       cancelTitle: 'Cancel',
@@ -29,7 +51,6 @@ export async function authenticateBiometric(reason = 'Unlock Waves') {
     });
     return true;
   } catch {
-    // Prompt failed or was cancelled — stay locked.
     return false;
   }
 }
