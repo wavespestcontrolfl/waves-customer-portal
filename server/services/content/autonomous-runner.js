@@ -590,7 +590,8 @@ class AutonomousRunner {
     if (comparisonGate && draft) {
       let namedCompetitorEnabled = false;
       try {
-        namedCompetitorEnabled = require('../../config/feature-gates').namedCompetitorComparison === true;
+        // feature-gates exports { gates, isEnabled }, not the flag at top level.
+        namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true;
       } catch (_) { namedCompetitorEnabled = false; }
       let comparisonResult;
       try {

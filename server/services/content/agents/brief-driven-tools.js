@@ -238,7 +238,8 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       // would block from publishing.
       try {
         let enabled = false;
-        try { enabled = require('../../../config/feature-gates').namedCompetitorComparison === true; }
+        // feature-gates exports { gates, isEnabled }, not the flag at top level.
+        try { enabled = require('../../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; }
         catch (_) { enabled = false; }
         return {
           named_competitor_enabled: enabled,

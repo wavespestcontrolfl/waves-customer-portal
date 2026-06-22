@@ -186,4 +186,62 @@ describe('comparison-table-gate', () => {
     expect(gate.hasAttribution('Per their website.')).toBe(false); // no as-of/date
     expect(gate.hasAttribution('')).toBe(false);
   });
+
+  // ── Round-3 findings ──
+
+  test('R3-1: an option literally named "Waves Pest Control" is recognized as our brand, not parked', () => {
+    expect(gate.classifyOption('Waves Pest Control')).toBe('own');
+    const t = CATEGORY_TABLE.replace('Local SWFL company', 'Waves Pest Control');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: false });
+    expect(r.pass).toBe(true);
+  });
+
+  test('R3-2: a table-scoped "worst" claim is caught (while prose "worst infestation" is not)', () => {
+    const t = CATEGORY_TABLE.replace('Generic playbook', 'Worst follow-up');
+    expect(gate.evaluate(wrap(t), { namedCompetitorEnabled: true }).findings
+      .some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    const prose = gate.evaluate({ body: `The worst infestation we saw was termites.\n\n${CATEGORY_TABLE}` }, {});
+    expect(prose.pass).toBe(true);
+  });
+
+  test('R3-3: in a multi-table guide, attribution must be on the table that names the competitor', () => {
+    const sourcedCategory = CATEGORY_TABLE.replace(
+      'Trade-offs to weigh when choosing pest control in Venice.',
+      'Trade-offs as of June 2026, per public sources.');
+    const unsourcedNamed = NAMED_TABLE('A quick look at your options.');
+    const r = gate.evaluate({ body: `${sourcedCategory}\n\n${unsourcedNamed}` }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED' && /Orkin/.test(f.message))).toBe(true);
+  });
+
+  test('R3-4: bare "best/top <service>" rankings are caught; generic "best pest control method" is not', () => {
+    for (const phrase of ['Waves is best pest control in Venice', 'We are the top pest control company']) {
+      const r = gate.evaluate({ body: `${phrase}.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const ok = gate.evaluate({ body: `The best pest control method for ants is bait.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
+
+  test('R3-6: a competitor named in the title/meta (not the body) is caught', () => {
+    const r = gate.evaluate(
+      { body: CATEGORY_TABLE, frontmatter: { title: 'Hulett vs Waves in Venice', meta_description: 'A neutral guide.' } },
+      { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && /Hulett/.test(f.message))).toBe(true);
+  });
+
+  test('R3-7: a named competitor cell stating a non-curated fact is routed to review', () => {
+    const fabricated = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[
+        { label: "Guarantee", values: ["90-day money-back guarantee","Re-treat between visits"] },
+        { label: "Reach", values: ["National (US)","Local"] }
+      ]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: fabricated }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /Orkin/.test(f.message))).toBe(true);
+  });
 });

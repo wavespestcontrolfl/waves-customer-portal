@@ -134,6 +134,18 @@ function isKnownCompetitor(name) {
 }
 
 /**
+ * attributeValues(name) → the curated attribute value strings for a competitor
+ * (e.g. ["National (US)", "Yes — recurring residential plans"]). The comparison
+ * gate checks a named competitor's table cells against these so the writer can
+ * only state facts that are actually curated/sourced. [] for unknown names.
+ */
+function attributeValues(name) {
+  const rec = findCompetitor(name);
+  if (!rec) return [];
+  return Object.values(rec.attributes || {}).map((a) => a && a.value).filter(Boolean);
+}
+
+/**
  * findBusinessMentions(text) → [{ name, inAllowlist }]
  *
  * Detects pest-control business names mentioned in `text` (word-boundary,
@@ -189,6 +201,7 @@ module.exports = {
   COMPETITOR_BRAND_SIGNALS,
   findCompetitor,
   isKnownCompetitor,
+  attributeValues,
   findBusinessMentions,
   listForPrompt,
   _internals: { normalize, DETECTABLE_NAMES, ALLOWLIST_INDEX },
