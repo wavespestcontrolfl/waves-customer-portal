@@ -274,5 +274,23 @@ async function findContact(domain, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TI
   return result;
 }
 
-module.exports = { findContact };
-module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, isBlockedHostname, isPrivateIp, hostResolvesPublic, CONTACT_PATHS };
+/**
+ * fetchPageText(url) → { title, snippet } | null — a light, SSRF-safe page read
+ * for outreach personalization (reuses the same hardened fetch path as findContact:
+ * private-IP/redirect guards, timeout, fail-soft). Strips scripts/styles/tags.
+ */
+async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const html = await fetchText(url, { fetchFn, timeoutMs });
+  if (!html) return null;
+  const title = (html.match(/<title[^>]*>([\s\S]{1,200}?)<\/title>/i) || [])[1]?.replace(/\s+/g, ' ').trim() || null;
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { title, snippet: text.slice(0, 400) || null };
+}
+
+module.exports = { findContact, fetchPageText };
+module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, isBlockedHostname, isPrivateIp, hostResolvesPublic, fetchText, CONTACT_PATHS };

@@ -131,6 +131,13 @@ const gates = {
   // requires an operator's explicit, authenticated approval click — never auto-send.
   linkProspectOutreach: process.env.GATE_LINK_OUTREACH === 'true',
 
+  // Outreach Drafter — in-process cron that claims outreach prospects, drafts a
+  // 1:1 pitch via Claude, and parks it as 'drafted' for the approval queue. It
+  // NEVER sends. Independent of linkProspectOutreach so drafts can be generated
+  // and reviewed BEFORE the send valve is armed (two-step trust ladder). Default
+  // OFF in prod.
+  outreachDrafter: isProd ? process.env.GATE_OUTREACH_DRAFTER === 'true' : true,
+
   // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
   // Marketplace add-on flags as spam. Explicit opt-in everywhere: until the
   // gate is on, verdicts are only logged (shadow) and never block a caller.
