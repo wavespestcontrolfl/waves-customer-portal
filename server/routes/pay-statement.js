@@ -95,6 +95,12 @@ router.get('/:token', async (req, res, next) => {
         total: statement.total,
         invoice_count: statement.invoice_count,
         paid_at: statement.paid_at,
+        // The statement's CURRENT active PaymentIntent — lets the pay page bind a
+        // Stripe redirect return to THIS statement's live attempt (a stale PI from
+        // a since-refunded statement, or a copied client-secret from another
+        // statement, won't match and so can't fake a "submitted" state). Not
+        // sensitive: the AP already holds this PI's client secret from /setup.
+        active_payment_intent_id: statement.stripe_payment_intent_id || null,
       },
       billTo: { company: snap.company_name || snap.display_name || null, ap_email: snap.ap_email || null },
       lines,

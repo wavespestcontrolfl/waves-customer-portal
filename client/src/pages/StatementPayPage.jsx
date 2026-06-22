@@ -310,6 +310,15 @@ export default function StatementPayPage() {
     let alive = true;
     setRedirectCheck("checking");
     (async () => {
+      // Bind the return to THIS statement's CURRENT attempt: the redirect secret's
+      // PI must be the statement's active PI. A secret from a since-refunded/
+      // cleared old attempt, or one copied onto another statement's URL, won't
+      // match — so it falls to `retry` (show the form) instead of faking success.
+      const redirectPiId = String(redirectClientSecret).split("_secret_")[0] || null;
+      if (!redirectPiId || redirectPiId !== (data.statement?.active_payment_intent_id || null)) {
+        if (alive) setRedirectCheck("retry");
+        return;
+      }
       try {
         const stripe = await getStripe(setup?.publishableKey || data.publishableKey);
         const { paymentIntent, error: piError } = await stripe.retrievePaymentIntent(redirectClientSecret);
@@ -334,7 +343,12 @@ export default function StatementPayPage() {
     // Wait out a redirect verification; only mint a PI if the redirect didn't
     // actually submit (redirectCheck === 'retry'), or there's no redirect at all.
     if (hasRedirect && redirectCheck !== "retry") return;
-    if (!data.statement?.payable) return;
+    const retryAfterRedirect = hasRedirect && redirectCheck === "retry";
+    // On a verified retry, drive /setup off the BACKEND's authority — it resets/
+    // mints a base PI, or 409s if the statement is genuinely still processing —
+    // rather than the GET's `payable` flag, which can lag a just-reverted
+    // statement (the failed-redirect window).
+    if (!data.statement?.payable && !retryAfterRedirect) return;
     let alive = true;
     fetch(`${API_BASE}/pay/statement/${token}/setup`, {
       method: "POST",
@@ -344,7 +358,15 @@ export default function StatementPayPage() {
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
         if (!alive) return;
-        if (!ok) { setSetupError(d?.error || "Could not start the payment."); return; }
+        if (!ok) {
+          // A 409 on the retry path means the statement is still processing (the
+          // webhook hasn't reverted the failed attempt yet) — say so plainly.
+          const stale = retryAfterRedirect && /in progress/i.test(d?.error || "");
+          setSetupError(stale
+            ? "We're still updating your statement after your last attempt — please refresh in a moment."
+            : (d?.error || "Could not start the payment."));
+          return;
+        }
         setSetup(d);
       })
       .catch(() => { if (alive) setSetupError("Could not start the payment."); });
@@ -427,7 +449,9 @@ export default function StatementPayPage() {
     );
   }
 
-  if (!statement.payable) {
+  // A verified `retry` means the redirect attempt failed; show the form (driven
+  // off the backend) even if the GET's `payable` still lags as processing.
+  if (!statement.payable && !(hasRedirect && redirectCheck === "retry")) {
     return shell(
       <BrandCard>
         <SerifHeading style={{ marginBottom: 12 }}>Nothing to pay right now</SerifHeading>
