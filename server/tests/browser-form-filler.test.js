@@ -1,12 +1,13 @@
 const { fillCitationForm, _internals } = require('../services/seo/browser-form-filler');
 
 // Fake Playwright page/browser that records actions and serves canned screenshots.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add' } = {}) {
+// failFillSel: a selector whose fill() throws, to exercise the fail-closed pre-submit path.
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null } = {}) {
   const page = {
     goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
     url: () => landedUrl,
     screenshot: async () => Buffer.from('png'),
-    fill: async (sel, val) => actionsLog.push(['fill', sel, val]),
+    fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); },
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
     check: async (sel) => actionsLog.push(['check', sel]),
     click: async (sel) => actionsLog.push(['click', sel]),
@@ -35,7 +36,7 @@ describe('fillCitationForm', () => {
     expect(log).toHaveLength(0); // never filled anything
   });
 
-  test('free form → fills allowed actions, submits, confirms → placed (on-host live_url kept)', async () => {
+  test('free form → fills, submits, confirms → placed+pending; live_url NEVER stored (verifier reconciles)', async () => {
     const log = [];
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
@@ -45,11 +46,13 @@ describe('fillCitationForm', () => {
       ),
     }));
     expect(r.outcome).toBe('placed');
-    expect(r.liveUrl).toBe('https://x.com/biz/waves');
+    expect(r.pending).toBe(true);
+    expect(r.liveUrl).toBeNull();                      // model URL never stored (verifier fetch would follow redirects → SSRF)
+    expect(r.notes).toContain('claimed:https://x.com/biz/waves'); // kept only as a non-fetched evidence note
     expect(log).toContainEqual(['fill', '#name', 'Waves']);
   });
 
-  test('P1: an OFF-host live_url is dropped (reported pending, never stored for the verifier)', async () => {
+  test('P1: an OFF-host claimed live_url is not even kept in the note', async () => {
     const log = [];
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
@@ -59,8 +62,35 @@ describe('fillCitationForm', () => {
       ),
     }));
     expect(r.outcome).toBe('placed');
-    expect(r.liveUrl).toBeNull();   // off-host URL not trusted
-    expect(r.pending).toBe(true);   // → pending so the row isn't stranded
+    expect(r.liveUrl).toBeNull();
+    expect(r.pending).toBe(true);
+    expect(r.notes || '').not.toContain('169.254'); // off-host URL not surfaced anywhere
+  });
+
+  test('P1: a failed pre-submit field action ABORTS before submit (fail-closed, never submitted)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log, { failFillSel: '#name' }),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#name', value: 'Waves' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('field_action_failed');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined(); // submit never clicked
+  });
+
+  test('P1: submit clicked but confirmation UNRECOGNIZED → placed+pending, NOT retryable failed', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, live_url: null }, // unconfirmed
+      ),
+    }));
+    expect(r.outcome).toBe('placed'); // once submit is clicked we never auto-retry (would risk a duplicate)
+    expect(r.pending).toBe(true);
+    expect(r.notes).toContain('unconfirmed');
+    expect(log).toContainEqual(['click', '#go']); // submit did happen
   });
 
   test('P1: model-emitted clicks are never executed (only fill/select/check + final submit)', async () => {

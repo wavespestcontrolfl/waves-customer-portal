@@ -193,52 +193,61 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     if (plan.blocked) return { outcome: `blocked_${plan.blocked}`.replace('blocked_phone', 'blocked_phone_verification'), errorCode: `blocked_${plan.blocked}`, screenshot: shot1, notes: plan.notes };
     if (plan.form_present !== true || !Array.isArray(plan.actions) || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: plan.notes || 'no form' };
 
-    // Validate the plan SHAPE before touching the page. A partial run that submits via
-    // a stray click and only THEN reports no_submit would risk a duplicate listing on
-    // the next retry — so require exactly one submit action, as the final action,
-    // up front; anything else is rejected without filling anything.
+    // Validate the plan SHAPE before touching the page: exactly one submit action, and
+    // it must be the FINAL action. We then run actions[0..-2] as fields and the last as
+    // the submit, so a malformed plan can't interleave a submit mid-fill or submit twice.
     const submitCount = plan.actions.filter((a) => a && a.action === 'submit').length;
     const last = plan.actions[plan.actions.length - 1];
     if (submitCount !== 1 || !last || last.action !== 'submit' || !last.selector) {
       return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'plan must end with exactly one submit action' };
     }
 
-    // Execute ONLY the allowlisted, deterministic actions (fill/select/check); any
-    // other action the model emitted — click, upload, captcha step — is not in
-    // ALLOWED_ACTIONS and is skipped. The single final 'submit' is the only button press.
-    let submitted = false;
-    for (const act of plan.actions) {
+    // FAIL-CLOSED: every pre-submit field action must succeed. A failed fill/select/
+    // check (missing required NAP field, wrong selector) means an incomplete listing,
+    // so we abort BEFORE clicking submit rather than submit a partial form. The single
+    // final 'submit' is sliced off and run separately. Non-vocab actions (click/upload)
+    // aren't in ALLOWED_ACTIONS and are skipped (never submit early).
+    for (const act of plan.actions.slice(0, -1)) {
       if (!act || !ALLOWED_ACTIONS.has(act.action) || !act.selector) continue;
       try {
         if (act.action === 'fill') await page.fill(act.selector, String(act.value ?? ''));
         else if (act.action === 'select') await page.selectOption(act.selector, String(act.value ?? ''));
         else if (act.action === 'check') await page.check(act.selector);
-        else if (act.action === 'submit') { await page.click(act.selector); submitted = true; await page.waitForLoadState('domcontentloaded').catch(() => {}); }
+        else continue; // 'submit' can't appear here (validated single + last)
         await page.waitForTimeout(250 + Math.random() * 500);
       } catch (e) {
-        logger.warn(`[form-filler] action ${act.action} ${act.selector} failed: ${e.message}`);
+        logger.warn(`[form-filler] pre-submit ${act.action} ${act.selector} failed: ${e.message}`);
+        return { outcome: 'failed', errorCode: 'field_action_failed', screenshot: shot1, notes: `pre-submit ${act.action} failed (not submitted)` };
       }
     }
-    if (!submitted) return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'submit action did not run' };
+
+    // The submit click is the point of no return. If it THROWS the click didn't land
+    // (no listing created) → retryable failed. If it SUCCEEDS, we never auto-retry
+    // again (a retry could duplicate a listing that actually went through), regardless
+    // of how the confirmation reads.
+    try {
+      await page.click(last.selector);
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+    } catch (e) {
+      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit click failed (not submitted): ${e.message}` };
+    }
 
     await page.waitForTimeout(1500);
     const shot2 = (await page.screenshot({ fullPage: true, type: 'png' }));
     const verify = await callVision(client, shot2.toString('base64'),
       'Did the previous business-listing submission SUCCEED? Look for a confirmation/thank-you, a moderation/"pending review" notice, or a created listing URL. Return ONLY JSON: {"success":bool,"pending":bool,"live_url":"url or null","notes":"≤15 words"}');
-    // Only trust a returned live_url that is on the allowlisted domain — a citation's
-    // listing lives on the directory's own domain. The downstream verifier fetches
-    // live_url server-side, so a model-/page-supplied off-host or internal URL must
-    // NOT be stored (it would bypass the same-host SSRF guard). Off-host → drop it
-    // (the placement reports pending; the verifier's domain reconcile finds the URL).
+    // The submit WAS clicked → ALWAYS report a PENDING placement (never failed/retry,
+    // even when the confirmation is unrecognized — a retry could duplicate a listing
+    // that actually succeeded). We do NOT store a model-/page-supplied live_url: the
+    // verifier fetches live_url server-side following redirects, so an open-redirect or
+    // rebinding on the directory could turn it into an SSRF. The verifier's domain
+    // reconcile discovers the real URL; the model's claimed URL is kept only as a
+    // non-fetched evidence note (and only if it's on the allowlisted domain).
     const claimedLive = verify && typeof verify.live_url === 'string' && /^https?:\/\//.test(verify.live_url) ? verify.live_url : null;
-    const liveUrl = claimedLive && hostMatchesExpected(hostOf(claimedLive), expectedHost) ? claimedLive : null;
-    if (verify && (verify.success || verify.pending)) {
-      // Pending whenever the model said so OR we have no trusted live URL (incl. one
-      // dropped as off-host) — a placement without a confirmed on-host URL must be
-      // reported pending so the verifier reconciles it instead of stranding the row.
-      return { outcome: 'placed', pending: !!verify.pending || !liveUrl, liveUrl, screenshot: shot2, notes: verify.notes };
-    }
-    return { outcome: 'failed', errorCode: 'unconfirmed', screenshot: shot2, notes: (verify && verify.notes) || 'submission not confirmed' };
+    const onHostClaim = claimedLive && hostMatchesExpected(hostOf(claimedLive), expectedHost) ? claimedLive : null;
+    const confirmed = !!(verify && (verify.success || verify.pending));
+    const note = [(verify && verify.notes) || (confirmed ? 'submitted' : 'submitted; unconfirmed'), onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200);
+    return { outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2, notes: note };
   } catch (err) {
     logger.error(`[form-filler] ${submitUrl}: ${err.message}`);
     return { outcome: 'failed', errorCode: 'engine_error', notes: String(err.message).slice(0, 160) };
