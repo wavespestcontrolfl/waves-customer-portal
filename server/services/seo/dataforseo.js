@@ -25,13 +25,19 @@ function hasUrlBoundary(candidate, clean) {
   return next === '/' || next === '?' || next === '#';
 }
 
-// A SERP location can be a named place (location_name) or a "lat,lng" coordinate
-// (location_coordinate). Some small markets (e.g. Parrish, FL) aren't in
-// DataForSEO's named-location DB and 40501 on location_name, so callers can pass
-// coordinates instead.
+// A SERP location can be a named place (location_name) or a "lat,lng[,radius]"
+// coordinate (location_coordinate). Some small markets (e.g. Parrish, FL) aren't
+// in DataForSEO's named-location DB and 40501 on location_name, so callers can
+// pass coordinates instead. DataForSEO documents the coordinate as
+// latitude,longitude,radius — a bare 2-part value happens to work for organic
+// but not the documented contract, so we append a default radius (km) when one
+// isn't supplied.
+const SERP_COORDINATE_RADIUS_KM = 20;
 function serpLocation(location) {
   const s = String(location || '').trim();
-  return /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(s) ? { location_coordinate: s } : { location_name: location };
+  if (/^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?,\s*\d+(\.\d+)?$/.test(s)) return { location_coordinate: s.replace(/\s+/g, '') };
+  if (/^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(s)) return { location_coordinate: `${s.replace(/\s+/g, '')},${SERP_COORDINATE_RADIUS_KM}` };
+  return { location_name: location };
 }
 
 class DataForSEO {
