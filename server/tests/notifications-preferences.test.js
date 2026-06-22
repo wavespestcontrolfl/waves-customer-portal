@@ -17,9 +17,10 @@ jest.mock('../services/account-membership-email', () => ({
   sendAccountUpdated: jest.fn(),
 }));
 
+const db = require('../models/db');
 const notificationsRoute = require('../routes/notifications');
 
-const { notificationPrefsDbUpdates, preferenceChangeItems } = notificationsRoute._private;
+const { notificationPrefsDbUpdates, preferenceChangeItems, resolvePrimaryProfileId, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
 
 describe('notification preference updates', () => {
   test('clears stale billing contact name when billing email changes without a replacement name', () => {
@@ -147,5 +148,32 @@ describe('notification preference updates', () => {
       newValue: 'Off',
       scope: 'Account',
     }]);
+  });
+});
+
+describe('account-level channel routing', () => {
+  function customersChain(value) {
+    const q = { where: jest.fn(() => q), first: jest.fn(async () => value) };
+    return q;
+  }
+
+  test('resolvePrimaryProfileId resolves the account primary for a secondary-property session', async () => {
+    db.mockImplementation(() => customersChain({ id: 'primary-1' }));
+    const id = await resolvePrimaryProfileId({ customerId: 'secondary-1', customer: { account_id: 'acct-1' } });
+    expect(id).toBe('primary-1');
+  });
+
+  test('resolvePrimaryProfileId falls back to the current customer when no primary profile is found', async () => {
+    db.mockImplementation(() => customersChain(null));
+    const id = await resolvePrimaryProfileId({ customerId: 'solo-1' });
+    expect(id).toBe('solo-1');
+  });
+
+  test('CHANNEL_DB_COLUMNS lists the three appointment channel columns', () => {
+    expect(CHANNEL_DB_COLUMNS).toEqual([
+      'appointment_confirmation_channel',
+      'service_reminder_72h_channel',
+      'service_reminder_24h_channel',
+    ]);
   });
 });

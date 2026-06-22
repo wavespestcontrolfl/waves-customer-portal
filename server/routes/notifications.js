@@ -60,6 +60,10 @@ function normalizeContactInput(contact = {}) {
 // Delivery-channel options for per-notification channel selection.
 const CHANNEL_VALUES = ['sms', 'email', 'both'];
 
+// Delivery channel is an account-level "how to reach me" preference, stored on
+// the account's primary profile so it is consistent across every property.
+const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel'];
+
 const PREF_SELECT = [
   'appointment_confirmation',
   'service_reminder_72h',
@@ -289,13 +293,41 @@ async function accountPropertyIds(req) {
   return rows.map(r => r.id);
 }
 
+// Resolve the customer id that owns the account-level channel preference — the
+// account's primary profile — so a customer switched to a secondary property
+// still reads/writes the one shared channel. Falls back to the current customer
+// when no primary profile resolves.
+async function resolvePrimaryProfileId(req) {
+  const accountId = req.accountId || req.customer?.account_id || req.customerId;
+  if (!accountId) return req.customerId;
+  const primary = await db('customers')
+    .where({ account_id: accountId, is_primary_profile: true })
+    .first('id')
+    .catch(() => null);
+  return primary?.id || req.customerId;
+}
+
+// Build the account-level preferences payload: per-property toggles/contacts
+// come from the current customer; delivery channels come from the account's
+// primary profile.
+async function loadPreferencePayload(req) {
+  const prefs = await ensurePrefs(req.customerId);
+  const primaryId = await resolvePrimaryProfileId(req);
+  const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
+  return preferencePayload({
+    ...prefs,
+    appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
+    service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
+    service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
+  });
+}
+
 // =========================================================================
 // GET /api/notifications/preferences — Get current notification prefs
 // =========================================================================
 router.get('/preferences', async (req, res, next) => {
   try {
-    const prefs = await ensurePrefs(req.customerId);
-    res.json(preferencePayload(prefs));
+    res.json(await loadPreferencePayload(req));
   } catch (err) {
     next(err);
   }
@@ -377,32 +409,46 @@ router.put('/preferences', async (req, res, next) => {
     const updates = await schema.validateAsync(req.body);
 
     const existing = await ensurePrefs(req.customerId);
-    const dbUpdates = {
-      ...notificationPrefsDbUpdates(updates, existing || {}),
-      updated_at: new Date(),
-    };
+    const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});
 
-    if (existing) {
+    // Delivery channels are account-level — persist them on the primary profile
+    // so the choice is honored no matter which property the customer is viewing.
+    // Everything else stays per-property on the current customer row.
+    const channelDbUpdates = {};
+    const propertyDbUpdates = {};
+    for (const [col, val] of Object.entries(allDbUpdates)) {
+      (CHANNEL_DB_COLUMNS.includes(col) ? channelDbUpdates : propertyDbUpdates)[col] = val;
+    }
+
+    // Capture the primary profile's prior channel state before writing.
+    const primaryId = Object.keys(channelDbUpdates).length ? await resolvePrimaryProfileId(req) : req.customerId;
+    const existingPrimary = String(primaryId) === String(req.customerId) ? existing : await ensurePrefs(primaryId);
+
+    if (Object.keys(propertyDbUpdates).length) {
       await db('notification_prefs')
         .where({ customer_id: req.customerId })
-        .update(dbUpdates);
-    } else {
-      await db('notification_prefs').insert({
-        customer_id: req.customerId,
-        ...dbUpdates,
-      });
+        .update({ ...propertyDbUpdates, updated_at: new Date() });
+    }
+    if (Object.keys(channelDbUpdates).length) {
+      await db('notification_prefs')
+        .where({ customer_id: primaryId })
+        .update({ ...channelDbUpdates, updated_at: new Date() });
     }
 
     logger.info(`Notification prefs updated for ${req.customerId}: ${JSON.stringify({
       fields: Object.keys(updates).sort(),
     })}`);
 
-    const prefs = await db('notification_prefs').where({ customer_id: req.customerId }).first();
-    const payload = preferencePayload(prefs);
+    const payload = await loadPreferencePayload(req);
+
+    // Change log: non-channel fields compare against the current customer's prior
+    // row; channel fields against the primary profile's prior row.
+    const before = { ...(existing || {}) };
+    for (const col of CHANNEL_DB_COLUMNS) before[col] = existingPrimary?.[col];
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.customerId,
-      items: preferenceChangeItems(updates, existing || {}, payload, { scope: 'Account' }),
+      items: preferenceChangeItems(updates, before, payload, { scope: 'Account' }),
       section: 'Notification preferences',
     });
 
@@ -511,6 +557,8 @@ router._private = {
   serviceContactsPayload,
   serviceContactSlotUpdates,
   normalizeContactInput,
+  resolvePrimaryProfileId,
+  CHANNEL_DB_COLUMNS,
 };
 
 module.exports = router;
