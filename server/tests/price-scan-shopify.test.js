@@ -34,6 +34,10 @@ describe('shopify handleOf / baseOrigin', () => {
     expect(baseOrigin({ url: 'https://seedbarn.com/products/x' })).toBe('https://seedbarn.com');
     expect(baseOrigin({})).toBeNull();
   });
+  test('baseOrigin assumes https for a bare host (operator-editable website)', () => {
+    expect(baseOrigin({ website: 'chemicalwarehouse.com' })).toBe('https://chemicalwarehouse.com');
+    expect(baseOrigin({ website: 'www.seedbarn.com/' })).toBe('https://www.seedbarn.com');
+  });
 });
 
 describe('registry resolves Shopify stores to the shopify adapter', () => {

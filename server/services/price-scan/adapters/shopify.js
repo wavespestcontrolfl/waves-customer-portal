@@ -14,10 +14,15 @@ const { convertToOz } = require('../../product-costing');
 const DEFAULT_TIMEOUT = 20000;
 const MAX_CANDIDATES = 4;
 
-// The storefront base origin for this vendor (e.g. https://chemicalwarehouse.com).
+// The storefront base origin for this vendor (e.g. https://chemicalwarehouse.com). The
+// website column is operator-editable and may be a bare host ("chemicalwarehouse.com") with
+// no scheme — assume https for those rather than returning null (which would silently yield
+// no candidate for a vendor that otherwise resolves to this adapter).
 function baseOrigin(vendor) {
-  const src = vendor.website || vendor.url || '';
-  try { return new URL(src).origin; } catch (e) { return null; }
+  const src = String((vendor && (vendor.website || vendor.url)) || '').trim();
+  if (!src) return null;
+  try { return new URL(src).origin; } catch (e) { /* maybe a scheme-less host */ }
+  try { return new URL(`https://${src}`).origin; } catch (e) { return null; }
 }
 
 // Pull the product handle out of a /products/<handle> URL (absolute or relative).
