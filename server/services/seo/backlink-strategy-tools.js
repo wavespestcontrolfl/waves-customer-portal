@@ -258,7 +258,9 @@ async function executeBacklinkTool(toolName, input) {
           // Honor p.link_type only when scoring didn't run (fail-soft), and only
           // if it is worker-claimable.
           link_type: scored?.intent_class || ((p.link_type && scorer.CLAIMABLE_LINK_TYPES.has(p.link_type)) ? p.link_type : null),
-          priority: p.priority || scored?.priority || null,
+          // Scored priority is canonical (it exists to replace raw-DR/agent guesses);
+          // honor an agent-supplied priority only as a fail-soft fallback.
+          priority: scored?.priority || p.priority || null,
           domain_rating: p.domain_rating || null,
           notes: p.notes || null,
           contact_email: scored?.contact?.contact_email || null,

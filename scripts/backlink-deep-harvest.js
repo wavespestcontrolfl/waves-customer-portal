@@ -94,8 +94,10 @@ async function harvest(db, args) {
   console.log(`\n[harvest] competitors (${competitors.length}): ${competitors.join(', ')}`);
   if (!dataforseo.configured) throw new Error('DATAFORSEO_LOGIN/PASSWORD not set');
 
-  // Domains we already have a link from — exclude (no point "prospecting" them).
-  const ours = new Set((await db('seo_backlinks').select('source_domain')).map((r) => normDomain(r.source_domain)).filter(Boolean));
+  // Domains we already have a LIVE link from — exclude. Active-only (matching
+  // BacklinkMonitor scope): a lost/disavowed row is NOT a link we still own, so
+  // that domain stays eligible to be re-prospected.
+  const ours = new Set((await db('seo_backlinks').where({ status: 'active' }).select('source_domain')).map((r) => normDomain(r.source_domain)).filter(Boolean));
   ours.add(OWN_DOMAIN);
 
   // 1. aggregate referring domains across competitors
@@ -221,7 +223,7 @@ async function rescore(db, args) {
     if ((r.contact_email || r.contact_url) && (!s.contact || !s.contact.has_contact_path)) {
       const stored = { has_contact_path: true, contact_email: r.contact_email, contact_url: r.contact_url };
       const re = scorer.scoreProspect({ domain_rating: r.domain_rating }, s.classification, stored);
-      s.score = re.score; s.tier = re.tier;
+      s.score = re.score; s.tier = re.tier; s.priority = re.priority; // priority too — patch writes s.priority
     }
     const isOutreachIntent = scorer.OUTREACH_INTENTS.has(s.intent_class) || s.gate.lane === 'haro_platform';
     // Demote only un-worked rows whose outreach claim fails (no contact path,
