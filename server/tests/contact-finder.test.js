@@ -107,4 +107,13 @@ describe('contact-finder', () => {
     expect(p('::ffff:808:808')).toBe(false);           // 8.8.8.8 — public
     expect(p('2606:4700:4700::1111')).toBe(false);     // public v6
   });
+
+  test('isPrivateIp blocks the full fe80::/10 link-local range', () => {
+    const p = _internals.isPrivateIp;
+    expect(p('fe80::1')).toBe(true);
+    expect(p('fe90::1')).toBe(true);
+    expect(p('fea0::1')).toBe(true);
+    expect(p('febf::1')).toBe(true);
+    expect(p('fec0::1')).toBe(false); // outside link-local
+  });
 });

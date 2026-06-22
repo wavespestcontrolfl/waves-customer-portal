@@ -51,7 +51,9 @@ function isPrivateIp(ip) {
   const h = String(ip).toLowerCase();
   const mapped = mappedIpv4(h);
   if (mapped) return isPrivateIp(mapped);
-  return h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80');
+  // ::1 loopback, ::/unspecified, fc/fd ULA, and the FULL fe80::/10 link-local
+  // range (fe80–febf, not just the fe80 spelling).
+  return h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || /^fe[89ab]/.test(h);
 }
 
 // Synchronous, no-network reject of obviously-unsafe hostnames.

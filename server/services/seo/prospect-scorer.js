@@ -259,7 +259,11 @@ function tierFor(classification) {
  *  - unknown/other → require a contact path (conservative)
  */
 function contactGate(classification, contact) {
-  if (classification.is_haro_platform || classification.intent_class === 'haro') {
+  // Only a KNOWN platform domain is join-not-email. A non-platform 'haro' intent
+  // (a real query opportunity at an outlet) should still go down the worker's
+  // supported haro outreach lane, gated on contact like any outreach target —
+  // not dropped wholesale.
+  if (classification.is_haro_platform) {
     return { ok: true, lane: 'haro_platform', reason: 'HARO platform — sign up, do not email' };
   }
   if (SIGNUP_INTENTS.has(classification.intent_class)) {

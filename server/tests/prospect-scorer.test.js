@@ -60,6 +60,11 @@ describe('contactGate', () => {
     const g = scorer.contactGate({ intent_class: 'haro', is_haro_platform: true }, null);
     expect(g.lane).toBe('haro_platform');
   });
+  test('non-platform HARO opportunity goes down the outreach lane (not dropped)', () => {
+    const g = scorer.contactGate({ intent_class: 'haro', is_haro_platform: false }, { has_contact_path: true });
+    expect(g.ok).toBe(true);
+    expect(g.lane).toBe('outreach');
+  });
 });
 
 describe('scoreProspect composite', () => {
