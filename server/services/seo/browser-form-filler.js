@@ -15,10 +15,30 @@
 
 const MODELS = require('../../config/models');
 const logger = require('../logger');
-const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname (sync, no-DNS)
+const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname (sync) + hostResolvesPublic (DNS)
 
 function hostOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+}
+
+/**
+ * Per-request SSRF decision for the Playwright route guard. Applied to EVERY request
+ * the browser makes (top-level navigation, redirect, sub-resource). Blocks:
+ *  (a) localhost / intranet / private-IP-literal hosts (sync, no DNS),
+ *  (b) a top-level navigation that leaves the allowlisted host (we only ever fill +
+ *      submit on expectedHost; a hostile redirect off-host is refused), and
+ *  (c) any host that resolves to a private/internal IP — closes the DNS-rebinding
+ *      gap a one-shot preflight can't (a public-looking host can resolve private).
+ * Public off-host SUB-resources (CDN/fonts/analytics) are allowed so the page still
+ * renders for the vision model. resolvePublic is injected (cached DNS) for testing.
+ */
+async function requestAllowed({ url, isNavigation, isTopFrame }, { expectedHost, resolvePublic }) {
+  let host = '';
+  try { host = new URL(url).hostname; } catch { return false; }
+  if (!host || ssrf.isBlockedHostname(host)) return false;
+  if (expectedHost && isNavigation && isTopFrame && hostOf(url) !== expectedHost) return false;
+  if (!(await resolvePublic(host))) return false;
+  return true;
 }
 
 let chromium;
@@ -93,17 +113,31 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   try {
     browser = await launchBrowser();
     const context = await browser.newContext();
-    // Defense in depth (the runner already host-validates the entry URL): abort ANY
-    // request — including a redirect or sub-resource — to a localhost/intranet/
-    // private-IP-literal host so a hostile page can't pivot the browser internally.
+    const page = await context.newPage();
+    // Defense in depth (the runner host-validates the entry URL): screen EVERY request
+    // the browser makes — top-level navigation, redirect, OR sub-resource. Blocks
+    // literal-private hosts, top-level navs that leave the allowlisted host, and any
+    // host that resolves to a private/internal IP (DNS-rebinding guard the one-shot
+    // preflight can't catch). A hostile allowlisted page therefore can't pivot the
+    // Railway browser to internal/metadata targets. DNS results cached per host/run.
     if (typeof context.route === 'function') {
-      await context.route('**/*', (route) => {
-        const h = (() => { try { return new URL(route.request().url()).hostname; } catch { return ''; } })();
-        if (!h || ssrf.isBlockedHostname(h)) return route.abort();
-        return route.continue();
+      const publicCache = new Map();
+      const resolvePublic = async (h) => {
+        if (!publicCache.has(h)) publicCache.set(h, await ssrf.hostResolvesPublic(h));
+        return publicCache.get(h);
+      };
+      await context.route('**/*', async (route) => {
+        const req = route.request();
+        let allowed = false;
+        try {
+          allowed = await requestAllowed(
+            { url: req.url(), isNavigation: req.isNavigationRequest(), isTopFrame: !req.frame().parentFrame() },
+            { expectedHost, resolvePublic },
+          );
+        } catch { allowed = false; }
+        return allowed ? route.continue() : route.abort();
       });
     }
-    const page = await context.newPage();
     await page.goto(submitUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
     // Off-host redirect guard: if the page navigated away from the allowlisted host,
     // bail before screenshotting / sending anything to the model.
@@ -154,4 +188,4 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
 }
 
 module.exports = { fillCitationForm };
-module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS };
+module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf };

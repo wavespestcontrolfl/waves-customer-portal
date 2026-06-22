@@ -83,6 +83,24 @@ async function recordAttempt(p, result, evidenceKey) {
 }
 
 /**
+ * Reclassify a prospect + release its lease, but ONLY if THIS lease is still current
+ * — same optimistic claimed_at guard worker.report/releaseClaims use. If the sweep
+ * released a long run and another worker reclaimed the row, claimed_at no longer
+ * matches our lease_token, the update affects 0 rows, and we DON'T clobber the newer
+ * lease or overwrite its automation_policy. Returns rows updated (0 = stale).
+ */
+async function leaseGuardedReclassify(p, patch) {
+  const leaseDate = p.lease_token ? new Date(p.lease_token) : null;
+  if (!leaseDate || Number.isNaN(leaseDate.getTime())) return 0;
+  const n = await db('seo_link_prospects')
+    .where({ id: p.id })
+    .where('claimed_at', leaseDate)
+    .update({ ...patch, claimed_at: null, claimed_by: null, updated_at: new Date() });
+  if (n === 0) logger.warn(`[signup-runner] stale lease on ${p.target_domain} — reclassify skipped (row was reclaimed)`);
+  return n;
+}
+
+/**
  * run — submit the allowlisted submit_free citations. dryRun previews (no browser,
  * no writes) and releases its leases. Returns { claimed, placed, blocked, failed, skipped }.
  */
@@ -121,7 +139,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     const submitUrl = await validateSubmitUrl(rawUrl, domain);
     if (!submitUrl) {
       logger.warn(`[signup-runner] unsafe/non-allowlisted submit URL for ${domain} — parking (skip)`);
-      await db('seo_link_prospects').where({ id: p.id }).update({ automation_policy: 'skip', claimed_at: null, claimed_by: null, updated_at: new Date() });
+      await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       await recordAttempt(p, { outcome: 'skipped', errorCode: 'unsafe_url', notes: 'target_url failed host/SSRF validation' }, null);
       counts.skipped++;
       continue;
@@ -145,19 +163,17 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       }
     } else if (result.outcome.startsWith('blocked_')) {
       // The classifier missed a gate the engine found — RECLASSIFY so it's not
-      // auto-retried, and release the lease (not a retryable failure).
-      const policy = result.errorCode === 'blocked_payment' ? 'pay_and_submit' : 'needs_account';
-      await db('seo_link_prospects').where({ id: p.id }).update({
-        automation_policy: policy,
-        requires_account: result.errorCode === 'blocked_account' ? true : undefined,
-        requires_captcha: result.errorCode === 'blocked_captcha' ? true : undefined,
-        requires_payment: result.errorCode === 'blocked_payment' ? true : undefined,
-        claimed_at: null, claimed_by: null, updated_at: new Date(),
-      });
+      // auto-retried, and release the lease (not a retryable failure). Build the
+      // patch without undefined keys (knex rejects undefined bindings).
+      const patch = { automation_policy: result.errorCode === 'blocked_payment' ? 'pay_and_submit' : 'needs_account' };
+      if (result.errorCode === 'blocked_account') patch.requires_account = true;
+      if (result.errorCode === 'blocked_captcha') patch.requires_captcha = true;
+      if (result.errorCode === 'blocked_payment') patch.requires_payment = true;
+      await leaseGuardedReclassify(p, patch);
       counts.blocked++;
     } else if (result.outcome === 'skipped') {
       // No submittable form here — mark off-lane so we stop claiming it.
-      await db('seo_link_prospects').where({ id: p.id }).update({ automation_policy: 'skip', claimed_at: null, claimed_by: null, updated_at: new Date() });
+      await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       counts.skipped++;
     } else {
       // Engine error / unconfirmed — retryable via the worker contract (MAX_ATTEMPTS).
@@ -172,4 +188,4 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 }
 
 module.exports = { run };
-module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl };
+module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify };

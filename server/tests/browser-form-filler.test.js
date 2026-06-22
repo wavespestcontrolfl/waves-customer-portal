@@ -93,3 +93,26 @@ describe('fillCitationForm', () => {
     expect([..._internals.ALLOWED_ACTIONS].sort()).toEqual(['check', 'click', 'fill', 'select', 'submit']);
   });
 });
+
+describe('requestAllowed (per-request SSRF guard)', () => {
+  const { requestAllowed } = _internals;
+  const pub = async () => true;   // host resolves to a public IP
+  const priv = async () => false; // host resolves to a private/internal IP
+
+  test('allows a public same-host top-level navigation', async () => {
+    expect(await requestAllowed({ url: 'https://x.com/add', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(true);
+  });
+  test('blocks a top-level navigation that leaves the allowlisted host', async () => {
+    expect(await requestAllowed({ url: 'https://evil.example/add', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
+  });
+  test('allows a public off-host SUB-resource (CDN/font), which is not a navigation', async () => {
+    expect(await requestAllowed({ url: 'https://cdn.other.com/a.css', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(true);
+  });
+  test('blocks a public-looking host that resolves to a private IP (DNS rebinding)', async () => {
+    expect(await requestAllowed({ url: 'https://rebind.example/a', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: priv })).toBe(false);
+  });
+  test('blocks localhost / metadata IP-literal hosts outright (before any DNS)', async () => {
+    expect(await requestAllowed({ url: 'http://169.254.169.254/latest/meta-data/', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
+    expect(await requestAllowed({ url: 'http://localhost:8080/x', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
+  });
+});

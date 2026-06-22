@@ -10,23 +10,51 @@ jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(as
 // Shape/host rejections in validateSubmitUrl happen BEFORE these are consulted.
 jest.mock('../services/seo/contact-finder', () => ({ _internals: { isBlockedHostname: () => false, hostResolvesPublic: async () => true } }));
 
-// Minimal knex-ish mock: db('table').insert(...) and db('table').where(...).update(...)
+// Minimal knex-ish mock supporting db('t').insert(...) and the lease-guarded
+// db('t').where({id}).where('claimed_at', lease).update(...) chain.
 // (jest.mock factories may only reference `mock`-prefixed outer variables.)
 const mockUpdate = jest.fn(async () => 1);
 const mockInsert = jest.fn(async () => [1]);
-jest.mock('../models/db', () => jest.fn(() => ({ insert: mockInsert, where: jest.fn(() => ({ update: mockUpdate })) })));
+const mockWhere = jest.fn();
+jest.mock('../models/db', () => {
+  const chain = { update: mockUpdate };
+  mockWhere.mockImplementation(() => chain); // chainable: .where(...).where(...)
+  chain.where = mockWhere;
+  return jest.fn(() => ({ insert: mockInsert, where: mockWhere }));
+});
 
 const worker = require('../services/seo/link-prospect-worker');
 const { fillCitationForm } = require('../services/seo/browser-form-filler');
 const runner = require('../services/seo/signup-runner');
-const { buildNap, parseAddress, validateSubmitUrl } = runner._internals;
+const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify } = runner._internals;
 
 const prospect = (o = {}) => ({ id: 'p1', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
 
 beforeEach(() => {
   worker.claim.mockReset(); worker.report.mockReset(); worker.report.mockResolvedValue({ ok: true });
   worker.releaseClaims.mockReset(); worker.releaseClaims.mockResolvedValue({ released: 0 });
-  fillCitationForm.mockReset(); mockUpdate.mockClear(); mockInsert.mockClear();
+  fillCitationForm.mockReset(); mockUpdate.mockClear(); mockInsert.mockClear(); mockWhere.mockClear();
+  mockUpdate.mockResolvedValue(1);
+});
+
+describe('leaseGuardedReclassify (optimistic lease guard)', () => {
+  test('updates with the lease (claimed_at) guard + clears the lease', async () => {
+    const n = await leaseGuardedReclassify({ id: 'p1', lease_token: '2026-06-22T00:00:00.000Z', target_domain: 'x.com' }, { automation_policy: 'skip' });
+    // .where({id}).where('claimed_at', <lease date>).update(...)
+    expect(mockWhere).toHaveBeenCalledWith('claimed_at', new Date('2026-06-22T00:00:00.000Z'));
+    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, claimed_by: null }));
+    expect(n).toBe(1);
+  });
+  test('no-op (returns 0, no DB write) without a valid lease_token', async () => {
+    const n = await leaseGuardedReclassify({ id: 'p1', lease_token: 'not-a-date' }, { automation_policy: 'skip' });
+    expect(n).toBe(0);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+  test('0 rows updated (row reclaimed) is surfaced as stale (returns 0)', async () => {
+    mockUpdate.mockResolvedValueOnce(0);
+    const n = await leaseGuardedReclassify({ id: 'p1', lease_token: '2026-06-22T00:00:00.000Z', target_domain: 'x.com' }, { automation_policy: 'skip' });
+    expect(n).toBe(0);
+  });
 });
 
 describe('buildNap / parseAddress', () => {
