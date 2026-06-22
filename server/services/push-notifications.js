@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const apns = require('./apns');
 
 let webpush;
 let vapidConfigured = false;
@@ -32,6 +33,19 @@ try {
 }
 
 async function sendSubscription(sub, notification) {
+  // iOS (Capacitor) subscriptions deliver via APNs, not web-push. Routing here
+  // keeps every caller (sendToCustomer / sendToAdmins / sendToAdminUsers)
+  // platform-agnostic — they just iterate active rows.
+  if (sub.platform === 'ios') {
+    const result = await apns.send(sub.device_token, notification);
+    if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
+    if (result.expired) {
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      return { sent: false, expired: true, reason: result.reason };
+    }
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+  }
+
   if (!webpush || !vapidConfigured) return { sent: false, skipped: true, reason: 'push_not_configured' };
   try {
     await webpush.sendNotification(JSON.parse(sub.subscription_data), JSON.stringify(notification));
@@ -52,6 +66,7 @@ class PushNotificationService {
       available: Boolean(webpush),
       configured: vapidConfigured,
       error: vapidSetupError,
+      apns: apns.status(),
     };
   }
 
@@ -105,4 +120,7 @@ function summarize(results, subscriptions) {
   };
 }
 
-module.exports = new PushNotificationService();
+const service = new PushNotificationService();
+// Exposed for unit tests (platform routing); not part of the public API.
+service._sendSubscription = sendSubscription;
+module.exports = service;
