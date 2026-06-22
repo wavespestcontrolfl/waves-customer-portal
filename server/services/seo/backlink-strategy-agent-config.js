@@ -39,8 +39,8 @@ EDITORIAL OUTREACH: Look for SWFL news (Bradenton Herald, Sarasota Magazine, SRQ
 
 OUTPUT TO THE PROSPECT BOARD: Your discoveries must land as concrete, trackable prospects — not just prose in the report. Each cycle:
 1. Call list_prospects first to see what's already on the board (avoid duplicates; find re-work).
-2. Use create_link_prospects for the higher-value lanes — editorial, resource/partner pages, guest posts, HARO, and local business partnerships (real estate / WDO, property management, complementary home services). Set target_page to the most relevant Waves money page, plus link_type and priority. Score priority on dual ROI (link value + lead value): a real-estate/WDO vendor page outranks a generic directory at similar DR.
-3. Keep using add_targets_to_queue for bulk directory/citation signups (Tier 4–5) — those are the auto-signup lane, separate from the board.
+2. Use create_link_prospects for the higher-value lanes — editorial, resource/partner pages, guest posts, and local business partnerships (real estate / WDO, property management, complementary home services). Set target_page to the most relevant Waves money page. create_link_prospects now AUTO-SCORES each target on relevance + lead-value + contactability and verifies a contact path: an outreach target with no reachable contact is GATED OUT (returned in the "gated" list, not added) — so favor LOCAL dual-ROI partners over high-DR national directories, which will score low. You may omit link_type and priority; the scorer fills them.
+3. Keep using add_targets_to_queue for bulk directory/citation signups (Tier 4–5) — those are the auto-signup lane, separate from the board. HARO platforms (helpareporter, qwoted, featured) are JOIN-not-email; do not add them as outreach prospects.
 
 Save a strategy report at the end with targets added, gaps found, and editorial recommendations.`,
 
@@ -176,7 +176,7 @@ Save a strategy report at the end with targets added, gaps found, and editorial 
     {
       type: 'custom',
       name: 'create_link_prospects',
-      description: `Write concrete link-building targets to the outbound prospect board (seo_link_prospects), where they are tracked through their lifecycle (prospect → contacted → placed → live → indexed) and auto-verified. Use this for the higher-value lanes — editorial, resource/partner pages, guest posts, HARO, and local business partnerships (real estate, property management, complementary home services) — NOT bulk directory signups (those go to add_targets_to_queue). Deduplicates on (target_domain, target_page); existing prospects are skipped. Each prospect needs a target_page (the Waves money page to link to). Returns counts added/skipped.`,
+      description: `Write concrete link-building targets to the outbound prospect board (seo_link_prospects), where they are tracked through their lifecycle (prospect → contacted → placed → live → indexed) and auto-verified. Use this for the higher-value lanes — editorial, resource/partner pages, guest posts, and local business partnerships (real estate, property management, complementary home services) — NOT bulk directory signups (those go to add_targets_to_queue). Each target is AUTO-SCORED on relevance + lead-value + contactability; link_type/priority are filled if you omit them. An outreach target with NO reachable contact path is gated out (returned in "gated", not added) — so high-DR national directories typically won't make it; favor local dual-ROI partners. Deduplicates on (target_domain, target_page). Returns { added, skipped, duplicates, gated }.`,
       input_schema: {
         type: 'object',
         properties: {
