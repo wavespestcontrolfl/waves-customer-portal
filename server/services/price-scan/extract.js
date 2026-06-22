@@ -546,4 +546,5 @@ module.exports = {
   deriveNormalizedUnitPrice,
   tokenOverlap,
   verifyMatch,
+  epaKey,
 };

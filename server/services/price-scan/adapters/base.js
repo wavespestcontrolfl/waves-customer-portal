@@ -17,6 +17,7 @@ const {
   mapAvailability,
   quantityToOz,
   verifyMatch,
+  epaKey,
 } = require('../extract');
 const { convertToOz } = require('../../product-costing');
 
@@ -220,21 +221,27 @@ function bestMatchingLink(hrefs, product) {
   return rankedMatchingLinks(hrefs, product)[0] || null;
 }
 
-// PURE: the (<= cap) result links the caller should open + verify, in order. Normally
-// the top `cap` ranked links — but if those are ALL brand matches and a non-brand link
-// exists further down, reserve the last slot for the top non-brand link so a same-EPA
-// generic equivalent (which ranks below every brand match) can't be squeezed out of the
-// candidate set before verifyMatch gets to accept it on EPA + size.
+// PURE: the result links the caller should open + verify, in order. Normally the top
+// `cap` ranked links. But when those are ALL brand matches and a non-brand link exists
+// further down, APPEND the top non-brand link as one EXTRA candidate (budget cap+1)
+// rather than replacing the last brand page — dropping a brand variant could lose the
+// real size/EPA match (e.g. a Talstar-P-style variant whose distinguishing token isn't
+// in the slug). The loop tries the brand matches first and only opens this extra if
+// none of them verify, so a same-EPA generic equivalent still gets a shot at no cost to
+// the brand candidates. Only done for products with a valid EPA reg — a different-brand
+// page can be accepted solely on EPA + size, so for a non-EPA product (fertilizer/
+// adjuvant) a non-brand link can never verify and isn't worth opening.
 function selectSearchCandidates(hrefs, product, cap = MAX_SEARCH_CANDIDATES) {
   const ranked = rankedMatchingLinks(hrefs, product);
   if (ranked.length <= cap) return ranked;
+  const picked = ranked.slice(0, cap);
+  if (!epaKey(product && product.epaReg)) return picked;
   const nameToks = searchTokens(product);
   const brand = nameToks.find((t) => t.length >= 3) || nameToks[0];
   const isBrand = (href) => !!brand && slugSegments(href).has(brand);
-  const picked = ranked.slice(0, cap);
   if (picked.every(isBrand)) {
     const topNonBrand = ranked.find((href) => !isBrand(href));
-    if (topNonBrand) picked[picked.length - 1] = topNonBrand;
+    if (topNonBrand && !picked.includes(topNonBrand)) picked.push(topNonBrand); // extra slot, not a swap
   }
   return picked;
 }

@@ -154,15 +154,21 @@ describe('rankedMatchingLinks (try same-brand variants in turn)', () => {
 
 describe('selectSearchCandidates (reserve a slot for an EPA-equivalent)', () => {
   const dmo = (s) => `https://www.domyown.com/${s}.html`;
-  test('when brand matches fill the cap, the last slot is reserved for the top non-brand link', () => {
+  const epaProduct = { vendorProductName: 'Taurus SC', quantity: '78 oz', epaReg: '53883-279' };
+  test('when brand matches fill the cap, the non-brand link is APPENDED as an extra (no brand variant dropped)', () => {
     const links = ['taurus-sc-a-p-1', 'taurus-sc-b-p-2', 'taurus-sc-c-p-3', 'taurus-sc-d-p-4', 'generic-fipronil-sc-p-9'].map(dmo);
-    const picked = selectSearchCandidates(links, { vendorProductName: 'Taurus SC', quantity: '78 oz' }, 4);
-    expect(picked).toHaveLength(4);
-    expect(picked).toContain(dmo('generic-fipronil-sc-p-9')); // equivalent not squeezed out
-    expect(picked.filter((h) => /taurus/.test(h))).toHaveLength(3); // 3 brand + 1 equivalent
+    const picked = selectSearchCandidates(links, epaProduct, 4);
+    expect(picked).toHaveLength(5); // 4 brand kept + 1 equivalent appended (cap+1)
+    expect(picked.filter((h) => /taurus/.test(h))).toHaveLength(4); // all four brand variants survive
+    expect(picked[picked.length - 1]).toBe(dmo('generic-fipronil-sc-p-9')); // equivalent tried LAST
+  });
+  test('does NOT displace a brand variant for a non-EPA product (a non-brand link can never verify)', () => {
+    const links = ['prodiamine-a-p-1', 'prodiamine-b-p-2', 'prodiamine-c-p-3', 'prodiamine-d-p-4', 'generic-other-p-9'].map(dmo);
+    const picked = selectSearchCandidates(links, { vendorProductName: 'Prodiamine 65 WDG', quantity: '5 lb' }, 4); // no epaReg
+    expect(picked).toEqual(links.slice(0, 4)); // all four brand variants kept
   });
   test('does not displace anything when a non-brand candidate is already within the cap', () => {
     const links = ['taurus-sc-a-p-1', 'taurus-sc-b-p-2', 'generic-fipronil-sc-p-9'].map(dmo);
-    expect(selectSearchCandidates(links, { vendorProductName: 'Taurus SC', quantity: '78 oz' }, 4)).toEqual(links);
+    expect(selectSearchCandidates(links, epaProduct, 4)).toEqual(links);
   });
 });
