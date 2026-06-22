@@ -5,6 +5,7 @@ const {
   extractJsonLdOffer,
   extractDomPrice,
   pickVariantOffer,
+  variantsFromOptionCards,
   normalizeSizeLabel,
   offerFromSnapshot,
   extractSizeToken,
@@ -635,8 +636,32 @@ describe('price-scan extract', () => {
     });
   });
 
+  describe('variantsFromOptionCards (DoMyOwn-style "<label> (<size>) $<price>")', () => {
+    test('parses the parenthesized size + price from card text', () => {
+      expect(variantsFromOptionCards(['jug (2.5 gal) $299.98', 'gallon (128 oz) $135.40'])).toEqual([
+        { size: '2.5 gal', price: 299.98, availabilityRaw: null },
+        { size: '128 oz', price: 135.40, availabilityRaw: null },
+      ]);
+    });
+    test('handles a thousands comma and a sold-out card', () => {
+      expect(variantsFromOptionCards(['drum (30 gal) $1,234.56'])[0]).toMatchObject({ size: '30 gal', price: 1234.56 });
+      expect(variantsFromOptionCards(['quart (32 oz) $99.00 Out of Stock'])[0].availabilityRaw).toBe('OutOfStock');
+    });
+    test('skips cards with no size or no price', () => {
+      expect(variantsFromOptionCards(['Add to cart', 'Free shipping', '(no price here)'])).toEqual([]);
+    });
+    test('feeds pickVariantOffer end-to-end (DoMyOwn quart 32 oz)', () => {
+      const v = variantsFromOptionCards(['bottle (1.33 oz) $19.98', 'bottle (20 oz) $131.01', 'quart (32 oz) $164.53']);
+      expect(pickVariantOffer(v, { targetOz: 32 })).toMatchObject({ price: 164.53, quantity: '32 oz' });
+    });
+  });
+
   describe('offerFromSnapshot (size-explicit variants)', () => {
     const variants = [{ size: '8 Ounce', price: 33.34 }, { size: '1 Gallon', price: 318.9 }];
+    test('derives variants from optionCardTexts when there is no structured variants array', () => {
+      const snap = { jsonLd: [], title: 'SpeedZone Southern Herbicide EW', optionCardTexts: ['jug (2.5 gal) $299.98', 'gallon (128 oz) $135.40'] };
+      expect(offerFromSnapshot(snap, { targetOz: 320 })).toMatchObject({ price: 299.98, quantity: '2.5 gal' });
+    });
     test('a matching variant wins and carries its size as the quantity', () => {
       const snap = { jsonLd: [], title: 'Primo Maxx', variants };
       const got = offerFromSnapshot(snap, { targetOz: 128 });
