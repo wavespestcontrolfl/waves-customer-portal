@@ -18,7 +18,7 @@ const AppointmentEmail = require('../services/appointment-email');
 const NotificationService = require('../services/notification-service');
 const AppointmentReminders = require('../services/appointment-reminders');
 
-const { apptChannel, deliverAppointmentNotice } = AppointmentReminders._test;
+const { apptChannel, deliverAppointmentNotice, getReminderPrefs } = AppointmentReminders._test;
 
 // Minimal knex-style chainable mock. first() resolves null so the
 // no-reachable-channel alert dedupe check finds no prior row and proceeds.
@@ -126,5 +126,61 @@ describe('deliverAppointmentNotice channel routing', () => {
 
     expect(reached).toBe(false);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getReminderPrefs account-level channel resolution', () => {
+  // chain whose first() resolves a fixed value.
+  function firstChain(value) {
+    const q = {};
+    ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(async () => value);
+    return q;
+  }
+
+  // Drive db(table) by a per-table FIFO queue of chains.
+  function setDbQueues(queues) {
+    const tableQueues = new Map(Object.entries(queues));
+    db.mockImplementation((table) => {
+      const queue = tableQueues.get(table);
+      if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+      return queue.shift();
+    });
+  }
+
+  test('secondary property inherits the primary profile channel', async () => {
+    setDbQueues({
+      notification_prefs: [
+        // property's own prefs (default sms)
+        firstChain({ appointment_confirmation_channel: 'sms', service_reminder_72h_channel: 'sms', service_reminder_24h_channel: 'sms', service_reminder_72h: true }),
+        // primary owner's prefs (email)
+        firstChain({ appointment_confirmation_channel: 'email', service_reminder_72h_channel: 'email', service_reminder_24h_channel: 'email' }),
+      ],
+      customers: [
+        firstChain({ account_id: 'acct-1', is_primary_profile: false }),
+        firstChain({ id: 'primary-1' }),
+      ],
+    });
+
+    const prefs = await getReminderPrefs('secondary-1');
+    expect(prefs.confirmationChannel).toBe('email');
+    expect(prefs.reminder72hChannel).toBe('email');
+    // Toggles still come from the property's own row.
+    expect(prefs.serviceReminder72h).toBe(true);
+  });
+
+  test('primary profile uses its own channel without an extra lookup', async () => {
+    setDbQueues({
+      notification_prefs: [
+        firstChain({ appointment_confirmation_channel: 'both', service_reminder_24h_channel: 'both' }),
+      ],
+      customers: [
+        firstChain({ account_id: 'acct-1', is_primary_profile: true }),
+      ],
+    });
+
+    const prefs = await getReminderPrefs('primary-1');
+    expect(prefs.confirmationChannel).toBe('both');
+    expect(prefs.reminder24hChannel).toBe('both');
   });
 });

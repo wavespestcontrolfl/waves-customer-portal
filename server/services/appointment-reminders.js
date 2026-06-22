@@ -437,17 +437,24 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
 async function getReminderPrefs(customerId) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
 
-  // Delivery channel is an account-level "how to reach me" preference, set only
-  // on the account owner's row in the portal. Reminders load prefs by each
-  // appointment's service-property customer id, so a secondary property would
-  // otherwise miss the channel choice and default to SMS — resolve it from the
-  // account owner (customers.account_id points at the primary customer id).
+  // Delivery channel is an account-level "how to reach me" preference, saved on
+  // the account owner's (primary profile's) row in the portal. Reminders load
+  // prefs by each appointment's service-property customer id, so a secondary
+  // property would otherwise miss the channel choice and default to SMS.
+  // Resolve it from the account's primary customer profile. (customers.account_id
+  // references customer_accounts.id, NOT a customers.id — so look up the primary
+  // profile rather than reading prefs by account_id directly.)
   let channelPrefs = prefs;
-  const customer = await db('customers').where({ id: customerId }).first('account_id').catch(() => null);
-  const ownerId = customer?.account_id;
-  if (ownerId && String(ownerId) !== String(customerId)) {
-    const ownerPrefs = await db('notification_prefs').where({ customer_id: ownerId }).first().catch(() => null);
-    if (ownerPrefs) channelPrefs = ownerPrefs;
+  const customer = await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
+  if (customer && customer.is_primary_profile !== true && customer.account_id) {
+    const primary = await db('customers')
+      .where({ account_id: customer.account_id, is_primary_profile: true })
+      .first('id')
+      .catch(() => null);
+    if (primary && String(primary.id) !== String(customerId)) {
+      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(() => null);
+      if (ownerPrefs) channelPrefs = ownerPrefs;
+    }
   }
 
   return {
@@ -1509,6 +1516,7 @@ AppointmentReminders._test = {
   apptChannel,
   deliverAppointmentNotice,
   sendAppointmentNoticeEmail,
+  getReminderPrefs,
 };
 
 module.exports = AppointmentReminders;
