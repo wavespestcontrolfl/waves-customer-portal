@@ -301,57 +301,81 @@ async function runAutoDispatch(opts = {}) {
     }
 
     // ── Pass 2 (apply mode): apply the collected moves BEST-IMPROVEMENT-FIRST ──
-    // The cap bounds how many moves a run applies; spending it on the largest
-    // route gains beats first-by-scheduled_date. Each move is RE-EVALUATED against
-    // the now-live schedule right before applying, so a move whose advantage was
-    // already captured by a higher-improvement move earlier this run is dropped
-    // (audited no_change) instead of force-applied onto a stale placement.
+    // The cap bounds how many moves a run applies, so it must fund the LARGEST
+    // route gains. Crucially, an applied move changes later moves' value (shared
+    // tech-days), so we pick GREEDILY by CURRENT value rather than a one-time
+    // pass-1 sort: each round re-evaluates the still-pending moves against the
+    // now-live schedule, drops any that no longer clear the bar (superseded by an
+    // earlier apply this run), and applies the single highest-FRESH-improvement
+    // move. Re-evaluation is the same per-service work the old inline loop did and
+    // the search window is only ±tolerance days; at steady state the pending set
+    // is small. Once the cap is hit the remainder is cap-held — also re-scored, so
+    // the reported backlog reflects current value and never counts a superseded
+    // move as pending.
     if (config.mode !== 'dry_run' && plannedMoves.length) {
-      plannedMoves.sort((a, b) => b.result.improvement - a.result.improvement);
-      for (const pm of plannedMoves) {
-        let fresh = null;
+      const auditSuperseded = (service, fresh) => audit.logDecision(runId, { action: 'no_change', service, reason_code: fresh.reason_code, reason_description: `Superseded by an earlier move this run — ${fresh.reason_description}`, ...fresh.audit });
+      const auditApplyFailure = async (service, err, auditCtx) => {
+        totals.failed++;
+        logger.error(`[auto-dispatch] apply failed for ${service && service.id}: ${err.message}`);
+        try { await audit.logDecision(runId, { action: 'failed', service, reason_code: 'ERROR', reason_description: err.message, ...auditCtx, error: err.message }); } catch (_) { /* swallow */ }
+      };
+
+      let pending = plannedMoves;
+      while (pending.length && totals.changed < config.maxChangesPerRun) {
+        // Re-score every pending move against the live schedule; keep the still-
+        // valid ones, audit the superseded/errored ones out of the pending set.
+        const scored = [];
+        for (const pm of pending) {
+          let fresh;
+          try {
+            fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
+          } catch (reErr) {
+            await auditApplyFailure(pm.service, reErr, pm.result.audit);
+            continue;
+          }
+          if (fresh.kind !== 'move') { await auditSuperseded(pm.service, fresh); continue; }
+          scored.push({ pm, fresh });
+        }
+        if (!scored.length) { pending = []; break; }
+
+        scored.sort((a, b) => b.fresh.improvement - a.fresh.improvement);
+        const winner = scored[0];
         try {
-          // Re-score against the now-live schedule (earlier applies this run may
-          // have changed routes/occupancy) BEFORE the cap decision, so the cap-held
-          // recommendation reflects the move's CURRENT value and a move whose gain
-          // was already captured is dropped (no_change) rather than reported as a
-          // pending recommendation or force-applied onto a stale placement.
-          fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
-          if (fresh.kind !== 'move') {
-            await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: fresh.reason_code, reason_description: `Superseded by an earlier move this run — ${fresh.reason_description}`, ...fresh.audit });
-            continue;
-          }
-
-          if (totals.changed >= config.maxChangesPerRun) {
-            totals.recommended++; // cap-held but still a valid move — count it in the summary
-            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (lower-improvement move held, +${fresh.improvement})`, ...fresh.audit });
-            continue;
-          }
-
-          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, config);
+          const result = await applyAutoDispatchMove(winner.pm.service, winner.fresh.best, runId, config);
           totals.changed++;
           await audit.logDecision(runId, {
             action: 'changed',
-            service: pm.service,
+            service: winner.pm.service,
             reason_code: 'CHANGE_APPLIED',
-            reason_description: `Moved (+${fresh.improvement})`,
-            oldPlacement: { date: toDateStr(pm.service.scheduled_date), window_start: pm.service.window_start, window_end: pm.service.window_end, technician_id: pm.service.technician_id, status: result.pre_status },
-            newPlacement: { ...fresh.audit.newPlacement, status: result.post_status },
-            scores: fresh.audit.scores,
-            prefsSnapshot: fresh.audit.prefsSnapshot,
-            routeMetrics: fresh.audit.routeMetrics,
-            constraints: fresh.audit.constraints,
+            reason_description: `Moved (+${winner.fresh.improvement})`,
+            oldPlacement: { date: toDateStr(winner.pm.service.scheduled_date), window_start: winner.pm.service.window_start, window_end: winner.pm.service.window_end, technician_id: winner.pm.service.technician_id, status: result.pre_status },
+            newPlacement: { ...winner.fresh.audit.newPlacement, status: result.post_status },
+            scores: winner.fresh.audit.scores,
+            prefsSnapshot: winner.fresh.audit.prefsSnapshot,
+            routeMetrics: winner.fresh.audit.routeMetrics,
+            constraints: winner.fresh.audit.constraints,
             appliedBy: 'auto_dispatch',
           });
         } catch (applyErr) {
-          totals.failed++;
-          logger.error(`[auto-dispatch] apply failed for ${pm.service && pm.service.id}: ${applyErr.message}`);
-          try {
-            // Prefer the fresh (actually-attempted) placement in the failure row;
-            // fall back to the pass-1 audit if the re-evaluation itself threw.
-            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...((fresh && fresh.audit) || pm.result.audit), error: applyErr.message });
-          } catch (_) { /* swallow */ }
+          await auditApplyFailure(winner.pm.service, applyErr, winner.fresh.audit);
         }
+        // Everyone else is re-scored next round against the post-apply schedule.
+        pending = scored.slice(1).map((s) => s.pm);
+      }
+
+      // Cap reached (or nothing left to apply): cap-hold the remaining moves,
+      // re-scored against the final schedule so the backlog count is accurate.
+      for (const pm of pending) {
+        let fresh;
+        try {
+          fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
+        } catch (reErr) {
+          await auditApplyFailure(pm.service, reErr, pm.result.audit);
+          continue;
+        }
+        if (fresh.kind !== 'move') { await auditSuperseded(pm.service, fresh); continue; }
+        totals.recommended++;
+        await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (lower-improvement move held, +${fresh.improvement})`, ...fresh.audit });
       }
     }
 
