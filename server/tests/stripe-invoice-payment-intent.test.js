@@ -164,6 +164,31 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       .rejects.toMatchObject({
         message: 'Invoice payment is already in progress',
         statusCode: 409,
+        // Money genuinely in flight (ACH processing) → the pay page routes the
+        // customer to the receipt's "bank payment processing" state.
+        inProgress: true,
+      });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('setup conflict for a card PI stuck in requires_action is recoverable (inProgress=false)', async () => {
+    // An abandoned 3DS handoff leaves a card PI in requires_action with the
+    // invoice still unpaid. This must NOT route the customer to the receipt —
+    // inProgress stays false so the pay page shows the error and they can retry.
+    invoiceRow.stripe_payment_intent_id = 'pi_requires_action';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_requires_action',
+      status: 'requires_action',
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        message: 'Invoice payment is already in progress',
+        statusCode: 409,
+        inProgress: false,
       });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();

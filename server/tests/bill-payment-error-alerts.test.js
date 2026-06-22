@@ -152,15 +152,44 @@ describe('bill-payment-error-alerts', () => {
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('isInProgressConflict matches only a 409 status code', () => {
+  test('isInProgressConflict matches only a 409 from the setup/update_amount phases', () => {
     const { __private } = require('../services/bill-payment-error-alerts');
     const { isInProgressConflict } = __private;
 
-    expect(isInProgressConflict({ statusCode: 409 })).toBe(true);
-    expect(isInProgressConflict({ statusCode: '409' })).toBe(true);
-    expect(isInProgressConflict({ statusCode: 400 })).toBe(false);
-    expect(isInProgressConflict({ statusCode: 500 })).toBe(false);
+    // 409 from the PI-lifecycle phases → benign in-progress conflict.
+    expect(isInProgressConflict({ statusCode: 409, phase: 'setup' })).toBe(true);
+    expect(isInProgressConflict({ statusCode: '409', phase: 'update_amount' })).toBe(true);
+    // 409 from other phases is an ACTIONABLE failure that must still alert
+    // (e.g. /consent PM-mismatch / not-consent-eligible after the customer paid).
+    expect(isInProgressConflict({ statusCode: 409, phase: 'consent' })).toBe(false);
+    expect(isInProgressConflict({ statusCode: 409, phase: 'confirm' })).toBe(false);
+    expect(isInProgressConflict({ statusCode: 409 })).toBe(false);
+    // Non-409 is never an in-progress conflict regardless of phase.
+    expect(isInProgressConflict({ statusCode: 400, phase: 'setup' })).toBe(false);
+    expect(isInProgressConflict({ statusCode: 500, phase: 'setup' })).toBe(false);
     expect(isInProgressConflict({})).toBe(false);
+  });
+
+  test('still alerts on a consent-phase 409 (actionable save-method failure)', async () => {
+    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
+
+    const result = await alertBillPaymentError({
+      invoice: {
+        id: 'inv_123',
+        invoice_number: 'WPC-2026-0100',
+        customer_id: 'cust_123',
+        total: '125.50',
+        stripe_payment_intent_id: 'pi_123',
+      },
+      phase: 'consent',
+      methodCategory: 'card',
+      message: 'Submitted payment method does not match the charged card',
+      statusCode: 409,
+      source: 'server',
+    });
+
+    expect(result).toEqual({ notified: true, alertId: 'alert-1' });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
   test('still alerts on a real server-side decline (not a validation error)', async () => {

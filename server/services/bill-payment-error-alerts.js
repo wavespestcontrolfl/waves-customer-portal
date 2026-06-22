@@ -109,18 +109,27 @@ function isClientFormValidationError(input = {}) {
   return stripeType === 'validation_error' && normalizePhase(input.phase) === 'payment_form_submit';
 }
 
-// A 409 from the pay flow is never a payment FAILURE — it's an
-// already-in-progress conflict: the invoice already has a live PaymentIntent
-// (most often an ACH bank debit sitting in `processing` for several business
-// days, or the invoice already flipped to `processing`). A customer who
-// reloads the pay link, returns from a bank redirect, or double-submits hits
-// this 409, and every retry would otherwise raise a "bill payment error" admin
-// alert ("Card during setup: Invoice payment is already in progress") for a
-// payment that is actually working. These are benign concurrency signals, not
-// declines — suppress them so the real failures aren't drowned out. (The pay
-// page routes the customer to the receipt's "bank payment processing" state.)
+// A 409 from the PI-lifecycle phases (setup / update_amount) is never a payment
+// FAILURE — it's an already-in-progress conflict: the invoice already has a live
+// PaymentIntent (most often an ACH bank debit sitting in `processing` for
+// several business days, or the invoice already flipped to `processing`). A
+// customer who reloads the pay link, returns from a bank redirect, or
+// double-submits hits this 409, and every retry would otherwise raise a "bill
+// payment error" admin alert ("Card during setup: Invoice payment is already in
+// progress") for a payment that is actually working. These are benign
+// concurrency signals, not declines — suppress them so the real failures aren't
+// drowned out. (The pay page routes the customer to the receipt's "bank payment
+// processing" state.)
+//
+// Scope to the setup/update_amount phases only: other routes use 409 for
+// ACTIONABLE failures that must still alert — e.g. /pay/:token/consent returns
+// 409 when the charged PaymentMethod doesn't match, the PI isn't consent-
+// eligible, or save-on-file wasn't requested (the customer has already paid and
+// the save-method consent needs operator follow-up).
+const IN_PROGRESS_CONFLICT_PHASES = new Set(['setup', 'update_amount']);
 function isInProgressConflict(input = {}) {
-  return Number(input.statusCode) === 409;
+  return Number(input.statusCode) === 409
+    && IN_PROGRESS_CONFLICT_PHASES.has(normalizePhase(input.phase));
 }
 
 async function alertBillPaymentError(input = {}) {

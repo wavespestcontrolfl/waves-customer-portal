@@ -283,10 +283,14 @@ router.post('/:token/setup', async (req, res, next) => {
     // live PaymentIntent — most often an ACH bank debit still `processing`, or
     // a customer reloading the pay link / returning from a bank redirect).
     // Surface it to the customer without raising an admin bill-payment-error
-    // alert; it's not a failure (matches /update-amount). The pay page routes
-    // the customer to the receipt's "bank payment processing" state.
+    // alert; it's not a failure (matches /update-amount). `inProgress` (set by
+    // createInvoicePaymentIntent only when money is genuinely in flight — a live
+    // payment row or a processing/succeeded PI) tells the pay page to route the
+    // customer to the receipt's "bank payment processing" state; a recoverable
+    // conflict (e.g. a card PI stuck in requires_action) leaves it falsy so the
+    // page shows the error and the customer can retry.
     if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message });
+      return res.status(409).json({ error: err.message, inProgress: !!err.inProgress });
     }
     logger.error(`[pay-v2] Setup error: ${err.message}`);
     reportBillPaymentError(req, {

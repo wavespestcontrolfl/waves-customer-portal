@@ -1537,8 +1537,13 @@ const StripeService = {
             .first();
           const terminalStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
           if (activePayment && !terminalStatuses.includes(activePayment.status)) {
+            // A live (non-terminal) payment row means money is genuinely in
+            // flight — an ACH debit in `processing`/`pending` that clears over
+            // several business days. inProgress=true tells the pay page to send
+            // the customer to the receipt's "bank payment processing" state.
             const err = new Error('Invoice payment is already in progress');
             err.statusCode = 409;
+            err.inProgress = true;
             throw err;
           }
 
@@ -1567,8 +1572,16 @@ const StripeService = {
           }
 
           if (activeIntent.status !== 'canceled') {
+            // Distinguish genuine money-in-flight (processing / succeeded /
+            // awaiting capture — the customer should land on the receipt's
+            // processing state) from a RECOVERABLE conflict like a card PI left
+            // in `requires_action` after an abandoned 3DS handoff, where the
+            // invoice is still unpaid and the customer must be able to retry.
+            // inProgress drives that branch on the pay page.
+            const inFlightStatuses = ['processing', 'succeeded', 'requires_capture'];
             const err = new Error('Invoice payment is already in progress');
             err.statusCode = 409;
+            err.inProgress = inFlightStatuses.includes(activeIntent.status);
             throw err;
           }
         }
