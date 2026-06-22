@@ -40,13 +40,53 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' && f.severity === 'P1')).toBe(true);
   });
 
-  test('legitimate pest/efficacy vocab ("garbage", "unreliable") does NOT trip disparagement', () => {
-    const t = CATEGORY_TABLE
-      .replace('Generic playbook', 'Store garbage in sealed bins')
-      .replace('Lowest upfront', 'DIY sprays are unreliable on termites');
+  test('legitimate pest vocab ("garbage") does NOT trip disparagement', () => {
+    const t = CATEGORY_TABLE.replace('Generic playbook', 'Store garbage in sealed bins');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
     expect(r.pass).toBe(true);
+  });
+
+  test('a negative reliability claim about an option in a table routes to review (P1)', () => {
+    const t = CATEGORY_TABLE.replace('Generic playbook', 'Unreliable follow-ups');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY' && f.severity === 'P1')).toBe(true);
+    expect(r.findings.some((f) => f.severity === 'P0')).toBe(false);
+  });
+
+  test('the same "unreliable" used as efficacy PROSE (no table) is NOT flagged', () => {
+    const r = gate.evaluate({ body: 'DIY sprays are unreliable on subterranean termites; a pro re-treats.' }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+
+  test('a recognized competitor named in PROSE (outside the table) is caught', () => {
+    const body = `Homeowners often compare us with Hulett before choosing.\n\n${CATEGORY_TABLE}`;
+    const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('a web-search-style business name (industry suffix, not allowlisted) used as a column is caught', () => {
+    const t = CATEGORY_TABLE.replace('National chain', 'Acme Pest Control');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    // No double-counting: not also reported as unclassified.
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Acme/.test(f.message))).toBe(false);
+  });
+
+  test('an option that is neither category nor Waves nor allowlisted fails closed (P1)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', "Bob's Bugs LLC");
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('a generic phrase "Professional Pest Control" is NOT misread as a business', () => {
+    const r = gate.evaluate({ body: 'Professional pest control beats DIY for termites. Professional Pest Control is worth it.' }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' || f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
   });
 
   test('an apostrophe inside a double-quoted caption does not truncate attribution detection', () => {

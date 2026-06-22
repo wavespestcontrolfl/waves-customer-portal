@@ -93,7 +93,6 @@ const COMPETITOR_BRAND_SIGNALS = [
   'Aptive Environmental',
   'Hawx',
   'Catseye',
-  'Rollins',
 ];
 
 function normalize(s) {

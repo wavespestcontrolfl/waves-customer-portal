@@ -2320,6 +2320,7 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       quality_gate_result: JSON.stringify(run.quality_gate_result || {}),
       claims_ledger_result: JSON.stringify(run.claims_ledger_result || {}),
       content_guardrails_result: JSON.stringify(run.content_guardrails_result || {}),
+      comparison_table_result: JSON.stringify(run.comparison_table_result || {}),
       seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),
       facts_sufficiency: JSON.stringify(run.facts_sufficiency || {}),
       protected_check: JSON.stringify(run.protected_check || {}),
