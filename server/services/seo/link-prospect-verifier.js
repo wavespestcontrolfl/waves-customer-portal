@@ -117,6 +117,22 @@ async function reconcileFromProfile(prospect) {
 async function reconcileByDomain(prospect) {
   const dom = comparableDomain(prospect.target_domain);
   if (!dom) return null;
+  // AMBIGUITY GUARD for homepage-cited rows: they all target the bare homepage, so a
+  // single directory→homepage backlink can't be attributed to a specific per-location
+  // listing. If MORE THAN ONE pending homepage-cited row exists for this directory
+  // (multi-location placements — Venice, Parrish, …), the domain reconcile is ambiguous:
+  // matching the one homepage backlink to all of them would mark every location row live
+  // off one link and duplicate-Omega the same source_url. Bail → they await a known
+  // live_url (profile reconcile / crawl) or manual reconciliation.
+  if (parseQuality(prospect.quality_signals).cited_homepage) {
+    const siblings = await db('seo_link_prospects')
+      .where({ status: 'placed' })
+      .whereNull('live_url')
+      .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [dom])
+      .whereRaw("COALESCE(quality_signals->>'cited_homepage','') = 'true'")
+      .count('* as c').first();
+    if (Number(siblings && siblings.c) > 1) return null;
+  }
   const rows = await db('seo_backlinks')
     // Active only — never promote/index from a 'disavowed' (or 'lost') link.
     .where({ status: 'active' })
