@@ -87,37 +87,168 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
   }
 }
 
+// Normalize a stored channel preference. Anything but 'email' / 'both' (incl.
+// null / legacy rows) means SMS-first.
+function apptChannel(value) {
+  return value === 'email' || value === 'both' ? value : 'sms';
+}
+
+// Send the email version of an appointment notice. Returns the raw send result
+// ({ ok, skipped, blocked, reason, ... }). Idempotent via AppointmentEmail's
+// per-occurrence keys, so calling it as both a fallback and a primary send for
+// the same occurrence will not double-deliver. Best-effort — never throws.
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service' }) {
+  try {
+    if (!customerId) return { ok: false, reason: 'no_customer' };
+    if (kind === 'confirmation') {
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel });
+    }
+    if (kind === '72h' || kind === '24h') {
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind });
+    }
+    return { ok: false, reason: 'unsupported_kind' };
+  } catch (err) {
+    logger.error(`[appt-remind] ${kind} email send error for ${customerId}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
 // Send the email version of an appointment notice after the SMS could not be
 // delivered. Returns true if the email was sent. On no-email-on-file, raises the
 // no-channel admin alert. Best-effort — never throws.
 async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service' }) {
-  try {
-    if (!customerId) return false;
-    let res;
-    if (kind === 'confirmation') {
-      res = await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel });
-    } else if (kind === '72h' || kind === '24h') {
-      res = await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind });
-    } else {
+  if (!customerId) return false;
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel });
+  if (res?.ok) {
+    logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
+    return true;
+  }
+  if ((res?.skipped && res.reason === 'missing_email') || res?.blocked) {
+    // No usable channel: the SMS failed and email is either unavailable (no
+    // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
+    // which block even transactional sends). Alert a human to reach the customer.
+    await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+  } else if (res?.reason !== 'unsupported_kind') {
+    logger.warn(`[appt-remind] ${kind} email fallback not sent for customer ${customerId}: ${res?.reason || res?.error || 'unknown'}`);
+  }
+  return false;
+}
+
+// Deliver an appointment notice honoring the customer's channel preference
+// (sms | email | both). `smsAttempt` is an async closure that performs the
+// real SMS send and resolves true when the customer was reached by text.
+//   'sms'   → SMS first; on delivery failure fall back to email (legacy default)
+//   'email' → email only; if there is no usable email, fall back to SMS so the
+//             customer is still reached (no admin alert unless BOTH fail)
+//   'both'  → send SMS and email
+// Returns true if the customer was reached on any channel. Best-effort.
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
+  const ch = apptChannel(channel);
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel };
+
+  // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
+  // accept flow) throw on a blocked/undeliverable send; for email/both that must
+  // not abort the email leg or bubble out of the booking/accept flow — treat a
+  // throw as "not reached" so the email still goes out and the alert logic runs.
+  const runSms = async () => {
+    try {
+      return await smsAttempt();
+    } catch (err) {
+      logger.warn(`[appt-remind] ${kind} SMS attempt threw for ${customerId}: ${err.message}`);
       return false;
     }
-    if (res?.ok) {
-      logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
-      return true;
-    }
-    if ((res?.skipped && res.reason === 'missing_email') || res?.blocked) {
-      // No usable channel: the SMS failed and email is either unavailable (no
-      // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
-      // which block even transactional sends). Alert a human to reach the customer.
-      await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
-    } else {
-      logger.warn(`[appt-remind] ${kind} email fallback not sent for customer ${customerId}: ${res?.reason || res?.error || 'unknown'}`);
-    }
-    return false;
-  } catch (err) {
-    logger.error(`[appt-remind] ${kind} email fallback error for ${customerId}: ${err.message}`);
-    return false;
+  };
+
+  if (ch === 'email') {
+    const res = await sendAppointmentNoticeEmail(emailArgs);
+    if (res?.ok) return true;
+    // No usable email (none on file / suppressed) — reach them by text instead.
+    logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
+    const smsOk = await runSms();
+    if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    return smsOk;
   }
+
+  if (ch === 'both') {
+    const smsOk = await runSms();
+    const emailRes = await sendAppointmentNoticeEmail(emailArgs);
+    const emailOk = !!emailRes?.ok;
+    // Neither channel reached the customer — raise the same human-follow-up
+    // alert the SMS-only path uses.
+    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    return smsOk || emailOk;
+  }
+
+  // 'sms' default — unchanged behavior.
+  const smsOk = await runSms();
+  if (!smsOk) await deliverAppointmentEmailFallback(emailArgs);
+  return smsOk;
+}
+
+// Reconstruct an appointment's ET instant from its scheduled_services row —
+// scheduled_date (DATE) + window_start (TIME) composed into the naive shape
+// parseETDateTime expects. Returns null when the row or fields are missing.
+async function scheduledServiceApptTime(scheduledServiceId) {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('scheduled_date', 'window_start');
+    if (!svc) return null;
+    const datePart = svc.scheduled_date instanceof Date
+      ? svc.scheduled_date.toISOString().slice(0, 10)
+      : String(svc.scheduled_date || '').slice(0, 10);
+    const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+    return (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+  } catch (err) {
+    logger.warn(`[appt-remind] appt-time lookup failed for service ${scheduledServiceId}: ${err.message}`);
+    return null;
+  }
+}
+
+// Deliver a booking confirmation honoring the customer's account-level
+// confirmation channel (sms | email | both). Self-service booking paths (portal
+// self-book, estimate acceptance, call-created) send their own confirmation SMS
+// instead of going through deliverConfirmation, so without this they would
+// ignore an Email/Both preference. `smsAttempt` runs the caller's existing SMS
+// send and resolves true when the customer was reached.
+//
+// The default 'sms' path is deliberately unchanged — it just runs smsAttempt, so
+// existing customers see identical behavior. Only an explicit email/both
+// preference routes through the channel-aware deliverAppointmentNotice (which
+// adds the email send and the both-failed admin alert). Best-effort: a
+// prefs-lookup failure falls back to the plain SMS send.
+async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
+  let channel = 'sms';
+  let confirmationOn = true;
+  try {
+    const prefs = await getReminderPrefs(customerId);
+    channel = prefs.confirmationChannel;
+    confirmationOn = prefs.appointmentConfirmation;
+  } catch (err) {
+    logger.warn(`[appt-remind] confirmation channel lookup failed for ${customerId}: ${err.message} — sending SMS`);
+  }
+  // Default 'sms', OR the customer opted out of New Appointment Confirmation:
+  // run the caller's SMS send only. That send goes through sendCustomerMessage,
+  // which already enforces the appointment_confirmation opt-out (suppressing it
+  // for opted-out customers) — and we must NOT email them, because the email
+  // path bypasses that validator.
+  if (channel === 'sms' || !confirmationOn) return smsAttempt();
+
+  // email / both — resolve the appointment time for the email body when the
+  // caller didn't pass one, so the confirmation email shows the right ET slot.
+  let resolvedApptTime = apptTime;
+  if (!resolvedApptTime && scheduledServiceId) {
+    resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
+  }
+  return deliverAppointmentNotice({
+    channel,
+    kind: 'confirmation',
+    customerId,
+    scheduledServiceId,
+    apptTime: resolvedApptTime,
+    serviceLabel,
+    smsAttempt,
+  });
 }
 
 function lastTenDigits(value) {
@@ -384,12 +515,36 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
 
 async function getReminderPrefs(customerId) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+
+  // Delivery channel is an account-level "how to reach me" preference, saved on
+  // the account owner's (primary profile's) row in the portal. Reminders load
+  // prefs by each appointment's service-property customer id, so a secondary
+  // property would otherwise miss the channel choice and default to SMS.
+  // Resolve it from the account's primary customer profile. (customers.account_id
+  // references customer_accounts.id, NOT a customers.id — so look up the primary
+  // profile rather than reading prefs by account_id directly.)
+  let channelPrefs = prefs;
+  const customer = await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(() => null);
+  if (customer && customer.is_primary_profile !== true && customer.account_id) {
+    const primary = await db('customers')
+      .where({ account_id: customer.account_id, is_primary_profile: true })
+      .first('id')
+      .catch(() => null);
+    if (primary && String(primary.id) !== String(customerId)) {
+      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(() => null);
+      if (ownerPrefs) channelPrefs = ownerPrefs;
+    }
+  }
+
   return {
     raw: prefs || {},
     smsEnabled: prefs?.sms_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,
     serviceReminder24h: prefs?.service_reminder_24h !== false,
+    confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
+    reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel),
+    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel),
   };
 }
 
@@ -442,14 +597,24 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       const date = formatDate(apptTime);
       const time = formatTime(apptTime);
 
-      const sent = await safeSendAppointment(customer, prefs.raw, async (contact) => {
-        const firstName = contact.name || customer.first_name || 'there';
-        return renderTemplate(
-          'appointment_confirmation',
-          { first_name: firstName, service_type: serviceLabel, date, time, day },
-          { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
-        );
-      }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId });
+      // Honor the customer's channel preference (sms | email | both). The
+      // 'sms' default is unchanged: SMS first, email fallback on failure.
+      const sent = await deliverAppointmentNotice({
+        channel: prefs.confirmationChannel,
+        kind: 'confirmation',
+        customerId,
+        scheduledServiceId,
+        apptTime,
+        serviceLabel,
+        smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
+          const firstName = contact.name || customer.first_name || 'there';
+          return renderTemplate(
+            'appointment_confirmation',
+            { first_name: firstName, service_type: serviceLabel, date, time, day },
+            { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
+          );
+        }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }),
+      });
 
       // Mark sent whether or not delivery succeeded (landline / block) so
       // reminders can proceed and we don't retry the confirmation.
@@ -458,16 +623,6 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
       if (sent) {
         logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${serviceLabel}`);
-      } else {
-        // SMS could not be delivered (landline / no mobile / blocked) — send the
-        // confirmation by email instead so the customer still gets it.
-        await deliverAppointmentEmailFallback({
-          kind: 'confirmation',
-          customerId,
-          scheduledServiceId,
-          apptTime,
-          serviceLabel,
-        });
       }
       return sent;
     }
@@ -831,7 +986,11 @@ const AppointmentReminders = {
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
           const prefs = await getReminderPrefs(r.customer_id);
-          if (!prefs.smsEnabled || !prefs.serviceReminder72h) {
+          const channel72 = prefs.reminder72hChannel;
+          // Skip only if the reminder is off, or it is SMS-only and the
+          // customer has opted out of texts. An email/both preference still
+          // sends by email even when SMS is suppressed.
+          if (!prefs.serviceReminder72h || (channel72 === 'sms' && !prefs.smsEnabled)) {
             logger.info(`[appt-remind] Skipping 72h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
             results.skipped++;
             continue;
@@ -857,28 +1016,26 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
-            const sent72 = await safeSendAppointment(customer, prefs.raw, async (contact) => {
-              const firstName = contact.name || customer?.first_name || 'there';
-              return renderTemplate(
-                'reminder_72h',
-                { first_name: firstName, service_type: serviceLabel, day, date, time },
-                { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
-              );
-            }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id });
+            await deliverAppointmentNotice({
+              channel: channel72,
+              kind: '72h',
+              customerId: r.customer_id,
+              scheduledServiceId: r.scheduled_service_id,
+              apptTime,
+              serviceLabel,
+              smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
+                const firstName = contact.name || customer?.first_name || 'there';
+                return renderTemplate(
+                  'reminder_72h',
+                  { first_name: firstName, service_type: serviceLabel, day, date, time },
+                  { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                );
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
+            });
 
             await db('appointment_reminders')
               .where({ id: r.id })
               .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
-
-            if (!sent72) {
-              await deliverAppointmentEmailFallback({
-                kind: '72h',
-                customerId: r.customer_id,
-                scheduledServiceId: r.scheduled_service_id,
-                apptTime,
-                serviceLabel,
-              });
-            }
 
             results.sent72h++;
             logger.info(`[appt-remind] 72h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
@@ -891,7 +1048,11 @@ const AppointmentReminders = {
         // ── 24-hour reminder ──
         if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25) {
           const prefs = await getReminderPrefs(r.customer_id);
-          if (!prefs.smsEnabled || !prefs.serviceReminder24h) {
+          const channel24 = prefs.reminder24hChannel;
+          // Skip only if the reminder is off, or it is SMS-only and the
+          // customer has opted out of texts. An email/both preference still
+          // sends by email even when SMS is suppressed.
+          if (!prefs.serviceReminder24h || (channel24 === 'sms' && !prefs.smsEnabled)) {
             logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — disabled by customer preference`);
             results.skipped++;
             continue;
@@ -915,28 +1076,26 @@ const AppointmentReminders = {
             const time = formatTime(apptTime);
 
             const serviceLabel = smsServiceLabelStored(r.service_type);
-            const sent24 = await safeSendAppointment(customer, prefs.raw, async (contact) => {
-              const firstName = contact.name || customer?.first_name || 'there';
-              return renderTemplate(
-                'reminder_24h',
-                { first_name: firstName, service_type: serviceLabel, time },
-                { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
-              );
-            }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id });
+            await deliverAppointmentNotice({
+              channel: channel24,
+              kind: '24h',
+              customerId: r.customer_id,
+              scheduledServiceId: r.scheduled_service_id,
+              apptTime,
+              serviceLabel,
+              smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
+                const firstName = contact.name || customer?.first_name || 'there';
+                return renderTemplate(
+                  'reminder_24h',
+                  { first_name: firstName, service_type: serviceLabel, time },
+                  { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                );
+              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
+            });
 
             await db('appointment_reminders')
               .where({ id: r.id })
               .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
-
-            if (!sent24) {
-              await deliverAppointmentEmailFallback({
-                kind: '24h',
-                customerId: r.customer_id,
-                scheduledServiceId: r.scheduled_service_id,
-                apptTime,
-                serviceLabel,
-              });
-            }
 
             results.sent24h++;
             logger.info(`[appt-remind] 24h reminder sent for customer ${r.customer_id} - ${r.service_type}`);
@@ -1430,9 +1589,20 @@ const AppointmentReminders = {
 // skipped locally) can raise the same deduped "no reachable channel" admin alert.
 AppointmentReminders.alertNoReachableChannel = alertNoReachableChannel;
 
+// Exposed so self-service booking paths (booking, estimate acceptance,
+// call-created) can route their own confirmation SMS through the customer's
+// account-level confirmation channel preference.
+AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel;
+
 AppointmentReminders._test = {
   maskPhone,
   sanitizeLookupError,
+  apptChannel,
+  deliverAppointmentNotice,
+  deliverConfirmationByChannel,
+  scheduledServiceApptTime,
+  sendAppointmentNoticeEmail,
+  getReminderPrefs,
 };
 
 module.exports = AppointmentReminders;

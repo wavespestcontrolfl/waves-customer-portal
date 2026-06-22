@@ -1065,20 +1065,31 @@ router.post('/confirm', async (req, res, next) => {
         logger.warn(`[booking:confirm] self_booking_confirmation template missing/disabled — skipping SMS for customer ${custId}`);
       }
 
-      const customerSms = smsBody ? await sendCustomerMessage({
-        to: customer.phone,
-        body: smsBody,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'appointment_confirmation',
+      // Honor the customer's account-level New Appointment Confirmation channel
+      // (sms | email | both). Default 'sms' keeps the exact prior send.
+      await AppointmentReminders.deliverConfirmationByChannel({
         customerId: custId,
-        appointmentId: serviceRow?.id,
-        identityTrustLevel: 'phone_matches_customer',
-        metadata: { original_message_type: 'booking_confirmation', source: source || 'portal' },
-      }) : null;
-      if (customerSms && !customerSms.sent) {
-        logger.warn(`[booking:confirm] Customer SMS blocked/failed for customer ${custId}: ${customerSms.code || customerSms.reason || 'unknown'}`);
-      }
+        scheduledServiceId: serviceRow?.id,
+        serviceLabel: resolvedServiceType,
+        smsAttempt: async () => {
+          if (!smsBody) return false;
+          const customerSms = await sendCustomerMessage({
+            to: customer.phone,
+            body: smsBody,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'appointment_confirmation',
+            customerId: custId,
+            appointmentId: serviceRow?.id,
+            identityTrustLevel: 'phone_matches_customer',
+            metadata: { original_message_type: 'booking_confirmation', source: source || 'portal' },
+          });
+          if (customerSms && !customerSms.sent) {
+            logger.warn(`[booking:confirm] Customer SMS blocked/failed for customer ${custId}: ${customerSms.code || customerSms.reason || 'unknown'}`);
+          }
+          return !!customerSms?.sent;
+        },
+      });
 
       if (process.env.ADAM_PHONE) {
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
