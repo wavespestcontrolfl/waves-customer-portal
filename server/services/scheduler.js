@@ -1261,6 +1261,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10:15AM (Tue–Fri) — Payer statement dunning (Phase 2 — P4)
+  // Fires the next due AP reminder for each unpaid NET-terms statement past its
+  // due date. Gated behind GATE_PAYER_STATEMENTS (runPending no-ops when off).
+  // Staggered 15m after the per-invoice sequences so they don't contend for the
+  // connection pool. Never contacts the homeowner — AP inbox only.
+  // =========================================================================
+  cron.schedule('15 10 * * 2-5', async () => {
+    logger.info('Running: payer statement dunning');
+    try {
+      await runExclusive('payer-statement-followups', async () => {
+        const StatementFollowups = require('./payer-statement-followups');
+        const result = await StatementFollowups.runPending();
+        logger.info(`Payer statement dunning done: ${result.sent} sent, ${result.skipped} skipped`);
+      });
+    } catch (err) {
+      logger.error(`Payer statement dunning failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {

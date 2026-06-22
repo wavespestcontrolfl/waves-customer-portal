@@ -283,4 +283,4 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
   return { ok: true, recipient, total: statement.total };
 }
 
-module.exports = { sendStatementEmail, resolveApRecipient };
+module.exports = { sendStatementEmail, resolveApRecipient, forcedRetryKey };

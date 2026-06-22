@@ -20,6 +20,8 @@ const { finalizeStatement, loadStatementLines } = require('../services/payer-sta
 const { sendStatementEmail } = require('../services/payer-statement-email');
 const StripeService = require('../services/stripe');
 const { settleStatementPaid, PAYABLE_STATEMENT_STATUSES } = require('../services/payer-statement-settle');
+const { payerArForPayer, computePayerArAging, ageStatement } = require('../services/payer-ar');
+const StatementFollowups = require('../services/payer-statement-followups');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -47,12 +49,35 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/payers/ar-aging — cross-payer AR ("AR by terms" + collections
+// worklist). MUST precede GET /:id so the literal path isn't captured as an id.
+// Ungated read: returns zeros until statements exist (gate-dark safe).
+router.get('/ar-aging', async (req, res, next) => {
+  try {
+    const aging = await computePayerArAging();
+    res.json(aging);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/admin/payers/:id
 router.get('/:id', async (req, res, next) => {
   try {
     const payer = await PayerService.getPayer(req.params.id);
     if (!payer) return res.status(404).json({ error: 'Payer not found' });
     res.json({ payer });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/payers/:id/ar — this payer's outstanding statements + aging.
+router.get('/:id/ar', async (req, res, next) => {
+  try {
+    const pid = Number(req.params.id);
+    if (!Number.isInteger(pid)) return res.status(400).json({ error: 'Invalid payer id' });
+    res.json(await payerArForPayer(pid));
   } catch (err) {
     next(err);
   }
@@ -91,10 +116,14 @@ router.get('/:id/statements', async (req, res, next) => {
   try {
     const pid = Number(req.params.id);
     if (!Number.isInteger(pid)) return res.status(400).json({ error: 'Invalid payer id' });
-    const statements = await db('payer_statements')
+    const rows = await db('payer_statements')
       .where({ payer_id: pid })
       .orderBy('period_start', 'desc')
       .limit(48);
+    // Derive aging (days_past_due / overdue / aging_bucket) per row — keyed on the
+    // statement's due_date. Meaningful only for outstanding rows; the client shows
+    // it where it matters. paid/void rows still carry the fields harmlessly.
+    const statements = rows.map((s) => ({ ...s, ...ageStatement(s) }));
     res.json({ statements });
   } catch (err) {
     next(err);
@@ -244,11 +273,71 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
       }, { database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });
     });
 
+    // Paid offline → stop dunning (best-effort, outside the settle txn; the
+    // eligibility filter already excludes `paid`, so this is just hygiene).
+    await StatementFollowups.stopOnStatementSettled(owned.id)
+      .catch((e) => logger.warn(`[payers] stopOnStatementSettled failed for S-${owned.id}: ${e.message}`));
+
     logger.info(`[payers] statement ${owned.id} reconciled offline via ${method} ($${settledAmount.toFixed(2)})`);
     res.json({ ok: true, statement: result.statement, alreadyPaid: !!result.alreadyPaid, childrenSettled: result.childrenSettled || 0 });
   } catch (err) {
     if (err.statusCode === 409) return res.status(409).json({ error: err.message });
     if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+// --- Statement dunning controls (Phase 2 — P4) ------------------------------
+// The followup sequence emails the payer's AP inbox (never the homeowner) on a
+// terms-aware schedule once a statement passes its due date. Read is ungated;
+// the mutating controls are gated like the rest of the lane.
+
+// GET /api/admin/payers/:id/statements/:statementId/followups — sequence state.
+router.get('/:id/statements/:statementId/followups', async (req, res, next) => {
+  try {
+    const statement = await loadOwnedStatement(req.params.id, req.params.statementId);
+    if (!statement) return res.status(404).json({ error: 'Statement not found' });
+    const sequence = await StatementFollowups.getSequenceForStatement(statement.id);
+    res.json({ sequence });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/payers/:id/statements/:statementId/followups/:action —
+// pause | resume | stop | send-now. Mirrors the per-invoice dunning controls.
+router.post('/:id/statements/:statementId/followups/:action', async (req, res, next) => {
+  if (!isEnabled('payerStatements')) return res.status(403).json({ error: 'Payer statements are not enabled' });
+  try {
+    const statement = await loadOwnedStatement(req.params.id, req.params.statementId);
+    if (!statement) return res.status(404).json({ error: 'Statement not found' });
+
+    const action = String(req.params.action || '').toLowerCase();
+    const adminId = req.user?.id || req.technicianId || null;
+
+    switch (action) {
+      case 'pause':
+        await StatementFollowups.pauseSequence(statement.id, { reason: req.body?.reason, until: req.body?.until, adminId });
+        break;
+      case 'resume':
+        await StatementFollowups.resumeSequence(statement.id);
+        break;
+      case 'stop':
+        await StatementFollowups.stopSequence(statement.id, { reason: req.body?.reason, adminId });
+        break;
+      case 'send-now': {
+        const result = await StatementFollowups.sendNextStepNow(statement.id);
+        if (!result.ok) return res.status(422).json({ error: result.error || 'send_failed' });
+        break;
+      }
+      default:
+        return res.status(400).json({ error: 'Action must be one of: pause, resume, stop, send-now' });
+    }
+
+    const sequence = await StatementFollowups.getSequenceForStatement(statement.id);
+    logger.info(`[payers] statement ${statement.id} dunning ${action} by admin ${adminId || '?'}`);
+    res.json({ ok: true, sequence });
+  } catch (err) {
     next(err);
   }
 });

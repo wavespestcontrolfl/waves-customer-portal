@@ -190,6 +190,14 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
     },
   },
   {
+    name: 'get_payer_ar_aging',
+    description: `Get third-party PAYER accounts-receivable aging ("AR by terms"): the outstanding NET-terms statement balance bucketed by days past due (current / 1-15 / 16-30 / 31-45 / 45+), split by terms (net15 / net30), plus the top past-due payers (the collections worklist). This is the BILL-TO/payer AR layer (builders, property managers, HOAs), separate from per-customer self-pay invoices. Use for "payer AR", "AR by terms", "which payers owe us?". Returns zeros until NET-terms statements exist.`,
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
     name: 'get_today_briefing',
     description: `Get a comprehensive daily briefing: today's schedule, unread messages, pending estimates, overdue customers, at-risk accounts, upcoming renewals. Use for "morning briefing" or "what do I need to know today?"`,
     input_schema: {
@@ -214,6 +222,7 @@ async function executeDashboardTool(toolName, input) {
       case 'get_service_mix': return await getServiceMix(input);
       case 'get_customer_acquisition': return await getCustomerAcquisition(input);
       case 'get_outstanding_balances': return await getOutstandingBalances(input);
+      case 'get_payer_ar_aging': return await getPayerArAging();
       case 'get_today_briefing': return await getTodayBriefing();
       default: return { error: `Unknown dashboard tool: ${toolName}` };
     }
@@ -920,6 +929,24 @@ async function getTodayBriefing() {
     overdue_pest_customers: parseInt(overdueCustomers?.c || 0),
     at_risk_customers: parseInt(atRisk?.c || 0),
     recent_activity: recentActivity.map(a => ({ action: a.action, description: a.description, time: a.created_at })),
+  };
+}
+
+// Third-party PAYER AR aging — the Bill-To/statement receivable layer (separate
+// from per-customer self-pay invoices). Delegates to the shared payer-ar service
+// so the IB tile and the admin /ar-aging endpoint report identical numbers.
+async function getPayerArAging() {
+  const { computePayerArAging } = require('../payer-ar');
+  const ar = await computePayerArAging();
+  return {
+    as_of: ar.as_of,
+    outstanding_total: ar.outstanding_total,
+    past_due_total: ar.past_due_total,
+    statement_count: ar.statement_count,
+    oldest_days_past_due: ar.oldest_days_past_due,
+    aging_buckets: ar.buckets,
+    by_terms: ar.by_terms,
+    top_past_due_payers: ar.payers.slice(0, 10),
   };
 }
 
