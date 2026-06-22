@@ -54,14 +54,18 @@ if (!RUN_ID) {
       // Publish the reviewed draft (PR or live) + complete the opportunity.
       const runner = require('../services/content/autonomous-runner');
       const result = await runner.approveAndPublishNamedCompetitor(run.opportunity_id, { approvedBy: APPROVED_BY });
-      await db('opportunity_queue')
-        .where({ id: run.opportunity_id, status: 'pending_review' })
-        .update({
-          status: 'done',
-          skip_reason: result.published_url ? 'named_competitor_published' : 'named_competitor_pr_open',
-          completed_at: new Date(),
-          updated_at: new Date(),
-        });
+      if (result.published_url) {
+        // Published live → complete the opportunity.
+        await db('opportunity_queue')
+          .where({ id: run.opportunity_id, status: 'pending_review' })
+          .update({ status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() });
+      } else {
+        // PR opened → keep parked as a normal PR-pending item so the PR poller
+        // verifies / indexes / completes the merge (marking it done orphans it).
+        await db('opportunity_queue')
+          .where({ id: run.opportunity_id, status: 'pending_review' })
+          .update({ skip_reason: 'astro_pr_pending_merge', updated_at: new Date() });
+      }
       console.log(`Named-competitor run ${RUN_ID} approved by ${APPROVED_BY} → ${result.published_url || result.astro_pr_url || result.publish_status || 'submitted'}`);
       return;
     }

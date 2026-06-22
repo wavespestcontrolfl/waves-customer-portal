@@ -2182,16 +2182,33 @@ class AutonomousRunner {
     const guards = await this._evaluatePublishingGuards(run, brief, seoRes);
     if (!guards.ok) { const e = new Error(`Publishing guard blocked: ${guards.reason}`); e.statusCode = 409; e.details = guards.notes; throw e; }
 
-    // Publish the reviewed draft through the existing astro-publisher path.
-    const runCtx = { ...run, opportunity_id: opportunityId };
-    const patch = await this._publishAndDistribute(draft, brief, runCtx);
+    // Atomically CLAIM the parked run before publishing, so two concurrent
+    // approvals (two admins, or the CLI racing the review API) can't both pass
+    // the prechecks and open duplicate Astro PRs / double-publish. The
+    // conditional UPDATE (WHERE still-parked) lets exactly one caller win; the
+    // loser sees 0 rows and bails. Released back to parked on a publish error.
+    const claimed = await db('autonomous_runs')
+      .where({ id: run.id, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' })
+      .update({ outcome: 'publishing_named_competitor', updated_at: new Date() });
+    if (!claimed) {
+      const e = new Error('This named-competitor review is already being approved/published'); e.statusCode = 409; throw e;
+    }
+
+    let patch;
+    try {
+      const runCtx = { ...run, opportunity_id: opportunityId };
+      patch = await this._publishAndDistribute(draft, brief, runCtx);
+    } catch (err) {
+      // Release the claim so the operator can retry after fixing the cause.
+      await db('autonomous_runs')
+        .where({ id: run.id, outcome: 'publishing_named_competitor' })
+        .update({ outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() })
+        .catch(() => {});
+      throw err;
+    }
 
     const published = !!patch.published_url;
-    const outcome = published ? 'completed_published' : 'completed_pending_review';
-    const skipReason = published ? null : (patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url');
-    await db('autonomous_runs').where('id', run.id).update({
-      outcome,
-      skip_reason: skipReason,
+    const update = {
       published_url: patch.published_url || null,
       astro_pr_url: patch.astro_pr_url || null,
       indexnow_status: patch.indexnow_status || null,
@@ -2199,7 +2216,22 @@ class AutonomousRunner {
       trust_build_approved_at: new Date(),
       trust_build_approved_by: String(approvedBy || 'operator').slice(0, 100),
       updated_at: new Date(),
-    });
+    };
+    if (published) {
+      update.outcome = 'completed_published';
+      update.skip_reason = null;
+      // Stamp the publish time so this counts against TODAY's / this week's
+      // canary publish caps (approving a draft parked on a prior day must not
+      // bypass _countPublishedSince).
+      update.completed_at = new Date();
+    } else {
+      // PR opened (or no live URL): park EXACTLY like the normal autonomous
+      // PR-open path so the existing PR poller verifies / indexes / completes
+      // the merge. Marking it done here would orphan the PR.
+      update.outcome = 'completed_pending_review';
+      update.skip_reason = patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url';
+    }
+    await db('autonomous_runs').where('id', run.id).update(update);
     return {
       published,
       published_url: patch.published_url || null,

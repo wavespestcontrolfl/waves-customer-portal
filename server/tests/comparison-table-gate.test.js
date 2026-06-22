@@ -335,4 +335,17 @@ describe('comparison-table-gate', () => {
     expect(gate.evaluate({ body: `The worst infestation we saw was termites.\n\n${CATEGORY_TABLE}` }, {})
       .findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
   });
+
+  // ── Round-6 finding ──
+
+  test('R6-3: a location-prefixed business name in prose/title is caught (not waved through)', () => {
+    const prose = gate.evaluate({ body: `Sarasota Pest Control offers free inspections.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(prose.pass).toBe(false);
+    expect(prose.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Sarasota Pest Control/.test(f.message))).toBe(true);
+
+    const titled = gate.evaluate(
+      { body: CATEGORY_TABLE, frontmatter: { title: 'Florida Pest Control vs Waves in Venice' } },
+      { namedCompetitorEnabled: true });
+    expect(titled.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Florida Pest Control/.test(f.message))).toBe(true);
+  });
 });

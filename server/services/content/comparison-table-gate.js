@@ -89,7 +89,11 @@ const RANKING_RE = new RegExp([
 
 // Generic descriptors / methodologies that may precede a pest-industry suffix in
 // PROSE but are not a business name.
-const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|National|Regional|Nationwide|Same|Top|Your|Our|The|This|That|These|Those|A|An|Florida|Southwest|Sarasota|Manatee|Charlotte|Bradenton|Venice|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year';
+// Generic descriptors / methodologies only. Geographic terms (Florida,
+// Sarasota, Manatee, Venice, …) are deliberately NOT excluded: "Sarasota Pest
+// Control" is a business-name pattern, not a generic phrase, so a location lead
+// + industry suffix in prose/title must still be flagged for review.
+const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year';
 const PROVIDER_NAME_SRC = `\\b((?!(?:${GENERIC_LEAD_EXCLUSIONS})\\b)[A-Z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:Pest Control|Pest Management|Pest Solutions?|Pest Services?|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest))\\b`;
 function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
 
