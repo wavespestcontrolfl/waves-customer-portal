@@ -2493,6 +2493,62 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('class="mini-guarantee"');
   });
 
+  test('Bora-Care wins over the termite-install heuristic and shows no bait chip', () => {
+    // Canonical service key `bora_care` must classify ahead of the generic
+    // termite-install heuristic even with install/termite wording in the label.
+    const item = { service: 'bora_care', name: 'Termite Bora-Care Install', price: 900 };
+    expect(deriveServiceCategory({}, [], [item])).toBe('bora_care');
+
+    const html = renderPage('boracare-termite-label-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 900,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 900, items: [item], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+  });
+
+  test('mixed Bora-Care + pre-slab one-time quote keeps the pre-slab warranty line', () => {
+    // Suppressing the mini-guarantee for Bora-Care must not hide another billable
+    // row's warranty — only a Bora-Care-only mix omits the line.
+    const html = renderPage('boracare-preslab-mix-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1300,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1300,
+          items: [
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+            { service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 249, warrantyStatus: 'No extended warranty selected.' },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('class="mini-guarantee"');
+    expect(html).toContain('Warranty terms depend on the selected warranty option.');
+  });
+
   test('server-rendered booking review buttons use explicit click listeners', () => {
     const html = renderPage('booking-token', {
       status: 'sent',

@@ -1089,9 +1089,12 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   const hasLawn = recurringList.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
   const hasMosquito = recurringList.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''))
     || oneTimeList.some((item) => serviceCategoryForOneTimeItem(item) === 'mosquito');
+  // Bora-Care rows are excluded here even when their label contains "termite"
+  // so the bait/barrier branch never fires for them — they get their own prompt.
   const hasTermite = recurringList.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''))
-    || oneTimeList.some((item) => /termite/i.test(item?.service || item?.label || item?.name || '')
-      || ['termite_bait', 'termite_trenching', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(item)));
+    || oneTimeList.some((item) => !isBoraCareOneTimeItem(item)
+      && (/termite/i.test(item?.service || item?.label || item?.name || '')
+        || ['termite_bait', 'termite_trenching', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(item))));
   const hasTreeShrub = recurringList.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
   const hasRodent = recurringList.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
   const hasPalm = recurringList.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
@@ -4174,7 +4177,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly && !hasBoraCareOneTime ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
+    ${isOneTimeOnly && !hasOnlyBoraCareServices ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
@@ -8876,8 +8879,11 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (!name && !service) return null;
   if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
-  if (isTermiteInstallItem(item)) return 'termite_bait';
+  // Bora-Care carries the canonical service key `bora_care`; classify it before
+  // the generic termite-install heuristic so an install-worded label
+  // (e.g. "Termite Bora-Care Install") never routes it down the bait path.
   if (isBoraCareOneTimeItem(item)) return 'bora_care';
+  if (isTermiteInstallItem(item)) return 'termite_bait';
   if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
   if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
