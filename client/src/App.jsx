@@ -177,6 +177,7 @@ const BillingRecoveryPage = lazyWithRetry(() => import('./pages/admin/BillingRec
 const PayersPage = lazyWithRetry(() => import('./pages/admin/PayersPage'));
 const AdminContractsPage = lazyWithRetry(() => import('./pages/admin/ContractsPage'));
 const PayPage = lazyWithRetry(() => import('./pages/PayPageV2'));
+const StatementPayPage = lazyWithRetry(() => import('./pages/StatementPayPage'));
 const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
@@ -281,6 +282,7 @@ export default function App() {
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/project/:token" element={<ProjectReportViewPage />} />
           <Route path="/report/:token" element={<ReportViewPage />} />
+          <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
