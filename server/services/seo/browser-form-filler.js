@@ -36,16 +36,6 @@ function hostOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
 }
 
-// Stable endpoint key (host + path, no query/fragment, www-normalized, no trailing
-// slash) — used to recognise THE form-submission request (matching the form's action)
-// vs. arbitrary same-host XHR/analytics, so only the real submit is treated as evidence.
-function endpointKey(url) {
-  try {
-    const u = new URL(url);
-    return `${u.hostname.replace(/^www\./, '').toLowerCase()}${u.pathname.replace(/\/+$/, '') || '/'}`;
-  } catch { return ''; }
-}
-
 // A host is "on the allowlisted domain" if it equals it or is a sub-domain of it
 // (a directory may host the live listing / confirmation on a sub-domain). Same
 // registrable domain only — never an off-domain host. Used for what we STORE/verify
@@ -224,7 +214,6 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   let submitPhase = false;
   let submitAborted = false;
   let submitDispatched = false;
-  let submitActionKey = null; // endpointKey of the form's action, captured just before submit
 
   let browser;
   try {
@@ -245,19 +234,15 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     if (typeof context.route === 'function') {
       await context.route('**/*', (route) => {
         const req = route.request();
-        // Recognise THE form-submission request as evidence. When we know the form's
-        // action (submitActionKey), only the request to that exact endpoint counts — so
-        // analytics/validation XHR to other same-host paths is NOT mistaken for the
-        // submit, and a later off-host CONFIRMATION redirect (a different endpoint) isn't
-        // either. If the action couldn't be read, fall back to body-bearing-method-or-
-        // navigation (signal-preserving) so we never silently lose submit evidence.
+        // Submission evidence = any BODY-BEARING same-host request (POST/PUT/PATCH — incl.
+        // a JS form that intercepts submit and posts to a different same-host endpoint) OR
+        // a navigation, fired after the click. We intentionally keep this BROAD so a real
+        // submit is never missed (which would make a completed submission look retryable →
+        // duplicate). The strand-vs-false-place tradeoff is handled by the decision
+        // ORDER below: an off-host (aborted) submit is preferred over loose dispatch, so an
+        // analytics POST can't mark an actually-off-host submission as placed.
         let isSubmitReq = false;
-        try {
-          if (submitPhase) {
-            if (submitActionKey) isSubmitReq = endpointKey(req.url()) === submitActionKey;
-            else isSubmitReq = !['GET', 'HEAD', 'OPTIONS'].includes(String(req.method() || 'GET').toUpperCase()) || req.isNavigationRequest();
-          }
-        } catch { isSubmitReq = false; }
+        try { isSubmitReq = submitPhase && (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method() || 'GET').toUpperCase()) || req.isNavigationRequest()); } catch { isSubmitReq = false; }
         let ok = false;
         try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
         if (!ok) {
@@ -348,23 +333,6 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // never actionable → nothing dispatched → genuinely retryable. Once it dispatches
     // (no throw), the POST may have landed — we NEVER auto-retry; any later navigation
     // /verification error becomes placed+pending below.
-    // Capture the form's submission endpoint so the route guard can recognise THE submit
-    // request (vs. analytics/validation XHR). Use only an EXPLICIT endpoint: the submit
-    // control's `formaction` (which overrides the form), else the form's `action`
-    // ATTRIBUTE. A no-action / JS-driven form (where browsers resolve form.action to the
-    // page URL but the real POST goes elsewhere) returns '' → the guard falls back to the
-    // method/navigation heuristic, so we never miss a real submit and risk a duplicate.
-    try {
-      const action = await page.$eval(last.selector, (el) => {
-        const fa = el.getAttribute && el.getAttribute('formaction');
-        if (fa) return (el.formAction || fa); // resolved absolute formaction override
-        const f = el.form || (el.closest && el.closest('form'));
-        const a = f && f.getAttribute && f.getAttribute('action');
-        return a ? (f.action || a) : ''; // only when an explicit action attribute exists
-      });
-      if (action) submitActionKey = endpointKey(action);
-    } catch { /* unreadable form → guard uses the fallback heuristic */ }
-
     submitPhase = true; // requests from here are the submission (POST / nav)
     try {
       await page.click(last.selector, { noWaitAfter: true });

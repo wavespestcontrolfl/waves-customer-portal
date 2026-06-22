@@ -30,16 +30,17 @@ const omega = require('./omega-indexer');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
 const OUR_HOMEPAGE = `https://${OUR_DOMAIN}`;
-// Signup-lane (citation) prospects: the runner submits the HOMEPAGE as the listing's
-// website, so their backlink targets the homepage — NOT prospect.target_page.
-const SIGNUP_LINK_TYPES = new Set(['directory', 'citation', 'social']);
 
 // THE single source of truth for "what URL should this prospect's backlink point at":
-// citations → the homepage; everything else → its money page. Used by the DataForSEO
-// reconcile, the crawl fallback, AND the Omega dofollow confirmation so every path agrees
-// (else a citation that links to the homepage would verify in one path but not another).
+// a row the SIGNUP RUNNER created (flagged quality_signals.cited_homepage — it submits the
+// homepage as the listing website) → the homepage; everything else → its money-page
+// target_page. Scoped by the flag, NOT link_type, so a MANUAL/strategy directory/citation
+// row (same link_types) with a real money-page target still verifies against that page.
+// Used by the DataForSEO reconcile, the crawl fallback, AND the Omega dofollow
+// confirmation so every path agrees.
 function expectedTargetUrl(prospect) {
-  return SIGNUP_LINK_TYPES.has(prospect && prospect.link_type) ? OUR_HOMEPAGE : (prospect && prospect.target_page);
+  const q = parseQuality(prospect && prospect.quality_signals);
+  return q.cited_homepage ? OUR_HOMEPAGE : (prospect && prospect.target_page);
 }
 const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
 

@@ -150,13 +150,14 @@ function mapReportToPatch(outcome, body = {}, existingQuality = null) {
       cost,
       notes: body.notes || null,
     };
-    // Pending = submitted to a slow-moderation directory; the live URL may be
-    // unknown until approval. Mark it so the verifier's domain reconcile polls
-    // for it instead of treating a null live_url as a stranded row.
-    if (body.pending) {
+    // Pending = submitted to a slow-moderation directory; the live URL may be unknown
+    // until approval. cited_homepage = this placement links to the homepage (signup
+    // runner), so the verifier reconciles THIS row against the homepage, not its
+    // target_page — scoping the homepage rule to runner-created rows only.
+    if (body.pending || body.cited_homepage) {
       const quality = parseQuality(existingQuality);
-      quality.pending = true;
-      quality.submitted_at = now.toISOString();
+      if (body.pending) { quality.pending = true; quality.submitted_at = now.toISOString(); }
+      if (body.cited_homepage) quality.cited_homepage = true;
       patch.quality_signals = JSON.stringify(quality);
     }
     return patch;

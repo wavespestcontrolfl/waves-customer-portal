@@ -232,7 +232,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // No confirmed live URL → report as PENDING (slow-moderation), never as a
       // resolved placement worker.report would reject for a missing live_url.
       const pending = !!result.pending || !result.liveUrl;
-      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, notes: 'auto-submitted citation' });
+      // cited_homepage: the runner submits the HOMEPAGE as the listing website, so the
+      // verifier must reconcile THIS row against the homepage (not its money-page
+      // target_page). A durable flag scopes the homepage rule to runner-created rows only —
+      // manual/strategy directory rows keep target_page.
+      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, cited_homepage: true, notes: 'auto-submitted citation' });
       if (rep && rep.ok) { counts.placed++; }
       else {
         // report rejected (e.g. stale lease) — don't claim success; the row stays

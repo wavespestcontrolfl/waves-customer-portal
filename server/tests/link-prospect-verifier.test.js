@@ -27,18 +27,23 @@ describe('link prospect verifier target matching', () => {
     }, prospect)).toBe(false);
   });
 
-  test('signup-lane (citation) prospects reconcile against the HOMEPAGE, not target_page', () => {
-    const citation = { link_type: 'citation', target_page: 'https://wavespestcontrol.com/wdo-inspection/' };
-    // a homepage backlink — what a citation listing actually creates → matches
-    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/' }, citation)).toBe(true);
-    expect(_test.backlinkTargetsProspect({ target_url: 'https://www.wavespestcontrol.com' }, citation)).toBe(true);
-    // a deep money-page backlink is NOT what a citation creates → must NOT match (homepage expected)
-    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/wdo-inspection/' }, citation)).toBe(false);
+  test('runner-cited rows (quality_signals.cited_homepage) reconcile against the HOMEPAGE, not target_page', () => {
+    const runnerCitation = { link_type: 'citation', target_page: 'https://wavespestcontrol.com/wdo-inspection/', quality_signals: { cited_homepage: true } };
+    // a homepage backlink — what the runner's citation actually creates → matches
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/' }, runnerCitation)).toBe(true);
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://www.wavespestcontrol.com' }, runnerCitation)).toBe(true);
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/wdo-inspection/' }, runnerCitation)).toBe(false);
   });
 
-  test('expectedTargetUrl: homepage for signup-lane, target_page otherwise (one source of truth)', () => {
-    expect(_test.expectedTargetUrl({ link_type: 'citation', target_page: 'https://wavespestcontrol.com/x' })).toBe('https://wavespestcontrol.com');
-    expect(_test.expectedTargetUrl({ link_type: 'directory', target_page: 'https://wavespestcontrol.com/x' })).toBe('https://wavespestcontrol.com');
+  test('a MANUAL directory row (same link_type, no cited_homepage flag) still verifies against its money page', () => {
+    const manual = { link_type: 'directory', target_page: 'https://wavespestcontrol.com/wdo-inspection/' }; // no quality_signals flag
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/wdo-inspection/' }, manual)).toBe(true);
+    expect(_test.backlinkTargetsProspect({ target_url: 'https://wavespestcontrol.com/' }, manual)).toBe(false);
+  });
+
+  test('expectedTargetUrl: homepage ONLY when cited_homepage is flagged; else target_page', () => {
+    expect(_test.expectedTargetUrl({ link_type: 'citation', target_page: 'https://wavespestcontrol.com/x', quality_signals: { cited_homepage: true } })).toBe('https://wavespestcontrol.com');
+    expect(_test.expectedTargetUrl({ link_type: 'directory', target_page: 'https://wavespestcontrol.com/x' })).toBe('https://wavespestcontrol.com/x'); // manual directory → money page
     expect(_test.expectedTargetUrl({ link_type: 'editorial', target_page: 'https://wavespestcontrol.com/wdo' })).toBe('https://wavespestcontrol.com/wdo');
   });
 

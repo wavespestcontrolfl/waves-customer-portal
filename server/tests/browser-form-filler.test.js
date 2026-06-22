@@ -160,22 +160,11 @@ describe('fillCitationForm', () => {
     expect(r.errorCode).toBe('submit_rejected'); // the rejection parks it instead of a phantom placed
   });
 
-  test('P2: only the FORM-ACTION request is evidence — a same-host analytics XHR does not count', async () => {
+  test('a body-bearing same-host request after the click IS evidence (incl. a JS POST to another path) → placed+pending', async () => {
+    // A JS-intercepted form posting to a DIFFERENT same-host endpoint must still count —
+    // missing it would make a completed submission look retryable (duplicate risk).
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
-      // form action is /submit, but the only request fired is an analytics POST to /track
-      launchBrowser: async () => fakeBrowser([], { formAction: 'https://x.com/submit', submitReq: { method: 'POST', url: 'https://x.com/track' } }),
-      anthropic: fakeAnthropic(
-        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
-        { success: false, pending: false, rejected: false, live_url: null },
-      ),
-    }));
-    expect(r.outcome).toBe('failed');
-    expect(r.errorCode).toBe('no_submit_evidence'); // analytics XHR ≠ the form submission → not stranded as placed
-  });
-
-  test('the actual form-action request IS counted as evidence → placed+pending', async () => {
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
-      launchBrowser: async () => fakeBrowser([], { formAction: 'https://x.com/submit', submitReq: { method: 'POST', url: 'https://x.com/submit?k=v' } }),
+      launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://x.com/api/save' } }),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
         { success: false, pending: false, rejected: false, live_url: null },

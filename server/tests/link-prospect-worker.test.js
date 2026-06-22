@@ -29,6 +29,15 @@ describe('link prospect worker — report mapping', () => {
     expect(p.claimed_at).toBeNull();
     expect(p.claimed_by).toBeNull();
   });
+  test('cited_homepage persists to quality_signals (so the verifier reconciles homepage)', () => {
+    const p = mapReportToPatch('placed', { pending: true, cited_homepage: true, notes: 'auto-submitted citation' });
+    const q = JSON.parse(p.quality_signals);
+    expect(q.cited_homepage).toBe(true);
+    expect(q.pending).toBe(true);
+    // a placement WITHOUT the flag must not set it
+    const p2 = mapReportToPatch('placed', { live_url: 'https://x.com/biz', notes: 'editorial' });
+    expect(p2.quality_signals).toBeUndefined();
+  });
 
   test('skipped marks rejected and releases lease', () => {
     const p = mapReportToPatch('skipped', { notes: 'ToS prohibits automation' });
