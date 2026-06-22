@@ -271,6 +271,91 @@ describe('termite measurement overrides and safeguards', () => {
     expect(missing.manualReviewReasons).toContain('missing_boracare_attic_sqft');
   });
 
+  test('BoraCare folds surface treatment (linear ft × height) into the treated area', () => {
+    // Surface-only job: 100 LF × default 8 ft = 800 sqft. No attic input required.
+    const surfaceOnly = priceBoraCare({}, { surfaceLinearFt: 100 });
+    expect(surfaceOnly.quoteRequired).toBe(false);
+    expect(surfaceOnly.atticSqFt).toBeNull();
+    expect(surfaceOnly.surfaceLinearFt).toBe(100);
+    expect(surfaceOnly.surfaceHeightFt).toBe(8);
+    expect(surfaceOnly.surfaceSqFt).toBe(800);
+    expect(surfaceOnly.totalSqFt).toBe(800);
+    expect(surfaceOnly.manualReviewReasons).not.toContain('missing_boracare_attic_sqft');
+    // Surface-only jobs price on actual gallons + actual labor (no attic 3-gal /
+    // 2-hr floors): 800 sqft → 3 gal, 800/640 = 1.25 hr (display-rounded to 1.3;
+    // price uses the exact value).
+    expect(surfaceOnly.gallons).toBe(3);
+    expect(surfaceOnly.laborHrs).toBe(1.3);
+    expect(surfaceOnly.price).toBe(749);
+    // The same area through the attic path keeps its 2-hr-floored labor curve,
+    // so a surface-only job must NOT equal the attic-equivalent price.
+    const equiv800 = priceBoraCare(800);
+    expect(surfaceOnly.price).not.toBe(equiv800.price);
+
+    // A small surface job no longer inherits the attic 3-gallon / 2-hour floors:
+    // 20 LF × 8 ft = 160 sqft → 1 gal, 0.25 hr (640 sf/hr, display-rounded to
+    // 0.3), ~$263 (was $808).
+    const smallSurface = priceBoraCare({}, { surfaceLinearFt: 20, surfaceHeightFt: 8 });
+    expect(smallSurface.totalSqFt).toBe(160);
+    expect(smallSurface.gallons).toBe(1);
+    expect(smallSurface.laborHrs).toBe(0.3);
+    expect(smallSurface.price).toBe(263);
+
+    // minJobPrice floors a truck-roll: a tiny job never prices below $150.
+    const tinySurface = priceBoraCare({}, { surfaceLinearFt: 1, surfaceHeightFt: 1 });
+    expect(tinySurface.price).toBeGreaterThanOrEqual(150);
+
+    // Custom surface height overrides the 8 ft default.
+    const tallSurface = priceBoraCare({}, { surfaceLinearFt: 100, surfaceHeightFt: 10 });
+    expect(tallSurface.surfaceHeightFt).toBe(10);
+    expect(tallSurface.totalSqFt).toBe(1000);
+
+    // Attic + surface combine; price matches the summed area through the attic path.
+    const combined = priceBoraCare({ atticSqFt: 1200 }, { surfaceLinearFt: 100, surfaceHeightFt: 8 });
+    expect(combined.atticSqFt).toBe(1200);
+    expect(combined.surfaceSqFt).toBe(800);
+    expect(combined.totalSqFt).toBe(2000);
+    expect(combined.price).toBe(priceBoraCare(2000).price);
+
+    // Legacy wall* aliases are still accepted on input.
+    const legacyAlias = priceBoraCare({}, { wallLinearFt: 100, wallHeightFt: 8 });
+    expect(legacyAlias.surfaceLinearFt).toBe(100);
+    expect(legacyAlias.surfaceSqFt).toBe(800);
+    expect(legacyAlias.price).toBe(surfaceOnly.price);
+
+    // Invalid surface linear ft flags review but still prices the attic portion.
+    const badSurface = priceBoraCare({ atticSqFt: 2000 }, { surfaceLinearFt: -5 });
+    expect(badSurface.totalSqFt).toBe(2000);
+    expect(badSurface.requiresManualReview).toBe(true);
+    expect(badSurface.manualReviewReasons).toContain('invalid_boracare_surface_linear_ft');
+
+    // Invalid surface height defaults to 8 ft but still flags review.
+    const badHeight = priceBoraCare({}, { surfaceLinearFt: 100, surfaceHeightFt: 0 });
+    expect(badHeight.surfaceHeightFt).toBe(8);
+    expect(badHeight.totalSqFt).toBe(800);
+    expect(badHeight.requiresManualReview).toBe(true);
+    expect(badHeight.manualReviewReasons).toContain('invalid_boracare_surface_height_defaulted');
+
+    // A rejected attic value with valid surface input must stay visible for
+    // review — not be silently treated as merely absent.
+    const badAtticWithSurface = priceBoraCare({ atticSqFt: -10 }, { surfaceLinearFt: 100 });
+    expect(badAtticWithSurface.totalSqFt).toBe(800);
+    expect(badAtticWithSurface.requiresManualReview).toBe(true);
+    expect(badAtticWithSurface.manualReviewReasons).toContain('invalid_boracare_attic_sqft');
+
+    // A truly missing attic with valid surface input prices cleanly (no noise).
+    const surfaceNoAttic = priceBoraCare({}, { surfaceLinearFt: 100 });
+    expect(surfaceNoAttic.requiresManualReview).toBe(false);
+    expect(surfaceNoAttic.manualReviewReasons).toHaveLength(0);
+
+    // Route flow: attic + surface both arrive via options (manual override). An
+    // invalid attic option with valid surface input must still flag review.
+    const invalidAtticOption = priceBoraCare({}, { atticSqFt: -10, surfaceLinearFt: 100 });
+    expect(invalidAtticOption.totalSqFt).toBe(800);
+    expect(invalidAtticOption.requiresManualReview).toBe(true);
+    expect(invalidAtticOption.manualReviewReasons).toContain('invalid_boracare_attic_sqft');
+  });
+
   test('Pre-Slab Termiticide normalizes products and aliases', () => {
     expect(normalizePreSlabTermiticideProduct('termidor_sc').productKey).toBe('termidor_sc');
     expect(normalizePreSlabTermiticideProduct('termidor sc').productKey).toBe('termidor_sc');
@@ -296,27 +381,27 @@ describe('termite measurement overrides and safeguards', () => {
     expect(termidor.productOz).toBe(200);
     expect(termidor.units).toBe(3);
     expect(termidor.productCost).toBe(448);
-    expect(termidor.price).toBe(1279);
+    expect(termidor.price).toBe(1087);
 
     const taurus = pricePreSlabTermiticide(2500, { productKey: 'taurus_sc', labelConfirmed: true });
     expect(taurus.productOz).toBe(200);
     expect(taurus.units).toBe(3);
     expect(taurus.productCost).toBe(243.59);
-    expect(taurus.price).toBe(825);
+    expect(taurus.price).toBe(701);
 
     const bifen = pricePreSlabTermiticide(2500, { productKey: 'bifen_it', labelConfirmed: true });
     expect(bifen.productOz).toBe(250);
     expect(bifen.units).toBe(2);
     expect(bifen.productCost).toBe(81.11);
-    expect(bifen.rawPrice).toBe(464);
-    expect(bifen.price).toBe(600);
+    expect(bifen.rawPrice).toBe(394);
+    expect(bifen.price).toBe(510);
 
     const talstar = pricePreSlabTermiticide(2500, { productKey: 'talstar_p', labelConfirmed: true });
     expect(talstar.productOz).toBe(250);
     expect(talstar.units).toBe(2);
     expect(talstar.productCost).toBe(76.15);
-    expect(talstar.rawPrice).toBe(453);
-    expect(talstar.price).toBe(600);
+    expect(talstar.rawPrice).toBe(385);
+    expect(talstar.price).toBe(510);
   });
 
   test('Pre-Slab Termiticide uses contextual small-slab minimums', () => {
@@ -327,8 +412,8 @@ describe('termite measurement overrides and safeguards', () => {
     });
     expect(standalone.productOz).toBe(10);
     expect(standalone.productCost).toBe(3.24);
-    expect(standalone.contextualFloor).toBe(225);
-    expect(standalone.price).toBe(225);
+    expect(standalone.contextualFloor).toBe(191);
+    expect(standalone.price).toBe(191);
     expect(standalone.price).not.toBe(600);
 
     const builderBatch = pricePreSlabTermiticide(100, {
@@ -336,8 +421,8 @@ describe('termite measurement overrides and safeguards', () => {
       jobContext: 'builderBatch',
       labelConfirmed: true,
     });
-    expect(builderBatch.contextualFloor).toBe(150);
-    expect(builderBatch.price).toBe(174);
+    expect(builderBatch.contextualFloor).toBe(128);
+    expect(builderBatch.price).toBe(148);
     expect(builderBatch.price).not.toBe(600);
 
     const sameTripAddOn = pricePreSlabTermiticide(100, {
@@ -345,8 +430,8 @@ describe('termite measurement overrides and safeguards', () => {
       jobContext: 'sameTripAddOn',
       labelConfirmed: true,
     });
-    expect(sameTripAddOn.contextualFloor).toBe(125);
-    expect(sameTripAddOn.price).toBe(174);
+    expect(sameTripAddOn.contextualFloor).toBe(106);
+    expect(sameTripAddOn.price).toBe(148);
     expect(sameTripAddOn.price).not.toBe(600);
   });
 
@@ -357,7 +442,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(termidorTenPlus.units).toBe(2);
-    expect(termidorTenPlus.price).toBe(797);
+    expect(termidorTenPlus.price).toBe(677);
     expect(termidorTenPlus.volumeDiscountMultiplier).toBe(0.85);
 
     const taurusTenPlus = pricePreSlabTermiticide(1800, {
@@ -365,24 +450,24 @@ describe('termite measurement overrides and safeguards', () => {
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(taurusTenPlus.price).toBe(519);
+    expect(taurusTenPlus.price).toBe(441);
 
     const bifenTenPlus = pricePreSlabTermiticide(1800, {
       productKey: 'bifen_it',
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(bifenTenPlus.contextualFloor).toBe(500);
-    expect(bifenTenPlus.priceBeforeVolumeDiscount).toBe(500);
-    expect(bifenTenPlus.price).toBe(500);
+    expect(bifenTenPlus.contextualFloor).toBe(425);
+    expect(bifenTenPlus.priceBeforeVolumeDiscount).toBe(425);
+    expect(bifenTenPlus.price).toBe(425);
 
     const talstarTenPlus = pricePreSlabTermiticide(1800, {
       productKey: 'talstar_p',
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(talstarTenPlus.priceBeforeVolumeDiscount).toBe(500);
-    expect(talstarTenPlus.price).toBe(500);
+    expect(talstarTenPlus.priceBeforeVolumeDiscount).toBe(425);
+    expect(talstarTenPlus.price).toBe(425);
 
     const override = pricePreSlabTermiticide({}, {
       productKey: 'termidor_sc',
@@ -392,9 +477,9 @@ describe('termite measurement overrides and safeguards', () => {
     });
     expect(override.slabSqFt).toBe(2500);
     expect(override.slabSqFtSource).toBe('manual_override');
-    expect(override.price).toBe(1479);
+    expect(override.price).toBe(1257);
     expect(override.warrantyExtendedSelected).toBe(true);
-    expect(override.warrantyExtendedPrice).toBe(200);
+    expect(override.warrantyExtendedPrice).toBe(170);
     expect(override.addOns[0].code).toBe('pre_slab_extended_warranty');
     expect(override.certificateOfComplianceRequired).toBe(true);
 
@@ -422,7 +507,7 @@ describe('termite measurement overrides and safeguards', () => {
     const legacy = pricePreSlabTermidor(2500, 'none');
     expect(legacy.productKey).toBe('termidor_sc');
     expect(legacy.legacyService).toBe('pre_slab_termidor');
-    expect(legacy.price).toBe(1279);
+    expect(legacy.price).toBe(1087);
   });
 
   test('estimate engine and v1 adapter carry termite measurement metadata', () => {
@@ -457,7 +542,7 @@ describe('termite measurement overrides and safeguards', () => {
     expect(trench.trenchDepthFt).toBe(1.5);
     expect(preslab.warrantyExtendedSelected).toBe(true);
     expect(preslab.productKey).toBe('taurus_sc');
-    expect(preslab.addOns[0].price).toBe(200);
+    expect(preslab.addOns[0].price).toBe(170);
 
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.results.tmBait.measurements.perimeterLF.source).toBe('manual_override');
@@ -477,9 +562,9 @@ describe('termite measurement overrides and safeguards', () => {
     expect(mappedPreSlab.labelConfirmed).toBe(true);
     expect(mappedPreSlab.certificateOfComplianceRequired).toBe(true);
     expect(mappedPreSlab.warrantyTier).toBe('extended');
-    expect(mappedPreSlab.warrantyAdder).toBe(200);
+    expect(mappedPreSlab.warrantyAdder).toBe(170);
     expect(mappedPreSlab.detail).toContain('Taurus');
-    expect(mappedPreSlab.addOns[0].price).toBe(200);
+    expect(mappedPreSlab.addOns[0].price).toBe(170);
 
     const noWarrantyInput = translateV2CallToV1Input(
       { homeSqFt: 2400, stories: 1, lotSqFt: 9000 },

@@ -148,6 +148,7 @@ const QUICK_ACTIONS = [
   { icon: '📅', label: "Today's Route", path: '/tech' },
   { icon: '📋', label: 'Field Estimator', path: '/tech/estimate' },
   { icon: '🌱', label: 'Lawn Diagnostic', path: '/tech/lawn-diagnostic' },
+  { icon: '📸', label: 'Social Post', path: '/tech/social-post' },
   { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
 ];
@@ -166,6 +167,7 @@ export default function TechHomePage() {
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
+  const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const techName = getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
@@ -391,7 +393,7 @@ export default function TechHomePage() {
         gap: 10,
         marginBottom: 20,
       }}>
-        {QUICK_ACTIONS.map((action) => (
+        {QUICK_ACTIONS.filter((action) => action.path !== '/tech/social-post' || socialPostEnabled).map((action) => (
           <button
             key={action.label}
             onClick={() => {

@@ -218,20 +218,20 @@ describe("client estimate engine pre-slab small-slab minimums", () => {
       .find((item) => item.name === "Pre-Slab");
     expect(standalone.productOz).toBe(10);
     expect(standalone.productCost).toBe(3.24);
-    expect(standalone.contextualFloor).toBe(225);
-    expect(standalone.price).toBe(225);
-    expect(standalone.price).not.toBe(600);
+    expect(standalone.contextualFloor).toBe(191);
+    expect(standalone.price).toBe(191);
+    expect(standalone.price).not.toBe(510);
 
     const builderBatch = preSlabEstimate({ preslabJobContext: "builderBatch" }).oneTime.items
       .find((item) => item.name === "Pre-Slab");
-    expect(builderBatch.contextualFloor).toBe(150);
-    expect(builderBatch.price).toBe(174);
-    expect(builderBatch.price).not.toBe(600);
+    expect(builderBatch.contextualFloor).toBe(128);
+    expect(builderBatch.price).toBe(148);
+    expect(builderBatch.price).not.toBe(510);
 
     const sameTripAddOn = preSlabEstimate({ preslabJobContext: "sameTripAddOn" }).oneTime.items
       .find((item) => item.name === "Pre-Slab");
-    expect(sameTripAddOn.contextualFloor).toBe(125);
-    expect(sameTripAddOn.price).toBe(174);
-    expect(sameTripAddOn.price).not.toBe(600);
+    expect(sameTripAddOn.contextualFloor).toBe(106);
+    expect(sameTripAddOn.price).toBe(148);
+    expect(sameTripAddOn.price).not.toBe(510);
   });
 });

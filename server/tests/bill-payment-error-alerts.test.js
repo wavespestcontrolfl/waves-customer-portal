@@ -124,6 +124,34 @@ describe('bill-payment-error-alerts', () => {
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
+  test('alerts on a 409 it is handed (suppression of benign in-progress 409s is the call site’s job)', async () => {
+    // The alerter no longer suppresses by status code — the /setup route only
+    // reports a 409 when it is NOT in progress (a recoverable card
+    // requires_action conflict where the customer is stuck), and other routes
+    // (e.g. /consent) report actionable 409s. Anything that reaches here should
+    // alert.
+    const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
+
+    const result = await alertBillPaymentError({
+      invoice: {
+        id: 'inv_123',
+        invoice_number: 'WPC-2026-0190',
+        customer_id: 'cust_123',
+        total: '35.67',
+        stripe_payment_intent_id: 'pi_123',
+      },
+      phase: 'setup',
+      methodCategory: 'card',
+      message: 'Invoice payment is already in progress',
+      statusCode: 409,
+      source: 'server',
+      metadata: { recoverable_conflict: true },
+    });
+
+    expect(result).toEqual({ notified: true, alertId: 'alert-1' });
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
   test('still alerts on a real server-side decline (not a validation error)', async () => {
     const { alertBillPaymentError } = require('../services/bill-payment-error-alerts');
 

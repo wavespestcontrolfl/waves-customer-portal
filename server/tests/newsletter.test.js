@@ -407,6 +407,48 @@ describe('event ingestion buildArticleBundle — news-RSS article bundling', () 
   });
 });
 
+describe('event ingestion recoverEventObjectsFromTruncatedJson — max_tokens-truncation salvage', () => {
+  const { recoverEventObjectsFromTruncatedJson } = require('../services/event-ingestion');
+
+  test('recovers complete event objects when the array is cut off mid-object', () => {
+    // Mimics a max_tokens cutoff: outer object + array never close, the
+    // last event is truncated mid-string. This is the exact shape that
+    // threw "Expected ',' or ']' after array element" for The Gabber.
+    const truncated = '{"events":['
+      + '{"title":"Boat Parade","startAt":"2026-07-04T18:00:00-04:00","city":"sarasota"},'
+      + '{"title":"Jazz Night","startAt":"2026-07-05T19:00:00-04:00","city":"venice"},'
+      + '{"title":"Art Wal';
+    const events = recoverEventObjectsFromTruncatedJson(truncated);
+    expect(events).toHaveLength(2);
+    expect(events[0].title).toBe('Boat Parade');
+    expect(events[1].city).toBe('venice');
+  });
+
+  test('does not choke on braces or brackets inside string values', () => {
+    const truncated = '{"events":['
+      + '{"title":"Sale {50% off} [today]","description":"Brackets ] and { braces"},'
+      + '{"title":"Next one half-';
+    const events = recoverEventObjectsFromTruncatedJson(truncated);
+    expect(events).toHaveLength(1);
+    expect(events[0].title).toBe('Sale {50% off} [today]');
+  });
+
+  test('recovers complete objects when the outer object/array never closes', () => {
+    // The /\{[\s\S]*\}/ happy-path match needs a closing brace; a response
+    // whose outer object is fully unterminated (no trailing ]}) slips past
+    // it, so recovery must still salvage the objects that did close.
+    const unterminated = '{"events":[{"title":"A"},{"title":"B"}';
+    const events = recoverEventObjectsFromTruncatedJson(unterminated);
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => e.title)).toEqual(['A', 'B']);
+  });
+
+  test('returns null when there is no salvageable events array', () => {
+    expect(recoverEventObjectsFromTruncatedJson('not json at all')).toBeNull();
+    expect(recoverEventObjectsFromTruncatedJson('{"events":[')).toBeNull();
+  });
+});
+
 describe('event ingestion buildExtractionSystemPrompt — shared extraction prompt', () => {
   const { buildExtractionSystemPrompt } = require('../services/event-ingestion');
   const source = { name: 'Bay News 9 — On The Town', url: 'https://baynews9.com' };

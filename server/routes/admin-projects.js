@@ -2813,6 +2813,53 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   // Tracks an invoice claimed as 'sending' so any abort (a throw before the
   // normal finalize/restore path) releases it instead of stranding it.
   let claimedInvoice = null;
+  // Seam-applied credit on the combined report+invoice send. Hoisted (with its
+  // reversal) so the outer catch can return it on ANY abort, not just the
+  // explicit WDO/no-delivery paths. Reverses ONLY this send's amount; on full
+  // coverage (prepaid) it un-prepays to the real pre-send status. Must run AFTER
+  // the 'sending' claim is released (reverseAppliedCredit refuses 'sending'/'prepaid').
+  let appliedProjectCredit = 0;
+  // True when this send's credit FULLY covered the invoice (now prepaid). The
+  // full-coverage side effects are deferred to the delivered-success branch so a
+  // failed-delivery reversal never strands a stopped dunning sequence / activated
+  // prepay term.
+  let projectCreditFullyCovered = false;
+  const reverseProjectCreditOnAbort = async () => {
+    if (!(appliedProjectCredit > 0) || !claimedInvoice) return;
+    try {
+      const { reverseAppliedCredit, postCreditMovement, round2 } = require('../services/customer-credit');
+      const r = await reverseAppliedCredit({ invoiceId: claimedInvoice.id, amount: appliedProjectCredit, createdBy: 'system:project_send_failed' });
+      if (r.reversed > 0) { appliedProjectCredit = 0; return; }
+      await db.transaction(async (trx) => {
+        const locked = await trx('invoices').where({ id: claimedInvoice.id }).forUpdate().first();
+        if (locked && String(locked.status || '').toLowerCase() === 'prepaid' && !locked.stripe_payment_intent_id) {
+          const reverseAmt = Math.min(round2(appliedProjectCredit), round2(locked.credit_applied || 0));
+          if (reverseAmt > 0) {
+            await postCreditMovement({
+              customerId: locked.customer_id,
+              delta: reverseAmt,
+              source: 'adjustment',
+              invoiceId: claimedInvoice.id,
+              note: `Project send failed — returned $${reverseAmt} applied credit`,
+              createdBy: 'system:project_send_failed',
+            }, trx);
+            await trx('invoices').where({ id: claimedInvoice.id }).update({
+              credit_applied: Math.max(0, round2(round2(locked.credit_applied || 0) - reverseAmt)),
+              status: claimedInvoice.previousStatus,
+              prepaid_at: null,
+              prepaid_by: null,
+              prepaid_prev_status: null,
+              paid_at: null,
+              updated_at: trx.fn.now(),
+            });
+          }
+        }
+      });
+      appliedProjectCredit = 0;
+    } catch (e) {
+      logger.warn(`[projects] credit reversal after failed project send skipped for ${claimedInvoice?.id}: ${e.message}`);
+    }
+  };
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -2997,6 +3044,32 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const reportPath = await projectReportPathForProject(db, refreshed, customer);
     const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
 
+    // Auto-apply available account credit BEFORE building the invoice PDF / pay
+    // link / email — this combined project-report+invoice send bypasses
+    // InvoiceService.sendViaSMSAndEmail, so without this a self-pay project
+    // invoice would go out at the gross total. Gated + best-effort + idempotent;
+    // applyAccountCreditToInvoice skips payer-billed invoices on its own. Re-read
+    // in place so the PDF + email amount_due + pay page all reflect it. The
+    // reversal helper (reverseProjectCreditOnAbort) is hoisted above the try so
+    // every abort path — including the outer catch — can return this credit.
+    try {
+      const { autoApplyAccountCreditIfEnabled } = require('../services/customer-credit');
+      // Defer the full-coverage side effects (stop dunning + activate the annual-
+      // prepay term): this send applies credit BEFORE building/delivering and
+      // reverses it if delivery fails, so those effects must not fire until the
+      // invoice is actually delivered — otherwise a reversal leaves them un-undone.
+      // We run them ourselves in the delivered-success branch below.
+      const projectCreditResult = await autoApplyAccountCreditIfEnabled(invoice.id, { deferFullCoverageSideEffects: true });
+      if (projectCreditResult && projectCreditResult.applied > 0) {
+        appliedProjectCredit = projectCreditResult.applied;
+        projectCreditFullyCovered = !!projectCreditResult.fullyCovered;
+        const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
+        if (freshInvoice) Object.assign(invoice, freshInvoice);
+      }
+    } catch (creditErr) {
+      logger.warn(`[projects] account-credit auto-apply skipped for invoice ${invoice.id}: ${creditErr.message}`);
+    }
+
     // Pay link (short URL, same shape as invoice-email).
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
@@ -3028,6 +3101,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     } catch (e) {
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      await reverseProjectCreditOnAbort();
       logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
@@ -3288,11 +3362,30 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         source: 'project_report_with_invoice',
         payUrl,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
+      // Invoice is delivered + finalized — now run the full-coverage side effects we
+      // deferred at apply time (stop dunning followups + activate the annual-prepay
+      // term). Deferred so a failed-delivery reversal never strands them; the
+      // delivered path can't be reversed afterward. Best-effort; never blocks.
+      if (projectCreditFullyCovered) {
+        try {
+          const { runPostFullCoverageSideEffects } = require('../services/customer-credit');
+          await runPostFullCoverageSideEffects(invoice.id);
+        } catch (sideErr) {
+          logger.warn(`[projects] post-coverage side effects skipped for invoice ${invoice.id}: ${sideErr.message}`);
+        }
+      }
+      // Delivery succeeded — the customer has the PDF/pay link built at amount due,
+      // so the credit is legitimately consumed. Clear the pending reversal so a
+      // throw in a LATER step (project status update, activity log, response) can't
+      // make the outer catch reverse credit / reopen the invoice out from under an
+      // already-delivered document.
+      appliedProjectCredit = 0;
     } else {
       // Nothing went out — release the 'sending' claim back to its prior status
       // so the invoice isn't stranded and can be retried.
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      await reverseProjectCreditOnAbort();
     }
 
     if (delivered) {
@@ -3342,6 +3435,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         .update({ status: claimedInvoice.previousStatus, updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
     }
+    // Return this send's seam-applied credit too — a throw between apply and the
+    // explicit WDO/no-delivery guards (e.g. while building the PDF or composing
+    // the message) would otherwise leave the invoice settled-by-credit with no
+    // pay link delivered. Runs after the claim release above so reverseAppliedCredit
+    // isn't refused on a still-'sending' row.
+    await reverseProjectCreditOnAbort();
     if (err?.message === 'Invoice not found for this customer') {
       return res.status(404).json({ error: err.message });
     }

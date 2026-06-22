@@ -726,7 +726,14 @@ function mapV1ToLegacyShape(v1Result) {
   const specialtyMoney = v1SpecItems
     .filter(s => !s.onProg)
     .reduce((s, i) => s + (i.price || 0), 0);
-  const oneTimeTotal = oneTimeItemsMoney + specialtyMoney + membershipFee;
+  // The manual/custom discount is pooled (not pushed into individual line
+  // prices), so the one-time slice computed by the engine is subtracted here to
+  // keep the one-time total and year-1 figure in sync with summary.manualDiscount.
+  const manualOneTimeDiscount = Number(summary.manualDiscount?.oneTimeAmount || 0);
+  const oneTimeTotal = Math.max(
+    0,
+    roundMoney(oneTimeItemsMoney + specialtyMoney + membershipFee - manualOneTimeDiscount),
+  );
   const quoteRequiredItems = lineItems
     .filter(li => li && (li.quoteRequired === true || li.requiresCustomQuote === true))
     .map(li => ({

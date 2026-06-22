@@ -9,7 +9,7 @@ const logger = require('../logger');
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const ALLOWED_STATUSES = new Set(['pending_review', 'pending', 'claimed', 'done', 'skipped', 'expired']);
-const ALLOWED_DECISIONS = new Set(['requeue', 'dismiss', 'approve_trust_build']);
+const ALLOWED_DECISIONS = new Set(['requeue', 'dismiss', 'approve_trust_build', 'approve_named_competitor']);
 
 async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMIT } = {}) {
   const normalizedStatus = normalizeStatus(status);
@@ -78,7 +78,7 @@ async function getReviewItem(opportunityId) {
   return buildReviewItem({ opportunity, brief, run, includeDraftBody: true });
 }
 
-async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}) {
+async function decideReviewItem(opportunityId, { decision, note, reviewer, expectedRunId = null } = {}) {
   const normalizedDecision = normalizeDecision(decision);
   const reviewerName = normalizeReviewer(reviewer);
   const cleanNote = normalizeNote(note);
@@ -95,6 +95,16 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}
     .where('opportunity_id', opportunityId)
     .orderBy('claimed_at', 'desc')
     .first();
+
+  // Bind the decision to the run the operator was looking at. If a requeue / re-run
+  // replaced it since the detail view loaded, reject so a stale view can't
+  // approve-and-publish a draft the operator never reviewed.
+  if (expectedRunId && run && run.id !== expectedRunId) {
+    const err = new Error('This item changed since you opened it (a newer run replaced the reviewed one); refresh and review again');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
 
   if (normalizedDecision === 'approve_trust_build') {
     assertTrustBuildRun(run);
@@ -116,6 +126,26 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}
         updated_at: new Date(),
       });
     });
+  } else if (normalizedDecision === 'approve_named_competitor') {
+    assertNamedCompetitorReviewRun(run);
+    // The runner atomically claims the opportunity + run under the engine lock,
+    // publishes the reviewed draft, and OWNS the final opportunity/run state
+    // (done for a live publish; parked as astro_pr_pending_merge for a PR so the
+    // poller reconciles). We only append the reviewer note here; a gate/guard/
+    // publish failure throws and leaves the item parked for retry.
+    const runner = require('./autonomous-runner');
+    // Publish the exact run that was reviewed (run.id), not "latest for the opp".
+    await runner.approveAndPublishNamedCompetitor(opportunityId, { runId: run?.id, approvedBy: reviewerName });
+    if (run?.id) {
+      await db('autonomous_runs').where('id', run.id).update({
+        reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+          decision: normalizedDecision,
+          reviewer: reviewerName,
+          note: cleanNote,
+        }),
+        updated_at: new Date(),
+      });
+    }
   } else if (normalizedDecision === 'requeue') {
     await db.transaction(async (trx) => {
       await updatePendingReviewOpportunity(trx, opportunityId, {
@@ -196,6 +226,7 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
   const signalMetadata = parseJsonMaybe(opportunity?.signal_metadata, {});
   const qualityGate = parseJsonMaybe(run?.quality_gate_result, {});
   const uniquenessGate = parseJsonMaybe(run?.uniqueness_gate_result, {});
+  const comparisonGate = parseJsonMaybe(run?.comparison_table_result, {});
   const draft = summarizeDraft(parseJsonMaybe(run?.draft_payload, {}), { includeBody: includeDraftBody });
   const seoCompletion = summarizeSeoCompletion(qualityGate?.seo_completion || draft.seo_completion || draft.seo_contract);
 
@@ -248,7 +279,8 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
       total_ms: run.total_ms,
       quality_gate_result: qualityGate,
       uniqueness_gate_result: uniquenessGate,
-      gate_summary: summarizeGates(qualityGate, uniquenessGate),
+      comparison_table_result: comparisonGate,
+      gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate),
       seo_completion: seoCompletion,
     } : null,
     review_actions: reviewActions({ opportunity, run }),
@@ -262,6 +294,7 @@ function reviewActions({ opportunity, run }) {
     can_requeue: pendingReview,
     can_dismiss: pendingReview,
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
+    can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };
 }
 
@@ -274,9 +307,30 @@ function isTrustBuildRun(run) {
   );
 }
 
+// A named-competitor comparison parked for mandatory human review. Approving it
+// PUBLISHES the reviewed draft (approve_named_competitor) rather than granting
+// trust-build credit — a human signs off on every competitor naming.
+function isNamedCompetitorReviewRun(run) {
+  return !!(
+    run
+    && run.outcome === 'completed_pending_review'
+    && run.shadow_mode === false
+    && run.skip_reason === 'named_competitor_review'
+  );
+}
+
 function assertTrustBuildRun(run) {
   if (!isTrustBuildRun(run)) {
     const err = new Error('Only live trust-build pending-review runs can be approved');
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
+}
+
+function assertNamedCompetitorReviewRun(run) {
+  if (!isNamedCompetitorReviewRun(run)) {
+    const err = new Error('Only a live named-competitor review run can be approved-and-published');
     err.statusCode = 400;
     err.isOperational = true;
     throw err;
@@ -351,10 +405,11 @@ function buildSeoRequirementsSummary(contract = {}) {
   };
 }
 
-function summarizeGates(qualityGate, uniquenessGate) {
+function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}) {
   const hard = Array.isArray(qualityGate?.hard_failures) ? qualityGate.hard_failures : [];
   const soft = Array.isArray(qualityGate?.soft_failures) ? qualityGate.soft_failures : [];
   const uniqueness = Array.isArray(uniquenessGate?.failed_reasons) ? uniquenessGate.failed_reasons : [];
+  const comparisonFindings = Array.isArray(comparisonGate?.findings) ? comparisonGate.findings : [];
   return {
     quality_ok: qualityGate?.ok === true,
     quality_score: qualityGate?.total_score ?? null,
@@ -364,6 +419,14 @@ function summarizeGates(qualityGate, uniquenessGate) {
     uniqueness_ok: uniquenessGate?.ok !== false,
     uniqueness_failures: uniqueness,
     seo_completion_ok: qualityGate?.seo_completion?.passed ?? null,
+    // Comparison-table gate: surface the full findings (codes + messages) so the
+    // review queue can show the offending names / caption / reason, not just the
+    // shortened reviewer_notes codes. comparison_ok is null when the gate did
+    // not run (no comparison table in the draft).
+    comparison_ok: comparisonFindings.length || comparisonGate?.pass !== undefined
+      ? comparisonGate?.pass !== false
+      : null,
+    comparison_findings: comparisonFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message })),
   };
 }
 
@@ -426,6 +489,7 @@ module.exports = {
   updatePendingReviewOpportunity,
   reviewActions,
   isTrustBuildRun,
+  isNamedCompetitorReviewRun,
   summarizeDraft,
   summarizeSeoCompletion,
   summarizeGates,

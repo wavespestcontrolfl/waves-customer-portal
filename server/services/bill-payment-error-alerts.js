@@ -109,6 +109,14 @@ function isClientFormValidationError(input = {}) {
   return stripeType === 'validation_error' && normalizePhase(input.phase) === 'payment_form_submit';
 }
 
+// A 409 from the pay flow is never auto-suppressed here. Suppression of the
+// benign already-in-progress conflict (an ACH debit still `processing`, or a
+// reload / bank-redirect return) happens at the call site (`/setup` route),
+// which has the `inProgress` signal needed to tell a genuine in-flight payment
+// (no alert) from a recoverable conflict like a card PI stuck in
+// requires_action (still alert — the customer is stuck). Doing it here by
+// status code alone would also swallow ACTIONABLE 409s from other routes — e.g.
+// /pay/:token/consent's PaymentMethod-mismatch / not-consent-eligible failures.
 async function alertBillPaymentError(input = {}) {
   const invoice = input.invoice || {};
   if (!invoice.id) return { notified: false, skipped: true, reason: 'missing_invoice' };

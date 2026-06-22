@@ -18,12 +18,12 @@ function selectAdapterKey(vendor = {}) {
 }
 
 // Lazy so requiring the registry (and selectAdapterKey) never pulls in the
-// Playwright-shaped adapter modules. veseris arrives in PR2b; until then it
-// falls through to the generic adapter (which needs a direct vendor.url).
+// Playwright-shaped adapter modules.
 const ADAPTER_LOADERS = {
   domyown: () => require('./domyown'),
   solutions: () => require('./solutions'),
   keystone: () => require('./keystone'),
+  veseris: () => require('./veseris'), // B2B login adapter (account pricing)
   generic: () => require('./generic'),
 };
 

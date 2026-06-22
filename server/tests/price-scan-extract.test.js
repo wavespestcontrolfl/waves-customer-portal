@@ -672,6 +672,16 @@ describe('price-scan extract', () => {
       const snap = { jsonLd: [], priceTexts: ['$89.00'], title: 'Taurus SC 78 oz', variants };
       expect(offerFromSnapshot(snap, { targetOz: 78 }).price).toBe(89);
     });
+    test('single nameless JSON-LD offer accepted when the TITLE substantiates the size (Veseris per-size URL)', () => {
+      // Veseris: one URL per size, a lone offer with no size in its name, size in the title.
+      const ld = JSON.stringify({ '@type': 'Product', name: 'Hydretain ES Plus', offers: { '@type': 'Offer', price: 122.47, priceCurrency: 'USD', availability: 'InStock' } });
+      const got = offerFromSnapshot({ jsonLd: [ld], title: 'Hydretain ES Plus Root Zone Moisture Management 2.5 gal jug' }, { targetOz: 320 });
+      expect(got).toMatchObject({ price: 122.47 });
+    });
+    test('single offer still rejected when neither name nor title carries the size', () => {
+      const ld = JSON.stringify({ '@type': 'Product', name: 'Hydretain ES Plus', offers: { '@type': 'Offer', price: 122.47, priceCurrency: 'USD' } });
+      expect(offerFromSnapshot({ jsonLd: [ld], title: 'Hydretain ES Plus' }, { targetOz: 320 })).toBeNull();
+    });
     test('a variant offer is flagged fromVariant and does NOT inherit page-level stock text', () => {
       // availabilityText is the default selection's stock, not the matched child's — the
       // variant must keep its per-child availability (here unknown), never the page text.

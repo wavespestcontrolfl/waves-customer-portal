@@ -1999,6 +1999,8 @@ export default function EstimateToolViewV2({
     bedbugHeatScope: "ROOMS_ONLY",
     bedbugSubcontractCost: "",
     boracareSqft: "",
+    boracareSurfaceLinearFt: "",
+    boracareSurfaceHeightFt: "",
     preslabSqft: "",
     preslabProductKey: "termidor_sc",
     preslabLabelConfirmed: false,
@@ -2998,6 +3000,12 @@ export default function EstimateToolViewV2({
       const trenchingDirtLF = parseNonNegativeNumber(form.trenchingDirtLF);
       const trenchingConcretePct = parseNonNegativeNumber(form.trenchingConcretePct);
       const boracareSqft = parsePositiveNumber(form.boracareSqft);
+      // Send raw (trimmed) Bora-Care measurements rather than parsed numbers: a
+      // present-but-invalid entry (e.g. "-5") must reach the engine so its
+      // invalid-measurement review path runs instead of being silently dropped.
+      const boracareSqftRaw = String(form.boracareSqft ?? "").trim() || undefined;
+      const boracareSurfaceLinearFt = String(form.boracareSurfaceLinearFt ?? "").trim() || undefined;
+      const boracareSurfaceHeightFt = String(form.boracareSurfaceHeightFt ?? "").trim() || undefined;
       const preslabSqft = parsePositiveNumber(form.preslabSqft);
       const propertyPalmCount = parsePositiveInteger(form.palmCount);
       const palmTreatmentCountBlank = String(form.palmTreatmentCount || "").trim() === "";
@@ -3056,7 +3064,9 @@ export default function EstimateToolViewV2({
         trenchingDepthFt: form.trenchingDepthFt || "1",
         trenchingWarrantyTier: form.trenchingWarrantyTier || "one_year_retreat",
         trenchingLabelConfirmed: !!form.trenchingLabelConfirmed,
-        boracareSqft,
+        boracareSqft: boracareSqftRaw,
+        boracareSurfaceLinearFt,
+        boracareSurfaceHeightFt,
         preslabSqft,
         preslabProductKey: form.preslabProductKey || "termidor_sc",
         preslabLabelConfirmed: !!form.preslabLabelConfirmed,
@@ -3202,7 +3212,18 @@ export default function EstimateToolViewV2({
           profile.homeSqFt / (profile.stories || 1),
         );
       if (trenchingPerimeterLF) profile.perimeterLF = trenchingPerimeterLF;
-      if (boracareSqft) profile.atticSqFt = boracareSqft;
+      if (boracareSqft) {
+        profile.atticSqFt = boracareSqft;
+      } else if (form.svcBoracare) {
+        // Surface-treatment (or attic-cleared) Bora-Care quote: don't inherit a
+        // stale lookup attic value, or a surface-only job would be priced as
+        // attic+surface. An invalid attic entry is still sent raw via options so
+        // the server flags it for review rather than dropping it.
+        delete profile.atticSqFt;
+        delete profile.atticAreaSqFt;
+        delete profile.rawWoodSqFt;
+        delete profile.woodTreatmentSqFt;
+      }
       if (preslabSqft) profile.slabSqFt = preslabSqft;
       profile.pool = form.hasPool === "YES" ? "YES" : "NO";
       profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
@@ -3232,7 +3253,11 @@ export default function EstimateToolViewV2({
         selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
       const preSlabOnly =
         selectedServices.length === 1 && selectedServices[0] === "PRESLAB";
-      if (!bedBugOnly && !preSlabOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      // Bora-Care is priced from attic/raw-wood sqft or surface linear ft, not
+      // the home/lot footprint, so a Bora-Care-only quote must not be gated on it.
+      const boraCareOnly =
+        selectedServices.length === 1 && selectedServices[0] === "BORACARE";
+      if (!bedBugOnly && !preSlabOnly && !boraCareOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -3614,6 +3639,8 @@ export default function EstimateToolViewV2({
       fleaExteriorAreaSource: "UNKNOWN",
       fleaExteriorZones: [],
       boracareSqft: "",
+      boracareSurfaceLinearFt: "",
+      boracareSurfaceHeightFt: "",
       preslabSqft: "",
       preslabProductKey: "termidor_sc",
       preslabLabelConfirmed: false,
@@ -3815,8 +3842,8 @@ export default function EstimateToolViewV2({
       !form.trenchingEstimateFromFootprint
       ? "Trenching needs measured perimeter LF before pricing."
       : null,
-    form.svcBoracare && !parsePositiveNumber(form.boracareSqft)
-      ? "Bora-Care needs attic/raw wood sqft."
+    form.svcBoracare && !parsePositiveNumber(form.boracareSqft) && !parsePositiveNumber(form.boracareSurfaceLinearFt)
+      ? "Bora-Care needs attic/raw wood sqft or surface linear ft."
       : null,
     form.svcPreslab && !parsePositiveNumber(form.preslabSqft)
       ? "Pre-Slab Termiticide Treatment needs slab sqft."
@@ -5183,13 +5210,29 @@ export default function EstimateToolViewV2({
                     </>
                   )}
                   {form.svcBoracare && (
-                    <FieldV2 label="Attic / Raw Wood Sq Ft">
-                      <InputV2
-                        k="boracareSqft"
-                        type="number"
-                        placeholder="Admin-entered"
-                      />
-                    </FieldV2>
+                    <>
+                      <FieldV2 label="Attic / Raw Wood Sq Ft">
+                        <InputV2
+                          k="boracareSqft"
+                          type="number"
+                          placeholder="Admin-entered"
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Surface Linear Ft">
+                        <InputV2
+                          k="boracareSurfaceLinearFt"
+                          type="number"
+                          placeholder="Linear ft of surface"
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Surface Height (ft)">
+                        <InputV2
+                          k="boracareSurfaceHeightFt"
+                          type="number"
+                          placeholder="Default 8"
+                        />
+                      </FieldV2>
+                    </>
                   )}
                   {form.svcPreslab && (
                     <>
@@ -5759,10 +5802,10 @@ export default function EstimateToolViewV2({
                 </div>
               )}
             </div>
-            {/* Manual Recurring Discount */}
+            {/* Manual / Custom Discount */}
             <div>
               {" "}
-              <PanelTitle>Manual Recurring Discount (optional)</PanelTitle>{" "}
+              <PanelTitle>Manual / Custom Discount (optional)</PanelTitle>{" "}
               <FieldV2 label="Preset">
                 {" "}
                 <select
@@ -5866,8 +5909,8 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <div className="text-11 text-ink-tertiary mt-2">
-                Applies after bundle discount. Re-click Generate Estimate to
-                recalculate.
+                Applies after bundle/WaveGuard discounts to both recurring and
+                one-time services. Re-click Generate Estimate to recalculate.
               </div>{" "}
             </div>
             {serviceCreditPresets.length > 0 && (
@@ -6331,7 +6374,9 @@ export default function EstimateToolViewV2({
                           <div className="text-12 text-ink-secondary mt-1">
                             Recurring monthly
                             {E.recurring.savings > 0 ? " (bundle pricing)" : ""}
-                            {E.manualDiscount && E.manualDiscount.amount > 0
+                            {E.manualDiscount &&
+                            (E.manualDiscount.recurringAmount ??
+                              E.manualDiscount.amount) > 0
                               ? " + manual discount"
                               : ""}
                           </div>{" "}
@@ -7232,20 +7277,27 @@ export default function EstimateToolViewV2({
                               </span>{" "}
                             </div>
                           )}
-                          {E.manualDiscount && E.manualDiscount.amount > 0 && (
-                            <div className="flex justify-between items-center py-1.5 text-14">
-                              {" "}
-                              <span className="text-ink-secondary">
-                                {E.manualDiscount.label ||
-                                  (E.manualDiscount.type === "PERCENT"
-                                    ? `Discount (${E.manualDiscount.value}%)`
-                                    : `Discount`)}
-                              </span>{" "}
-                              <span className="font-medium text-zinc-900 u-nums">
-                                -{fmt(E.manualDiscount.amount)}/yr
-                              </span>{" "}
-                            </div>
-                          )}
+                          {E.manualDiscount &&
+                            (E.manualDiscount.recurringAmount ??
+                              E.manualDiscount.amount) > 0 && (
+                              <div className="flex justify-between items-center py-1.5 text-14">
+                                {" "}
+                                <span className="text-ink-secondary">
+                                  {E.manualDiscount.label ||
+                                    (E.manualDiscount.type === "PERCENT"
+                                      ? `Discount (${E.manualDiscount.value}%)`
+                                      : `Discount`)}
+                                </span>{" "}
+                                <span className="font-medium text-zinc-900 u-nums">
+                                  -
+                                  {fmt(
+                                    E.manualDiscount.recurringAmount ??
+                                      E.manualDiscount.amount,
+                                  )}
+                                  /yr
+                                </span>{" "}
+                              </div>
+                            )}
                           {E.oneTime.tmInstall > 0 && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               {" "}
@@ -7270,7 +7322,10 @@ export default function EstimateToolViewV2({
                                   One-Time Services
                                 </span>{" "}
                                 <span className="font-medium text-zinc-900 u-nums">
-                                  {fmtInt(E.oneTime.otSubtotal)}
+                                  {fmtInt(
+                                    E.oneTime.otSubtotal +
+                                      (E.manualDiscount?.oneTimeAmount || 0),
+                                  )}
                                 </span>{" "}
                               </div>
                               {E.oneTime.items.map((item, i) => (
@@ -7321,6 +7376,24 @@ export default function EstimateToolViewV2({
                                   </span>{" "}
                                 </div>
                               ))}
+                              {E.manualDiscount &&
+                                E.manualDiscount.oneTimeAmount > 0 && (
+                                  <div className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary">
+                                    {" "}
+                                    <span>
+                                      {E.manualDiscount.label ||
+                                        (E.manualDiscount.type === "PERCENT"
+                                          ? `Discount (${E.manualDiscount.value}%)`
+                                          : `Discount`)}{" "}
+                                      <span className="text-11 text-ink-tertiary">
+                                        (one-time)
+                                      </span>
+                                    </span>{" "}
+                                    <span className="text-13 u-nums">
+                                      -{fmtInt(E.manualDiscount.oneTimeAmount)}
+                                    </span>{" "}
+                                  </div>
+                                )}
                             </>
                           )}
                           <div className="flex justify-between items-center py-3 text-18 font-medium border-t-2 border-zinc-900 mt-2">

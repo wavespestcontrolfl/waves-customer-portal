@@ -6,6 +6,7 @@ const { getPrimaryContact, getServiceContact } = require('./customer-contact');
 const { getProjectType } = require('./project-types');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
+const { invoiceAmountDue } = require('./invoice-helpers');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -304,7 +305,9 @@ async function sendProjectReportWithInvoice({
     invoice_url: payUrl || '',
     pay_url: payUrl || '',
     invoice_number: clean(invoice?.invoice_number),
-    amount_due: invoice?.total != null ? `$${Number(invoice.total).toFixed(2)}` : '',
+    // Amount due (total − applied account credit), not gross — credit is
+    // auto-applied before this email is built, and the charge paths bill this.
+    amount_due: invoice ? `$${invoiceAmountDue(invoice).toFixed(2)}` : '',
     attachments_note: attachmentsNote,
   };
   return sendProjectTemplate({

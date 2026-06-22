@@ -29,6 +29,8 @@ const {
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
+  manualDiscountForRecurringBase,
+  applyManualOneTimeDiscountToChoiceRows,
   oneTimeChoiceAmountForEstimate,
   pestMonthlyBaseForFrequency,
   preferenceMonthlyOffForPestVisits,
@@ -294,6 +296,118 @@ describe('public estimate one-time breakdown', () => {
       expect.objectContaining({ service: 'rodent_bundle_discount', amount: -75, kind: 'discount' }),
     ]);
     expect(breakdown.total).toBe(499);
+  });
+
+  test('applies the manual one-time discount slice to engineResult-backed breakdowns', () => {
+    // Raw engineResult estimates have no oneTime.total — the breakdown sums gross
+    // line items, so the pooled one-time discount must surface as its own row or
+    // the customer would be shown (and charged) the undiscounted total.
+    const breakdown = normalizeOneTimeBreakdown({
+      engineResult: {
+        lineItems: [
+          { service: 'exclusion', label: 'Rodent Exclusion', priceAfterDiscount: 720 },
+        ],
+        summary: {
+          manualDiscount: {
+            label: 'WaveGuard Member Discount',
+            type: 'PERCENT',
+            value: 15,
+            amount: 108,
+            recurringAmount: 0,
+            oneTimeAmount: 108,
+          },
+        },
+      },
+    });
+
+    expect(breakdown.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'exclusion', amount: 720 }),
+      expect.objectContaining({
+        service: 'manual_discount',
+        amount: -108,
+        kind: 'discount',
+        label: 'WaveGuard Member Discount',
+      }),
+    ]));
+    expect(breakdown.total).toBe(612);
+  });
+
+  test('manual one-time discount nets once for mapped estimates (oneTime.total already net)', () => {
+    const breakdown = normalizeOneTimeBreakdown({
+      result: {
+        oneTime: {
+          total: 612, // mapper already subtracted the 108 one-time slice
+          items: [{ service: 'exclusion', name: 'Rodent Exclusion', price: 720 }],
+        },
+        manualDiscount: {
+          label: 'WaveGuard Member Discount',
+          oneTimeAmount: 108,
+        },
+      },
+    });
+
+    // The explicit discount row replaces the generic "Other one-time services"
+    // adjustment, and the total stays net — no double subtraction.
+    expect(breakdown.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'exclusion', amount: 720 }),
+      expect.objectContaining({ service: 'manual_discount', amount: -108, kind: 'discount' }),
+    ]));
+    expect(breakdown.items.find((r) => r.service === 'one_time_adjustment')).toBeUndefined();
+    expect(breakdown.total).toBe(612);
+  });
+
+  test('manualDiscountForRecurringBase refreshes recurringAmount to the recomputed per-cadence amount', () => {
+    // The saved discount carries a recurringAmount/oneTimeAmount from the
+    // originally generated cadence. A different cadence has a different recurring
+    // base, so the recurring slice must be recomputed — the recurring price card
+    // (which prefers recurringAmount) must reconcile with the recomputed amount,
+    // not show the stale spread value.
+    const saved = { type: 'PERCENT', value: 15, amount: 162, recurringAmount: 70.2, oneTimeAmount: 91.8 };
+    const recomputed = manualDiscountForRecurringBase(saved, 600);
+
+    expect(recomputed.amount).toBe(90); // 15% of the 600 recurring base
+    expect(recomputed.recurringAmount).toBe(90); // tracks amount, not the stale 70.2
+    expect(recomputed.oneTimeAmount).toBe(0);
+    expect(recomputed.monthlyAmount).toBe(7.5); // 90 / 12
+  });
+
+  test('fixed discount recurring slice + one-time slice sum to the fixed value across cadences', () => {
+    // $100 fixed split into a 39.39 recurring / 60.61 one-time slice. The
+    // recurring card must show only the recurring slice (never the full $100),
+    // and recurring + one-time must keep totaling $100 on every cadence.
+    const saved = { type: 'FIXED', value: 100, amount: 100, recurringAmount: 39.39, oneTimeAmount: 60.61 };
+
+    const base = manualDiscountForRecurringBase(saved, 468);
+    expect(base.recurringAmount).toBeCloseTo(39.39, 2);
+    expect(base.oneTimeAmount).toBe(0);
+    expect(base.recurringAmount + saved.oneTimeAmount).toBeCloseTo(100, 2);
+
+    // A different cadence (larger recurring base) keeps the same recurring slice,
+    // because the one-time slice is cadence-invariant — still sums to $100.
+    const larger = manualDiscountForRecurringBase(saved, 900);
+    expect(larger.recurringAmount).toBeCloseTo(39.39, 2);
+    expect(larger.recurringAmount + saved.oneTimeAmount).toBeCloseTo(100, 2);
+
+    // A cadence whose recurring base can't absorb the recurring slice caps to the
+    // base (never over-discounts).
+    const tiny = manualDiscountForRecurringBase(saved, 20);
+    expect(tiny.recurringAmount).toBe(20);
+    expect(tiny.capped).toBe(true);
+  });
+
+  test('applyManualOneTimeDiscountToChoiceRows nets the one-time slice into preserved choice rows', () => {
+    const rows = [{ service: 'pest_initial_roach', name: 'Initial Roach Knockdown', label: 'Initial Roach Knockdown', price: 239 }];
+
+    const percent = applyManualOneTimeDiscountToChoiceRows(rows, { type: 'PERCENT', value: 15 });
+    expect(percent[0].price).toBeCloseTo(203.15, 2); // 239 - 15%
+    expect(percent[0].grossPrice).toBe(239);
+    expect(percent[0].manualDiscountApplied).toBeCloseTo(35.85, 2);
+
+    // FIXED uses the engine-computed one-time slice, capped to the carried subtotal.
+    const fixed = applyManualOneTimeDiscountToChoiceRows(rows, { type: 'FIXED', value: 500, oneTimeAmount: 40 });
+    expect(fixed[0].price).toBe(199);
+    const overCap = applyManualOneTimeDiscountToChoiceRows(rows, { type: 'FIXED', value: 500, oneTimeAmount: 999 });
+    expect(overCap[0].price).toBe(0); // never below zero
   });
 
   test('keeps free service-specific inspection rows visible in one-time breakdown', () => {
@@ -2283,7 +2397,49 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('data-estimate-ask-prompt="How does the bait work?"');
+    // Trenching is a liquid barrier, not a bait system — the chip matches the method.
+    expect(html).toContain('data-estimate-ask-prompt="How long does the barrier last?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+  });
+
+  test('server-rendered pre-slab estimate uses pre-slab ask prompt and never duplicates its copy', () => {
+    const html = renderPage('preslab-onetime-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 225,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 225,
+          items: [{
+            service: 'pre_slab_termiticide',
+            name: 'Pre-Slab Termiticide Treatment',
+            price: 225,
+            warrantyStatus: 'No extended warranty selected.',
+          }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    // Pre-slab is a soil treatment, not a bait system — the chip matches the method.
+    expect(html).toContain('data-estimate-ask-prompt="How does pre-slab treatment work?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+
+    // The service note and the warranty assurance each render exactly once —
+    // they used to print as one combined sentence in both the one-time note and
+    // the mini-guarantee, which showed the customer the same text twice.
+    const noteOccurrences = (html.match(/Includes pre-slab soil treatment for the measured slab area\./g) || []).length;
+    const warrantyOccurrences = (html.match(/Warranty terms depend on the selected warranty option\./g) || []).length;
+    expect(noteOccurrences).toBe(1);
+    expect(warrantyOccurrences).toBe(1);
+    expect(html).toContain('No extended warranty selected.');
   });
 
   test('server-rendered booking review buttons use explicit click listeners', () => {

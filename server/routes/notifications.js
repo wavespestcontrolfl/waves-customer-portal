@@ -57,6 +57,13 @@ function normalizeContactInput(contact = {}) {
   };
 }
 
+// Delivery-channel options for per-notification channel selection.
+const CHANNEL_VALUES = ['sms', 'email', 'both'];
+
+// Delivery channel is an account-level "how to reach me" preference, stored on
+// the account's primary profile so it is consistent across every property.
+const CHANNEL_DB_COLUMNS = ['appointment_confirmation_channel', 'service_reminder_72h_channel', 'service_reminder_24h_channel'];
+
 const PREF_SELECT = [
   'appointment_confirmation',
   'service_reminder_72h',
@@ -73,9 +80,21 @@ const PREF_SELECT = [
   'payment_confirmation_sms',
   'appointment_notify_primary',
   'service_report_notify_primary',
+  'appointment_confirmation_channel',
+  'service_reminder_72h_channel',
+  'service_reminder_24h_channel',
 ];
 
-function preferencePayload(prefs = {}) {
+function channelValue(value) {
+  return CHANNEL_VALUES.includes(value) ? value : 'sms';
+}
+
+// Delivery channels are an account-level preference resolved from the primary
+// profile, so they only belong on the account payload. Property payloads omit
+// them (`includeChannels: false`) — otherwise a secondary property's local
+// default channels would clobber the account channels when the client merges a
+// property response into the top-level prefs.
+function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
   return {
     appointmentConfirmation: prefs.appointment_confirmation !== false,
     serviceReminder72h: prefs.service_reminder_72h !== false,
@@ -92,6 +111,12 @@ function preferencePayload(prefs = {}) {
     paymentConfirmationSms: prefs.payment_confirmation_sms !== false,
     appointmentNotifyPrimary: prefs.appointment_notify_primary === true,
     serviceReportNotifyPrimary: prefs.service_report_notify_primary === true,
+    ...(includeChannels ? {
+      // Per-notification delivery channel (sms | email | both)
+      appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
+      serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
+      serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
+    } : {}),
   };
 }
 
@@ -129,6 +154,9 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   }
   if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
   if (updates.serviceReportNotifyPrimary !== undefined) dbUpdates.service_report_notify_primary = updates.serviceReportNotifyPrimary;
+  if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
+  if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
+  if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
   return dbUpdates;
 }
 
@@ -148,7 +176,20 @@ const ACCOUNT_PREF_LABELS = {
   billingContactName: 'Billing Contact Name',
   paymentConfirmationSms: 'Payment Confirmation Texts',
   serviceReportNotifyPrimary: 'Primary Account Service Report Copies',
+  appointmentConfirmationChannel: 'New Appointment Confirmation — Delivery',
+  serviceReminder72hChannel: '72-Hour Appointment Reminder — Delivery',
+  serviceReminder24hChannel: '24-Hour Service Reminder — Delivery',
 };
+
+// Preference keys whose value is a delivery channel (sms | email | both)
+// rather than an on/off toggle — displayed by name in the change log.
+const CHANNEL_PREF_KEYS = new Set([
+  'appointmentConfirmationChannel',
+  'serviceReminder72hChannel',
+  'serviceReminder24hChannel',
+]);
+
+const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email' };
 
 const DB_FIELD_BY_PREF = {
   appointmentConfirmation: 'appointment_confirmation',
@@ -166,10 +207,14 @@ const DB_FIELD_BY_PREF = {
   billingContactName: 'billing_contact_name',
   paymentConfirmationSms: 'payment_confirmation_sms',
   serviceReportNotifyPrimary: 'service_report_notify_primary',
+  appointmentConfirmationChannel: 'appointment_confirmation_channel',
+  serviceReminder72hChannel: 'service_reminder_72h_channel',
+  serviceReminder24hChannel: 'service_reminder_24h_channel',
 };
 
 function prefDisplayValue(key, value) {
   if (key === 'billingEmail' || key === 'billingContactName') return value || 'Not set';
+  if (CHANNEL_PREF_KEYS.has(key)) return CHANNEL_DISPLAY[channelValue(value)];
   return value === false ? 'Off' : 'On';
 }
 
@@ -181,9 +226,10 @@ function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, optio
     if (!label) continue;
     const dbField = DB_FIELD_BY_PREF[key];
     const oldRaw = dbField ? before?.[dbField] : undefined;
-    const oldValue = key === 'billingEmail' || key === 'billingContactName'
-      ? oldRaw || ''
-      : oldRaw !== false;
+    let oldValue;
+    if (key === 'billingEmail' || key === 'billingContactName') oldValue = oldRaw || '';
+    else if (CHANNEL_PREF_KEYS.has(key)) oldValue = channelValue(oldRaw);
+    else oldValue = oldRaw !== false;
     const newValue = afterPrefs?.[key];
     if (prefDisplayValue(key, oldValue) === prefDisplayValue(key, newValue)) continue;
     items.push({
@@ -254,13 +300,41 @@ async function accountPropertyIds(req) {
   return rows.map(r => r.id);
 }
 
+// Resolve the customer id that owns the account-level channel preference — the
+// account's primary profile — so a customer switched to a secondary property
+// still reads/writes the one shared channel. Falls back to the current customer
+// when no primary profile resolves.
+async function resolvePrimaryProfileId(req) {
+  const accountId = req.accountId || req.customer?.account_id || req.customerId;
+  if (!accountId) return req.customerId;
+  const primary = await db('customers')
+    .where({ account_id: accountId, is_primary_profile: true })
+    .first('id')
+    .catch(() => null);
+  return primary?.id || req.customerId;
+}
+
+// Build the account-level preferences payload: per-property toggles/contacts
+// come from the current customer; delivery channels come from the account's
+// primary profile.
+async function loadPreferencePayload(req) {
+  const prefs = await ensurePrefs(req.customerId);
+  const primaryId = await resolvePrimaryProfileId(req);
+  const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
+  return preferencePayload({
+    ...prefs,
+    appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
+    service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
+    service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
+  });
+}
+
 // =========================================================================
 // GET /api/notifications/preferences — Get current notification prefs
 // =========================================================================
 router.get('/preferences', async (req, res, next) => {
   try {
-    const prefs = await ensurePrefs(req.customerId);
-    res.json(preferencePayload(prefs));
+    res.json(await loadPreferencePayload(req));
   } catch (err) {
     next(err);
   }
@@ -297,7 +371,7 @@ router.get('/property-preferences', async (req, res, next) => {
           state: p.state,
           zip: p.zip,
         },
-        preferences: preferencePayload(byCustomerId.get(String(p.id)) || {}),
+        preferences: preferencePayload(byCustomerId.get(String(p.id)) || {}, { includeChannels: false }),
         // Legacy single-contact shape (slot 1) — kept for older clients.
         serviceContact: serviceContactPayload({
           name: p.service_contact_name,
@@ -334,37 +408,54 @@ router.put('/preferences', async (req, res, next) => {
       billingContactName: Joi.string().trim().max(120).allow('', null),
       paymentConfirmationSms: Joi.boolean(),
       serviceReportNotifyPrimary: Joi.boolean(),
+      appointmentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES),
+      serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES),
+      serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES),
     }).min(1);
 
     const updates = await schema.validateAsync(req.body);
 
     const existing = await ensurePrefs(req.customerId);
-    const dbUpdates = {
-      ...notificationPrefsDbUpdates(updates, existing || {}),
-      updated_at: new Date(),
-    };
+    const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});
 
-    if (existing) {
+    // Delivery channels are account-level — persist them on the primary profile
+    // so the choice is honored no matter which property the customer is viewing.
+    // Everything else stays per-property on the current customer row.
+    const channelDbUpdates = {};
+    const propertyDbUpdates = {};
+    for (const [col, val] of Object.entries(allDbUpdates)) {
+      (CHANNEL_DB_COLUMNS.includes(col) ? channelDbUpdates : propertyDbUpdates)[col] = val;
+    }
+
+    // Capture the primary profile's prior channel state before writing.
+    const primaryId = Object.keys(channelDbUpdates).length ? await resolvePrimaryProfileId(req) : req.customerId;
+    const existingPrimary = String(primaryId) === String(req.customerId) ? existing : await ensurePrefs(primaryId);
+
+    if (Object.keys(propertyDbUpdates).length) {
       await db('notification_prefs')
         .where({ customer_id: req.customerId })
-        .update(dbUpdates);
-    } else {
-      await db('notification_prefs').insert({
-        customer_id: req.customerId,
-        ...dbUpdates,
-      });
+        .update({ ...propertyDbUpdates, updated_at: new Date() });
+    }
+    if (Object.keys(channelDbUpdates).length) {
+      await db('notification_prefs')
+        .where({ customer_id: primaryId })
+        .update({ ...channelDbUpdates, updated_at: new Date() });
     }
 
     logger.info(`Notification prefs updated for ${req.customerId}: ${JSON.stringify({
       fields: Object.keys(updates).sort(),
     })}`);
 
-    const prefs = await db('notification_prefs').where({ customer_id: req.customerId }).first();
-    const payload = preferencePayload(prefs);
+    const payload = await loadPreferencePayload(req);
+
+    // Change log: non-channel fields compare against the current customer's prior
+    // row; channel fields against the primary profile's prior row.
+    const before = { ...(existing || {}) };
+    for (const col of CHANNEL_DB_COLUMNS) before[col] = existingPrimary?.[col];
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.customerId,
-      items: preferenceChangeItems(updates, existing || {}, payload, { scope: 'Account' }),
+      items: preferenceChangeItems(updates, before, payload, { scope: 'Account' }),
       section: 'Notification preferences',
     });
 
@@ -447,7 +538,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     }
 
     const prefs = await ensurePrefs(req.params.customerId);
-    const payload = preferencePayload(prefs);
+    const payload = preferencePayload(prefs, { includeChannels: false });
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.params.customerId,
@@ -473,6 +564,8 @@ router._private = {
   serviceContactsPayload,
   serviceContactSlotUpdates,
   normalizeContactInput,
+  resolvePrimaryProfileId,
+  CHANNEL_DB_COLUMNS,
 };
 
 module.exports = router;

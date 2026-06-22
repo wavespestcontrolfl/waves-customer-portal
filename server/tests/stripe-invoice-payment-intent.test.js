@@ -61,10 +61,17 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       where: jest.fn(() => paymentsQuery),
       first: jest.fn().mockResolvedValue(null),
     };
+    // Auto-apply resolves the customer's account-credit balance up front; these
+    // cases have no credit, so the original PI lifecycle must run untouched.
+    const customersQuery = {
+      where: jest.fn(() => customersQuery),
+      first: jest.fn().mockResolvedValue({ account_credits: '0.00' }),
+    };
 
     trxMock = jest.fn(table => {
       if (table === 'invoices') return lockedInvoiceQuery;
       if (table === 'payments') return paymentsQuery;
+      if (table === 'customers') return customersQuery;
       throw new Error(`Unexpected trx table: ${table}`);
     });
     dbMock = jest.fn(table => {
@@ -157,6 +164,54 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       .rejects.toMatchObject({
         message: 'Invoice payment is already in progress',
         statusCode: 409,
+        // Money genuinely in flight (ACH processing) → the pay page routes the
+        // customer to the receipt's "bank payment processing" state.
+        inProgress: true,
+      });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('setup conflict for a card PI stuck in requires_action is recoverable (inProgress=false)', async () => {
+    // An abandoned 3DS handoff leaves a card PI in requires_action with the
+    // invoice still unpaid. inProgress stays false so the pay page shows the
+    // error (the customer can retry) and the route still raises an admin alert.
+    invoiceRow.stripe_payment_intent_id = 'pi_requires_action';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_requires_action',
+      status: 'requires_action',
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        message: 'Invoice payment is already in progress',
+        statusCode: 409,
+        inProgress: false,
+      });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('setup conflict for a succeeded PI with no local row is an alert-worthy mismatch (inProgress=false)', async () => {
+    // A stored PI reporting `succeeded` while no live local payment row exists
+    // means money was captured but reconciliation never ran (a lost/failed
+    // webhook). It must NOT show the benign "bank payment processing" copy —
+    // inProgress stays false so the route raises an admin reconciliation alert.
+    invoiceRow.stripe_payment_intent_id = 'pi_succeeded';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_succeeded',
+      status: 'succeeded',
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        message: 'Invoice payment is already in progress',
+        statusCode: 409,
+        inProgress: false,
       });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();

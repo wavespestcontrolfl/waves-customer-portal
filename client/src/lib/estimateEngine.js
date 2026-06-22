@@ -726,7 +726,7 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 174.72,
     containerOz: 78,
     productOzPer10SqFt: 0.8,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.',
   },
   taurus_sc: {
@@ -738,7 +738,7 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 95.00,
     containerOz: 78,
     productOzPer10SqFt: 0.8,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.',
   },
   bifen_it: {
@@ -750,7 +750,7 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 41.53,
     containerOz: 128,
     productOzPer10SqFt: 1.0,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.',
   },
   talstar_p: {
@@ -762,29 +762,31 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 38.99,
     containerOz: 128,
     productOzPer10SqFt: 1.0,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.',
   },
 };
 
+// Floors reflect the 15%-across-the-board pre-slab price cut (orig x0.85,
+// rounded to whole dollars). Mirrors server constants preSlabTermiticide.minimums.
 const PRE_SLAB_TERMITICIDE_MINIMUMS = {
   standalone: [
-    { maxSqFt: 250, floor: 225 },
-    { maxSqFt: 750, floor: 325 },
-    { maxSqFt: 1250, floor: 425 },
-    { maxSqFt: Infinity, floor: 600 },
+    { maxSqFt: 250, floor: 191 },
+    { maxSqFt: 750, floor: 276 },
+    { maxSqFt: 1250, floor: 361 },
+    { maxSqFt: Infinity, floor: 510 },
   ],
   builderBatch: [
-    { maxSqFt: 250, floor: 150 },
-    { maxSqFt: 750, floor: 250 },
-    { maxSqFt: 1250, floor: 350 },
-    { maxSqFt: Infinity, floor: 500 },
+    { maxSqFt: 250, floor: 128 },
+    { maxSqFt: 750, floor: 213 },
+    { maxSqFt: 1250, floor: 298 },
+    { maxSqFt: Infinity, floor: 425 },
   ],
   sameTripAddOn: [
-    { maxSqFt: 250, floor: 125 },
-    { maxSqFt: 750, floor: 225 },
-    { maxSqFt: 1250, floor: 325 },
-    { maxSqFt: Infinity, floor: 500 },
+    { maxSqFt: 250, floor: 106 },
+    { maxSqFt: 750, floor: 191 },
+    { maxSqFt: 1250, floor: 276 },
+    { maxSqFt: Infinity, floor: 425 },
   ],
 };
 
@@ -1133,6 +1135,10 @@ export function calculateEstimate(inputs) {
     trenchingWarrantyTier,
     trenchingLabelConfirmed,
     boracareSqft: bcSqft,
+    boracareSurfaceLinearFt: bcSurfaceLF,
+    boracareSurfaceHeightFt: bcSurfaceHeight,
+    boracareWallLinearFt: bcWallLF,
+    boracareWallHeightFt: bcWallHeight,
     preslabSqft: psSqft,
     preslabWarranty,
     preslabVolume,
@@ -2133,21 +2139,43 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Bora-Care ───────────────────────────────────────────── */
-  if (svcBoracare && !isCommercial && bcSqft > 0) {
+  // Surface treatment: linear ft of an accessible run (wall, foundation,
+  // framing, block) × height → treatable area, folded into the BoraCare area.
+  // Default 8 ft when height omitted. Legacy wall* inputs still accepted.
+  // Coerce both components to numbers first — callers (e.g. the legacy
+  // EstimatePage path) may spread raw string form values, and string + number
+  // would concatenate ("1200" + 0 → "12000") and grossly over-price the job.
+  const bcAtticSqft = Number(bcSqft) > 0 ? Number(bcSqft) : 0;
+  const bcSurfaceLFRaw = bcSurfaceLF ?? bcWallLF;
+  const bcSurfaceHeightRaw = bcSurfaceHeight ?? bcWallHeight;
+  const bcSurfaceLinear = Number(bcSurfaceLFRaw) > 0 ? Number(bcSurfaceLFRaw) : 0;
+  const bcSurfaceSqft = bcSurfaceLinear > 0
+    ? bcSurfaceLinear * (Number(bcSurfaceHeightRaw) > 0 ? Number(bcSurfaceHeightRaw) : 8)
+    : 0;
+  const bcTotalSqft = bcAtticSqft + bcSurfaceSqft;
+  if (svcBoracare && !isCommercial && bcTotalSqft > 0) {
     hasOT = true;
     const BC_GAL = 91.98, BC_COV = 275, BC_EQUIP = 17.50;
-    const gal = Math.max(3, Math.ceil(bcSqft / BC_COV));
+    // Surface-only jobs (no attic/raw-wood input) skip the attic 3-gal / 2-hr
+    // floors and price on actual gallons + actual labor, floored at $150.
+    const BC_MIN_JOB = 150, BC_SURFACE_LABOR_SQFT_PER_HR = 640;
+    const bcSurfaceOnly = bcAtticSqft <= 0;
+    const gal = Math.max(bcSurfaceOnly ? 1 : 3, Math.ceil(bcTotalSqft / BC_COV));
     // v1.5: raised labor cap from 6 to 10 hrs — 4,500+ sf attics are multi-day in SWFL heat
-    const isMultiDay = bcSqft > 4500;
+    const isMultiDay = bcTotalSqft > 4500;
     const lhr = isMultiDay
-      ? Math.min(10, Math.max(6, 1.5 + bcSqft / 800))  // more aggressive rate for large attics
-      : Math.min(6, Math.max(2, 1.5 + bcSqft / 1000));
+      ? Math.min(10, Math.max(6, 1.5 + bcTotalSqft / 800))  // more aggressive rate for large attics
+      : bcSurfaceOnly
+        ? Math.min(6, bcTotalSqft / BC_SURFACE_LABOR_SQFT_PER_HR)
+        : Math.min(6, Math.max(2, 1.5 + bcTotalSqft / 1000));
     const cost = gal * BC_GAL + lhr * LABOR + BC_EQUIP;
-    const fp = otP(Math.round(cost / 0.45));
-    const detail = '~' + bcSqft.toLocaleString() + ' sf | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
-    otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft, gal, lhr, isMultiDay });
+    const rawPrice = Math.round(cost / 0.45);
+    const fp = otP(bcSurfaceOnly ? Math.max(BC_MIN_JOB, rawPrice) : rawPrice);
+    const surfaceNote = bcSurfaceSqft > 0 ? ' (incl. ' + bcSurfaceSqft.toLocaleString() + ' sf surface)' : '';
+    const detail = '~' + bcTotalSqft.toLocaleString() + ' sf' + surfaceNote + ' | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
+    otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft: bcTotalSqft, gal, lhr, isMultiDay });
   } else if (svcBoracare && !isCommercial) {
-    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft required', quoteRequired: true });
+    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft or surface linear ft required', quoteRequired: true });
   }
 
   /* ── Pre-Slab Termiticide ────────────────────────────────── */
@@ -2176,7 +2204,7 @@ export function calculateEstimate(inputs) {
       contextualMinimum.floor,
     );
     const warranty = normalizePreSlabWarranty(preslabWarranty);
-    const warrAdd = warranty.tier === 'EXTENDED' ? 200 : 0;
+    const warrAdd = warranty.tier === 'EXTENDED' ? 170 : 0;
     const basePreSlabPrice = priceAfterVolumeDiscount;
     const fp = basePreSlabPrice + warrAdd;
     const labelConfirmed = preslabLabelConfirmed === true || preslabLabelConfirmed === 'true';

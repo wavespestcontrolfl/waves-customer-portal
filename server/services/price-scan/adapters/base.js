@@ -404,7 +404,33 @@ function makeAdapter(config) {
     };
   }
 
+  // Log in ONCE per browser context for adapters that need authentication (e.g. Veseris
+  // account pricing). runScanMany shares one context across all product pages, so the
+  // login cookies persist — we authenticate on the first product and reuse the session for
+  // the rest. A failed login is cached too, so we don't re-attempt it for every product.
+  async function ensureAuthenticated(page, vendor) {
+    if (!config.authenticate) return;
+    const ctx = page.context();
+    ctx.__priceScanAuth = ctx.__priceScanAuth || { ok: new Set(), failed: new Map() };
+    if (ctx.__priceScanAuth.ok.has(config.key)) return;
+    if (ctx.__priceScanAuth.failed.has(config.key)) throw ctx.__priceScanAuth.failed.get(config.key);
+    const creds = vendor && vendor.credentials;
+    if (!creds || !creds.password || !(creds.username || creds.email)) {
+      const err = new Error(`${config.key}: login credentials required but none provided`);
+      ctx.__priceScanAuth.failed.set(config.key, err);
+      throw err;
+    }
+    try {
+      await config.authenticate(page, creds, { timeout });
+      ctx.__priceScanAuth.ok.add(config.key);
+    } catch (err) {
+      ctx.__priceScanAuth.failed.set(config.key, err); // cache so other products skip fast
+      throw err;
+    }
+  }
+
   async function fetchCandidate(page, vendor, product) {
+    await ensureAuthenticated(page, vendor);
     // Direct URL (explicit vendor.url or a builder) — one shot.
     const directUrl = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
     if (directUrl) return scrapeCandidate(page, vendor, product, directUrl);

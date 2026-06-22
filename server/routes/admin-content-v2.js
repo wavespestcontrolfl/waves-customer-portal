@@ -233,6 +233,7 @@ router.post('/autonomous/review/:id/decision', async (req, res, next) => {
       decision: req.body?.decision,
       note: req.body?.note,
       reviewer: req.technicianId || 'admin',
+      expectedRunId: req.body?.run_id || null,
     });
     if (!item) return res.status(404).json({ error: 'Review item not found' });
     res.json({ success: true, item });

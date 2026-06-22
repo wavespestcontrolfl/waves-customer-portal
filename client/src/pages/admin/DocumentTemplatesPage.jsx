@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   Copy,
@@ -254,6 +254,19 @@ export default function DocumentTemplatesPage() {
   const [bulkPreview, setBulkPreview] = useState(null);
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkLoading, setBulkLoading] = useState(false);
+  const editorRef = useRef(null);
+
+  // On the single-column mobile layout the editor renders below the template
+  // list, so selecting a template or starting a new one updates content that
+  // sits off-screen ("nothing happens" from the top of the page). Bring the
+  // editor into view on narrow viewports; on lg+ it's already beside the list.
+  const focusEditor = useCallback(() => {
+    if (typeof window === "undefined") return;
+    if (window.matchMedia?.("(min-width: 1024px)").matches) return;
+    requestAnimationFrame(() => {
+      editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, []);
 
   const loadTemplates = useCallback(async () => {
     setLoading(true);
@@ -380,6 +393,7 @@ export default function DocumentTemplatesPage() {
     setBulkResult(null);
     setToast("");
     setError("");
+    focusEditor();
   };
 
   const saveTemplate = async () => {
@@ -599,6 +613,7 @@ export default function DocumentTemplatesPage() {
                 onClick={() => {
                   setNewMode(false);
                   setSelectedKey(template.templateKey);
+                  focusEditor();
                 }}
                 className={cn(
                   "w-full px-3 py-3 text-left hover:bg-zinc-50 u-focus-ring",
@@ -632,7 +647,7 @@ export default function DocumentTemplatesPage() {
           </div>
         </div>
 
-        <div className="space-y-4">
+        <div ref={editorRef} className="space-y-4 scroll-mt-4">
           <Card>
             <CardBody className="p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

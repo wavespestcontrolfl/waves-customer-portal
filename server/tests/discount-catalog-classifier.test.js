@@ -103,19 +103,60 @@ describe('discount catalog classification', () => {
   });
 
   test.each([
-    ['waveguard_gold', 'WaveGuard Gold', 'tier'],
-    ['waveguard_member', 'WaveGuard Member Discount', 'tier'],
-  ])('%s is a WaveGuard tier discount and not manual-selectable', (discountKey, name, stackGroup) => {
+    ['waveguard_gold', 'WaveGuard Gold'],
+    ['waveguard_platinum', 'WaveGuard Platinum'],
+  ])('%s (flagged tier discount) is not manual-selectable', (discountKey, name) => {
     const result = classifyDiscountCatalogEntry(row({
       discount_key: discountKey,
       name,
-      stack_group: stackGroup,
+      stack_group: 'tier',
+      is_waveguard_tier_discount: true,
       requires_waveguard_tier: 'Bronze',
     }));
 
     expect(result.catalogCategory).toBe('waveguard_tier_discount');
     expect(result.estimatorManualEligible).toBe(false);
     expect(result.warnings).toContain('waveguard_tier_discount_not_manual_selectable');
+  });
+
+  test('WaveGuard Member Discount (non-tier, stacks in tier group) is manual-selectable', () => {
+    // Ships with is_waveguard_tier_discount=false + stack_group='tier'. The
+    // explicit flag must win so it surfaces as a selectable manual discount in
+    // the estimator dropdown rather than being hidden as a tier discount.
+    const result = classifyDiscountCatalogEntry(row({
+      discount_key: 'waveguard_member',
+      name: 'WaveGuard Member Discount',
+      discount_type: 'percentage',
+      amount: 15,
+      stack_group: 'tier',
+      is_waveguard_tier_discount: false,
+      requires_waveguard_tier: 'Bronze',
+    }));
+
+    expect(result.catalogCategory).toBe('manual_recurring_estimate_discount');
+    expect(result.estimatorManualEligible).toBe(true);
+    expect(result.waveGuardTierDiscount).toBe(false);
+    expect(result.warnings).not.toContain('waveguard_tier_discount_not_manual_selectable');
+    // Still gated behind the operator's eligibility-confirmation checkbox so it
+    // can't be applied to a non-member lead.
+    expect(result.warnings).toContain('manual_discount_requires_waveguard_tier');
+  });
+
+  test('a tier-stacked discount with no explicit flag still classifies as tier', () => {
+    // Backward-compat: when is_waveguard_tier_discount was never set, the tier
+    // stack group alone still marks it as an auto tier discount.
+    const result = classifyDiscountCatalogEntry({
+      id: 'legacy_tier',
+      discount_key: 'legacy_tier',
+      name: 'Legacy Tier Discount',
+      discount_type: 'percentage',
+      amount: 10,
+      is_active: true,
+      stack_group: 'tier',
+    });
+
+    expect(result.catalogCategory).toBe('waveguard_tier_discount');
+    expect(result.estimatorManualEligible).toBe(false);
   });
 
   test.each([

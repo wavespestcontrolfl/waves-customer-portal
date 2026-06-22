@@ -280,7 +280,7 @@ try {
   if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
 } catch { /* twilio config not available */ }
 
-const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500 };
+const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200 };
 
 function validateContent(text, platform) {
   const issues = [];
@@ -1396,7 +1396,7 @@ const SocialMediaService = {
   /**
    * Post to a single platform (from admin UI).
    */
-  async postToSingle(platform, { title, description, link, content, imageUrl, locationId }) {
+  async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { platform, success: false, error: 'Automation is disabled' };
     }
@@ -1424,7 +1424,21 @@ const SocialMediaService = {
       return { platform, success: false, dryRun: true, content: text };
     }
 
-    if (platform === 'facebook') return postToFacebook(text, link);
+    if (platform === 'facebook') {
+      if (!imageUrl) return postToFacebook(text, link);
+      // Photo-first callers (tech field posts) pass mediaFallback:false — the post
+      // must carry the photo, so fail rather than silently posting text-only (a
+      // text fallback after a timed-out photo post could also duplicate it).
+      if (!mediaFallback) return postToFacebook(text, link, imageUrl);
+      // Admin/blog single-post: preserve the text/link fallback so an image Meta
+      // can't fetch/accept still creates the FB post rather than failing outright.
+      try {
+        return await postToFacebook(text, link, imageUrl);
+      } catch (err) {
+        logger.warn(`[social] FB photo post failed (${err.message}) — falling back to text/link`);
+        return postToFacebook(text, link);
+      }
+    }
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
     if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
@@ -1465,6 +1479,14 @@ const SocialMediaService = {
   generateImage,
 };
 
+// True only when both S3 and the public CDN domain are configured — i.e. an
+// uploaded image will actually be fetchable. Lets callers avoid uploading a
+// customer photo that uploadImageToS3 would orphan (it PUTs before the CDN check).
+function isImageHostingConfigured() {
+  return !!process.env.SOCIAL_MEDIA_CDN_DOMAIN
+    && !!(config.s3 && config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket);
+}
+
 module.exports = SocialMediaService;
 module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 module.exports.isPausedByAdmin = isPausedByAdmin;
@@ -1478,3 +1500,6 @@ module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
 module.exports.buildSocialFailureAlert = buildSocialFailureAlert;
+// Reused by tech-social-caption.js so field-photo captions share one brand voice.
+module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;
+module.exports.isImageHostingConfigured = isImageHostingConfigured;

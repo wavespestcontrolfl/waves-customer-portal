@@ -22,11 +22,18 @@ const InvoiceService = require('../services/invoice');
 function chain({ first, returning } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
+  q.whereIn = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(async () => returning || []);
   return q;
 }
+
+// voidInvoice runs a money guard (db('payments')…first('id')) before AND inside
+// the void transaction — a credit-only invoice has no such row, so both resolve
+// to undefined and the void proceeds. Each call consumes one db() mock slot.
+const noPayment = () => chain({ first: undefined });
 
 function invoice(overrides = {}) {
   return {
@@ -47,7 +54,9 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
   test('stops the invoice follow-up sequence after voiding an invoice', async () => {
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
-      .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }));
+      .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }))
+      .mockReturnValueOnce(noPayment());
 
     await InvoiceService.voidInvoice('inv-1');
 
@@ -76,7 +85,9 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
     });
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
-      .mockReturnValueOnce(chain({ returning: [voided] }));
+      .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain({ returning: [voided] }))
+      .mockReturnValueOnce(noPayment());
 
     await InvoiceService.voidInvoice('inv-1');
 
@@ -87,7 +98,9 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
   test('a restore failure rolls the void back — blocked void beats stranded deposit money (P1)', async () => {
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
-      .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }));
+      .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }))
+      .mockReturnValueOnce(noPayment());
     mockRestoreDepositCredit.mockRejectedValueOnce(new Error('ledger unavailable'));
 
     await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow('ledger unavailable');
@@ -99,9 +112,31 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
   test('a lost conditional void (status changed mid-flight) throws instead of restoring twice', async () => {
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
+      .mockReturnValueOnce(noPayment())
       .mockReturnValueOnce(chain({ returning: [] }));
 
     await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow(/changed while voiding/);
     expect(mockRestoreDepositCredit).not.toHaveBeenCalled();
+  });
+
+  test('refuses to void a CASH-backed prepaid invoice (payment_recorded_at) — refund, not void', async () => {
+    // 'prepaid' passes assertInvoiceVoidable, but a cash-backed prepayment records
+    // money; voiding it would hide collected revenue. Must refund instead.
+    db
+      .mockReturnValueOnce(chain({ first: invoice({ status: 'prepaid', payment_recorded_at: '2026-06-21T12:00:00Z' }) }))
+      .mockReturnValueOnce(noPayment());
+
+    await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow(/payment already applied[\s\S]*refund instead/);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(mockRestoreDepositCredit).not.toHaveBeenCalled();
+  });
+
+  test('refuses to void a prepaid invoice with a paid payments row — refund, not void', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: invoice({ status: 'prepaid' }) }))
+      .mockReturnValueOnce(chain({ first: { id: 'pay-9' } }));
+
+    await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow(/payment already applied \(payment pay-9\)/);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 });

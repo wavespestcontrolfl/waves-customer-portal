@@ -323,7 +323,9 @@ router.get('/balance', async (req, res, next) => {
       .where({ customer_id: req.customerId })
       .whereIn('status', ['sent', 'viewed', 'overdue'])
       .whereNull('payer_id')
-      .sum('total as total')
+      // Outstanding balance = amount DUE (total − applied account credit), not the
+      // raw total, so the portal balance matches what Stripe/Terminal actually charge.
+      .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) AS total'))
       .first();
 
     // The portal's billing banner flips to "failed" when the most recent

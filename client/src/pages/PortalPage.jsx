@@ -2280,6 +2280,20 @@ function formatPropertyAddress(property) {
 // Mirrors MAX_SERVICE_CONTACTS in server/routes/notifications.js.
 const MAX_PROPERTY_CONTACTS = 3;
 
+// Per-notification delivery channel. Appointment notices can be sent by text,
+// email, or both — e.g. a customer travelling overseas can switch to email.
+// Mirrors the *_channel columns wired through server/services/appointment-reminders.js.
+const CHANNEL_OPTIONS = [
+  { value: 'sms', label: 'Text' },
+  { value: 'email', label: 'Email' },
+  { value: 'both', label: 'Both' },
+];
+const APPOINTMENT_CHANNEL_KEYS = [
+  'appointmentConfirmationChannel',
+  'serviceReminder72hChannel',
+  'serviceReminder24hChannel',
+];
+
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
@@ -2325,6 +2339,41 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [key]: false }));
+    }
+  };
+
+  // Change the delivery channel (text / email / both) for one notification.
+  const handleChannelChange = async (channelKey, value) => {
+    if (prefsLocked[channelKey]) return;
+    const prevVal = prefs[channelKey] || 'sms';
+    if (prevVal === value) return;
+    setPrefsLocked(prev => ({ ...prev, [channelKey]: true }));
+    setPrefs(prev => ({ ...prev, [channelKey]: value }));
+    try {
+      await api.updateNotificationPrefs({ [channelKey]: value });
+    } catch (err) {
+      setPrefs(prev => ({ ...prev, [channelKey]: prevVal }));
+      alert('Could not update delivery preference. Please try again.');
+      console.error(err);
+    } finally {
+      setPrefsLocked(prev => ({ ...prev, [channelKey]: false }));
+    }
+  };
+
+  // One-tap shortcut: route every appointment update to the given channel
+  // (used for the "Traveling? Get appointment updates by email" toggle).
+  const handleAllAppointmentChannels = async (value) => {
+    if (APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === value)) return;
+    const prevById = {};
+    const updates = {};
+    APPOINTMENT_CHANNEL_KEYS.forEach(k => { prevById[k] = prefs[k] || 'sms'; updates[k] = value; });
+    setPrefs(prev => ({ ...prev, ...updates }));
+    try {
+      await api.updateNotificationPrefs(updates);
+    } catch (err) {
+      setPrefs(prev => ({ ...prev, ...prevById }));
+      alert('Could not update delivery preference. Please try again.');
+      console.error(err);
     }
   };
 
@@ -2824,14 +2873,39 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div style={sectionTitle}>Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Service notifications</div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
+            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
+              Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
+            </div>
+            {customer.email ? (() => {
+              const allEmail = APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === 'email');
+              return (
+                <button
+                  onClick={() => handleAllAppointmentChannels(allEmail ? 'sms' : 'email')}
+                  style={{
+                    marginTop: 12, padding: '8px 14px', borderRadius: 999,
+                    border: `1px solid ${allEmail ? B.blueDeeper : '#D8D0C0'}`,
+                    background: allEmail ? B.blueDeeper : '#fff',
+                    color: allEmail ? '#fff' : B.blueDeeper,
+                    fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  <Icon name={allEmail ? 'smartphone' : 'mail'} size={14} strokeWidth={2} />
+                  {allEmail ? 'Switch appointment updates back to text' : 'Traveling? Get appointment updates by email'}
+                </button>
+              );
+            })() : (
+              <div style={{ marginTop: 8, fontSize: 12, color: muted }}>
+                Add an email to your profile to receive notifications by email.
+              </div>
+            )}
           </div>
           <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
               const items = [
-                { key: 'appointmentConfirmation', label: 'New Appointment Confirmation', desc: 'Get a text when a visit is booked or rescheduled', icon: 'checkCircle', locked: false, defaultOn: true },
-                { key: 'serviceReminder72h', label: '72-Hour Appointment Reminder', desc: 'Get a text 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
-                { key: 'serviceReminder24h', label: '24-Hour Service Reminder', desc: 'Get a text the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
+                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'checkCircle', locked: false, defaultOn: true },
+                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
+                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
                 { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
                 // Phase 2E: per-customer auto-flip opt-out. Distinct
                 // from techEnRoute — that one fires when the tech taps
@@ -2866,6 +2940,30 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       )}
                     </div>
                   </div>
+                  {p.channelKey && (() => {
+                    // Email/Both can only be offered once an email is on file —
+                    // otherwise the backend silently falls back to SMS and the
+                    // customer would think email was configured when it wasn't.
+                    const hasEmail = !!customer.email;
+                    const opts = hasEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+                    const selectable = isOn && hasEmail;
+                    return (
+                      <select
+                        value={hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
+                        onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
+                        disabled={!selectable || !!prefsLocked[p.channelKey]}
+                        aria-label={`Delivery method for ${p.label}`}
+                        style={{
+                          fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                          background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                          cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                        }}
+                      >
+                        {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    );
+                  })()}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                     <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
                       width: 44, height: 24, borderRadius: 12,

@@ -230,13 +230,37 @@ async function ensureTable() {
       { config_key: 'onetime_preslab', name: 'Pre-Slab Termiticide Treatment', category: 'one_time', sort_order: 8, data: JSON.stringify({
         default_product_key: 'termidor_sc',
         ps_equip: 15,
-        warranty_extended: 200,
+        warranty_extended: 170,
         volume_discounts: { none: 1.00, '5plus': 0.90, '10plus': 0.85 },
+        // Contextual price floors by job context + slab size — the floors the
+        // pricing engine actually applies (lookupPreSlabMinimum). Stored as flat
+        // top-level array keys (not a nested object) so the admin panel's inline
+        // table editor persists edits. Terminal tier uses 'Infinity'.
+        // Floors reflect the 15%-across-the-board pre-slab price cut (orig x0.85).
+        minimums_standalone: [
+          { maxSqFt: 250, floor: 191 },
+          { maxSqFt: 750, floor: 276 },
+          { maxSqFt: 1250, floor: 361 },
+          { maxSqFt: 'Infinity', floor: 510 },
+        ],
+        minimums_builderBatch: [
+          { maxSqFt: 250, floor: 128 },
+          { maxSqFt: 750, floor: 213 },
+          { maxSqFt: 1250, floor: 298 },
+          { maxSqFt: 'Infinity', floor: 425 },
+        ],
+        minimums_sameTripAddOn: [
+          { maxSqFt: 250, floor: 106 },
+          { maxSqFt: 750, floor: 191 },
+          { maxSqFt: 1250, floor: 276 },
+          { maxSqFt: 'Infinity', floor: 425 },
+        ],
+        // margin_divisor 0.5294 = 0.45 / 0.85 (15% cut, margin ~47%).
         products: {
-          termidor_sc: { container_cost: 174.72, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
-          taurus_sc: { container_cost: 95.00, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
-          bifen_it: { container_cost: 41.53, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
-          talstar_p: { container_cost: 38.99, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
+          termidor_sc: { container_cost: 174.72, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.5294 },
+          taurus_sc: { container_cost: 95.00, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.5294 },
+          bifen_it: { container_cost: 41.53, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
+          talstar_p: { container_cost: 38.99, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
         },
       }) },
       { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing + Access Multipliers', category: 'one_time', sort_order: 9, data: JSON.stringify({ simple: 50, moderate: 95, advanced: 195, specialty_minimum: 275, inspection: 125, inspection_waived_with_service_optin: true, minimums_by_home_sqft: [{max_sqft:1500,minimum:395},{max_sqft:2500,minimum:595},{max_sqft:4000,minimum:895},{max_sqft:'Infinity',minimum:1295,custom_recommended:true}], story_multipliers: { one: 1.00, two: 1.15, three: 1.30 }, roof_multipliers: { shingle: 1.00, flat: 1.00, metal: 1.15, tile: 1.25, steep_or_fragile: 1.35 }, construction_multipliers: { block: 1.00, stucco: 1.05, frame: 1.10, mixed: 1.10 } }) },

@@ -77,6 +77,7 @@ const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
 const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
+const getComparisonTableGate = lazy('comparison-table-gate', './comparison-table-gate');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
@@ -577,6 +578,45 @@ class AutonomousRunner {
       }
     }
 
+    // 3d. Comparison-table gate — keeps the writer's <ComparisonTable>
+    // buyer's-guide listicles honest: no disparagement, no self-declared
+    // rankings, named competitors only from the curated competitor-facts
+    // allowlist, and every named-competitor post routed to a human. Applies to
+    // any body-content action; a draft with no comparison table passes
+    // untouched. P0/P1 → human review. namedCompetitorComparison is gated OFF
+    // in prod by default, so a named-competitor draft routes to review rather
+    // than auto-publishing until the owner enables it.
+    const comparisonGate = getComparisonTableGate();
+    if (comparisonGate && draft) {
+      let namedCompetitorEnabled = false;
+      try {
+        // feature-gates exports { gates, isEnabled }, not the flag at top level.
+        namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true;
+      } catch (_) { namedCompetitorEnabled = false; }
+      let comparisonResult;
+      try {
+        comparisonResult = comparisonGate.evaluate(draft, { namedCompetitorEnabled });
+      } catch (err) {
+        logger.warn(`[autonomous-runner] comparison-table gate threw: ${err.message}`);
+        comparisonResult = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_ERROR', message: err.message }] };
+      }
+      run.comparison_table_result = comparisonResult;
+      // A clean draft that NAMES a competitor must still never auto-publish — it
+      // routes to the (approvable) human-review queue at the trust-build step.
+      run.comparison_requires_review = comparisonResult.requiresHumanReview === true;
+      if (!comparisonResult.pass) {
+        const blocking = comparisonResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+        const notes = `Comparison-table gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'comparison_table_failed',
+          reviewer_notes: notes,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken });
+        return finalized;
+      }
+    }
+
     // 4. Uniqueness gate. City-service/customer-question run the full
     //    landing-page uniqueness suite. Supporting blogs (opt-in via
     //    AUTONOMOUS_CONTENT_BLOG_UNIQUENESS) run a dedup-only check vs the
@@ -766,7 +806,12 @@ class AutonomousRunner {
     // publishing guards + daily/weekly caps downstream still apply.
     const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
-    const trustBuildSatisfied = autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD;
+    // A named-competitor comparison is never auto-publish-eligible: even with
+    // trust built / AUTO_PUBLISH on, it must clear human review first (legal/
+    // brand surface). It still uses the approvable trust-build review path.
+    const forceNamedCompetitorReview = run.comparison_requires_review === true;
+    const trustBuildSatisfied = !forceNamedCompetitorReview
+      && (autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
     // 7. Decide outcome.
@@ -796,9 +841,10 @@ class AutonomousRunner {
         return finalized;
       }
       const reason = !gatesPass ? 'gate_fail'
+        : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
-      const trustBuildNote = reason.startsWith('trust_build_')
+      const trustBuildNote = (reason.startsWith('trust_build_') || reason === 'named_competitor_review')
         ? 'Review autonomous_runs.draft_payload, then approve with server/scripts/approve-autonomous-run.js --id=<run_id> --by=<operator>.'
         : null;
       const finalized = await finalize(run, t0, {
@@ -2094,6 +2140,210 @@ class AutonomousRunner {
     return Number(row?.count || 0);
   }
 
+  // ── Approve-then-publish for named-competitor comparisons ──
+  // A clean named-competitor comparison NEVER auto-publishes; it parks as
+  // completed_pending_review / 'named_competitor_review'. A human approves it
+  // here, which publishes the EXACT reviewed draft (not a re-draft) through the
+  // same astro-publisher path, after re-confirming the comparison gate + the
+  // canary/cap publishing guards. Returns the publish outcome; throws (with a
+  // statusCode) on any guard/gate/publish failure so the caller leaves the
+  // opportunity pending. Idempotent-ish: a second approval after a live publish
+  // is rejected because the run is no longer 'named_competitor_review'.
+  async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator' } = {}) {
+    if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
+    // Serialize with runDaily / runCatchUp / admin run-now behind the engine
+    // advisory lock so the canary-cap read + publish can't interleave with
+    // another publisher and blow past the per-day/week caps or overlap publishes.
+    const result = await this._withEngineLock('approveNamedCompetitor',
+      () => this._approveNamedCompetitorLocked(opportunityId, { runId, approvedBy }));
+    if (result && result.skipped && result.reason === 'engine_locked') {
+      const e = new Error('Autonomous publisher is busy; retry in a moment'); e.statusCode = 409; throw e;
+    }
+    return result;
+  }
+
+  async _approveNamedCompetitorLocked(opportunityId, { runId = null, approvedBy = 'operator' } = {}) {
+    // Publish the EXACT run the operator reviewed. A requeue can leave an older
+    // run still parked while a newer run parks for the same opportunity, so
+    // resolve by runId when given and verify it belongs to this opportunity;
+    // only fall back to "latest parked" when no runId was supplied.
+    let run;
+    if (runId) {
+      run = await db('autonomous_runs').where('id', runId).first();
+      if (!run) { const e = new Error('No autonomous run found for this id'); e.statusCode = 404; throw e; }
+      if (run.opportunity_id !== opportunityId) { const e = new Error('Run does not belong to this opportunity'); e.statusCode = 400; throw e; }
+      // Bind the approval to the LATEST parked named-competitor-review run for
+      // this opportunity. A requeue resets the opportunity to pending but leaves
+      // the OLD run still flagged completed_pending_review/named_competitor_review;
+      // after a re-run parks a NEW run, approving the OLD runId by --id would
+      // otherwise pass every check and claim the opportunity (now parked for the
+      // NEW run), publishing the stale draft the operator is no longer reviewing.
+      const latestParked = await db('autonomous_runs')
+        .where({ opportunity_id: opportunityId, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false })
+        .orderBy('claimed_at', 'desc')
+        .orderBy('id', 'desc')
+        .first();
+      if (latestParked && String(latestParked.id) !== String(run.id)) {
+        const e = new Error('A newer named-competitor review run has replaced this one; approve the latest parked run for this opportunity');
+        e.statusCode = 409; throw e;
+      }
+    } else {
+      run = await db('autonomous_runs').where('opportunity_id', opportunityId).orderBy('claimed_at', 'desc').orderBy('id', 'desc').first();
+      if (!run) { const e = new Error('No autonomous run found for this opportunity'); e.statusCode = 404; throw e; }
+    }
+    if (run.outcome !== 'completed_pending_review' || run.skip_reason !== 'named_competitor_review' || run.shadow_mode === true) {
+      const e = new Error('Only a live named-competitor review run can be approved-and-published'); e.statusCode = 400; throw e;
+    }
+    const draft = parseJsonMaybe(run.draft_payload);
+    if (!draft || !draft.body) { const e = new Error('Stored draft is missing or empty'); e.statusCode = 422; throw e; }
+    // Use the brief the reviewed draft was generated against (run.brief_id), not
+    // the latest — a requeue/recompose must not swap action_type/target while a
+    // stale approval publishes the old body.
+    const brief = await this._loadReviewedBrief(run);
+    if (!brief) { const e = new Error('Brief not found for this run'); e.statusCode = 422; throw e; }
+    const opp = await db('opportunity_queue').where('id', opportunityId).first();
+    if (!opp) { const e = new Error('Opportunity not found'); e.statusCode = 404; throw e; }
+
+    // Re-confirm the comparison gate still passes on the stored draft (defense
+    // against a tampered draft_payload between parking and approval).
+    const gate = getComparisonTableGate();
+    if (gate) {
+      let namedEnabled = false;
+      try { namedEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedEnabled = false; }
+      const g = gate.evaluate(draft, { namedCompetitorEnabled: namedEnabled });
+      if (!g.pass) {
+        const codes = (g.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => f.code).join('; ');
+        const e = new Error(`Comparison-table gate no longer passes: ${codes}`); e.statusCode = 409; throw e;
+      }
+    }
+
+    // Same canary / publish-cap guards as the autonomous lane (now serialized
+    // under the engine lock so the cap read is authoritative).
+    const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};
+    const guards = await this._evaluatePublishingGuards(run, brief, seoRes);
+    if (!guards.ok) { const e = new Error(`Publishing guard blocked: ${guards.reason}`); e.statusCode = 409; e.details = guards.notes; throw e; }
+
+    // Atomically CLAIM the OPPORTUNITY out of the review queue (status →
+    // 'claimed') AND the run before publishing. Moving it off 'pending_review'
+    // means a concurrent requeue/dismiss is rejected (the review decisions
+    // require pending_review), so it can't overwrite the in-flight publish.
+    const oppClaimed = await db('opportunity_queue')
+      .where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_review' })
+      .update({ status: 'claimed', skip_reason: 'named_competitor_publishing', updated_at: new Date() });
+    if (!oppClaimed) {
+      const e = new Error('This opportunity is no longer parked for named-competitor review'); e.statusCode = 409; throw e;
+    }
+    const runClaimed = await db('autonomous_runs')
+      .where({ id: run.id, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' })
+      .update({ outcome: 'publishing_named_competitor', updated_at: new Date() });
+    if (!runClaimed) {
+      await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .update({ status: 'pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+      const e = new Error('This named-competitor review is already being published'); e.statusCode = 409; throw e;
+    }
+
+    const revertClaims = async () => {
+      await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
+        .update({ outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+      await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .update({ status: 'pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+    };
+
+    // Operator-intercept posts must capture the publish-day Wayband/source
+    // snapshot BEFORE publishing (same as the autonomous path) so competitor
+    // claims stay verifiable. Fail-soft inside the helper.
+    try { await this._snapshotInterceptSources(opp, draft, run); }
+    catch (err) { logger.warn(`[autonomous-runner] named-competitor source snapshot failed (non-blocking): ${err.message}`); }
+
+    let patch;
+    try {
+      patch = await this._publishAndDistribute(draft, brief, { ...run, opportunity_id: opportunityId });
+    } catch (err) {
+      await revertClaims(); // let the operator retry
+      throw err;
+    }
+
+    const published = !!patch.published_url;
+    // _publishAndDistribute mutates draft.frontmatter with the published
+    // canonical/domains; persist the mutated draft so the PR poller can resolve
+    // the merge target from draft_payload.frontmatter.canonical (A5). Stamp
+    // completed_at = now for BOTH live and PR-open so cap counting + "blog
+    // started today" reflect the approval, not the original parking time.
+    const stampedDraft = JSON.stringify(draft || {});
+    const baseUpdate = {
+      draft_payload: stampedDraft,
+      astro_pr_url: patch.astro_pr_url || null,
+      indexnow_status: patch.indexnow_status || null,
+      link_tasks_queued: patch.link_tasks_queued || 0,
+      completed_at: new Date(),
+      trust_build_approved_at: new Date(),
+      trust_build_approved_by: String(approvedBy || 'operator').slice(0, 100),
+      updated_at: new Date(),
+    };
+    const runUpdate = published
+      ? { ...baseUpdate, outcome: 'completed_published', skip_reason: null, published_url: patch.published_url }
+      : { ...baseUpdate, outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', published_url: null };
+    // Post is live / PR open. If persistence fails, fall back to a minimal
+    // reconcilable state (never leave the row stuck in publishing_*).
+    try {
+      await db('autonomous_runs').where('id', run.id).update(runUpdate);
+    } catch (err) {
+      logger.error(`[autonomous-runner] named-competitor run persist failed (run ${run.id}); writing reconcilable fallback: ${err.message}`);
+      const fallback = published
+        ? { outcome: 'completed_published', published_url: patch.published_url, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date() }
+        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date() };
+      await db('autonomous_runs').where('id', run.id).update(fallback)
+        .catch((e2) => logger.error(`[autonomous-runner] named-competitor run fallback persist ALSO failed (run ${run.id}); manual reconcile needed: ${e2.message}`));
+    }
+    // Final opportunity state. PR-open MUST land at pending_review +
+    // astro_pr_pending_merge (the exact state the PR poller reconciles); if the
+    // update fails, retry that minimal state once so the PR isn't orphaned (A6).
+    // Keep the opportunity's skip_reason in lockstep with the run's so the queue
+    // never shows a phantom PR-pending item the poller will never reconcile: a
+    // PR-open → astro_pr_pending_merge; a no-PR/no-live result (e.g. a refresh
+    // 'no_changes') → publisher_no_live_url (actionable in review, not pollable).
+    const oppFinal = published
+      ? { status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() }
+      : patch.astro_pr_url
+        ? { status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() }
+        : { status: 'pending_review', skip_reason: 'publisher_no_live_url', updated_at: new Date() };
+    try {
+      await db('opportunity_queue').where({ id: opportunityId }).update(oppFinal);
+    } catch (err) {
+      logger.error(`[autonomous-runner] named-competitor opportunity persist failed (opp ${opportunityId}); retrying minimal reconcilable state: ${err.message}`);
+      await db('opportunity_queue').where({ id: opportunityId }).update(oppFinal)
+        .catch((e2) => logger.error(`[autonomous-runner] named-competitor opportunity fallback ALSO failed (opp ${opportunityId}); manual reconcile needed: ${e2.message}`));
+    }
+    return {
+      published,
+      published_url: patch.published_url || null,
+      astro_pr_url: patch.astro_pr_url || null,
+      publish_status: patch.publish_status || null,
+    };
+  }
+
+  // Load + JSONB-parse the brief the reviewed run was generated against
+  // (run.brief_id), falling back to the latest brief for the opportunity only
+  // when the run carries no brief_id. Shape consumed by the astro-publisher.
+  async _loadReviewedBrief(run) {
+    let row = null;
+    if (run?.brief_id) row = await db('content_briefs').where('id', run.brief_id).first();
+    if (!row && run?.opportunity_id) {
+      row = await db('content_briefs').where('opportunity_id', run.opportunity_id).orderBy('version', 'desc').first();
+    }
+    if (!row) return null;
+    const JSONB_COLS = [
+      'score_breakdown', 'serp_signal', 'gsc_signal', 'customer_signal',
+      'conversion_signal', 'required_sections', 'schema_types',
+      'internal_links_to_add', 'voice_constraints', 'facts_pack', 'target_sites',
+    ];
+    const out = { ...row };
+    for (const k of JSONB_COLS) {
+      if (typeof out[k] === 'string') { try { out[k] = JSON.parse(out[k]); } catch (_) { /* leave as-is */ } }
+    }
+    return out;
+  }
+
   async _publishAndDistribute(draft, brief, run) {
     const out = {};
     const publisher = getAstroPublisher();
@@ -2284,6 +2534,7 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       quality_gate_result: JSON.stringify(run.quality_gate_result || {}),
       claims_ledger_result: JSON.stringify(run.claims_ledger_result || {}),
       content_guardrails_result: JSON.stringify(run.content_guardrails_result || {}),
+      comparison_table_result: JSON.stringify(run.comparison_table_result || {}),
       seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),
       facts_sufficiency: JSON.stringify(run.facts_sufficiency || {}),
       protected_check: JSON.stringify(run.protected_check || {}),
@@ -2554,6 +2805,12 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
   if (Number(refreshed || 0) < 1) return null;
 
   return { id: existing.id, inserted: false, refreshed: true };
+}
+
+function parseJsonMaybe(value, fallback = null) {
+  if (value == null) return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
 }
 
 function firstReturnedId(rows) {

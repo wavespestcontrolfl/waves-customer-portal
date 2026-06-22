@@ -42,6 +42,7 @@ const KNOWN_FLAGS = [
   // with Compose/History/Subscribers/Automations consolidated under it.
   "ff_invoice_send_receipt",
   "visual_service_notes_enabled",
+  "tech_social_enabled", // gates the Tech portal "Social Post" tile (UI side of TECH_SOCIAL_ENABLED)
 ];
 
 const DEFAULT_VISUAL_SETTINGS = {

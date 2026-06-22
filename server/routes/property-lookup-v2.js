@@ -2362,8 +2362,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     dirtLF: measurementValue(o.trenchingDirtLF, o.trenchingDirtLf, o.dirtLF),
     concretePct: measurementValue(o.trenchingConcretePct, o.concretePct),
   };
+  const boraCareSurfaceLinearFt = measurementValue(o.boracareSurfaceLinearFt, o.boraCareSurfaceLinearFt, o.surfaceLinearFt, o.boracareWallLinearFt, o.boraCareWallLinearFt, o.wallLinearFt);
+  const boraCareSurfaceHeightFt = measurementValue(o.boracareSurfaceHeightFt, o.boraCareSurfaceHeightFt, o.surfaceHeightFt, o.boracareWallHeightFt, o.boraCareWallHeightFt, o.wallHeightFt);
   const boraCareMeasurements = {
     atticSqFt: measurementValue(o.boracareSqft, o.boraCareSqFt, o.atticSqFt, o.rawWoodSqFt),
+    surfaceLinearFt: boraCareSurfaceLinearFt,
+    surfaceHeightFt: boraCareSurfaceHeightFt,
   };
   const preSlabMeasurements = {
     slabSqFt: measurementValue(o.preslabSqft, o.preSlabSqFt, o.slabSqFt),
@@ -2498,6 +2502,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('BORACARE')) {
     services.boraCare = {
       atticSqFt: o.boracareSqft,
+      surfaceLinearFt: boraCareSurfaceLinearFt,
+      surfaceHeightFt: boraCareSurfaceHeightFt,
       measurements: boraCareMeasurements,
     };
   }

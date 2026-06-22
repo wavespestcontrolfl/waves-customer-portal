@@ -9,7 +9,10 @@ const {
   normalizeLimit,
   normalizeStatus,
   parseJsonMaybe,
+  reviewActions,
+  isNamedCompetitorReviewRun,
   summarizeDraft,
+  summarizeGates,
   summarizeSeoCompletion,
 } = require('../services/content/autonomous-review-queue');
 
@@ -22,6 +25,49 @@ describe('autonomous-review-queue read model helpers', () => {
     expect(normalizeLimit('25')).toBe(25);
     expect(normalizeLimit('500')).toBe(100);
     expect(normalizeLimit('bad')).toBe(50);
+  });
+
+  test('surfaces comparison-table gate findings in the gate summary', () => {
+    const cmp = {
+      pass: false,
+      findings: [{ severity: 'P0', code: 'COMPARISON_UNKNOWN_COMPETITOR', message: 'Names "Hulett", ...' }],
+    };
+    const summary = summarizeGates({ ok: true }, { ok: true }, cmp);
+    expect(summary.comparison_ok).toBe(false);
+    expect(summary.comparison_findings).toEqual([
+      { severity: 'P0', code: 'COMPARISON_UNKNOWN_COMPETITOR', message: 'Names "Hulett", ...' },
+    ]);
+  });
+
+  test('comparison_ok is null when the comparison gate did not run', () => {
+    expect(summarizeGates({ ok: true }, { ok: true }, {}).comparison_ok).toBeNull();
+    expect(summarizeGates({ ok: true }, { ok: true }).comparison_ok).toBeNull();
+  });
+
+  test('named-competitor review runs are approve-and-publish, not trust-build credit', () => {
+    const named = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'named_competitor_review' };
+    expect(isNamedCompetitorReviewRun(named)).toBe(true);
+    expect(isTrustBuildRun(named)).toBe(false); // must NOT be approvable via trust-build (that wouldn't publish)
+
+    const trust = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_3' };
+    expect(isNamedCompetitorReviewRun(trust)).toBe(false);
+    expect(isTrustBuildRun(trust)).toBe(true);
+
+    // Shadow / wrong-outcome runs are not approvable.
+    expect(isNamedCompetitorReviewRun({ ...named, shadow_mode: true })).toBe(false);
+  });
+
+  test('reviewActions exposes can_approve_named_competitor only for those pending runs', () => {
+    const opp = { status: 'pending_review' };
+    const named = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'named_competitor_review' };
+    const a = reviewActions({ opportunity: opp, run: named });
+    expect(a.can_approve_named_competitor).toBe(true);
+    expect(a.can_approve_trust_build).toBe(false);
+
+    const trust = { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_3' };
+    const b = reviewActions({ opportunity: opp, run: trust });
+    expect(b.can_approve_named_competitor).toBe(false);
+    expect(b.can_approve_trust_build).toBe(true);
   });
 
   test('parses JSON columns with fallback', () => {

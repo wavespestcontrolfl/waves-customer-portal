@@ -275,7 +275,18 @@ export default function ReceiptPage() {
   const { invoice, service, customer, payment, payer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
+  // When account credit (fully or partly) covered the invoice there may be no
+  // payments row — fall back to the amount DUE net of applied credit (zero for a
+  // fully credit-covered invoice), never the gross invoice.total, so the
+  // "Account credit applied" line and the charged total reconcile.
+  const chargedTotal = payment?.amount != null
+    ? payment.amount
+    : Math.max(0, Number(invoice.total || 0) - Number(invoice.creditApplied || 0));
   const paid = invoice.status === 'paid';
+  // A fully-refunded invoice moves to status 'refunded' but keeps a permanent,
+  // downloadable bookkeeping receipt (the PDF route serves 'paid' + 'refunded'),
+  // so the download link must show for both — else a refund hides the PDF button.
+  const hasReceiptPdf = paid || invoice.status === 'refunded';
   const processing = invoice.status === 'processing' || payment?.state === 'processing';
   const paidAt = invoice.paidAt || payment?.paymentDate;
   const invoiceMethod = String(invoice.paymentMethod || '').toLowerCase();
@@ -499,7 +510,7 @@ export default function ReceiptPage() {
             <div>
               <div style={eyebrow}>{processing ? 'Submitted amount' : 'Receipt total'}</div>
               <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
-                {fmtCurrency(payment?.amount || invoice.total)}
+                {fmtCurrency(chargedTotal)}
               </div>
               <div style={{ marginTop: 8, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
                 {statusDetail}
@@ -641,7 +652,10 @@ export default function ReceiptPage() {
                 value={fmtCurrency(payment.surchargeAmountCents / 100)}
               />
             )}
-            <SummaryRow label={processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(payment?.amount || invoice.total)} strong />
+            {invoice.creditApplied > 0 && (
+              <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
+            )}
+            <SummaryRow label={processing ? 'Total submitted' : 'Total charged'} value={fmtCurrency(chargedTotal)} strong />
 
             {refundState && payment?.refundAmount > 0 && (
               <>
@@ -665,7 +679,7 @@ export default function ReceiptPage() {
           )}
 
           <div className="waves-no-print" style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14 }}>
-            {paid ? (
+            {hasReceiptPdf ? (
               <a
                 href={`${API_BASE}/receipt/${token}/pdf`}
                 style={{

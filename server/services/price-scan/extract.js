@@ -230,13 +230,15 @@ function extractJsonLdOffer(jsonLdStrings, opts = {}) {
     // Trustworthy variant matches: the offer's OWN name parses to the size.
     let pool = offers.filter((o) => o.ownName && matchesTarget(o.ownName));
     if (!pool.length && offers.length === 1) {
-      // Single CONCRETE offer = the whole product; accept it only when its
-      // display name actually substantiates the target size. A name with NO size
-      // can't be tied to the requested pack (the page may expose only a
-      // default/starting-variant price), so don't guess — return null. An
-      // AggregateOffer lowPrice is never accepted this way either.
+      // Single CONCRETE offer = the whole product. Accept it when the size is
+      // substantiated by the offer's display name OR the page TITLE (opts.title) — some
+      // storefronts use a separate URL per size (Veseris: ".../primo-maxx-...-1-gal"),
+      // where the lone offer is nameless but the title states the size, so that price IS
+      // tied to the requested pack. A name+title with NO size still can't be tied (don't
+      // guess); an AggregateOffer lowPrice is never accepted this way; price must be > 0.
       const only = offers[0];
-      if (!only.aggregate && matchesTarget(only.name)) pool = offers;
+      const sized = matchesTarget(only.name) || (opts.title && matchesTarget(opts.title));
+      if (!only.aggregate && sized && Number(only.price) > 0) pool = offers;
     }
     if (!pool.length) return null;
     const best = pickBestOffer(pool);
@@ -439,7 +441,9 @@ function offerFromSnapshot(snapshot = {}, opts = {}) {
     }
   }
 
-  const ldOffer = extractJsonLdOffer(jsonLd, opts);
+  // Pass the page title so a single nameless offer on a per-size URL (Veseris) can be tied
+  // to the target size by the title.
+  const ldOffer = extractJsonLdOffer(jsonLd, { ...opts, title: snapshot.title });
   if (ldOffer) {
     // When structured data priced the offer but omitted availability, fall back
     // to the DOM availability text — otherwise a page whose DOM says out of
