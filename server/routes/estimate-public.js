@@ -1275,7 +1275,11 @@ function normalizeManualDiscountSummary(estData = {}) {
 
 function manualDiscountMonthlyAmount(estData = {}) {
   const manual = normalizeManualDiscountSummary(estData);
-  return manual ? Math.round((manual.amount / 12) * 100) / 100 : 0;
+  if (!manual) return 0;
+  // Monthly figure tracks the recurring slice only; the one-time slice is shown
+  // in the one-time total, not amortized across recurring months.
+  const recurring = Number(manual.recurringAmount ?? manual.amount);
+  return recurring > 0 ? Math.round((recurring / 12) * 100) / 100 : 0;
 }
 
 function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnualBase = 0) {
@@ -2824,7 +2828,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const prefs = normalizePrefs(estData?.preferences);
   const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
   const manualDiscount = normalizeManualDiscountSummary(estData);
-  const manualDiscountMonthly = manualDiscount ? Math.round((manualDiscount.amount / 12) * 100) / 100 : 0;
+  const manualDiscountMonthly = manualDiscount
+    ? Math.round((Number(manualDiscount.recurringAmount ?? manualDiscount.amount) / 12) * 100) / 100
+    : 0;
   const hasOnlyLawnCareServices = hasOnlyLawnCareServiceMix(recurring, oneTimeItems);
   const hasOnlyMosquitoServices = hasOnlyMosquitoServiceMix(recurring, oneTimeItems);
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
@@ -7370,7 +7376,11 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   const manualDiscount = summary.manualDiscount && Number(summary.manualDiscount.amount) > 0
     ? {
         ...summary.manualDiscount,
-        monthlyAmount: Math.round((Number(summary.manualDiscount.amount) / 12) * 100) / 100,
+        // monthlyAmount is the per-month recurring figure, so it tracks only the
+        // recurring slice; the one-time slice is reflected in the one-time total.
+        monthlyAmount: Math.round(
+          (Number(summary.manualDiscount.recurringAmount ?? summary.manualDiscount.amount) / 12) * 100,
+        ) / 100,
       }
     : null;
 

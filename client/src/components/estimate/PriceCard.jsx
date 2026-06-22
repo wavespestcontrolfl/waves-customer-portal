@@ -109,8 +109,13 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const manualDiscount = frequency.manualDiscount && Number(frequency.manualDiscount.amount) > 0
     ? frequency.manualDiscount
     : null;
-  const manualDiscountInterval = manualDiscount
-    ? Math.round((Number(manualDiscount.amount) / 12) * intervalMonths * 100) / 100
+  // Only the recurring slice belongs on a per-interval recurring price card; the
+  // one-time slice (recurringAmount vs amount) is shown with one-time services.
+  const manualDiscountRecurringAnnual = manualDiscount
+    ? Number(manualDiscount.recurringAmount ?? manualDiscount.amount)
+    : 0;
+  const manualDiscountInterval = manualDiscountRecurringAnnual > 0
+    ? Math.round((manualDiscountRecurringAnnual / 12) * intervalMonths * 100) / 100
     : 0;
   const treatmentRows = Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments

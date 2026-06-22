@@ -69,6 +69,65 @@ describe('pricing engine manual recurring discount', () => {
     expect(estimate.summary.recurringAnnualAfterDiscount).toBe(0);
   });
 
+  test('custom percentage discounts a one-time-only estimate (no recurring base)', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { exclusion: true },
+      manualDiscount: {
+        source: 'custom',
+        presetKey: 'custom_percent',
+        catalogCategory: 'custom_template',
+        type: 'PERCENT',
+        value: 15,
+        label: 'WaveGuard Member Discount',
+      },
+    }));
+
+    const md = estimate.summary.manualDiscount;
+    expect(md.recurringAmount).toBe(0);
+    expect(md.oneTimeAmount).toBeGreaterThan(0);
+    expect(md.amount).toBeCloseTo(md.oneTimeAmount, 2);
+    expect(md.scope).toBe('recurring_and_one_time_after_waveguard');
+    // The one-time total is reduced by exactly the one-time slice.
+    expect(md.oneTimeAmount).toBeCloseTo(md.oneTimeDiscountableBase * 0.15, 2);
+    expect(estimate.summary.oneTimeTotal).toBeCloseTo(
+      md.oneTimeDiscountableBase - md.oneTimeAmount,
+      2,
+    );
+  });
+
+  test('custom percentage splits across recurring and one-time work', () => {
+    const noDiscount = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, exclusion: true },
+    }));
+    const estimate = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, exclusion: true },
+      manualDiscount: { source: 'custom', type: 'PERCENT', value: 15, label: 'Member' },
+    }));
+
+    const md = estimate.summary.manualDiscount;
+    expect(md.recurringAmount).toBeGreaterThan(0);
+    expect(md.oneTimeAmount).toBeGreaterThan(0);
+    expect(md.amount).toBeCloseTo(md.recurringAmount + md.oneTimeAmount, 2);
+    // Year-1 drops by the full (recurring + one-time) discount, exactly once.
+    expect(estimate.summary.year1Total).toBeCloseTo(
+      noDiscount.summary.year1Total - md.amount,
+      0,
+    );
+  });
+
+  test('fixed dollar discount allocates proportionally across recurring and one-time', () => {
+    const estimate = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, exclusion: true },
+      manualDiscount: { source: 'custom', type: 'FIXED', value: 100, label: 'Member' },
+    }));
+
+    const md = estimate.summary.manualDiscount;
+    expect(md.recurringAmount + md.oneTimeAmount).toBeCloseTo(100, 2);
+    expect(md.recurringAmount).toBeGreaterThan(0);
+    expect(md.oneTimeAmount).toBeGreaterThan(0);
+    expect(md.capped).toBe(false);
+  });
+
   test('manual percentage above 100 is rejected server-side', () => {
     expect(() => generateEstimate(baseInput({
       manualDiscount: { type: 'PERCENT', value: 101 },

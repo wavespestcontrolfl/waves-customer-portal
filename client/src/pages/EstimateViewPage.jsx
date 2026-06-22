@@ -1321,8 +1321,11 @@ function manualDiscountMonthlyAmount(manualDiscount) {
   if (!manualDiscount) return 0;
   const monthly = Number(manualDiscount.monthlyAmount);
   if (Number.isFinite(monthly) && monthly > 0) return Math.round(monthly * 100) / 100;
-  const amount = Number(manualDiscount.amount);
-  return Number.isFinite(amount) && amount > 0 ? Math.round((amount / 12) * 100) / 100 : 0;
+  // Only the recurring slice belongs on the recurring (per-month) total; the
+  // one-time slice is reflected in the one-time breakdown. Falls back to the
+  // full amount for legacy estimates saved before the slice fields existed.
+  const annual = Number(manualDiscount.recurringAmount ?? manualDiscount.amount);
+  return Number.isFinite(annual) && annual > 0 ? Math.round((annual / 12) * 100) / 100 : 0;
 }
 
 function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier }) {

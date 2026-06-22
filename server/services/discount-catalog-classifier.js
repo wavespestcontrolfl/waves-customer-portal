@@ -72,9 +72,18 @@ function classifyDiscountCatalogEntry(discount = {}) {
       (discountType === 'percentage' || discountType === 'variable_percentage') &&
       amount >= 100
     );
-  const waveGuardTierDiscount =
-    asBoolean(discount.is_waveguard_tier_discount || discount.isWaveguardTierDiscount) ||
-    stackNorm === 'tier';
+  // A row only counts as an auto-applied WaveGuard *tier* discount when it is
+  // explicitly flagged as one. The `tier` stack group is a tie-breaker (only
+  // one tier-group discount wins), so generic member discounts share it without
+  // being tier discounts — e.g. "WaveGuard Member Discount" ships with
+  // is_waveguard_tier_discount=false and is meant to be applied manually in the
+  // estimator. Honor the explicit flag when present; fall back to the stack
+  // group only when the flag was never set.
+  const tierFlagRaw = discount.is_waveguard_tier_discount ?? discount.isWaveguardTierDiscount;
+  const tierFlagProvided = tierFlagRaw !== undefined && tierFlagRaw !== null;
+  const waveGuardTierDiscount = tierFlagProvided
+    ? asBoolean(tierFlagRaw)
+    : stackNorm === 'tier';
   const invoicePromo = stackNorm === 'promo' || !!discount.promo_code || !!discount.promoCode;
   const paymentMethodDiscount =
     !!paymentMethodCondition ||
