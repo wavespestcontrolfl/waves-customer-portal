@@ -2886,7 +2886,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     border: `1px solid ${allEmail ? B.blueDeeper : '#D8D0C0'}`,
                     background: allEmail ? B.blueDeeper : '#fff',
                     color: allEmail ? '#fff' : B.blueDeeper,
-                    fontSize: 13, fontWeight: 800, cursor: 'pointer',
+                    fontSize: 14, fontWeight: 800, cursor: 'pointer',
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                   }}
                 >
