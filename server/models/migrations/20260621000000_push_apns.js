@@ -14,11 +14,16 @@ exports.up = async function (knex) {
     t.string('platform', 10).notNullable().defaultTo('web');
     t.text('device_token');
   });
-  // Dedup re-registrations of the same device. Partial so existing web rows
-  // (device_token IS NULL) are exempt.
+  // Dedup re-registrations of the same device. NON-partial on purpose: Postgres
+  // treats NULLs as distinct in a unique index (default NULLS DISTINCT), so the
+  // many web rows with device_token IS NULL never collide, while ios tokens stay
+  // unique. A partial index (WHERE device_token IS NOT NULL) could NOT be
+  // inferred by the `ON CONFLICT (device_token)` upsert in routes/push.js
+  // without repeating the predicate — which would make every native-subscribe
+  // fail "no unique or exclusion constraint matching the ON CONFLICT".
   await knex.schema.raw(
     `CREATE UNIQUE INDEX IF NOT EXISTS push_subscriptions_device_token_uniq
-     ON push_subscriptions (device_token) WHERE device_token IS NOT NULL`
+     ON push_subscriptions (device_token)`
   );
 };
 
