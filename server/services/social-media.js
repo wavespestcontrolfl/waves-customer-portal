@@ -1424,7 +1424,7 @@ const SocialMediaService = {
       return { platform, success: false, dryRun: true, content: text };
     }
 
-    if (platform === 'facebook') return postToFacebook(text, link);
+    if (platform === 'facebook') return postToFacebook(text, link, imageUrl);
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
     if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
@@ -1478,3 +1478,5 @@ module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;
 module.exports.buildSocialFailureAlert = buildSocialFailureAlert;
+// Reused by tech-social-caption.js so field-photo captions share one brand voice.
+module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;

@@ -148,6 +148,7 @@ const QUICK_ACTIONS = [
   { icon: '📅', label: "Today's Route", path: '/tech' },
   { icon: '📋', label: 'Field Estimator', path: '/tech/estimate' },
   { icon: '🌱', label: 'Lawn Diagnostic', path: '/tech/lawn-diagnostic' },
+  { icon: '📸', label: 'Social Post', path: '/tech/social-post' },
   { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
 ];
