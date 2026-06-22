@@ -21,6 +21,20 @@ function hostOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
 }
 
+// A host is "on the allowlisted domain" if it equals it or is a sub-domain of it
+// (a directory may host the live listing / confirmation on a sub-domain). Same
+// registrable domain only — never an off-domain host.
+function hostMatchesExpected(host, expected) {
+  return !!expected && (host === expected || host.endsWith(`.${expected}`));
+}
+
+// A selector that looks like a submit control — we never let a model-emitted `click`
+// hit one (the real submission goes through the explicit final `submit` action), so a
+// stray click can't submit the form early and trigger a duplicate listing on retry.
+function isSubmitControl(sel) {
+  return /submit/i.test(String(sel || ''));
+}
+
 /**
  * Per-request SSRF decision for the Playwright route guard. Applied to EVERY request
  * the browser makes (top-level navigation, redirect, sub-resource). Blocks:
@@ -36,7 +50,7 @@ async function requestAllowed({ url, isNavigation, isTopFrame }, { expectedHost,
   let host = '';
   try { host = new URL(url).hostname; } catch { return false; }
   if (!host || ssrf.isBlockedHostname(host)) return false;
-  if (expectedHost && isNavigation && isTopFrame && hostOf(url) !== expectedHost) return false;
+  if (expectedHost && isNavigation && isTopFrame && !hostMatchesExpected(hostOf(url), expectedHost)) return false;
   if (!(await resolvePublic(host))) return false;
   return true;
 }
@@ -141,7 +155,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     await page.goto(submitUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
     // Off-host redirect guard: if the page navigated away from the allowlisted host,
     // bail before screenshotting / sending anything to the model.
-    if (expectedHost && typeof page.url === 'function' && hostOf(page.url()) !== expectedHost) {
+    if (expectedHost && typeof page.url === 'function' && !hostMatchesExpected(hostOf(page.url()), expectedHost)) {
       return { outcome: 'failed', errorCode: 'offsite_redirect', notes: `redirected off ${expectedHost}` };
     }
     await page.waitForTimeout(1500);
@@ -150,13 +164,25 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     const plan = await callVision(client, shot1.toString('base64'), planPrompt(nap));
     if (!plan || typeof plan !== 'object') return { outcome: 'failed', errorCode: 'plan_parse', screenshot: shot1, notes: 'no plan' };
     if (plan.blocked) return { outcome: `blocked_${plan.blocked}`.replace('blocked_phone', 'blocked_phone_verification'), errorCode: `blocked_${plan.blocked}`, screenshot: shot1, notes: plan.notes };
-    if (!plan.form_present || !Array.isArray(plan.actions) || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: plan.notes || 'no form' };
+    if (plan.form_present !== true || !Array.isArray(plan.actions) || !plan.actions.length) return { outcome: 'skipped', errorCode: 'no_form', screenshot: shot1, notes: plan.notes || 'no form' };
 
-    // Execute ONLY the allowlisted, deterministic actions; ignore anything else
-    // the model emitted (no uploads, no open-ended navigation, no captcha steps).
+    // Validate the plan SHAPE before touching the page. A partial run that submits via
+    // a stray click and only THEN reports no_submit would risk a duplicate listing on
+    // the next retry — so require exactly one submit action, as the final action,
+    // up front; anything else is rejected without filling anything.
+    const submitCount = plan.actions.filter((a) => a && a.action === 'submit').length;
+    const last = plan.actions[plan.actions.length - 1];
+    if (submitCount !== 1 || !last || last.action !== 'submit' || !last.selector) {
+      return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'plan must end with exactly one submit action' };
+    }
+
+    // Execute ONLY the allowlisted, deterministic actions; ignore anything else the
+    // model emitted (no uploads, no open-ended navigation, no captcha steps). Skip a
+    // `click` on a submit-looking control so nothing submits before the final submit.
     let submitted = false;
     for (const act of plan.actions) {
       if (!act || !ALLOWED_ACTIONS.has(act.action) || !act.selector) continue;
+      if (act.action === 'click' && isSubmitControl(act.selector)) { logger.warn(`[form-filler] skipping click on submit-like control ${act.selector}`); continue; }
       try {
         if (act.action === 'fill') await page.fill(act.selector, String(act.value ?? ''));
         else if (act.action === 'select') await page.selectOption(act.selector, String(act.value ?? ''));
@@ -168,15 +194,24 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
         logger.warn(`[form-filler] action ${act.action} ${act.selector} failed: ${e.message}`);
       }
     }
-    if (!submitted) return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'plan had no submit' };
+    if (!submitted) return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'submit action did not run' };
 
     await page.waitForTimeout(1500);
     const shot2 = (await page.screenshot({ fullPage: true, type: 'png' }));
     const verify = await callVision(client, shot2.toString('base64'),
       'Did the previous business-listing submission SUCCEED? Look for a confirmation/thank-you, a moderation/"pending review" notice, or a created listing URL. Return ONLY JSON: {"success":bool,"pending":bool,"live_url":"url or null","notes":"≤15 words"}');
-    const liveUrl = verify && typeof verify.live_url === 'string' && /^https?:\/\//.test(verify.live_url) ? verify.live_url : null;
+    // Only trust a returned live_url that is on the allowlisted domain — a citation's
+    // listing lives on the directory's own domain. The downstream verifier fetches
+    // live_url server-side, so a model-/page-supplied off-host or internal URL must
+    // NOT be stored (it would bypass the same-host SSRF guard). Off-host → drop it
+    // (the placement reports pending; the verifier's domain reconcile finds the URL).
+    const claimedLive = verify && typeof verify.live_url === 'string' && /^https?:\/\//.test(verify.live_url) ? verify.live_url : null;
+    const liveUrl = claimedLive && hostMatchesExpected(hostOf(claimedLive), expectedHost) ? claimedLive : null;
     if (verify && (verify.success || verify.pending)) {
-      return { outcome: 'placed', pending: !!verify.pending && !liveUrl, liveUrl, screenshot: shot2, notes: verify.notes };
+      // Pending whenever the model said so OR we have no trusted live URL (incl. one
+      // dropped as off-host) — a placement without a confirmed on-host URL must be
+      // reported pending so the verifier reconciles it instead of stranding the row.
+      return { outcome: 'placed', pending: !!verify.pending || !liveUrl, liveUrl, screenshot: shot2, notes: verify.notes };
     }
     return { outcome: 'failed', errorCode: 'unconfirmed', screenshot: shot2, notes: (verify && verify.notes) || 'submission not confirmed' };
   } catch (err) {
@@ -188,4 +223,4 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
 }
 
 module.exports = { fillCitationForm };
-module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf };
+module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf, hostMatchesExpected, isSubmitControl };

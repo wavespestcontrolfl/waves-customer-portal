@@ -32,9 +32,9 @@ describe('fillCitationForm', () => {
     expect(log).toHaveLength(0); // never filled anything
   });
 
-  test('free form → fills allowed actions, submits, confirms → placed', async () => {
+  test('free form → fills allowed actions, submits, confirms → placed (on-host live_url kept)', async () => {
     const log = [];
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#name', value: 'Waves' }, { action: 'submit', selector: '#go' }] },
@@ -44,6 +44,47 @@ describe('fillCitationForm', () => {
     expect(r.outcome).toBe('placed');
     expect(r.liveUrl).toBe('https://x.com/biz/waves');
     expect(log).toContainEqual(['fill', '#name', 'Waves']);
+  });
+
+  test('P1: an OFF-host live_url is dropped (reported pending, never stored for the verifier)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: true, pending: false, live_url: 'http://169.254.169.254/latest/meta-data/' },
+      ),
+    });
+    expect(r.outcome).toBe('placed');
+    expect(r.liveUrl).toBeNull();   // off-host URL not trusted
+    expect(r.pending).toBe(true);   // → pending so the row isn't stranded
+  });
+
+  test('P1: a click on a submit-like control is skipped (no early submit before the final submit)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'click', selector: 'button#submitNow' }, { action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: true, pending: false, live_url: 'https://x.com/ok' },
+      ),
+    });
+    expect(r.outcome).toBe('placed');
+    expect(log.find((a) => a[1] === '#submitNow')).toBeUndefined(); // the submit-like click never fired
+    expect(log).toContainEqual(['fill', '#n', 'W']);
+    expect(log).toContainEqual(['click', '#go']); // only the explicit final submit clicked
+  });
+
+  test('P1: plan with no single final submit → failed up front, nothing filled', async () => {
+    const log = [];
+    // two submits → ambiguous; reject before touching the page
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'submit', selector: '#a' }, { action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#b' }] }, {}),
+    });
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('no_submit');
+    expect(log).toHaveLength(0); // rejected before any fill
   });
 
   test('ignores non-allowlisted action types (e.g. upload) the model might emit', async () => {
@@ -104,6 +145,11 @@ describe('requestAllowed (per-request SSRF guard)', () => {
   });
   test('blocks a top-level navigation that leaves the allowlisted host', async () => {
     expect(await requestAllowed({ url: 'https://evil.example/add', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
+  });
+  test('allows a top-level navigation to a sub-domain of the allowlisted host', async () => {
+    expect(await requestAllowed({ url: 'https://listings.x.com/biz/waves', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(true);
+    // but not a look-alike that merely ends with the string
+    expect(await requestAllowed({ url: 'https://notx.com/add', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
   });
   test('allows a public off-host SUB-resource (CDN/font), which is not a navigation', async () => {
     expect(await requestAllowed({ url: 'https://cdn.other.com/a.css', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(true);
