@@ -2413,35 +2413,47 @@ const CallRecordingProcessor = {
                 windowStart: windowStartForLog,
               };
             } else if (!alreadySent) {
-              const sendResult = await sendCustomerMessage({
-                to: smsPhone,
-                body: smsBody,
-                channel: 'sms',
-                audience: 'customer',
-                purpose: 'appointment_confirmation',
+              // Honor the customer's account-level New Appointment Confirmation
+              // channel (sms | email | both). Default 'sms' keeps the exact prior
+              // send; email/both also emails the confirmation.
+              const AppointmentReminders = require('./appointment-reminders');
+              await AppointmentReminders.deliverConfirmationByChannel({
                 customerId,
-                appointmentId: scheduledServiceId,
-                identityTrustLevel: 'phone_matches_customer',
-                metadata: {
-                  original_message_type: 'confirmation',
+                scheduledServiceId,
+                serviceLabel: serviceType,
+                smsAttempt: async () => {
+                  const sendResult = await sendCustomerMessage({
+                    to: smsPhone,
+                    body: smsBody,
+                    channel: 'sms',
+                    audience: 'customer',
+                    purpose: 'appointment_confirmation',
+                    customerId,
+                    appointmentId: scheduledServiceId,
+                    identityTrustLevel: 'phone_matches_customer',
+                    metadata: {
+                      original_message_type: 'confirmation',
+                    },
+                  });
+                  if (sendResult.blocked || sendResult.sent === false) {
+                    logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+                    appointmentResult = {
+                      smsSent: false,
+                      smsBlocked: true,
+                      smsBlockedCode: sendResult.code || null,
+                      scheduledServiceId,
+                      service: serviceType,
+                      dateTime: extracted.preferred_date_time,
+                      scheduledDate: scheduledDateForLog,
+                      windowStart: windowStartForLog,
+                    };
+                    return false;
+                  }
+                  logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
+                  appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
+                  return true;
                 },
               });
-              if (sendResult.blocked || sendResult.sent === false) {
-                logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
-                appointmentResult = {
-                  smsSent: false,
-                  smsBlocked: true,
-                  smsBlockedCode: sendResult.code || null,
-                  scheduledServiceId,
-                  service: serviceType,
-                  dateTime: extracted.preferred_date_time,
-                  scheduledDate: scheduledDateForLog,
-                  windowStart: windowStartForLog,
-                };
-              } else {
-                logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
-                appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
-              }
             } else {
               logger.info(`[call-proc] Skipping duplicate appointment SMS to customer ${customerId} (sent within last 10 min)`);
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };

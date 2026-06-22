@@ -18,7 +18,7 @@ const AppointmentEmail = require('../services/appointment-email');
 const NotificationService = require('../services/notification-service');
 const AppointmentReminders = require('../services/appointment-reminders');
 
-const { apptChannel, deliverAppointmentNotice, getReminderPrefs } = AppointmentReminders._test;
+const { apptChannel, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
 
 // Minimal knex-style chainable mock. first() resolves null so the
 // no-reachable-channel alert dedupe check finds no prior row and proceeds.
@@ -182,5 +182,64 @@ describe('getReminderPrefs account-level channel resolution', () => {
     const prefs = await getReminderPrefs('primary-1');
     expect(prefs.confirmationChannel).toBe('both');
     expect(prefs.reminder24hChannel).toBe('both');
+  });
+});
+
+describe('deliverConfirmationByChannel (self-service booking paths)', () => {
+  function firstChain(value) {
+    const q = {};
+    ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(async () => value);
+    return q;
+  }
+  function setDbQueues(queues) {
+    const tableQueues = new Map(Object.entries(queues));
+    db.mockImplementation((table) => {
+      const queue = tableQueues.get(table);
+      if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+      return queue.shift();
+    });
+  }
+
+  test("'sms' preference: runs the caller's SMS send, never emails", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => true);
+    const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', smsAttempt });
+
+    expect(reached).toBe(true);
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test("'email' preference: emails the confirmation with the derived appt time, skips SMS", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'email' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+      scheduled_services: [firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' })],
+    });
+    const smsAttempt = jest.fn(async () => true);
+    const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', smsAttempt });
+
+    expect(reached).toBe(true);
+    expect(smsAttempt).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+    const callArg = AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls[0][0];
+    expect(callArg.appointmentTime instanceof Date).toBe(true);
+  });
+
+  test('falls back to the SMS send when channel prefs are unavailable', async () => {
+    setDbQueues({
+      notification_prefs: [firstChain(null)],
+      customers: [firstChain(null)],
+    });
+    const smsAttempt = jest.fn(async () => true);
+    const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt });
+
+    expect(reached).toBe(true);
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
 });

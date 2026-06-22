@@ -6669,23 +6669,34 @@ router.put('/:token/accept', async (req, res, next) => {
             );
             if (!customerBody) {
               logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
-            } else {
-              const sendResult = await sendCustomerMessage({
-                to: estimate.customer_phone,
-                body: customerBody,
-                channel: 'sms',
-                audience: 'customer',
-                purpose: 'appointment_confirmation',
-                customerId: customerId || undefined,
-                appointmentId: confirmedAppointmentRow?.id,
-                estimateId: estimate.id,
-                identityTrustLevel: 'service_contact_authorized',
-                entryPoint: 'estimate_accept_onetime_confirmed',
-                metadata: { original_message_type: 'appointment_confirmation' },
-              });
-              if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-              logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${confirmedServiceLabel}`);
             }
+            // Honor the customer's account-level New Appointment Confirmation
+            // channel (sms | email | both). Default 'sms' keeps the exact prior
+            // send; a lead with no customerId resolves to 'sms' as well.
+            await AppointmentReminders.deliverConfirmationByChannel({
+              customerId: customerId || undefined,
+              scheduledServiceId: confirmedAppointmentRow?.id,
+              serviceLabel: confirmedServiceLabel,
+              smsAttempt: async () => {
+                if (!customerBody) return false;
+                const sendResult = await sendCustomerMessage({
+                  to: estimate.customer_phone,
+                  body: customerBody,
+                  channel: 'sms',
+                  audience: 'customer',
+                  purpose: 'appointment_confirmation',
+                  customerId: customerId || undefined,
+                  appointmentId: confirmedAppointmentRow?.id,
+                  estimateId: estimate.id,
+                  identityTrustLevel: 'service_contact_authorized',
+                  entryPoint: 'estimate_accept_onetime_confirmed',
+                  metadata: { original_message_type: 'appointment_confirmation' },
+                });
+                if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+                logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${confirmedServiceLabel}`);
+                return sendResult.sent === true;
+              },
+            });
           }
         } else if (annualPrepaySelected) {
           const amountText = annualPrepayDisplayAmount != null ? ` for ${fmtMoney(annualPrepayDisplayAmount)}` : '';

@@ -172,6 +172,65 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   return smsOk;
 }
 
+// Reconstruct an appointment's ET instant from its scheduled_services row —
+// scheduled_date (DATE) + window_start (TIME) composed into the naive shape
+// parseETDateTime expects. Returns null when the row or fields are missing.
+async function scheduledServiceApptTime(scheduledServiceId) {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('scheduled_date', 'window_start');
+    if (!svc) return null;
+    const datePart = svc.scheduled_date instanceof Date
+      ? svc.scheduled_date.toISOString().slice(0, 10)
+      : String(svc.scheduled_date || '').slice(0, 10);
+    const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+    return (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+  } catch (err) {
+    logger.warn(`[appt-remind] appt-time lookup failed for service ${scheduledServiceId}: ${err.message}`);
+    return null;
+  }
+}
+
+// Deliver a booking confirmation honoring the customer's account-level
+// confirmation channel (sms | email | both). Self-service booking paths (portal
+// self-book, estimate acceptance, call-created) send their own confirmation SMS
+// instead of going through deliverConfirmation, so without this they would
+// ignore an Email/Both preference. `smsAttempt` runs the caller's existing SMS
+// send and resolves true when the customer was reached.
+//
+// The default 'sms' path is deliberately unchanged — it just runs smsAttempt, so
+// existing customers see identical behavior. Only an explicit email/both
+// preference routes through the channel-aware deliverAppointmentNotice (which
+// adds the email send and the both-failed admin alert). Best-effort: a
+// prefs-lookup failure falls back to the plain SMS send.
+async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
+  let channel = 'sms';
+  try {
+    const prefs = await getReminderPrefs(customerId);
+    channel = prefs.confirmationChannel;
+  } catch (err) {
+    logger.warn(`[appt-remind] confirmation channel lookup failed for ${customerId}: ${err.message} — sending SMS`);
+  }
+  if (channel === 'sms') return smsAttempt();
+
+  // email / both — resolve the appointment time for the email body when the
+  // caller didn't pass one, so the confirmation email shows the right ET slot.
+  let resolvedApptTime = apptTime;
+  if (!resolvedApptTime && scheduledServiceId) {
+    resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
+  }
+  return deliverAppointmentNotice({
+    channel,
+    kind: 'confirmation',
+    customerId,
+    scheduledServiceId,
+    apptTime: resolvedApptTime,
+    serviceLabel,
+    smsAttempt,
+  });
+}
+
 function lastTenDigits(value) {
   return String(value || '').replace(/\D/g, '').slice(-10);
 }
@@ -1510,11 +1569,18 @@ const AppointmentReminders = {
 // skipped locally) can raise the same deduped "no reachable channel" admin alert.
 AppointmentReminders.alertNoReachableChannel = alertNoReachableChannel;
 
+// Exposed so self-service booking paths (booking, estimate acceptance,
+// call-created) can route their own confirmation SMS through the customer's
+// account-level confirmation channel preference.
+AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel;
+
 AppointmentReminders._test = {
   maskPhone,
   sanitizeLookupError,
   apptChannel,
   deliverAppointmentNotice,
+  deliverConfirmationByChannel,
+  scheduledServiceApptTime,
   sendAppointmentNoticeEmail,
   getReminderPrefs,
 };
