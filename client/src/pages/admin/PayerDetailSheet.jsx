@@ -31,8 +31,8 @@ import { adminFetch } from "../../lib/adminFetch";
 const money = (n) =>
   `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-// DATE columns arrive as 'YYYY-MM-DD' (or a midnight-UTC ISO) — render in UTC so
-// a date never shifts a day in the browser's local zone.
+// DATE columns (period_start/end, due_date, service_date) arrive as 'YYYY-MM-DD'
+// (or a midnight-UTC ISO) — render in UTC so a date never shifts a day.
 const dateOnly = (v) =>
   v
     ? new Date(v).toLocaleDateString("en-US", {
@@ -40,6 +40,19 @@ const dateOnly = (v) =>
         month: "short",
         day: "numeric",
         timeZone: "UTC",
+      })
+    : "—";
+
+// TIMESTAMP columns (paid_at, etc.) are instants — render their Eastern calendar
+// date (the portal is ET end-to-end), NOT UTC, so a 10pm-ET settle doesn't show
+// the next day.
+const dateInET = (v) =>
+  v
+    ? new Date(v).toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        timeZone: "America/New_York",
       })
     : "—";
 
@@ -309,7 +322,7 @@ function StatementDetail({ payerId, statement, onChanged }) {
           </Button>
         )}
         {status === "paid" && (
-          <span className="text-12 text-zinc-500">Settled {statement.paid_at ? `on ${dateOnly(statement.paid_at)}` : ""}.</span>
+          <span className="text-12 text-zinc-500">Settled {statement.paid_at ? `on ${dateInET(statement.paid_at)}` : ""}.</span>
         )}
       </div>
 
@@ -338,6 +351,12 @@ function StatementDetail({ payerId, statement, onChanged }) {
 function ReconcileForm({ total, busy, onCancel, onSubmit }) {
   const [method, setMethod] = useState("check");
   const [amount, setAmount] = useState(total != null ? Number(total).toFixed(2) : "");
+  // Validate client-side: a blank/NaN amount serializes to JSON null, which the
+  // server treats as "default to the full statement total" — so an invalid entry
+  // would silently record the whole balance. Block submit unless it's a positive
+  // finite number (the server still re-checks it against the locked total).
+  const parsed = parseFloat(amount);
+  const valid = Number.isFinite(parsed) && parsed > 0;
   return (
     <div className="mt-2 p-2 border-hairline rounded-sm bg-white flex flex-wrap items-end gap-2">
       <label className="block">
@@ -356,9 +375,10 @@ function ReconcileForm({ total, busy, onCancel, onSubmit }) {
           onChange={(e) => setAmount(e.target.value)}
           inputMode="decimal"
           className="w-28"
+          aria-invalid={!valid}
         />
       </label>
-      <Button size="sm" disabled={!!busy} onClick={() => onSubmit(method, parseFloat(amount))}>
+      <Button size="sm" disabled={!!busy || !valid} onClick={() => valid && onSubmit(method, parsed)}>
         {busy === "Payment recorded" ? "Recording…" : "Record"}
       </Button>
       <Button size="sm" variant="ghost" disabled={!!busy} onClick={onCancel}>
