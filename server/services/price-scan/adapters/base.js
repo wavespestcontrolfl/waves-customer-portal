@@ -354,8 +354,19 @@ function makeAdapter(config) {
     let fallback = null; // best-ranked priced page, if nothing verifies (-> precise 'unverified')
     let firstBuyable = null; // first BUYABLE name+size match lacking EPA confirmation
     let firstUnbuyable = null; // first verified match that isn't buyable (compare drops it)
+    let candidateError = null; // a per-candidate nav/scrape failure, surfaced only if nothing verifies
     for (const url of candidates) {
-      const cand = await scrapeCandidate(page, vendor, product, url);
+      let cand;
+      try {
+        cand = await scrapeCandidate(page, vendor, product, url);
+      } catch (err) {
+        // A transient nav timeout / scrape failure on ONE candidate must not abort the
+        // product — the real match is often the very next link (the search is fuzzy and
+        // relevance-ranked). Remember the error so an all-fail run still reports
+        // fetch_error, but keep trying the remaining candidates.
+        candidateError = err;
+        continue;
+      }
       if (!cand) continue;
       if (!fallback) fallback = cand;
       const verdict = verifyMatch(
@@ -374,8 +385,17 @@ function makeAdapter(config) {
       else if (!firstUnbuyable) firstUnbuyable = cand; // verified but unbuyable
     }
     // A buyable match (can actually be an opportunity) beats a verified-but-unbuyable one
-    // (compare would drop it), which beats any priced page (a precise 'unverified' skip).
-    return firstBuyable || firstUnbuyable || fallback;
+    // (compare would drop it). Only these two are actual verifyMatch passes.
+    const verified = firstBuyable || firstUnbuyable;
+    // If NOTHING verified and a candidate threw, surface that error as a precise
+    // 'fetch_error': the scan was INCOMPLETE (the candidate that timed out might have
+    // been the real match), so we must not let a priced-but-unverified fallback report a
+    // clean 'unverified' — that reads as "found it, no match here, don't retry" when the
+    // truth is "a fetch failed, retry". Only a verified match suppresses the error.
+    if (!verified && candidateError) throw candidateError;
+    // A verified match wins; else the best priced page is a precise 'unverified' skip
+    // (we did reach a page, it just didn't confirm).
+    return verified || fallback;
   }
 
   return { key: config.key, config, fetchCandidate };
