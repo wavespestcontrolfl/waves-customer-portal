@@ -271,6 +271,13 @@ export default function StatementPayPage() {
   const [setupError, setSetupError] = useState(null);
   const [paid, setPaid] = useState(false);
   const [payNotice, setPayNotice] = useState(null); // recovery message across a PI reset
+  // Stripe redirect return (3DS / ACH bank-redirect): the PI is already
+  // submitted, so DON'T re-run /setup (which would 409 against the now-
+  // processing PI and show a false "payment already in progress" error).
+  const [redirectStatus] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("redirect_status"); } catch { return null; }
+  });
+  const redirectSubmitted = redirectStatus === "succeeded" || redirectStatus === "processing";
 
   // A card /finalize attempt left the PI at the surcharged amount; drop it and
   // re-run /setup to mint a fresh BASE-amount PI before another attempt (so a
@@ -294,6 +301,7 @@ export default function StatementPayPage() {
   // Create the PaymentIntent once we know the statement is payable.
   useEffect(() => {
     if (!data || paid || setup || setupError) return;
+    if (redirectSubmitted) return; // returned from a Stripe redirect — already submitted
     if (!data.statement?.payable) return;
     let alive = true;
     fetch(`${API_BASE}/pay/statement/${token}/setup`, {
@@ -309,7 +317,7 @@ export default function StatementPayPage() {
       })
       .catch(() => { if (alive) setSetupError("Could not start the payment."); });
     return () => { alive = false; };
-  }, [data, token, paid, setup, setupError]);
+  }, [data, token, paid, setup, setupError, redirectSubmitted]);
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
@@ -332,12 +340,21 @@ export default function StatementPayPage() {
 
   const { statement, billTo, lines } = data;
 
-  if (paid || statement.status === "paid") {
+  // One "submitted, receipt to follow" terminal state for every success path —
+  // an inline confirm (paid), a Stripe redirect return (3DS / ACH bank-redirect),
+  // an ACH still processing, or a return visit to an already-settled statement.
+  // Honest for card (instant) and ACH (days) alike: settlement + the receipt are
+  // the webhook's job, so we don't claim "settled" while ACH is still clearing.
+  const submitted =
+    paid || redirectSubmitted || statement.status === "paid" || statement.status === "processing";
+
+  if (submitted) {
     return shell(
       <BrandCard>
-        <SerifHeading style={{ marginBottom: 12 }}>Payment received — thank you</SerifHeading>
+        <SerifHeading style={{ marginBottom: 12 }}>Thank you — your payment is in</SerifHeading>
         <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
-          Statement {statement.number} is settled. A receipt will follow by email. Questions? <HelpPhoneLink tone="dark" inline />.
+          We&rsquo;ve received your payment for statement {statement.number}. A receipt will follow by
+          email once it finishes processing. Questions? <HelpPhoneLink tone="dark" inline />.
         </p>
       </BrandCard>,
     );
@@ -348,7 +365,7 @@ export default function StatementPayPage() {
       <BrandCard>
         <SerifHeading style={{ marginBottom: 12 }}>Nothing to pay right now</SerifHeading>
         <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
-          Statement {statement.number} isn&rsquo;t open for payment{statement.status === "processing" ? " — a payment is already processing" : ""}. Questions? <HelpPhoneLink tone="dark" inline />.
+          Statement {statement.number} isn&rsquo;t open for payment. Questions? <HelpPhoneLink tone="dark" inline />.
         </p>
       </BrandCard>,
     );
