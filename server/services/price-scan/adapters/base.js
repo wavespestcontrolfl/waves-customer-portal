@@ -220,6 +220,25 @@ function bestMatchingLink(hrefs, product) {
   return rankedMatchingLinks(hrefs, product)[0] || null;
 }
 
+// PURE: the (<= cap) result links the caller should open + verify, in order. Normally
+// the top `cap` ranked links — but if those are ALL brand matches and a non-brand link
+// exists further down, reserve the last slot for the top non-brand link so a same-EPA
+// generic equivalent (which ranks below every brand match) can't be squeezed out of the
+// candidate set before verifyMatch gets to accept it on EPA + size.
+function selectSearchCandidates(hrefs, product, cap = MAX_SEARCH_CANDIDATES) {
+  const ranked = rankedMatchingLinks(hrefs, product);
+  if (ranked.length <= cap) return ranked;
+  const nameToks = searchTokens(product);
+  const brand = nameToks.find((t) => t.length >= 3) || nameToks[0];
+  const isBrand = (href) => !!brand && slugSegments(href).has(brand);
+  const picked = ranked.slice(0, cap);
+  if (picked.every(isBrand)) {
+    const topNonBrand = ranked.find((href) => !isBrand(href));
+    if (topNonBrand) picked[picked.length - 1] = topNonBrand;
+  }
+  return picked;
+}
+
 // Collect every candidate result link from the page (deduped, in document order).
 async function collectResultLinks(page, config) {
   const sels = config.productLinkSelectors && config.productLinkSelectors.length
@@ -311,12 +330,12 @@ function makeAdapter(config) {
     // same-brand variants apart (Talstar P vs Talstar XTRA). So open the top-ranked
     // results in turn and let verifyMatch (EPA / formulation / size) pick the real
     // one — returning the first that VERIFIES rather than betting on a single link.
-    const ranked = rankedMatchingLinks(await collectResultLinks(page, config), product);
     const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
+    const candidates = selectSearchCandidates(await collectResultLinks(page, config), product, cap);
     const wantsEpa = !!(product && product.epaReg);
     let fallback = null; // best-ranked priced page, if nothing verifies
     let firstMatch = null; // first name+size match, used only if no EPA-confirmed one
-    for (const url of ranked.slice(0, cap)) {
+    for (const url of candidates) {
       const cand = await scrapeCandidate(page, vendor, product, url);
       if (!cand) continue;
       if (!fallback) fallback = cand;
@@ -342,6 +361,6 @@ function makeAdapter(config) {
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, firstProductLink, rankedMatchingLinks, bestMatchingLink, searchTokens,
+  makeAdapter, collectSnapshot, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
   searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };

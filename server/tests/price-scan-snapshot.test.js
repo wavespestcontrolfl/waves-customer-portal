@@ -1,7 +1,7 @@
 // No jsdom: collectSnapshot's DOM querying is browser I/O (exercised by the live
 // proof). The unit-testable part — preferring microdata attributes over text,
 // and the structured-size oz gate — is covered here with plain objects.
-const { priceValue, availabilityValue, targetOzOf, bestMatchingLink, rankedMatchingLinks, searchTokens } = require('../services/price-scan/adapters/base');
+const { priceValue, availabilityValue, targetOzOf, bestMatchingLink, rankedMatchingLinks, selectSearchCandidates, searchTokens } = require('../services/price-scan/adapters/base');
 
 // Minimal element stub: attributes + textContent, like a DOM node.
 const el = (attrs = {}, text = '') => ({
@@ -149,5 +149,20 @@ describe('rankedMatchingLinks (try same-brand variants in turn)', () => {
     ], { vendorProductName: 'Taurus SC Termiticide', quantity: '78 oz' });
     expect(ranked[0]).toMatch(/taurus-sc-termiticide/); // exact brand first (fast path)
     expect(ranked).toContain('https://www.domyown.com/generic-fipronil-9-sc-p-50.html'); // equivalent kept for verify
+  });
+});
+
+describe('selectSearchCandidates (reserve a slot for an EPA-equivalent)', () => {
+  const dmo = (s) => `https://www.domyown.com/${s}.html`;
+  test('when brand matches fill the cap, the last slot is reserved for the top non-brand link', () => {
+    const links = ['taurus-sc-a-p-1', 'taurus-sc-b-p-2', 'taurus-sc-c-p-3', 'taurus-sc-d-p-4', 'generic-fipronil-sc-p-9'].map(dmo);
+    const picked = selectSearchCandidates(links, { vendorProductName: 'Taurus SC', quantity: '78 oz' }, 4);
+    expect(picked).toHaveLength(4);
+    expect(picked).toContain(dmo('generic-fipronil-sc-p-9')); // equivalent not squeezed out
+    expect(picked.filter((h) => /taurus/.test(h))).toHaveLength(3); // 3 brand + 1 equivalent
+  });
+  test('does not displace anything when a non-brand candidate is already within the cap', () => {
+    const links = ['taurus-sc-a-p-1', 'taurus-sc-b-p-2', 'generic-fipronil-sc-p-9'].map(dmo);
+    expect(selectSearchCandidates(links, { vendorProductName: 'Taurus SC', quantity: '78 oz' }, 4)).toEqual(links);
   });
 });
