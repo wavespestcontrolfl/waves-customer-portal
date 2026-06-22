@@ -305,7 +305,10 @@ router.post('/publish', async (req, res, next) => {
     // actually publish and it isn't a dry run. Instagram requires a public URL;
     // Facebook and GBP attach it when present.
     let imageUrl = null;
-    if (toPublish.length && !dryRun && photo && photo.data) {
+    // Only upload when hosting is fully configured — uploadImageToS3 PUTs the
+    // object BEFORE its own CDN check, so calling it without a CDN domain would
+    // orphan the customer photo on S3 with no URL to clean up.
+    if (toPublish.length && !dryRun && photo && photo.data && social.isImageHostingConfigured()) {
       // Unguessable, collision-free key — these are customer field photos.
       imageUrl = await social.uploadImageToS3(photo.data, `tech-field-${crypto.randomUUID()}.jpg`);
     }
@@ -357,10 +360,20 @@ router.post('/publish', async (req, res, next) => {
     const loggedCaptions = {};
     for (const item of plan) loggedCaptions[item.platform] = item.content;
 
+    // Sanitize what we persist: drop the detailed validationIssues (they can quote
+    // an unknown phone number) and genericize validation skip reasons; and redact
+    // techNote if it carries PII (it's free text the tech typed, never PII-checked).
+    const loggedResults = results.map(({ validationIssues, ...r }) =>
+      (typeof r.skipped === 'string' && r.skipped.startsWith('Validation:'))
+        ? { ...r, skipped: 'Validation: caption rejected' }
+        : r);
+    const rawNote = typeof req.body.techNote === 'string' ? req.body.techNote : '';
+    const safeNote = captionService.piiIssues(rawNote).length ? '' : rawNote;
+
     const location = WAVES_LOCATIONS.find((l) => l.id === locationId) || null;
     await logPost(buildPostLogRow({
-      techNote: typeof req.body.techNote === 'string' ? req.body.techNote : '',
-      captions: loggedCaptions, results, imageUrl, location,
+      techNote: safeNote,
+      captions: loggedCaptions, results: loggedResults, imageUrl, location,
       model: typeof model === 'string' ? model.slice(0, 80) : null, // ai_model is varchar(80)
       publishId: typeof publishId === 'string' ? publishId : null,
     }));

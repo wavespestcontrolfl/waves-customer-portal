@@ -1465,6 +1465,14 @@ const SocialMediaService = {
   generateImage,
 };
 
+// True only when both S3 and the public CDN domain are configured — i.e. an
+// uploaded image will actually be fetchable. Lets callers avoid uploading a
+// customer photo that uploadImageToS3 would orphan (it PUTs before the CDN check).
+function isImageHostingConfigured() {
+  return !!process.env.SOCIAL_MEDIA_CDN_DOMAIN
+    && !!(config.s3 && config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket);
+}
+
 // Delete a previously hosted social image (CDN URL → S3 key). Used to clean up a
 // field photo when every publish attempt failed, so an orphaned customer photo
 // isn't left publicly fetchable.
@@ -1501,3 +1509,4 @@ module.exports.buildSocialFailureAlert = buildSocialFailureAlert;
 // Reused by tech-social-caption.js so field-photo captions share one brand voice.
 module.exports.BRAND_PREAMBLE = BRAND_PREAMBLE;
 module.exports.deleteSocialImage = deleteSocialImage;
+module.exports.isImageHostingConfigured = isImageHostingConfigured;
