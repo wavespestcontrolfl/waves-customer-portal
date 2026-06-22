@@ -1155,7 +1155,7 @@ const SPECIALTY = {
         containerOz: 78,
         productOzPer10SqFt: 0.8,
         pricingMethod: 'product_oz_per_10_sqft',
-        marginDivisor: 0.45,
+        marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1174,7 +1174,7 @@ const SPECIALTY = {
         containerOz: 78,
         productOzPer10SqFt: 0.8,
         pricingMethod: 'product_oz_per_10_sqft',
-        marginDivisor: 0.45,
+        marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1192,7 +1192,7 @@ const SPECIALTY = {
         containerOz: 128,
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
-        marginDivisor: 0.45,
+        marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1210,7 +1210,7 @@ const SPECIALTY = {
         containerOz: 128,
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
-        marginDivisor: 0.45,
+        marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1219,24 +1219,26 @@ const SPECIALTY = {
         ],
       },
     },
+    // Floors reflect the 15%-across-the-board pre-slab price cut (orig x0.85,
+    // rounded to whole dollars).
     minimums: {
       standalone: [
-        { maxSqFt: 250, floor: 225 },
-        { maxSqFt: 750, floor: 325 },
-        { maxSqFt: 1250, floor: 425 },
-        { maxSqFt: 'Infinity', floor: 600 },
+        { maxSqFt: 250, floor: 191 },
+        { maxSqFt: 750, floor: 276 },
+        { maxSqFt: 1250, floor: 361 },
+        { maxSqFt: 'Infinity', floor: 510 },
       ],
       builderBatch: [
-        { maxSqFt: 250, floor: 150 },
-        { maxSqFt: 750, floor: 250 },
-        { maxSqFt: 1250, floor: 350 },
-        { maxSqFt: 'Infinity', floor: 500 },
+        { maxSqFt: 250, floor: 128 },
+        { maxSqFt: 750, floor: 213 },
+        { maxSqFt: 1250, floor: 298 },
+        { maxSqFt: 'Infinity', floor: 425 },
       ],
       sameTripAddOn: [
-        { maxSqFt: 250, floor: 125 },
-        { maxSqFt: 750, floor: 225 },
-        { maxSqFt: 1250, floor: 325 },
-        { maxSqFt: 'Infinity', floor: 500 },
+        { maxSqFt: 250, floor: 106 },
+        { maxSqFt: 750, floor: 191 },
+        { maxSqFt: 1250, floor: 276 },
+        { maxSqFt: 'Infinity', floor: 425 },
       ],
     },
     equipCost: 15,
@@ -1253,7 +1255,7 @@ const SPECIALTY = {
       maxHours: 5,
     },
     volumeDiscounts: { '10plus': 0.85, '5plus': 0.90, none: 1.00 },
-    warrantyExtended: r(200),
+    warrantyExtended: r(170),  // 15% cut from $200
   },
   foamDrill: {
     canCost: 39.08,

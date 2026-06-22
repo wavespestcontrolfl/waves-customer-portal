@@ -206,18 +206,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 1054,
+      "total": 896,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
           "name": "Pre-Slab Termiticide Treatment",
-          "price": 1054
+          "price": 896
         }
       ]
     },
     "totals": {
-      "year1": 1054,
+      "year1": 896,
       "year2": 0
     }
   },

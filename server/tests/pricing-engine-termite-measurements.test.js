@@ -356,27 +356,27 @@ describe('termite measurement overrides and safeguards', () => {
     expect(termidor.productOz).toBe(200);
     expect(termidor.units).toBe(3);
     expect(termidor.productCost).toBe(448);
-    expect(termidor.price).toBe(1279);
+    expect(termidor.price).toBe(1087);
 
     const taurus = pricePreSlabTermiticide(2500, { productKey: 'taurus_sc', labelConfirmed: true });
     expect(taurus.productOz).toBe(200);
     expect(taurus.units).toBe(3);
     expect(taurus.productCost).toBe(243.59);
-    expect(taurus.price).toBe(825);
+    expect(taurus.price).toBe(701);
 
     const bifen = pricePreSlabTermiticide(2500, { productKey: 'bifen_it', labelConfirmed: true });
     expect(bifen.productOz).toBe(250);
     expect(bifen.units).toBe(2);
     expect(bifen.productCost).toBe(81.11);
-    expect(bifen.rawPrice).toBe(464);
-    expect(bifen.price).toBe(600);
+    expect(bifen.rawPrice).toBe(394);
+    expect(bifen.price).toBe(510);
 
     const talstar = pricePreSlabTermiticide(2500, { productKey: 'talstar_p', labelConfirmed: true });
     expect(talstar.productOz).toBe(250);
     expect(talstar.units).toBe(2);
     expect(talstar.productCost).toBe(76.15);
-    expect(talstar.rawPrice).toBe(453);
-    expect(talstar.price).toBe(600);
+    expect(talstar.rawPrice).toBe(385);
+    expect(talstar.price).toBe(510);
   });
 
   test('Pre-Slab Termiticide uses contextual small-slab minimums', () => {
@@ -387,8 +387,8 @@ describe('termite measurement overrides and safeguards', () => {
     });
     expect(standalone.productOz).toBe(10);
     expect(standalone.productCost).toBe(3.24);
-    expect(standalone.contextualFloor).toBe(225);
-    expect(standalone.price).toBe(225);
+    expect(standalone.contextualFloor).toBe(191);
+    expect(standalone.price).toBe(191);
     expect(standalone.price).not.toBe(600);
 
     const builderBatch = pricePreSlabTermiticide(100, {
@@ -396,8 +396,8 @@ describe('termite measurement overrides and safeguards', () => {
       jobContext: 'builderBatch',
       labelConfirmed: true,
     });
-    expect(builderBatch.contextualFloor).toBe(150);
-    expect(builderBatch.price).toBe(174);
+    expect(builderBatch.contextualFloor).toBe(128);
+    expect(builderBatch.price).toBe(148);
     expect(builderBatch.price).not.toBe(600);
 
     const sameTripAddOn = pricePreSlabTermiticide(100, {
@@ -405,8 +405,8 @@ describe('termite measurement overrides and safeguards', () => {
       jobContext: 'sameTripAddOn',
       labelConfirmed: true,
     });
-    expect(sameTripAddOn.contextualFloor).toBe(125);
-    expect(sameTripAddOn.price).toBe(174);
+    expect(sameTripAddOn.contextualFloor).toBe(106);
+    expect(sameTripAddOn.price).toBe(148);
     expect(sameTripAddOn.price).not.toBe(600);
   });
 
@@ -417,7 +417,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(termidorTenPlus.units).toBe(2);
-    expect(termidorTenPlus.price).toBe(797);
+    expect(termidorTenPlus.price).toBe(677);
     expect(termidorTenPlus.volumeDiscountMultiplier).toBe(0.85);
 
     const taurusTenPlus = pricePreSlabTermiticide(1800, {
@@ -425,24 +425,24 @@ describe('termite measurement overrides and safeguards', () => {
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(taurusTenPlus.price).toBe(519);
+    expect(taurusTenPlus.price).toBe(441);
 
     const bifenTenPlus = pricePreSlabTermiticide(1800, {
       productKey: 'bifen_it',
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(bifenTenPlus.contextualFloor).toBe(500);
-    expect(bifenTenPlus.priceBeforeVolumeDiscount).toBe(500);
-    expect(bifenTenPlus.price).toBe(500);
+    expect(bifenTenPlus.contextualFloor).toBe(425);
+    expect(bifenTenPlus.priceBeforeVolumeDiscount).toBe(425);
+    expect(bifenTenPlus.price).toBe(425);
 
     const talstarTenPlus = pricePreSlabTermiticide(1800, {
       productKey: 'talstar_p',
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(talstarTenPlus.priceBeforeVolumeDiscount).toBe(500);
-    expect(talstarTenPlus.price).toBe(500);
+    expect(talstarTenPlus.priceBeforeVolumeDiscount).toBe(425);
+    expect(talstarTenPlus.price).toBe(425);
 
     const override = pricePreSlabTermiticide({}, {
       productKey: 'termidor_sc',
@@ -452,9 +452,9 @@ describe('termite measurement overrides and safeguards', () => {
     });
     expect(override.slabSqFt).toBe(2500);
     expect(override.slabSqFtSource).toBe('manual_override');
-    expect(override.price).toBe(1479);
+    expect(override.price).toBe(1257);
     expect(override.warrantyExtendedSelected).toBe(true);
-    expect(override.warrantyExtendedPrice).toBe(200);
+    expect(override.warrantyExtendedPrice).toBe(170);
     expect(override.addOns[0].code).toBe('pre_slab_extended_warranty');
     expect(override.certificateOfComplianceRequired).toBe(true);
 
@@ -482,7 +482,7 @@ describe('termite measurement overrides and safeguards', () => {
     const legacy = pricePreSlabTermidor(2500, 'none');
     expect(legacy.productKey).toBe('termidor_sc');
     expect(legacy.legacyService).toBe('pre_slab_termidor');
-    expect(legacy.price).toBe(1279);
+    expect(legacy.price).toBe(1087);
   });
 
   test('estimate engine and v1 adapter carry termite measurement metadata', () => {
@@ -517,7 +517,7 @@ describe('termite measurement overrides and safeguards', () => {
     expect(trench.trenchDepthFt).toBe(1.5);
     expect(preslab.warrantyExtendedSelected).toBe(true);
     expect(preslab.productKey).toBe('taurus_sc');
-    expect(preslab.addOns[0].price).toBe(200);
+    expect(preslab.addOns[0].price).toBe(170);
 
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.results.tmBait.measurements.perimeterLF.source).toBe('manual_override');
@@ -537,9 +537,9 @@ describe('termite measurement overrides and safeguards', () => {
     expect(mappedPreSlab.labelConfirmed).toBe(true);
     expect(mappedPreSlab.certificateOfComplianceRequired).toBe(true);
     expect(mappedPreSlab.warrantyTier).toBe('extended');
-    expect(mappedPreSlab.warrantyAdder).toBe(200);
+    expect(mappedPreSlab.warrantyAdder).toBe(170);
     expect(mappedPreSlab.detail).toContain('Taurus');
-    expect(mappedPreSlab.addOns[0].price).toBe(200);
+    expect(mappedPreSlab.addOns[0].price).toBe(170);
 
     const noWarrantyInput = translateV2CallToV1Input(
       { homeSqFt: 2400, stories: 1, lotSqFt: 9000 },

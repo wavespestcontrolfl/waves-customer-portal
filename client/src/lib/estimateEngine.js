@@ -726,7 +726,7 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 174.72,
     containerOz: 78,
     productOzPer10SqFt: 0.8,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.',
   },
   taurus_sc: {
@@ -738,7 +738,7 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 95.00,
     containerOz: 78,
     productOzPer10SqFt: 0.8,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.',
   },
   bifen_it: {
@@ -750,7 +750,7 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 41.53,
     containerOz: 128,
     productOzPer10SqFt: 1.0,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.',
   },
   talstar_p: {
@@ -762,29 +762,31 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerCost: 38.99,
     containerOz: 128,
     productOzPer10SqFt: 1.0,
-    marginDivisor: 0.45,
+    marginDivisor: 0.5294,
     warning: 'Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.',
   },
 };
 
+// Floors reflect the 15%-across-the-board pre-slab price cut (orig x0.85,
+// rounded to whole dollars). Mirrors server constants preSlabTermiticide.minimums.
 const PRE_SLAB_TERMITICIDE_MINIMUMS = {
   standalone: [
-    { maxSqFt: 250, floor: 225 },
-    { maxSqFt: 750, floor: 325 },
-    { maxSqFt: 1250, floor: 425 },
-    { maxSqFt: Infinity, floor: 600 },
+    { maxSqFt: 250, floor: 191 },
+    { maxSqFt: 750, floor: 276 },
+    { maxSqFt: 1250, floor: 361 },
+    { maxSqFt: Infinity, floor: 510 },
   ],
   builderBatch: [
-    { maxSqFt: 250, floor: 150 },
-    { maxSqFt: 750, floor: 250 },
-    { maxSqFt: 1250, floor: 350 },
-    { maxSqFt: Infinity, floor: 500 },
+    { maxSqFt: 250, floor: 128 },
+    { maxSqFt: 750, floor: 213 },
+    { maxSqFt: 1250, floor: 298 },
+    { maxSqFt: Infinity, floor: 425 },
   ],
   sameTripAddOn: [
-    { maxSqFt: 250, floor: 125 },
-    { maxSqFt: 750, floor: 225 },
-    { maxSqFt: 1250, floor: 325 },
-    { maxSqFt: Infinity, floor: 500 },
+    { maxSqFt: 250, floor: 106 },
+    { maxSqFt: 750, floor: 191 },
+    { maxSqFt: 1250, floor: 276 },
+    { maxSqFt: Infinity, floor: 425 },
   ],
 };
 
@@ -2190,7 +2192,7 @@ export function calculateEstimate(inputs) {
       contextualMinimum.floor,
     );
     const warranty = normalizePreSlabWarranty(preslabWarranty);
-    const warrAdd = warranty.tier === 'EXTENDED' ? 200 : 0;
+    const warrAdd = warranty.tier === 'EXTENDED' ? 170 : 0;
     const basePreSlabPrice = priceAfterVolumeDiscount;
     const fp = basePreSlabPrice + warrAdd;
     const labelConfirmed = preslabLabelConfirmed === true || preslabLabelConfirmed === 'true';
