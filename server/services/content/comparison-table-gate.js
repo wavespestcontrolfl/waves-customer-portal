@@ -118,8 +118,17 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // uncurated row label like "Free termite inspections | Free" is validated, not
 // waved through as a neutral mark).
 const AFFIRMATIVE_CELL_RE = /^(yes|y|✓|✔|included|standard|available|offered|both|always|free|✅)$/i;
-// Cell value is a neutral/negative mark → no factual claim about the competitor.
-const NEUTRAL_CELL_RE = /^(no|n|n\/?a|none|n\.a\.|—|–|-|\*|✗|✘|x|varies|varies?\.?|quote[\s-]?based|optional|sometimes|limited|tbd|maybe|\$+|never|❌)$/i;
+// Cell value is a truly NEUTRAL / non-asserting mark → no factual claim.
+const NEUTRAL_CELL_RE = /^(n\/?a|none|n\.a\.|—|–|-|\*|varies|varies?\.?|quote[\s-]?based|optional|sometimes|limited|tbd|maybe|\$+)$/i;
+// Cell value is a NEGATIVE mark — asserts the option LACKS the row's criterion.
+// Harmless on a neutral feature row, but on a service-reliability/quality row
+// it becomes a negative-reliability claim about a NAMED competitor (e.g.
+// "Orkin — Answers the phone: Never"), which must route to human review rather
+// than be silently waved through.
+const NEGATIVE_CELL_RE = /^(no|n|never|✗|✘|x|❌)$/i;
+// Row labels whose NEGATION reads as a provider service-reliability / quality
+// claim. A negative cell under a named competitor on one of these is flagged.
+const RELIABILITY_LABEL_RE = /\b(answers?|responds?|responsive|response|reachable|shows?\s?up|on[\s-]?time|punctual|reliab\w*|guarantee\w*|warrant\w*|call[\s-]?backs?|callbacks?|honors?|keeps?\s+appointments?|same[\s-]?day|emergency|24\/?7|availab\w*)\b/i;
 
 function finding(severity, code, message) {
   return { severity, code, message };
@@ -189,10 +198,16 @@ function hasAttribution(caption) {
 function classifyOption(header) {
   const h = String(header || '').trim();
   if (!h) return 'category';
-  if (OWN_BRAND_RE.test(h)) return 'own';
+  // Competitor detection runs BEFORE the own-brand check: a column header that
+  // names a competitor must be validated as a competitor column even when it
+  // ALSO mentions Waves (e.g. "Waves vs Orkin"). Returning 'own' early there
+  // would skip the competitor cells' curated-fact validation entirely. (Waves
+  // is deliberately absent from the competitor detector, so a pure "Waves" /
+  // "Waves Pest Control" header still falls through to 'own' below.)
   const mentions = competitorFacts.findBusinessMentions(h);
-  if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
   if (mentions.some((m) => !m.inAllowlist)) return 'unknown_competitor';
+  if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
+  if (OWN_BRAND_RE.test(h)) return 'own';
   if (INDUSTRY_SUFFIX_RE.test(h) || BUSINESS_MARKER_RE.test(h) || providerNameRe().test(h)) return 'unclassified';
   if (CATEGORY_OPTION_RE.test(h)) return 'category';
   return 'unclassified';
@@ -222,9 +237,16 @@ function claimSupported(text, attrValues) {
   if (!words.length) {
     // A value made only of short / numeric tokens ("24/7", "A+ rating" → "a
     // rating") is still a factual CLAIM (trivial yes/no marks are filtered by
-    // the caller), so require it to appear verbatim in a curated attribute —
-    // never auto-pass for lack of long words.
-    return attrValues.some((av) => { const na = normalize(av); return na && na.includes(nt); });
+    // the caller). Require EVERY claim token to appear as a whole token of a
+    // curated value — NOT a substring, so "A+" → "a" is not "supported" by an
+    // unrelated curated value like "National (US)" → "national us" via the
+    // stray "a" inside "national".
+    const claimTokens = nt.split(' ').filter(Boolean);
+    if (!claimTokens.length) return true;
+    return attrValues.some((av) => {
+      const naTokens = normalize(av).split(' ').filter(Boolean);
+      return claimTokens.every((t) => naTokens.includes(t));
+    });
   }
   for (const av of attrValues) {
     const na = normalize(av);
@@ -254,6 +276,7 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   const unsourcedKnown = new Set();
   const blockNamedKnown = new Set();
   const unsupportedFacts = new Set();
+  const negativeReliability = new Set();
 
   // ── Whole-text scans (body + title/meta) ──
   const disp = scanText.match(DISPARAGEMENT_RE) || scanText.match(PROVIDER_DISPARAGEMENT_RE);
@@ -326,8 +349,17 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
     options.forEach((opt, j) => {
       const cls = classifyOption(opt);
       if (cls === 'known_competitor') {
-        const mm = competitorFacts.findBusinessMentions(opt).find((x) => x.inAllowlist);
-        const name = mm ? mm.name : opt.trim();
+        const allowlisted = competitorFacts.findBusinessMentions(opt).filter((x) => x.inAllowlist);
+        const distinctNames = [...new Set(allowlisted.map((x) => x.name))];
+        // A single comparison column must represent ONE provider. If a header
+        // names multiple allowlisted competitors ("Orkin / Massey Services"),
+        // only one would ever be validated — fail closed and route to review.
+        if (distinctNames.length > 1) {
+          distinctNames.forEach((n) => { known.add(n); blockKnown.add(n); });
+          unsupportedFacts.add(`${distinctNames.join(' / ')} — one comparison column names multiple competitors; give each its own column so every cell is validated against that competitor's curated facts`);
+          return;
+        }
+        const name = distinctNames[0] || opt.trim();
         known.add(name);
         blockKnown.add(name);
         const attrVals = competitorFacts.attributeValues(name);
@@ -340,6 +372,16 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
         for (const row of rows) {
           const cell = String(row.values[j] ?? '').trim();
           if (!cell || NEUTRAL_CELL_RE.test(cell)) continue;
+          // A NEGATIVE mark ("No"/"Never"/"✗") asserts the competitor LACKS the
+          // row's criterion. Harmless for a neutral feature, but on a service-
+          // reliability/quality row it is a negative-reliability claim about a
+          // named competitor → route to human review (never wave it through).
+          if (NEGATIVE_CELL_RE.test(cell)) {
+            if (RELIABILITY_LABEL_RE.test(String(row.label || ''))) {
+              negativeReliability.add(`${name} — "${String(row.label).trim()}: ${cell}"`);
+            }
+            continue;
+          }
           // Affirmative cell → the claim is the ROW LABEL; substantive cell → the value.
           const claim = AFFIRMATIVE_CELL_RE.test(cell) ? row.label : cell;
           if (!claimSupported(claim, attrVals)) {
@@ -415,6 +457,10 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   for (const f of unsupportedFacts) {
     findings.push(finding('P1', 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT',
       `Comparison states a fact about ${f} that is not a curated attribute in competitor-facts.js — only sourced, curated attributes may be claimed about a named competitor.`));
+  }
+  for (const f of negativeReliability) {
+    findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+      `Comparison marks a named competitor as lacking a service/reliability criterion (${f}) — a negative reliability claim about a named provider. Routed to human review; state neutral, verifiable attributes only.`));
   }
   for (const nm of competitorInProse) {
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',

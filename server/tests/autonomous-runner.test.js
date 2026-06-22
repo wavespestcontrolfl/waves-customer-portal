@@ -2251,3 +2251,42 @@ describe('_queueHasClaimable (catch-up probe)', () => {
     expect(mockQueue.peek).toHaveBeenCalled();
   });
 });
+
+// R10-5 (Codex): approving an OLD named-competitor run by --id must not publish a
+// stale draft once a requeue + re-run has parked a NEWER run for the opportunity.
+describe('approveAndPublishNamedCompetitor — stale named-competitor run guard', () => {
+  const PARKED = { outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false };
+  const runA = { id: 1, opportunity_id: 7, ...PARKED, claimed_at: new Date('2026-06-20T00:00:00Z') };
+  const runB = { id: 2, opportunity_id: 7, ...PARKED, claimed_at: new Date('2026-06-21T00:00:00Z') };
+
+  // db query builder whose .first() returns successive queued results:
+  //   call 1 = lookup-by-id, call 2 = latest-parked lookup.
+  function dbReturning(firsts) {
+    jest.resetModules();
+    const db = require('../models/db');
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    let i = 0;
+    const builder = {
+      where: () => builder,
+      orderBy: () => builder,
+      first: () => Promise.resolve(firsts[i++]),
+      update: () => Promise.resolve(1),
+    };
+    db.mockImplementation(() => builder);
+    const runner = new AutonomousRunner();
+    runner._withEngineLock = (_label, fn) => fn(); // bypass the advisory lock
+    return runner;
+  }
+
+  test('rejects (409) approving an OLDER runId when a newer parked run exists', async () => {
+    const runner = dbReturning([runA, runB]); // by-id → A, latest-parked → B
+    await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 1 }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer named-competitor review run/i) });
+  });
+
+  test('lets the LATEST runId past the guard (fails later as 422 missing-draft, not the 409 stale guard)', async () => {
+    const runner = dbReturning([runB, runB]); // by-id → B, latest-parked → B (same)
+    await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
+      .rejects.toMatchObject({ statusCode: 422 }); // got past the stale-run guard
+  });
+});

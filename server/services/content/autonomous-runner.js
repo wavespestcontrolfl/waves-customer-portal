@@ -2172,8 +2172,23 @@ class AutonomousRunner {
       run = await db('autonomous_runs').where('id', runId).first();
       if (!run) { const e = new Error('No autonomous run found for this id'); e.statusCode = 404; throw e; }
       if (run.opportunity_id !== opportunityId) { const e = new Error('Run does not belong to this opportunity'); e.statusCode = 400; throw e; }
+      // Bind the approval to the LATEST parked named-competitor-review run for
+      // this opportunity. A requeue resets the opportunity to pending but leaves
+      // the OLD run still flagged completed_pending_review/named_competitor_review;
+      // after a re-run parks a NEW run, approving the OLD runId by --id would
+      // otherwise pass every check and claim the opportunity (now parked for the
+      // NEW run), publishing the stale draft the operator is no longer reviewing.
+      const latestParked = await db('autonomous_runs')
+        .where({ opportunity_id: opportunityId, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false })
+        .orderBy('claimed_at', 'desc')
+        .orderBy('id', 'desc')
+        .first();
+      if (latestParked && String(latestParked.id) !== String(run.id)) {
+        const e = new Error('A newer named-competitor review run has replaced this one; approve the latest parked run for this opportunity');
+        e.statusCode = 409; throw e;
+      }
     } else {
-      run = await db('autonomous_runs').where('opportunity_id', opportunityId).orderBy('claimed_at', 'desc').first();
+      run = await db('autonomous_runs').where('opportunity_id', opportunityId).orderBy('claimed_at', 'desc').orderBy('id', 'desc').first();
       if (!run) { const e = new Error('No autonomous run found for this opportunity'); e.statusCode = 404; throw e; }
     }
     if (run.outcome !== 'completed_pending_review' || run.skip_reason !== 'named_competitor_review' || run.shadow_mode === true) {

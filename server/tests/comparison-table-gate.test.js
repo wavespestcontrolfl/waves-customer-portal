@@ -427,4 +427,73 @@ describe('comparison-table-gate', () => {
     const r = gate.evaluate({ body: `Compared with HomeTeam Pest Defense in Venice.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /HomeTeam Pest Defense/.test(f.message))).toBe(true);
   });
+
+  // ── Round-10 findings (Codex review of the round-9 commit) ──
+
+  test('R10-1: a "Waves vs Orkin" column is validated as a competitor column (own-brand co-mention no longer skips cell checks)', () => {
+    expect(gate.classifyOption('Waves vs Orkin')).toBe('known_competitor');
+    expect(gate.classifyOption('Waves Pest Control')).toBe('own'); // pure brand still own
+    const t = `<ComparisonTable
+      columns={["What to weigh","Waves vs Orkin","Local SWFL company"]}
+      rows={[{ label: "Guarantee", values: ["90-day money-back guarantee","Re-treat between visits"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /Orkin/.test(f.message))).toBe(true);
+  });
+
+  test('R10-2: one column naming MULTIPLE competitors fails closed (each needs its own column)', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin / Massey Services","Local SWFL company"]}
+      rows={[{ label: "Reach", values: ["Regional (Southeast US)","Local"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT'
+      && /Orkin/.test(f.message) && /Massey/.test(f.message))).toBe(true);
+  });
+
+  test('R10-3: a NEGATIVE cell on a reliability row for a named competitor routes to review', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[
+        { label: "Answers the phone", values: ["Never","Yes"] },
+        { label: "Reach", values: ["National (US)","Local"] }
+      ]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY' && /Orkin/.test(f.message))).toBe(true);
+    expect(r.findings.some((f) => f.severity === 'P0')).toBe(false);
+  });
+
+  test('R10-3b: a NEGATIVE cell on a NEUTRAL feature row for a named competitor is NOT a reliability claim', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[
+        { label: "Free re-inspection visits", values: ["No","Yes"] },
+        { label: "Reach", values: ["National (US)","Local"] }
+      ]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('R10-4: short/numeric claims need a whole-token curated match, not a substring', () => {
+    // "A+" → "a" must NOT be "supported" by "National (US)" → "national us" (stray "a" in "national").
+    expect(gate.claimSupported('A+', ['National (US)'])).toBe(false);
+    expect(gate.claimSupported('A+', ['A+ rating'])).toBe(true);
+    expect(gate.claimSupported('24/7', ['24/7 support'])).toBe(true);
+    expect(gate.claimSupported('24/7', ['Available 24 hours'])).toBe(false);
+  });
+
+  test('R10-4b: a named competitor "A+" rating cell with no curated A+ attribute is rejected', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[{ label: "BBB rating", values: ["A+","A"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /Orkin/.test(f.message))).toBe(true);
+  });
 });
