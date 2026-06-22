@@ -195,3 +195,19 @@ describe('extractSizeToken', () => {
     expect(extractSizeToken('Bifen 30 fl. oz Bottle')).toBe('30 fl oz'); // dot dropped
   });
 });
+
+describe('veseris login-URL host guard (security)', () => {
+  const { isTrustedVeserisLoginUrl } = require('../services/price-scan/adapters/veseris');
+  test('accepts https veseris.com hosts', () => {
+    expect(isTrustedVeserisLoginUrl('https://veseris.com/default/customer/account/login/')).toBe(true);
+    expect(isTrustedVeserisLoginUrl('https://www.veseris.com/customer/account/login')).toBe(true);
+  });
+  test('rejects non-https, foreign hosts, and look-alikes (fail closed)', () => {
+    expect(isTrustedVeserisLoginUrl('http://veseris.com/login')).toBe(false); // not https
+    expect(isTrustedVeserisLoginUrl('https://evil.com/login')).toBe(false);
+    expect(isTrustedVeserisLoginUrl('https://veseris.com.evil.com/login')).toBe(false); // look-alike
+    expect(isTrustedVeserisLoginUrl('https://notveseris.com/login')).toBe(false);
+    expect(isTrustedVeserisLoginUrl('garbage')).toBe(false);
+    expect(isTrustedVeserisLoginUrl(null)).toBe(false);
+  });
+});

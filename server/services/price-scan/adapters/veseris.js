@@ -10,7 +10,21 @@ const { makeAdapter, searchQuery } = require('./base');
 
 const DEFAULT_LOGIN_URL = 'https://veseris.com/default/customer/account/login/';
 
-module.exports = makeAdapter({
+// SECURITY: the login URL is stored vendor data, and we type the decrypted password into the
+// page it loads. Only ever do that on HTTPS + a Veseris-owned host — a bad/tampered login_url
+// with matching login[username]/login[password] fields would otherwise exfiltrate the password.
+function isTrustedVeserisLoginUrl(u) {
+  try {
+    const url = new URL(String(u));
+    if (url.protocol !== 'https:') return false;
+    const h = url.hostname.toLowerCase();
+    return h === 'veseris.com' || h.endsWith('.veseris.com');
+  } catch (e) {
+    return false;
+  }
+}
+
+const adapter = makeAdapter({
   key: 'veseris',
   priceType: 'account', // logged-in account pricing, not public list price
   buildSearchUrl: (p) => {
@@ -33,8 +47,13 @@ module.exports = makeAdapter({
   // unauthenticated (list-price / gated) session.
   authenticate: async (page, creds) => {
     const LOGIN_TIMEOUT = 45000;
+    const loginUrl = creds.loginUrl || DEFAULT_LOGIN_URL;
+    // Fail CLOSED before typing the password anywhere off a trusted Veseris host.
+    if (!isTrustedVeserisLoginUrl(loginUrl)) {
+      throw new Error('veseris login aborted: login URL is not an https veseris.com host');
+    }
     const attempt = async () => {
-      await page.goto(creds.loginUrl || DEFAULT_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
+      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
       const email = page.locator('input[name="login[username]"]:visible').first();
       const pass = page.locator('input[name="login[password]"]:visible').first();
       await email.waitFor({ state: 'visible', timeout: 30000 });
@@ -77,3 +96,7 @@ module.exports = makeAdapter({
     }
   },
 });
+
+// Exposed for unit testing the login-URL host guard.
+adapter.isTrustedVeserisLoginUrl = isTrustedVeserisLoginUrl;
+module.exports = adapter;
