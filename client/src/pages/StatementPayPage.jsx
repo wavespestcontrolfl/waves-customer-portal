@@ -129,9 +129,14 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
     // ACH — no surcharge; confirm the base-amount PI directly.
     if (selectedMethodRef.current === "us_bank_account") {
       try {
+        // Clean return URL — strip any stale Stripe params (payment_intent*,
+        // redirect_status) from the current URL so a retry off a bookmarked/failed
+        // return doesn't send the next redirect back with TWO secrets (the page
+        // reads the first via URLSearchParams.get and would bind to the stale one).
+        const returnUrl = window.location.origin + window.location.pathname;
         const { error, paymentIntent: pi } = await stripeRef.current.confirmPayment({
           elements: elementsRef.current,
-          confirmParams: { return_url: window.location.href },
+          confirmParams: { return_url: returnUrl },
           redirect: "if_required",
         });
         if (error) { setElementError(error.message); setProcessing(false); return; }
