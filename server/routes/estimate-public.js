@@ -1089,7 +1089,20 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   }
   if (hasLawn) servicePrompts.push('How does your lawn assessment tech work?');
   if (hasMosquito) servicePrompts.push('How long does it last?');
-  if (hasTermite) servicePrompts.push('How does the bait work?');
+  if (hasTermite) {
+    // Match the prompt to the actual termite method so the chip isn't
+    // misleading. Pre-slab is a soil treatment and trenching is a liquid
+    // barrier — neither uses bait stations. Recurring/monitoring termite plans
+    // keep the bait prompt. Mirrors the per-subtype chips in SERVICE_COPY.
+    const termiteOneTimeCategories = oneTimeList.map(serviceCategoryForOneTimeItem);
+    if (oneTimeList.some(isPreSlabOneTimeItem) || termiteOneTimeCategories.includes('pre_slab_termiticide')) {
+      servicePrompts.push('How does pre-slab treatment work?');
+    } else if (termiteOneTimeCategories.includes('termite_trenching')) {
+      servicePrompts.push('How long does the barrier last?');
+    } else {
+      servicePrompts.push('How does the bait work?');
+    }
+  }
   if (hasTreeShrub) servicePrompts.push('Which trees get treated?');
   if (hasRodent) servicePrompts.push('Where do bait stations go?');
   if (hasPalm) servicePrompts.push('Why injections vs. spray?');
@@ -1780,8 +1793,15 @@ function preSlabCustomerCopy(items = []) {
     if (raw.includes('no extended')) return false;
     return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
   });
-  return 'Includes pre-slab soil treatment for the measured slab area. Certificate/termite-treatment documentation is provided when required. Warranty terms depend on the selected warranty option.'
-    + (hasExtendedWarranty ? '' : ' No extended warranty selected.');
+  // Two slots render this copy — the one-time note inside the price card and
+  // the mini-guarantee line below it. Split the service description from the
+  // warranty assurance so they don't print the same sentence twice (the
+  // German-roach one-time follows the same note + guarantee shape).
+  return {
+    note: 'Includes pre-slab soil treatment for the measured slab area. Certificate/termite-treatment documentation is provided when required.',
+    warranty: 'Warranty terms depend on the selected warranty option.'
+      + (hasExtendedWarranty ? '' : ' No extended warranty selected.'),
+  };
 }
 
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
@@ -2834,7 +2854,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const recurring = recurringServicesWithSupplements(estResult);
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
   const hasPreSlabOneTime = oneTimeItems.some(isPreSlabOneTimeItem);
-  const preSlabOneTimeCopy = hasPreSlabOneTime ? preSlabCustomerCopy(oneTimeItems) : '';
+  const preSlabCopy = hasPreSlabOneTime ? preSlabCustomerCopy(oneTimeItems) : null;
   const germanRoachCleanoutItem = oneTimeItems.find(isGermanRoachCleanoutOneTimeItem);
   const germanRoachOneTimeCopy = germanRoachCleanoutItem
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
@@ -3494,7 +3514,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))}
         </div>
       </div>
     `;
@@ -4066,7 +4086,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
+    ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
