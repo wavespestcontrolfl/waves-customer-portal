@@ -280,11 +280,8 @@ export default function StatementPayPage() {
   const [redirectClientSecret] = useState(() => {
     try { return new URLSearchParams(window.location.search).get("payment_intent_client_secret"); } catch { return null; }
   });
-  const [redirectStatusParam] = useState(() => {
-    try { return new URLSearchParams(window.location.search).get("redirect_status"); } catch { return null; }
-  });
   const hasRedirect = !!redirectClientSecret;
-  const [redirectCheck, setRedirectCheck] = useState(null); // null | 'checking' | 'done' | 'retry'
+  const [redirectCheck, setRedirectCheck] = useState(null); // null | 'checking' | 'done' | 'retry' | 'unverified'
 
   // A card /finalize attempt left the PI at the surcharged amount; drop it and
   // re-run /setup to mint a fresh BASE-amount PI before another attempt (so a
@@ -321,13 +318,15 @@ export default function StatementPayPage() {
         const st = paymentIntent?.status;
         setRedirectCheck(st === "succeeded" || st === "processing" ? "done" : "retry");
       } catch {
-        // Couldn't verify — trust the param only as a last resort (a real return),
-        // else fall through to the form.
-        if (alive) setRedirectCheck(redirectStatusParam === "succeeded" || redirectStatusParam === "processing" ? "done" : "retry");
+        // Couldn't verify the PI (Stripe.js blocked / offline / stale secret). Do
+        // NOT trust the URL param (a bookmarked/tampered return would fake success)
+        // and do NOT re-run /setup (risking a double-pay if it really went
+        // through) — show an explicit unable-to-verify state instead.
+        if (alive) setRedirectCheck("unverified");
       }
     })();
     return () => { alive = false; };
-  }, [data, hasRedirect, redirectCheck, redirectClientSecret, redirectStatusParam, setup]);
+  }, [data, hasRedirect, redirectCheck, redirectClientSecret, setup]);
 
   // Create the PaymentIntent once we know the statement is payable.
   useEffect(() => {
@@ -386,15 +385,35 @@ export default function StatementPayPage() {
     );
   }
 
+  // Verification of the redirect PI failed — neither claim success (a tampered URL
+  // would) nor re-mint a PI (a real submission would double-pay). Tell the AP
+  // contact the safe truth and let them refresh.
+  if (redirectCheck === "unverified") {
+    return shell(
+      <BrandCard>
+        <SerifHeading style={{ marginBottom: 12 }}>We couldn&rsquo;t confirm your payment</SerifHeading>
+        <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
+          If you just submitted a payment for statement {statement.number}, it may still be going
+          through — you&rsquo;ll get a receipt by email, so please don&rsquo;t pay again. Otherwise,
+          refresh this page to try again, or call us — <HelpPhoneLink tone="dark" inline />.
+        </p>
+      </BrandCard>,
+    );
+  }
+
   // One "submitted, receipt to follow" terminal state for every success path —
   // an inline confirm (paid), a VERIFIED Stripe redirect return (PI succeeded/
-  // processing), an ACH still processing, or a return visit to an already-settled
-  // statement. Honest for card (instant) and ACH (days) alike: settlement + the
-  // receipt are the webhook's job, so we don't claim "settled" while ACH clears.
-  // `redirectCheck === 'done'` is gated on the RETRIEVED PI status, not the URL
-  // param, so a since-reverted statement falls through to the retry form instead.
+  // processing), or a settled/processing statement. Honest for card (instant) and
+  // ACH (days) alike: settlement + the receipt are the webhook's job, so we don't
+  // claim "settled" while ACH clears. A `retry` redirect verdict means the PI did
+  // NOT go through, so the (lagging) `processing` GET status is ignored in that
+  // case — otherwise a failed-ACH return would falsely read as success until the
+  // webhook reverts it. A genuinely `paid` statement is always terminal.
   const submitted =
-    paid || redirectCheck === "done" || statement.status === "paid" || statement.status === "processing";
+    paid
+    || redirectCheck === "done"
+    || statement.status === "paid"
+    || (redirectCheck !== "retry" && statement.status === "processing");
 
   if (submitted) {
     return shell(
