@@ -1216,7 +1216,10 @@ const EstimateConverter = {
       const annualPrepayAmount = billingTerm === 'prepay_annual'
         ? prepayResolved.amount
         : annualPrepayBase;
-      const prepayDiscountApplied = prepayResolved.discount > 0;
+      // Setup-waiver copy applies only to pest/mosquito (the services with a setup
+      // fee). No-fee mixes show the EFFECTIVE prepay discount (which the margin
+      // floor may shrink below the configured rate, or to zero).
+      const prepayMixHasSetupFee = recurringMixHasMembershipFeeService(recurringServicesForConversion);
       const standardFirstApplicationAmount = billingTerm === 'standard'
         ? resolveFirstApplicationAmount({
           firstApplicationAmount: opts.firstApplicationAmount,
@@ -1238,13 +1241,22 @@ const EstimateConverter = {
           const termMonthlyRate = monthlyRate > 0
             ? monthlyRate
             : Math.round((annualAmount / 12) * 100) / 100;
-          const prepayDiscountPctLabel = `${Math.round(ANNUAL_PREPAY_DISCOUNT_PCT * 100)}%`;
-          const prepayLineDescription = prepayDiscountApplied
-            ? `WaveGuard ${tier || 'Bronze'} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
-            : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
-          const prepayNotes = prepayDiscountApplied
-            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`;
+          // Effective % from the resolved (possibly floor-clamped) discount, so the
+          // invoice copy never overstates the discount or quotes the configured rate.
+          const prepayEffectivePctLabel = `${Math.round((prepayResolved.rate || 0) * 100)}%`;
+          let prepayLineDescription;
+          let prepayNotes;
+          if (prepayMixHasSetupFee) {
+            prepayLineDescription = `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
+            prepayNotes = `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`;
+          } else if (prepayResolved.discount > 0) {
+            prepayLineDescription = `WaveGuard ${tier || 'Bronze'} — 12 months prepaid (${prepayEffectivePctLabel} prepay discount)`;
+            prepayNotes = `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayEffectivePctLabel} annual-prepay discount applied to the recurring annual.`;
+          } else {
+            // No setup fee and the margin floor left no room for a discount.
+            prepayLineDescription = `WaveGuard ${tier || 'Bronze'} — 12 months prepaid`;
+            prepayNotes = `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront."`;
+          }
           const inv = await InvoiceService.create({
             database,
             customerId,
