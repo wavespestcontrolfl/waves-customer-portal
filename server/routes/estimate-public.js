@@ -625,6 +625,7 @@ function oneTimeInvoiceLabelForCategory(category, fallback = 'One-time service')
     case 'mosquito': return 'One-Time Mosquito Control';
     case 'termite_bait': return 'Termite Bait Installation';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
+    case 'bora_care': return 'Bora-Care Wood Treatment';
     case 'termite_trenching': return 'Termite Treatment';
     case 'rodent': return 'Rodent Remediation';
     case 'bundle': return 'One-Time Service';
@@ -896,6 +897,21 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this quote.",
     },
   },
+  bora_care: {
+    headline: "Hey {first}, here's your Bora-Care wood treatment quote.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your wood-treatment areas before pricing this estimate',
+    aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
+    askChips: [
+      'What does Bora-Care treat?',
+      'Is it safe for my home?',
+      'What product is used?',
+      'When should this be done?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this quote.",
+    },
+  },
   lawn_care: {
     headline: "Hey {first}, choose your lawn care option.",
     aiEyebrow: 'Waves AI',
@@ -1079,6 +1095,9 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   const hasTreeShrub = recurringList.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
   const hasRodent = recurringList.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
   const hasPalm = recurringList.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
+  // Bora-Care is a borate wood treatment, not a bait or barrier — keep it off
+  // the termite-method branch above and give it its own prompt.
+  const hasBoraCare = oneTimeList.some(isBoraCareOneTimeItem);
   const hasGermanRoach = oneTimeList.some(isGermanRoachCleanoutOneTimeItem)
     || recurringList.some(isGermanRoachCleanoutOneTimeItem);
   const hasPestAny = !!pestRecurring || hasPestOneTime || hasGermanRoach;
@@ -1106,8 +1125,9 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   if (hasTreeShrub) servicePrompts.push('Which trees get treated?');
   if (hasRodent) servicePrompts.push('Where do bait stations go?');
   if (hasPalm) servicePrompts.push('Why injections vs. spray?');
+  if (hasBoraCare) servicePrompts.push('What does Bora-Care treat?');
 
-  const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm;
+  const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm || hasBoraCare;
   const prompts = servicePrompts.slice(0, 2);
   if (hasChemicalService) prompts.push(SAFETY_ASK_CHIP);
   for (const prompt of ['When am I charged?', 'What happens after approval?']) {
@@ -1804,6 +1824,30 @@ function preSlabCustomerCopy(items = []) {
   };
 }
 
+// Bora-Care is a one-time borate wood treatment (service key `bora_care` from
+// the pricing engine). It is applied to bare wood — attic/raw framing and
+// surface areas like foundation and block. Detect it explicitly by service key
+// so it is never misclassified as the pest_control default.
+function isBoraCareOneTimeItem(item = {}) {
+  const service = String(item?.service || '').toLowerCase();
+  if (service === 'bora_care' || service === 'boracare') return true;
+  const raw = [item.service, item.name, item.label, item.displayName, item.detail, item.det]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return /\bbora\s*care\b/.test(raw) || raw.includes('borate');
+}
+
+// Customer-facing one-time note for a Bora-Care estimate. Description only —
+// the estimate intentionally carries no guarantee/coverage line for this
+// service, so the mini-guarantee slot is omitted at the render site.
+function boraCareCustomerCopy() {
+  return {
+    note: 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi.',
+  };
+}
+
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
@@ -1915,6 +1959,15 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
     && oneTimeRows.length > 0
     && oneTimeRows.some(isTermiteTrenchingOneTimeItem)
     && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
+}
+
+function hasOnlyBoraCareServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  return recurringRows.length === 0
+    && oneTimeRows.length > 0
+    && oneTimeRows.some(isBoraCareOneTimeItem)
+    && oneTimeRows.every((item) => isBoraCareOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
 }
 
 function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
@@ -2396,6 +2449,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const isTreeShrubOnly = hasTreeShrub
     && serviceKeys.length > 0
     && serviceKeys.every((key) => key === 'tree_shrub');
+  const isBoraCareOnly = oneTimeCategories.has('bora_care')
+    && hasOnlyBoraCareServiceMix(recurringServices, intelligenceOneTimeItems);
 
   const stories = firstPositiveNumber(inputs.stories, property.stories) || 1;
   const homeSqFt = firstPositiveNumber(
@@ -2532,7 +2587,9 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
         ? 'Waves AI reviewed your mosquito treatment zones before pricing this estimate'
         : (isTermiteBaitOnly
           ? 'Waves AI reviewed your termite perimeter before pricing this estimate'
-          : 'Waves AI reviewed your property before pricing this estimate')));
+          : (isBoraCareOnly
+            ? 'Waves AI reviewed your wood-treatment areas before pricing this estimate'
+            : 'Waves AI reviewed your property before pricing this estimate'))));
   const intelligenceBody = isLawnOnly
     ? (satelliteUrl || metrics.length
       ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
@@ -2549,9 +2606,11 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
           ? (satelliteUrl || metrics.length
             ? 'Waves AI reviews satellite imagery, property records, and termite perimeter details to shape your termite protection plan.'
             : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your termite protection plan.')
-          : (satelliteUrl || metrics.length
-            ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
-            : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.'))));
+          : (isBoraCareOnly
+            ? 'Waves AI reviews your selected wood-treatment areas and the Bora-Care application rate to price this treatment.'
+            : (satelliteUrl || metrics.length
+              ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
+              : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')))));
   return {
     eyebrow: 'Waves AI',
     title: intelligenceTitle,
@@ -2855,6 +2914,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
   const hasPreSlabOneTime = oneTimeItems.some(isPreSlabOneTimeItem);
   const preSlabCopy = hasPreSlabOneTime ? preSlabCustomerCopy(oneTimeItems) : null;
+  const hasBoraCareOneTime = oneTimeItems.some(isBoraCareOneTimeItem);
+  const boraCareCopy = hasBoraCareOneTime ? boraCareCustomerCopy() : null;
   const germanRoachCleanoutItem = oneTimeItems.find(isGermanRoachCleanoutOneTimeItem);
   const germanRoachOneTimeCopy = germanRoachCleanoutItem
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
@@ -2878,6 +2939,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteBaitServices = hasOnlyTermiteBaitServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteTrenchingServices = hasOnlyTermiteTrenchingServiceMix(recurring, oneTimeItems);
+  const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, oneTimeItems);
   const pageCopy = hasOnlyLawnCareServices
     ? {
         heroSuffix: "here's your lawn care estimate.",
@@ -3008,7 +3070,33 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               finalSubhead: "Let's finish the trenching review with Waves.",
               finalBody: 'No payment today. No surprise increases.',
             }
-          : {
+          : (hasOnlyBoraCareServices
+            ? {
+                heroSuffix: "here's your Bora-Care wood treatment quote.",
+                recurringAssurance: 'This quote is based on the measured attic and surface wood areas treated with Bora-Care.',
+                aggregateDayLabel: 'Bora-Care wood treatment',
+                billingHeading: 'Choose how you want to pay',
+                billingLede: null,
+                payAfterTitle: 'Pay per application',
+                payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
+                noPaymentCopy: 'No payment is charged on this page. Your Bora-Care treatment will be billed after completion.',
+                bookingTitle: 'Pick your Bora-Care treatment visit',
+                bookingSubhead: 'Choose a window to get your Bora-Care wood treatment scheduled.',
+                payPrefHeading: 'Choose how you want to pay',
+                payPrefCardTitle: 'Pay per application',
+                payPrefCardSub: 'Invoice is sent automatically after confirmation.',
+                prepayTitle: 'Pay in full',
+                prepayBody: 'We send the invoice automatically after confirmation.',
+                prepayButtonSub: 'Approve the Bora-Care wood treatment.',
+                cardConfirmTitle: 'Confirm invoice',
+                cardConfirmSub: 'next step creates your invoice and makes secure payment available.',
+                perksHeading: 'What your Bora-Care treatment includes',
+                perksBody: 'Bora-Care is applied to the measured bare wood and treats it for termites, wood-boring beetles, and wood-decay fungi.',
+                finalHeading: 'Ready to schedule your Bora-Care treatment?',
+                finalSubhead: "Let's get your Bora-Care wood treatment on the schedule.",
+                finalBody: 'No payment today.',
+              }
+            : {
               heroSuffix: "here's your custom quote.",
               recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
               aggregateDayLabel: 'complete home protection',
@@ -3032,7 +3120,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
               finalSubhead: '',
               finalBody: '',
-            }))));
+            })))));
 
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the
@@ -3508,13 +3596,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeOnlyHeroPriceHtml = `
       <div class="choice-treatment">
         <div class="choice-treatment-name">${escapeHtml(quotedOneTimeNames[0] || quotedServicesLabel || 'One-time service')}</div>
-        <div class="choice-treatment-detail">${escapeHtml(hasPreSlabOneTime ? 'Pre-slab soil treatment' : 'One-time service')}</div>
+        <div class="choice-treatment-detail">${escapeHtml(hasPreSlabOneTime ? 'Pre-slab soil treatment' : (hasBoraCareOneTime ? 'Bora-Care wood treatment' : 'One-time service'))}</div>
         <div class="big-price choice-treatment-price">
           <span class="num" id="onetime-display">${fmtMoney(onetimeTotal || oneTimeChoicePrice)}</span>
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasBoraCareOneTime ? boraCareCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')))}
         </div>
       </div>
     `;
@@ -4086,7 +4174,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
+    ${isOneTimeOnly && !hasBoraCareOneTime ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
@@ -8774,6 +8862,7 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait Stations';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
+    case 'bora_care': return 'Bora-Care Wood Treatment';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
     case 'bundle': return 'Recurring services';
@@ -8788,6 +8877,7 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   if (isTermiteInstallItem(item)) return 'termite_bait';
+  if (isBoraCareOneTimeItem(item)) return 'bora_care';
   if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
   if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
@@ -8823,6 +8913,7 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
     services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab || inputs.svcPreslab ? 'pre_slab_termiticide' : null,
+    services.boraCare || services.bora_care || inputs.svcBoracare ? 'bora_care' : null,
     services.trenching || inputs.svcTrenching ? 'termite_trenching' : null,
     services.rodent || inputs.svcRodent ? 'rodent' : null,
   ].filter(Boolean);

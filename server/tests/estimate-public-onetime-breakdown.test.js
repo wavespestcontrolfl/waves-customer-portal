@@ -2442,6 +2442,57 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('No extended warranty selected.');
   });
 
+  test('server-rendered Bora-Care estimate uses Bora-Care copy + AI card + chips, not pest defaults', () => {
+    // Bora-Care comes in as service `bora_care`; classify it instead of letting
+    // it fall through to the pest_control default.
+    expect(deriveServiceCategory({}, [], [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }]))
+      .toBe('bora_care');
+
+    const html = renderPage('boracare-onetime-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1051,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1051,
+          items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    // Hero + Waves AI card are Bora-Care-specific, not the generic/pest fallback.
+    // (The hero apostrophe is HTML-escaped, so match without it.)
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
+    expect(html).toContain('the Bora-Care application rate to price this treatment.');
+    expect(html).not.toContain('choose your pest control option');
+    expect(html).not.toContain('to show the details behind your WaveGuard plan.');
+
+    // Description note + treatment-detail label replace the bare "One-time service".
+    expect(html).toContain('Bora-Care is a borate wood treatment applied to the measured attic and surface areas.');
+    expect(html).toContain('Bora-Care wood treatment');
+
+    // Ask Waves surfaces a Bora-Care service chip + the safety chip; never the
+    // bait/pest chips it used to fall back to.
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How do you handle ants?"');
+
+    // No guarantee/coverage line for Bora-Care — the wrong pest callback is gone
+    // and no mini-guarantee renders.
+    expect(html).not.toContain('30-day callback period if pests return');
+    expect(html).not.toContain('class="mini-guarantee"');
+  });
+
   test('server-rendered booking review buttons use explicit click listeners', () => {
     const html = renderPage('booking-token', {
       status: 'sent',
