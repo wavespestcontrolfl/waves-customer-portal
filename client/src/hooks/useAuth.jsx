@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import api from '../utils/api';
+import { flushNativePushToken } from '../native/nativePush';
 
 const AuthContext = createContext(null);
 
@@ -28,6 +29,9 @@ export function AuthProvider({ children }) {
       const propertyData = await api.getAuthProperties().catch(() => ({ properties: [] }));
       setProperties(propertyData.properties || []);
       setError(null);
+      // Now authenticated — flush any APNs token captured before login (native
+      // app only; no-op on web). See native/nativePush.js.
+      flushNativePushToken();
     } catch (err) {
       console.error('Failed to load customer:', err);
       api.clearTokens();

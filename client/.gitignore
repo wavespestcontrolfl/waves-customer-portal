@@ -1,0 +1,8 @@
+# Capacitor-generated native iOS project (regenerate with scripts/mobile/bootstrap-ios.sh).
+# For the spike we keep it out of git — once the app needs hand-edited native
+# files (entitlements, custom Info.plist, native plugins), commit client/ios/
+# and instead ignore only ios/App/Pods/ and ios/App/build/.
+ios/
+
+# Capacitor CLI scratch
+.capacitor/
