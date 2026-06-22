@@ -17,14 +17,12 @@
  *
  * The web push path (lib/push-subscribe.js + /admin/push/subscribe) is untouched.
  */
-import { Capacitor } from '@capacitor/core';
+import { isNativeApp } from './platform';
+
+export { isNativeApp };
 
 let pendingToken = null;
 let listenersBound = false;
-
-export function isNativeApp() {
-  return Capacitor.isNativePlatform();
-}
 
 function authToken() {
   if (typeof localStorage === 'undefined') return '';
@@ -60,7 +58,7 @@ async function postToken(token) {
  * startup. No-op on web; safe to call again.
  */
 export async function initNativePush() {
-  if (!Capacitor.isNativePlatform()) return;
+  if (!isNativeApp()) return;
   try {
     const { PushNotifications } = await import('@capacitor/push-notifications');
 
@@ -97,7 +95,7 @@ export async function initNativePush() {
  * present (see hooks/useAuth.jsx). No-op on web or when nothing is pending.
  */
 export function flushNativePushToken() {
-  if (!Capacitor.isNativePlatform()) return;
+  if (!isNativeApp()) return;
   if (!pendingToken) return;
   const token = pendingToken;
   pendingToken = null;

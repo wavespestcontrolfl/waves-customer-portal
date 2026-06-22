@@ -17,6 +17,8 @@ import {
   setupIntentIncompleteMessage,
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
+import { isNativeApp } from '../native/platform';
+import { captureCameraPhoto } from '../native/camera';
 
 // Normalize date strings from API — handles both "2026-04-02" and "2026-04-02T00:00:00.000Z"
 function parseDate(d) {
@@ -9742,6 +9744,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     e.target.value = '';
   };
 
+  // Native iOS shell: use the Capacitor camera/photo picker instead of the
+  // <input type="file"> (more reliable inside a WKWebView). No-op on web.
+  const handleNativePhoto = async () => {
+    if (photosRemaining <= 0) return;
+    const photo = await captureCameraPhoto();
+    if (photo) setPhotos(prev => [...prev, photo].slice(0, photoLimit));
+  };
+
   const removePhoto = (idx) => {
     setPhotos(prev => prev.filter((_, i) => i !== idx));
   };
@@ -10168,7 +10178,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   {photosRemaining > 0 && (
                     <button
                       type="button"
-                      onClick={() => fileRef.current?.click()}
+                      onClick={isNativeApp() ? handleNativePhoto : () => fileRef.current?.click()}
                       style={{
                         minHeight: 92,
                         borderRadius: 8,
