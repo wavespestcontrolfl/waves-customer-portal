@@ -53,14 +53,19 @@ function normHost(v) {
 }
 
 // Policy from a classification. AI/SaaS-only directories are off-target for a
-// local business → skip. Paid → pay_and_submit (Phase 2 acts; the free runner
-// skips). Account/verification → needs_account (manual). Else submit_free.
+// local business → skip. A human/gate (account/verification/CAPTCHA) → needs_account
+// (manual) — checked BEFORE payment, so a gated-AND-paid page parks for a human
+// rather than entering the auto-pay lane. Purely paid → pay_and_submit (Phase 2
+// acts; the free runner skips). Else submit_free.
 function decide(c) {
   if (['ai_tool', 'saas', 'irrelevant'].includes(c.directory_category)) return { automation_policy: 'skip', risk_level: 'low' };
-  if (c.requires_payment) return { automation_policy: 'pay_and_submit', risk_level: c.offered_link_rel === 'dofollow' ? 'medium' : 'low' };
-  // Anything needing a human/gate is NOT auto-submittable. CAPTCHA included — the
-  // runner also fail-closes at submit-time, but don't even queue it for the runner.
+  // Anything needing a human/gate is NOT fully automatable — even if it's ALSO paid.
+  // Phase 2 auto-pay only handles a purely-paid listing flow, so a gated-and-paid
+  // page (e.g. a chamber membership = create account + pay) must be parked for a
+  // human, never routed to pay_and_submit. CAPTCHA included — the runner also
+  // fail-closes at submit-time, but don't even queue it. This precedes the pay check.
   if (c.requires_account || c.requires_email_verification || c.requires_captcha) return { automation_policy: 'needs_account', risk_level: 'low' };
+  if (c.requires_payment) return { automation_policy: 'pay_and_submit', risk_level: c.offered_link_rel === 'dofollow' ? 'medium' : 'low' };
   return { automation_policy: 'submit_free', risk_level: 'low' };
 }
 
@@ -100,7 +105,11 @@ Return ONLY JSON with ALL fields:
   // else fail safe. A malformed/injected partial (e.g. {"directory_category":
   // "general"}) must NOT coerce missing booleans to false → submit_free.
   const isBool = (v) => typeof v === 'boolean';
-  const priceOk = o && (o.detected_price_usd === null || o.detected_price_usd === undefined || Number.isFinite(Number(o.detected_price_usd)));
+  // detected_price_usd must satisfy the prompt's number|null contract EXACTLY:
+  // present, and either null or a finite number. Reject omitted/undefined and any
+  // string (Number('') and Number('  ') are a finite 0 that would fake a $0 price
+  // on a paid listing) → fail safe to needs_account.
+  const priceOk = o && (o.detected_price_usd === null || (typeof o.detected_price_usd === 'number' && Number.isFinite(o.detected_price_usd)));
   const valid = o && CATEGORIES.has(o.directory_category) && RELS.has(o.offered_link_rel)
     && isBool(o.requires_account) && isBool(o.requires_email_verification)
     && isBool(o.requires_captcha) && isBool(o.requires_payment) && isBool(o.recurring) && priceOk;
@@ -114,9 +123,9 @@ Return ONLY JSON with ALL fields:
     requires_email_verification: o.requires_email_verification,
     requires_captcha: o.requires_captcha,
     requires_payment: o.requires_payment,
-    // Preserve an explicit null price (no price shown) — Number(null) is 0, which
-    // would fake a $0 listing and corrupt the Phase-2 payment evidence.
-    detected_price_usd: (o.detected_price_usd === null || o.detected_price_usd === undefined) ? null : Number(o.detected_price_usd),
+    // Validated above as exactly null or a finite number — pass it through as-is
+    // (no Number() coercion that could turn a blank into a fake $0).
+    detected_price_usd: o.detected_price_usd,
     recurring: o.recurring,
     offered_link_rel: o.offered_link_rel,
     _source: 'llm',

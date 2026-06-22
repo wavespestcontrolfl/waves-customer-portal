@@ -14,6 +14,12 @@ describe('decide (policy matrix)', () => {
     expect(decide({ directory_category: 'local_business', requires_account: true }).automation_policy).toBe('needs_account');
     expect(decide({ directory_category: 'local_business', requires_email_verification: true }).automation_policy).toBe('needs_account');
   });
+  test('P2: gated AND paid → needs_account (human gate wins over the paid lane)', () => {
+    // A chamber-style page (create account + pay) is NOT auto-payable by Phase 2 →
+    // park it for a human rather than route it to pay_and_submit.
+    expect(decide({ directory_category: 'local_business', requires_payment: true, requires_account: true, offered_link_rel: 'dofollow' }).automation_policy).toBe('needs_account');
+    expect(decide({ directory_category: 'local_business', requires_payment: true, requires_captcha: true }).automation_policy).toBe('needs_account');
+  });
   test('free local directory → submit_free', () => {
     expect(decide({ directory_category: 'local_business', requires_account: false, requires_payment: false }).automation_policy).toBe('submit_free');
   });
@@ -30,14 +36,15 @@ describe('classifyOne — known directories (heuristic, no fetch/LLM)', () => {
     const c = await classifier.classifyOne({ target_domain: 'citysquares.com' }, { fetchPageFn: fetchThatThrows });
     expect(c.automation_policy).toBe('submit_free');
   });
-  test('chamber → pay_and_submit (membership)', async () => {
+  test('chamber membership (account + paid) → needs_account (manual, not auto-pay)', async () => {
     const c = await classifier.classifyOne({ target_domain: 'venicechamber.com' }, { fetchPageFn: fetchThatThrows });
-    expect(c.automation_policy).toBe('pay_and_submit');
+    expect(c.requires_payment).toBe(true);
+    expect(c.automation_policy).toBe('needs_account');
   });
-  test('NPMA pest directory → pay_and_submit, pest_niche', async () => {
+  test('NPMA pest directory (membership) → needs_account, pest_niche', async () => {
     const c = await classifier.classifyOne({ target_domain: 'npmapestworld.org' }, { fetchPageFn: fetchThatThrows });
     expect(c.directory_category).toBe('pest_niche');
-    expect(c.automation_policy).toBe('pay_and_submit');
+    expect(c.automation_policy).toBe('needs_account');
   });
 });
 
@@ -70,8 +77,23 @@ describe('llmClassify — unknown directories', () => {
     expect(decide(c).automation_policy).toBe('needs_account');
   });
   test('preserves an explicit null price (does not coerce to 0)', async () => {
-    const c = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, requires_account: true, detected_price_usd: null }));
+    const c = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: null }));
     expect(c.detected_price_usd).toBeNull();
+  });
+  test('keeps a real numeric price', async () => {
+    const c = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: 49 }));
+    expect(c.detected_price_usd).toBe(49);
+  });
+  test('P2: a non-numeric price ("" or string) → fails safe (no fake $0)', async () => {
+    const empty = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: '' }));
+    expect(empty._source).toBe('fallback');
+    const str = await llmClassify('x.com', { title: 'x' }, llm({ ...COMPLETE, requires_payment: true, detected_price_usd: '49' }));
+    expect(str._source).toBe('fallback');
+  });
+  test('P2: an omitted price field → fails safe (number|null contract requires presence)', async () => {
+    const { detected_price_usd, ...noPrice } = COMPLETE;
+    const c = await llmClassify('x.com', { title: 'x' }, llm(noPrice));
+    expect(c._source).toBe('fallback');
   });
   test('a complete ai_tool classification → skip', async () => {
     const c = await llmClassify('aibest.tools', { title: 'Submit your AI tool' }, llm({ ...COMPLETE, directory_category: 'ai_tool' }));
