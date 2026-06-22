@@ -167,8 +167,8 @@ describe('adapter registry getAdapter', () => {
     expect(a.key).toBe('domyown');
     expect(typeof a.fetchCandidate).toBe('function');
   });
-  test('unknown key falls back to generic', () => {
-    expect(getAdapter('veseris').key).toBe('generic'); // veseris arrives in PR2b
+  test('veseris resolves to its login adapter; unknown key falls back to generic', () => {
+    expect(getAdapter('veseris').key).toBe('veseris'); // now built (B2B login adapter)
     expect(getAdapter('nope').key).toBe('generic');
   });
 });
