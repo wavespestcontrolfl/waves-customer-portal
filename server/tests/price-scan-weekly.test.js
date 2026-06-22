@@ -8,6 +8,7 @@ const {
   matchKey,
   runWeeklyScan,
   attachLoginCredentials,
+  scrapableVendors,
 } = require('../services/price-scan/weekly-scan');
 
 const baselineRow = (over = {}) => ({
@@ -258,5 +259,22 @@ describe('attachLoginCredentials (login adapters get decrypted creds)', () => {
     const specs = [veserisSpec()];
     await attachLoginCredentials({}, specs, { getVendorLoginCredentials });
     expect(specs[0].vendors[0].credentials).toBeUndefined();
+  });
+});
+
+describe('scrapableVendors (adapter allowlist incl. shopify)', () => {
+  const fakeDb = (rows) => {
+    const chain = { where: () => chain, andWhere: () => chain, select: async () => rows };
+    return () => chain;
+  };
+  test('keeps vendors that resolve to a bespoke adapter (incl. Shopify), drops generic', async () => {
+    const rows = [
+      { id: 'cw', name: 'Chemical Warehouse', website: 'https://chemicalwarehouse.com' }, // shopify
+      { id: 'dmo', name: 'DoMyOwn', website: 'https://www.domyown.com' }, // domyown
+      { id: 'ves', name: 'Veseris', website: 'https://www.veseris.com' }, // veseris
+      { id: 'rng', name: 'Random Co', website: 'https://example.com' }, // generic -> dropped
+    ];
+    const kept = await scrapableVendors(fakeDb(rows));
+    expect(kept.map((v) => v.name).sort()).toEqual(['Chemical Warehouse', 'DoMyOwn', 'Veseris']);
   });
 });

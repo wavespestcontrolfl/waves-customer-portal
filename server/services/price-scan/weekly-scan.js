@@ -44,7 +44,7 @@ const APPROVED_STATES = ['approved', 'auto_approved'];
 // if it's price_scraping_enabled AND resolves to one of these; everything else falls to the
 // generic adapter (direct URL, no search), so it's not driven autonomously. Veseris is a
 // LOGIN adapter — it additionally needs decrypted credentials attached (see LOGIN_ADAPTER_KEYS).
-const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris'];
+const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris', 'shopify'];
 
 // Adapters that authenticate before scraping (account pricing). For these, the weekly scan
 // decrypts the vendor's stored credentials and attaches them to the scan spec.
