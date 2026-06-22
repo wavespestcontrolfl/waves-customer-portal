@@ -19,15 +19,47 @@ export default function BiometricGate({ children }) {
   const [checking, setChecking] = useState(false);
   const contentRef = useRef(null);
   const unlockBtnRef = useRef(null);
+  // Guards against the Face ID prompt looping: the iOS biometric sheet briefly sends
+  // the app to the background and fires appStateChange(isActive:true) again when it
+  // dismisses, which would otherwise re-trigger another prompt indefinitely.
+  const promptInFlightRef = useRef(false); // a biometric prompt is currently showing
+  const suppressStateRef = useRef(false);  // ignore app-state churn our own prompt causes
+  const lockedRef = useRef(false);         // latest lock state for the stable listener closure
+  const suppressTimerRef = useRef(null);   // pending timer that clears suppressStateRef
 
   const attempt = useCallback(async () => {
     if (!isNativeApp() || !hasSessionToken()) { setLocked(false); return; }
+    // Never run two prompts at once — without this, the foreground event from the
+    // biometric sheet's own dismissal re-enters attempt() and Face ID loops forever.
+    if (promptInFlightRef.current) return;
+    promptInFlightRef.current = true;
+    // Cancel any pending suppression-clear from a previous prompt so its stale timer
+    // can't flip suppression off while this new prompt's sheet is still showing.
+    if (suppressTimerRef.current) { clearTimeout(suppressTimerRef.current); suppressTimerRef.current = null; }
+    suppressStateRef.current = true;
     setChecking(true);
     setLocked(true);
-    const ok = await authenticateBiometric('Unlock Waves');
-    setLocked(!ok);
-    setChecking(false);
+    let ok = false;
+    try {
+      ok = await authenticateBiometric('Unlock Waves');
+    } finally {
+      setLocked(!ok);
+      setChecking(false);
+      promptInFlightRef.current = false;
+      // Keep ignoring app-state changes briefly to swallow the trailing foreground
+      // event the biometric sheet emits when it closes. Track the timer so a later
+      // prompt cancels this one (above) rather than letting it clear suppression
+      // while a newer sheet is still open.
+      if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current);
+      suppressTimerRef.current = setTimeout(() => {
+        suppressStateRef.current = false;
+        suppressTimerRef.current = null;
+      }, 700);
+    }
   }, []);
+
+  // Keep lockedRef in sync so the (stable) appStateChange listener reads current state.
+  useEffect(() => { lockedRef.current = locked; }, [locked]);
 
   useEffect(() => {
     if (!isNativeApp()) return undefined;
@@ -36,10 +68,18 @@ export default function BiometricGate({ children }) {
     import('@capacitor/app')
       .then(({ App }) => App.addListener('appStateChange', ({ isActive }) => {
         if (isActive) {
-          attempt();
+          // Ignore ONLY the foreground event the biometric sheet emits when it
+          // dismisses — that prompt-induced re-entry is what caused the loop.
+          if (suppressStateRef.current) return;
+          // Only (re)prompt when actually locked — a stray foreground while already
+          // unlocked must never kick off another Face ID prompt.
+          if (lockedRef.current) attempt();
         } else if (hasSessionToken()) {
-          // Cover the app-switcher snapshot taken on background.
+          // ALWAYS lock on background — even during a prompt's suppression window —
+          // to cover the app-switcher snapshot and ensure a real background here
+          // can't leave content unlocked on the next foreground.
           setLocked(true);
+          lockedRef.current = true;
         }
       }))
       .then((l) => { listener = l; })
