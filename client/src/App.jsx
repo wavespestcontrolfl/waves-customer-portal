@@ -154,6 +154,7 @@ const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimator
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
+const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
@@ -310,6 +311,7 @@ export default function App() {
             <Route path="estimate" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><TechEstimatorPage /></Suspense>} />
             <Route path="protocols" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading protocols...</div>}><TechProtocolsPage /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn diagnostic...</div>}><TechLawnDiagnosticPage /></Suspense>} />
+            <Route path="social-post" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social post...</div>}><TechSocialPostPage /></Suspense>} />
           </Route>
           <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
