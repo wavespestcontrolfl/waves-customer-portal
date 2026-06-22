@@ -29,9 +29,11 @@
  * No price values change. down() is a faithful inverse driven by this
  * migration's audit snapshot: it removes a flat key only if up() created it AND
  * the floors still match exactly what up() wrote (key-order-independent compare,
- * because Postgres jsonb does not preserve object key order) — so a pre-existing
- * OR post-deploy admin-edited table survives rollback — and it restores the
- * pre-up nested shape and per-product floor fields from the snapshot.
+ * because Postgres jsonb does not preserve object key order). Because the
+ * rolled-back (pre-migration) db-bridge reads only the nested shape, down()
+ * rebuilds that shape from the snapshot AND folds in any surviving post-deploy
+ * edit to a flat key — so an admin floor change isn't silently reverted on
+ * rollback — and restores the per-product floor fields from the snapshot.
  */
 const MIGRATION_TAG = 'migration:20260622000000';
 const UP_REASON = 'Pre-slab: seed contextual minimums (flat keys) + drop dead per-product floor fields';
@@ -103,6 +105,16 @@ function nestedMinimumsOf(data) {
   if (nested && typeof nested === 'object' && !Array.isArray(nested)) return nested;
   const byContext = data.minimums_by_context;
   if (byContext && typeof byContext === 'object' && !Array.isArray(byContext)) return byContext;
+  return null;
+}
+
+// Which nested key (if any) holds the floor shape — `minimums` takes precedence,
+// matching db-bridge's `ps.minimums || ps.minimums_by_context` read order.
+function nestedMinimumsKey(data) {
+  const nested = data.minimums;
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) return 'minimums';
+  const byContext = data.minimums_by_context;
+  if (byContext && typeof byContext === 'object' && !Array.isArray(byContext)) return 'minimums_by_context';
   return null;
 }
 
@@ -187,18 +199,34 @@ exports.down = async function down(knex) {
   const preUpProducts = preUp.products || {};
 
   const newData = { ...data };
-  // Remove a flat key only if up() created it (snapshot lacked it as a flat key)
-  // AND it still matches exactly what up() wrote — order-independent, so a jsonb
-  // key-order shuffle doesn't masquerade as an admin edit.
+  // Rebuild the nested floor shape the pre-migration db-bridge reads (it reads
+  // only `minimums` / `minimums_by_context`, never the flat keys). Start from the
+  // pre-up snapshot's nested shape, then fold in any surviving post-deploy edit
+  // to a flat key — otherwise a flat-only edit would be invisible to the
+  // rolled-back bridge and the floor would silently revert.
+  const preNestedKey = nestedMinimumsKey(preUp);
+  const nestedResult = preNestedKey ? JSON.parse(JSON.stringify(preUp[preNestedKey])) : {};
+  let foldedEdit = false;
   for (const { flatKey, context } of CONTEXTS) {
+    // up() created a flat key iff the snapshot lacked it as a flat array. It's an
+    // admin edit iff the current value differs from what up() wrote — compared
+    // order-independently so a jsonb key-order shuffle isn't read as an edit.
     const addedByUp = !Array.isArray(preUp[flatKey]);
-    if (addedByUp && floorsEqual(newData[flatKey], valueUpWrites(preUp, flatKey, context))) {
-      delete newData[flatKey];
+    const current = newData[flatKey];
+    if (addedByUp && Array.isArray(current) && !floorsEqual(current, valueUpWrites(preUp, flatKey, context))) {
+      nestedResult[context] = current;
+      foldedEdit = true;
     }
+    // Flat keys aren't read by the pre-migration bridge; drop all of them.
+    delete newData[flatKey];
   }
-  // Restore the pre-up nested shape that up() consolidated away.
-  if (preUp.minimums !== undefined) newData.minimums = preUp.minimums;
-  if (preUp.minimums_by_context !== undefined) newData.minimums_by_context = preUp.minimums_by_context;
+  // Restore the nested shape (pre-up snapshot + any folded edits) under the key
+  // the snapshot used. With no nested snapshot and no edits, leave it absent so
+  // the rolled-back bridge falls through to the constants defaults (which the
+  // seeded floors mirror — same values).
+  if (preNestedKey || foldedEdit) {
+    newData[preNestedKey || 'minimums'] = nestedResult;
+  }
   // Restore each product's floor fields to exactly what the pre-up snapshot held.
   if (newData.products && typeof newData.products === 'object') {
     newData.products = Object.fromEntries(
