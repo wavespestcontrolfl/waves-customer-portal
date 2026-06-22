@@ -385,12 +385,17 @@ function makeAdapter(config) {
       else if (!firstUnbuyable) firstUnbuyable = cand; // verified but unbuyable
     }
     // A buyable match (can actually be an opportunity) beats a verified-but-unbuyable one
-    // (compare would drop it), which beats any priced page (a precise 'unverified' skip).
-    const result = firstBuyable || firstUnbuyable || fallback;
-    // Nothing usable AND at least one candidate threw -> surface the error so the run
-    // reports a precise 'fetch_error' rather than a misleading 'no_candidate'.
-    if (!result && candidateError) throw candidateError;
-    return result;
+    // (compare would drop it). Only these two are actual verifyMatch passes.
+    const verified = firstBuyable || firstUnbuyable;
+    // If NOTHING verified and a candidate threw, surface that error as a precise
+    // 'fetch_error': the scan was INCOMPLETE (the candidate that timed out might have
+    // been the real match), so we must not let a priced-but-unverified fallback report a
+    // clean 'unverified' — that reads as "found it, no match here, don't retry" when the
+    // truth is "a fetch failed, retry". Only a verified match suppresses the error.
+    if (!verified && candidateError) throw candidateError;
+    // A verified match wins; else the best priced page is a precise 'unverified' skip
+    // (we did reach a page, it just didn't confirm).
+    return verified || fallback;
   }
 
   return { key: config.key, config, fetchCandidate };
