@@ -64,7 +64,7 @@ const COMPETITORS = [
     aliases: ['truly nolen pest control', 'truly nolen of america'],
     attributes: {
       reach: { value: 'National (US)', source: 'https://www.trulynolen.com', asOf: '2026-06-22' },
-      residential_recurring: { value: 'Yes — quarterly or one-time', source: 'https://www.trulynolen.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.trulynolen.com', asOf: '2026-06-22' },
     },
   },
   {
@@ -101,8 +101,8 @@ const COMPETITORS = [
     name: 'All U Need Pest Control',
     aliases: ['all u need pest', 'all u need pest control', 'all "u" need pest control'],
     attributes: {
-      reach: { value: 'Florida (statewide)', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
-      residential_recurring: { value: 'Yes — residential & commercial plans', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
+      reach: { value: 'Multi-state (FL, SC, TX)', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
     },
   },
   {
@@ -120,16 +120,19 @@ const COMPETITORS = [
     aliases: ['farrow pest', 'farrow pest control'],
     attributes: {
       reach: { value: 'Local (Southwest Florida)', source: 'https://farrowpestservices.com', asOf: '2026-06-22' },
-      residential_recurring: { value: 'Yes — pest & lawn plans', source: 'https://farrowpestservices.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://farrowpestservices.com', asOf: '2026-06-22' },
     },
   },
   {
     id: 'rodent-solutions',
-    name: 'Rodent Solutions',
-    aliases: ['rodent solutions inc'],
+    // Use the full legal name as the canonical/detected token: the bare phrase
+    // "rodent solutions" is generic ("compare rodent solutions before…"), so
+    // detecting it case-insensitively would false-flag ordinary rodent copy.
+    name: 'Rodent Solutions Inc',
+    aliases: ['rodent solutions inc.'],
     attributes: {
       reach: { value: 'Local (Southwest Florida)', source: 'https://rodentsolutioninc.com', asOf: '2026-06-22' },
-      residential_recurring: { value: 'Yes — residential & commercial plans', source: 'https://rodentsolutioninc.com', asOf: '2026-06-22' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://rodentsolutioninc.com', asOf: '2026-06-22' },
     },
   },
   {
@@ -155,7 +158,7 @@ const COMPETITORS = [
     name: 'HomeTeam Pest Defense',
     aliases: ['hometeam pest', 'home team pest defense', 'hometeam'],
     attributes: {
-      reach: { value: 'National (US — 13+ states)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
+      reach: { value: 'National (US — multi-state)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
     },
   },

@@ -423,6 +423,12 @@ describe('comparison-table-gate', () => {
       .findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /cell\/row/.test(f.message))).toBe(true);
   });
 
+  test('curation: the generic phrase "rodent solutions" (lower-case) is NOT treated as a named competitor', () => {
+    const r = gate.evaluate({ body: `Compare rodent solutions before choosing a plan.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => /COMPETITOR/.test(f.code))).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
   test('R9-B5: an UNallowlisted business with a less-common suffix ("Pest Defense") is recognized', () => {
     // Uses a name NOT on the curated allowlist so it still exercises the
     // suffix recognizer → fail-closed (allowlisted ones now route via the

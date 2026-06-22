@@ -15,7 +15,7 @@ describe('competitor-facts', () => {
       ['All U Need Pest Control', 'all-u-need-pest'],
       ['Arrow Environmental', 'arrow-environmental'],
       ['Farrow Pest Services', 'farrow-pest'],
-      ['Rodent Solutions', 'rodent-solutions'],
+      ['Rodent Solutions Inc', 'rodent-solutions'],
       ['Turner Pest Control', 'turner-pest'],
       ['Good News Pest Solutions', 'good-news-pest'],
       ['HomeTeam Pest Defense', 'hometeam-pest-defense'],
