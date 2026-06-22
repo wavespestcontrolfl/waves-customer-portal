@@ -196,6 +196,7 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
   const signalMetadata = parseJsonMaybe(opportunity?.signal_metadata, {});
   const qualityGate = parseJsonMaybe(run?.quality_gate_result, {});
   const uniquenessGate = parseJsonMaybe(run?.uniqueness_gate_result, {});
+  const comparisonGate = parseJsonMaybe(run?.comparison_table_result, {});
   const draft = summarizeDraft(parseJsonMaybe(run?.draft_payload, {}), { includeBody: includeDraftBody });
   const seoCompletion = summarizeSeoCompletion(qualityGate?.seo_completion || draft.seo_completion || draft.seo_contract);
 
@@ -248,7 +249,8 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
       total_ms: run.total_ms,
       quality_gate_result: qualityGate,
       uniqueness_gate_result: uniquenessGate,
-      gate_summary: summarizeGates(qualityGate, uniquenessGate),
+      comparison_table_result: comparisonGate,
+      gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate),
       seo_completion: seoCompletion,
     } : null,
     review_actions: reviewActions({ opportunity, run }),
@@ -351,10 +353,11 @@ function buildSeoRequirementsSummary(contract = {}) {
   };
 }
 
-function summarizeGates(qualityGate, uniquenessGate) {
+function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}) {
   const hard = Array.isArray(qualityGate?.hard_failures) ? qualityGate.hard_failures : [];
   const soft = Array.isArray(qualityGate?.soft_failures) ? qualityGate.soft_failures : [];
   const uniqueness = Array.isArray(uniquenessGate?.failed_reasons) ? uniquenessGate.failed_reasons : [];
+  const comparisonFindings = Array.isArray(comparisonGate?.findings) ? comparisonGate.findings : [];
   return {
     quality_ok: qualityGate?.ok === true,
     quality_score: qualityGate?.total_score ?? null,
@@ -364,6 +367,14 @@ function summarizeGates(qualityGate, uniquenessGate) {
     uniqueness_ok: uniquenessGate?.ok !== false,
     uniqueness_failures: uniqueness,
     seo_completion_ok: qualityGate?.seo_completion?.passed ?? null,
+    // Comparison-table gate: surface the full findings (codes + messages) so the
+    // review queue can show the offending names / caption / reason, not just the
+    // shortened reviewer_notes codes. comparison_ok is null when the gate did
+    // not run (no comparison table in the draft).
+    comparison_ok: comparisonFindings.length || comparisonGate?.pass !== undefined
+      ? comparisonGate?.pass !== false
+      : null,
+    comparison_findings: comparisonFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message })),
   };
 }
 

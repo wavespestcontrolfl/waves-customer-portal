@@ -10,6 +10,7 @@ const {
   normalizeStatus,
   parseJsonMaybe,
   summarizeDraft,
+  summarizeGates,
   summarizeSeoCompletion,
 } = require('../services/content/autonomous-review-queue');
 
@@ -22,6 +23,23 @@ describe('autonomous-review-queue read model helpers', () => {
     expect(normalizeLimit('25')).toBe(25);
     expect(normalizeLimit('500')).toBe(100);
     expect(normalizeLimit('bad')).toBe(50);
+  });
+
+  test('surfaces comparison-table gate findings in the gate summary', () => {
+    const cmp = {
+      pass: false,
+      findings: [{ severity: 'P0', code: 'COMPARISON_UNKNOWN_COMPETITOR', message: 'Names "Hulett", ...' }],
+    };
+    const summary = summarizeGates({ ok: true }, { ok: true }, cmp);
+    expect(summary.comparison_ok).toBe(false);
+    expect(summary.comparison_findings).toEqual([
+      { severity: 'P0', code: 'COMPARISON_UNKNOWN_COMPETITOR', message: 'Names "Hulett", ...' },
+    ]);
+  });
+
+  test('comparison_ok is null when the comparison gate did not run', () => {
+    expect(summarizeGates({ ok: true }, { ok: true }, {}).comparison_ok).toBeNull();
+    expect(summarizeGates({ ok: true }, { ok: true }).comparison_ok).toBeNull();
   });
 
   test('parses JSON columns with fallback', () => {

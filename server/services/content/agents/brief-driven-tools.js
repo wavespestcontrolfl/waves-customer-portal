@@ -232,9 +232,18 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
     case 'get_competitor_facts': {
       // Curated allowlist for NAMED-COMPETITOR comparison tables. Pure data —
       // the comparison-table publish gate enforces that any business the writer
-      // names is on this list, so the two can never drift.
+      // names is on this list, so the two can never drift. When the named-
+      // competitor feature is gated off, return an EMPTY list so the writer uses
+      // a CATEGORY comparison instead of burning a run on a draft that the gate
+      // would block from publishing.
       try {
-        return { competitors: competitorFacts.listForPrompt() };
+        let enabled = false;
+        try { enabled = require('../../../config/feature-gates').namedCompetitorComparison === true; }
+        catch (_) { enabled = false; }
+        return {
+          named_competitor_enabled: enabled,
+          competitors: enabled ? competitorFacts.listForPrompt() : [],
+        };
       } catch (err) {
         return { error: `competitor-facts unavailable: ${err.message}` };
       }

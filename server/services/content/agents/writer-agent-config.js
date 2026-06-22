@@ -212,13 +212,17 @@ choose; never fake a ranking or trash a competitor. Two modes:
      knows SWFL pests + soil/season, re-treat guarantee, recurring vs one-off,
      who answers the phone). Let the reader conclude where a local licensed
      company fits — never declare a winner. Needs no special data.
-  2) NAMED-COMPETITOR mode (gated + always human-reviewed) — you may name a real
-     competitor ONLY if get_competitor_facts() returns it, and you may state
-     ONLY the neutral attributes it returns for that competitor. NEVER name a
-     business the tool does not list (the publish gate hard-blocks an unlisted
-     name). Add a caption with attribution + an "as of" date, e.g.
-     caption="Attributes as of June 2026, per each company's public website."
-     Every named-competitor post routes to a human before it can publish — so
+  2) NAMED-COMPETITOR mode (gated + human-reviewed) — call get_competitor_facts()
+     FIRST. If it returns named_competitor_enabled: false or an empty competitors
+     list, use CATEGORY mode (a named competitor would be blocked from
+     publishing). Otherwise you may name a real competitor ONLY if that tool
+     returns it, and you may state ONLY the neutral attributes it returns for
+     that competitor. NEVER name a business the tool does not list (the publish
+     gate hard-blocks an unlisted or business-looking name — and a name found via
+     web search is NOT allowed unless it is in the tool's list). Add a caption
+     with attribution + an "as of" date, e.g. caption="Attributes as of June
+     2026, per each company's public website." Named-competitor posts go through
+     human review (the trust-build approval ramp) before they can publish — so
      prefer category mode unless the brief specifically needs named businesses.
 RULES for either mode (the comparison-table publish gate enforces these — a
 violation routes the whole draft to review and wastes the run):

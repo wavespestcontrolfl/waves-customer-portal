@@ -68,13 +68,20 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
   });
 
-  test('a web-search-style business name (industry suffix, not allowlisted) used as a column is caught', () => {
+  test('a web-search-style business name (industry suffix, not allowlisted) used as a column fails closed', () => {
     const t = CATEGORY_TABLE.replace('National chain', 'Acme Pest Control');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
     expect(r.pass).toBe(false);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
-    // No double-counting: not also reported as unclassified.
-    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Acme/.test(f.message))).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+  });
+
+  test('finding D: a service-named business option is not swallowed by the category regex', () => {
+    for (const name of ['National Pest Control', 'Bug Off Pest Service', "Bob's Bug Service"]) {
+      const t = CATEGORY_TABLE.replace('National chain', name);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
   });
 
   test('an option that is neither category nor Waves nor allowlisted fails closed (P1)', () => {
@@ -84,9 +91,31 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && f.severity === 'P1')).toBe(true);
   });
 
-  test('a generic phrase "Professional Pest Control" is NOT misread as a business', () => {
-    const r = gate.evaluate({ body: 'Professional pest control beats DIY for termites. Professional Pest Control is worth it.' }, { namedCompetitorEnabled: true });
+  test('finding B: a generic phrase in prose ("Integrated Pest Management" / "Professional Pest Control") is NOT misread as a business', () => {
+    const body = `We practice Integrated Pest Management (IPM). Professional pest control beats DIY.\n\n${CATEGORY_TABLE}`;
+    const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' || f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('finding B: a non-comparison draft mentioning a competitor/IPM passes untouched', () => {
+    const r = gate.evaluate({ body: 'Integrated Pest Management works. Orkin is a national brand. No table here.' }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
+  });
+
+  test('finding E: a self-declared ranking in PROSE (outside the table) is caught', () => {
+    const body = `Waves is the best pest control choice in Venice.\n\n${CATEGORY_TABLE}`;
+    const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('finding E: prose "the best time to treat" does NOT trip the ranking check', () => {
+    const body = `The best time to treat for chinch bugs is late spring.\n\n${CATEGORY_TABLE}`;
+    const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(r.pass).toBe(true);
   });
 
   test('an apostrophe inside a double-quoted caption does not truncate attribution detection', () => {
@@ -133,20 +162,16 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.severity === 'P0')).toBe(false);
   });
 
-  test('a known competitor with feature ENABLED but UNSOURCED caption is flagged + still routes to review', () => {
+  test('a known competitor with feature ENABLED but UNSOURCED caption is flagged (P1, routes to review)', () => {
     const r = gate.evaluate(wrap(NAMED_TABLE('A quick look at your options.')), { namedCompetitorEnabled: true });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED' && f.severity === 'P1')).toBe(true);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_REVIEW')).toBe(true);
   });
 
-  test('a known competitor with feature ENABLED + sourced caption still ALWAYS routes to review (never auto-publishes)', () => {
+  test('finding C: a known competitor with feature ENABLED + sourced caption PASSES (flows to the trust-build approval ramp)', () => {
     const r = gate.evaluate(wrap(NAMED_TABLE('Attributes as of June 2026, per each company public website.')), { namedCompetitorEnabled: true });
-    expect(r.pass).toBe(false);
-    // No hard P0 and no "unsourced" finding — the only thing holding it is the mandatory human review.
-    expect(r.findings.some((f) => f.severity === 'P0')).toBe(false);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED')).toBe(false);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_REVIEW' && f.severity === 'P1')).toBe(true);
+    expect(r.pass).toBe(true);
+    expect(r.findings).toHaveLength(0);
   });
 
   test('extractCaption handles caption="..." and caption={\'...\'}', () => {

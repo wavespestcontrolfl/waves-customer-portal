@@ -6,42 +6,46 @@
  * [city]" post on a <ComparisonTable> (see agents/writer-agent-config.js). This
  * is the constrained, honest version of the AI-citation "listicle play": it
  * earns that demand by HELPING the reader choose, never by faking a ranking or
- * trashing competitors. This gate enforces that — and because the writer
- * produces full buyer-guide PROSE around the table (and has web_search), the
- * competitor + disparagement safeguards scan the WHOLE body, not just the
- * extracted component, and FAIL CLOSED on any comparison option that is not a
+ * trashing competitors.
+ *
+ * SCOPE: the gate only scrutinizes drafts that actually embed a
+ * <ComparisonTable>. A draft with no comparison table passes untouched —
+ * ordinary educational posts must not be parked for mentioning "Integrated Pest
+ * Management" or a competitor in passing. For a comparison draft, the
+ * competitor / disparagement / ranking checks scan the WHOLE body (the writer
+ * wraps the table in buyer-guide prose and can web-search names), and the
+ * option-column classification FAILS CLOSED on anything that is not a
  * recognized provider CATEGORY, Waves, or a curated allowlist competitor.
  *
  *   P0 COMPARISON_DISPARAGEMENT       — derogatory language about any provider
- *                                       (anywhere in the body)
- *   P0 COMPARISON_UNKNOWN_COMPETITOR  — a recognized competitor brand is named
- *                                       that is NOT on the curated allowlist
- *   P1 COMPARISON_UNCLASSIFIED_OPTION — a comparison option / provider-looking
+ *   P0 COMPARISON_UNKNOWN_COMPETITOR  — a recognized competitor brand named that
+ *                                       is NOT on the curated allowlist
+ *   P1 COMPARISON_UNCLASSIFIED_OPTION — a comparison option / business-looking
  *                                       name that is neither a category nor
  *                                       Waves nor an allowlisted competitor
- *                                       (fail-closed: could be a web-search name)
  *   P1 COMPARISON_RIGGED_RANKING      — self-declared "winner" / superlative
+ *                                       (intro/table/conclusion)
  *   P1 COMPARISON_NEGATIVE_RELIABILITY— negative service-reliability claim about
- *                                       an option inside a table (route to human)
- *   P1 COMPARISON_NAMED_COMPETITOR_DISABLED  — names a competitor while gated off
- *   P1 COMPARISON_COMPETITOR_UNSOURCED       — names one but no caption "as of"+source
- *   P1 COMPARISON_NAMED_COMPETITOR_REVIEW    — informational: every named-
- *                                       competitor post routes to a human
+ *                                       an option inside a table
+ *   P1 COMPARISON_NAMED_COMPETITOR_DISABLED — names a competitor while gated off
+ *   P1 COMPARISON_COMPETITOR_UNSOURCED      — names one but no caption "as of"+source
  *
- * Category comparisons ("National chain" vs "Local SWFL company" vs "DIY") name
- * no business, so they only face the disparagement + ranking checks and
- * otherwise pass freely. Pure (no I/O). Returns
+ * A clean named-competitor draft (feature enabled + allowlisted + sourced + no
+ * other finding) PASSES the gate; it then flows through the normal pipeline's
+ * trust-build human-approval ramp (which has a real approve action) rather than
+ * a bespoke dead-end review state. Category comparisons name no business, so
+ * they only face the disparagement + ranking checks. Pure (no I/O). Returns
  * { pass, findings:[{severity,code,message}] }. P0/P1 block (route to review).
  */
 
 const competitorFacts = require('./competitor-facts');
 
 // Derogatory language about a provider — block outright, scanned over the whole
-// body. Deliberately limited to terms that are almost exclusively business-
-// disparagement; words with legitimate pest/efficacy uses ("garbage", "worst
-// infestation", "terrible/awful smell") are EXCLUDED to avoid false positives
-// on real pest copy. Negative service-RELIABILITY claims are handled separately
-// (table-scoped, route-to-review) below.
+// body of a comparison draft. Deliberately limited to terms that are almost
+// exclusively business-disparagement; words with legitimate pest/efficacy uses
+// ("garbage", "worst infestation", "terrible/awful smell") are EXCLUDED to
+// avoid false positives. Negative service-RELIABILITY claims are handled
+// separately (table-scoped, route-to-review) below.
 const DISPARAGEMENT_RE = /\b(scams?|rip[\s-]?offs?|ripoffs?|overpriced|goug\w*|incompetent|shady|sketchy|dishonest|untrustworthy|crooks?|frauds?|fraudulent|hidden fees?|bait[\s-]and[\s-]switch|lousy|sloppy|clueless|second[\s-]?rate)\b/i;
 
 // Negative service-reliability claims about an option. Legitimate as honest
@@ -51,23 +55,31 @@ const DISPARAGEMENT_RE = /\b(scams?|rip[\s-]?offs?|ripoffs?|overpriced|goug\w*|i
 // termites") elsewhere is untouched.
 const PROVIDER_NEGATIVE_RE = /\b(unreliable|unresponsive|no[\s-]?shows?|never (?:answers?|calls?|shows?)\b|hard to reach|leaves? you waiting|ghosts? you|won'?t call (?:you )?back|don'?t show up)\b/i;
 
-// Self-declared ranking / superlative framing — the astroturf tell. Each
-// alternative is self-bounding (the leading \b lives INSIDE each word-initial
-// branch, not before the group, so non-word starts like "#1" still match). We
-// match ranking CLAIMS, not the bare word "best"; "the best" is banned outright,
-// matching the title/meta spam gate. Table-scoped (prose "the best time to
-// treat" must not route a post to review).
-const RANKING_RE = /(\bthe best\b|#\s?1\b|\bno\.?\s?1\b|\bnumber one\b|\btop[\s-]?rated\b|\bunbeatable\b|\bbest[\s-]in[\s-]class\b|\bhands[\s-]down\b|\bclear winner\b|\bthe winner\b|\bsuperior to\b|\bbetter than (?:everyone|the rest|all others|the competition)\b|\bcrush\w* the competition\b)/i;
+// Self-declared ranking / superlative framing — the astroturf tell. Scanned over
+// the whole comparison-draft body (intro/table/conclusion), so it must be
+// prose-safe: "the best" only fires in a ranking context ("the best pest control
+// choice"), NOT "the best time to treat". Non-word starts like "#1" match
+// because each branch is self-bounding.
+const RANKING_RE = /(#\s?1\b|\bno\.?\s?1\b|\bnumber one\b|\btop[\s-]?rated\b|\bunbeatable\b|\bbest[\s-]in[\s-]class\b|\bhands[\s-]down\b|\bclear winner\b|\bthe winner\b|\bsuperior to\b|\bbetter than (?:everyone|the rest|all others|the competition|any other)\b|\bcrush\w* the competition\b|\bbest in (?:town|the area|swfl|southwest florida|florida|venice|sarasota|bradenton|manatee|charlotte|parrish|palmetto|north port)\b|\bthe best\b\s+(?:\w+\s+){0,2}(?:pest control|exterminators?|lawn (?:care|service)|company|companies|choice|option|service|provider|value|deal|price|in town))/i;
 
-// Generic provider-name detector: a proper-noun phrase carrying a pest-industry
-// suffix ("Acme Pest Control", "Gulf Coast Exterminators"). Catches businesses
-// NOT in the static signal list — e.g. a name the writer surfaced via web
-// search. A negative lookahead skips generic descriptors ("Professional Pest
-// Control", "Local Exterminators") so common phrases are not misread as a
-// business. Build fresh per use to avoid lastIndex state.
-const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|National|Regional|Nationwide|Same|Top|Your|Our|The|A|An|Florida|Southwest|Sarasota|Manatee|Charlotte|Bradenton|Venice';
-const PROVIDER_NAME_SRC = `\\b((?!(?:${GENERIC_LEAD_EXCLUSIONS})\\b)[A-Z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:Pest Control|Pest Management|Pest Solutions|Pest Services|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest))\\b`;
+// Generic descriptors / methodologies that may precede a pest-industry suffix
+// in PROSE but are not a business name — skip them so "Professional Pest
+// Control" / "Integrated Pest Management" / "Year-Round Pest Control" are not
+// misread as a competitor in the whole-body scan.
+const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|National|Regional|Nationwide|Same|Top|Your|Our|The|This|That|These|Those|A|An|Florida|Southwest|Sarasota|Manatee|Charlotte|Bradenton|Venice|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year';
+const PROVIDER_NAME_SRC = `\\b((?!(?:${GENERIC_LEAD_EXCLUSIONS})\\b)[A-Z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:Pest Control|Pest Management|Pest Solutions?|Pest Services?|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest))\\b`;
 function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
+
+// A pest-industry suffix anywhere in a comparison OPTION header marks it as a
+// business name (not a category) — so "National Pest Control" / "Bug Off Pest
+// Service" are not swallowed by the category regex's generic words. Allowlisted
+// businesses are matched earlier; anything else routes to review.
+const INDUSTRY_SUFFIX_RE = /\b(pest (?:control|management|solutions?|services?)|exterminat(?:or|ors|ing)|termite (?:&|and) pest|environmental(?: pest)?|lawn (?:&|and) pest)\b/i;
+
+// Legal-entity / possessive markers that signal a business name in an option
+// header. Case-sensitive: lowercase "company" in "Local SWFL company" is a
+// category descriptor, not a marker.
+const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/;
 
 // Recognized generic provider CATEGORY / option labels (NOT a named business).
 const CATEGORY_OPTION_RE = /\b(national|nationwide|chains?|franchises?|big[\s-]?box|corporate|regional|local(?:ly)?|independent|small(?:er)?|diy|do[\s-]it[\s-]yourself|self[\s-]?treat\w*|home(?:owner)?|store[\s-]bought|over[\s-]the[\s-]counter|professionals?|pros?|quarterly|monthly|annual|seasonal|one[\s-]?time|one[\s-]?off|recurring|reactive|preventive|preventative|on[\s-]demand|subscription|plans?|programs?|packages?|services?|options?|untreated|no treatment|ignoring it|what (?:to|you))\b/i;
@@ -130,16 +142,18 @@ function hasAttribution(caption) {
 /**
  * classifyOption(header) → 'own' | 'category' | 'known_competitor'
  *                          | 'unknown_competitor' | 'unclassified'
- * Classifies a single comparison OPTION column header. Anything that is not a
- * recognized category, Waves, or an allowlisted competitor fails closed.
+ * Classifies a single comparison OPTION column header. Business-looking names
+ * (industry suffix / legal-entity marker / proper-noun + suffix) are checked
+ * BEFORE the category regex so generic words inside a business name ("Bug Off
+ * Pest Service", "National Pest Control") cannot pass as a safe category.
  */
 function classifyOption(header) {
   const h = String(header || '').trim();
-  if (!h) return 'category'; // empty/structural — nothing to verify
+  if (!h) return 'category';
   const mentions = competitorFacts.findBusinessMentions(h);
   if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
   if (mentions.some((m) => !m.inAllowlist)) return 'unknown_competitor';
-  if (providerNameRe().test(h)) return 'unknown_competitor';
+  if (INDUSTRY_SUFFIX_RE.test(h) || BUSINESS_MARKER_RE.test(h) || providerNameRe().test(h)) return 'unclassified';
   if (OWN_BRAND_RE.test(h)) return 'own';
   if (CATEGORY_OPTION_RE.test(h)) return 'category';
   return 'unclassified';
@@ -155,21 +169,24 @@ function classifyOption(header) {
 function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   const body = String(draft?.body || draft?.content || '');
   const findings = [];
-  if (!body) return { pass: true, findings };
-
   const blocks = extractComparisonBlocks(body);
+  // Only comparison/listicle drafts are scrutinized — no table, no scan.
+  if (!body || blocks.length === 0) return { pass: true, findings };
+
   const known = new Set();   // allowlisted competitor display names
   const unknown = new Set(); // recognized brand, not allowlisted (P0)
-  const unclassified = new Set(); // provider-looking option, not categorizable (P1)
+  const unclassified = new Set(); // business-looking, not categorizable (P1)
 
-  // ── Whole-body competitor detection (prose + tables). The writer wraps the
-  // table in buyer-guide prose and can web-search names, so a competitor named
-  // OR disparaged anywhere in the post must be caught — not just inside the
-  // component. ─────────────────────────────────────────────────────────────
-  if (DISPARAGEMENT_RE.test(body)) {
-    const m = body.match(DISPARAGEMENT_RE);
+  // ── Whole-body scans (the table + its surrounding buyer-guide prose) ──
+  const disp = body.match(DISPARAGEMENT_RE);
+  if (disp) {
     findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-      `Body contains disparaging language about a provider ("${m[0]}"). State attributes, never insults — the reader judges.`));
+      `Body contains disparaging language about a provider ("${disp[0]}"). State attributes, never insults — the reader judges.`));
+  }
+  const rank = body.match(RANKING_RE);
+  if (rank) {
+    findings.push(finding('P1', 'COMPARISON_RIGGED_RANKING',
+      `Body uses ranking/superlative framing ("${rank[0].trim()}"). Present neutral trade-offs and let the reader conclude — do not declare a winner, in the table or the surrounding copy.`));
   }
   for (const m of competitorFacts.findBusinessMentions(body)) {
     (m.inAllowlist ? known : unknown).add(m.name);
@@ -178,11 +195,10 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
     const nm = m[1].trim();
     if (OWN_BRAND_RE.test(nm)) continue;
     if (competitorFacts.isKnownCompetitor(nm)) known.add(competitorFacts.findCompetitor(nm).name);
-    else unclassified.add(nm); // heuristic name → route to review (fail closed)
+    else unclassified.add(nm); // business-looking name → route to review (fail closed)
   }
 
-  // ── Per-table checks: classify comparison OPTIONS (fail closed), plus the
-  // table-scoped ranking + negative-reliability checks. ──────────────────────
+  // ── Per-table checks: classify comparison OPTIONS + table-scoped reliability ──
   for (const block of blocks) {
     const options = extractColumns(block).slice(1); // drop the row-label header
     for (const opt of options) {
@@ -196,11 +212,6 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
         unclassified.add(opt.trim());
       }
     }
-    const rank = block.match(RANKING_RE);
-    if (rank) {
-      findings.push(finding('P1', 'COMPARISON_RIGGED_RANKING',
-        `Comparison table uses ranking/superlative framing ("${rank[0].trim()}"). Present neutral trade-offs and let the reader conclude — do not declare a winner.`));
-    }
     const neg = block.match(PROVIDER_NEGATIVE_RE);
     if (neg) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
@@ -208,35 +219,35 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
     }
   }
 
-  // Reconcile overlaps so one name yields one finding at its strongest
-  // severity: allowlisted (known) > recognized-but-unlisted (unknown, P0) >
-  // heuristic provider-looking (unclassified, P1).
+  // Reconcile overlaps so one name yields one finding at its strongest severity:
+  // allowlisted (known) > recognized-but-unlisted (unknown, P0) > business-
+  // looking (unclassified, P1).
   for (const nm of known) unknown.delete(nm);
   for (const nm of [...unclassified]) {
     if (known.has(nm) || unknown.has(nm)) unclassified.delete(nm);
   }
 
-  // ── Resolve named-business findings. ───────────────────────────────────────
+  // ── Resolve named-business findings ──
   for (const nm of unknown) {
     findings.push(finding('P0', 'COMPARISON_UNKNOWN_COMPETITOR',
       `Names "${nm}", a recognized competitor that is not on the curated competitor-facts allowlist — its attributes cannot be verified. Use a provider CATEGORY (e.g. "National chain", "Local SWFL company") instead, or add "${nm}" to competitor-facts.js with sourced, dated facts.`));
   }
   for (const nm of unclassified) {
     findings.push(finding('P1', 'COMPARISON_UNCLASSIFIED_OPTION',
-      `Comparison references "${nm}", which is neither a recognized provider category, Waves, nor an allowlisted competitor — routed to human review (fail-closed). Use a category label, or add it to competitor-facts.js if it is a real competitor.`));
+      `References "${nm}", which looks like a business but is neither a recognized provider category, Waves, nor an allowlisted competitor — routed to human review (fail-closed). Use a category label, or add it to competitor-facts.js if it is a real competitor.`));
   }
   if (known.size) {
     const names = [...known].join(', ');
     if (!namedCompetitorEnabled) {
       findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_DISABLED',
-        `Names a competitor (${names}) but named-competitor comparisons are currently disabled (GATE_NAMED_COMPETITOR_COMPARISON). Routed to human review; use a category comparison to publish autonomously.`));
+        `Names a competitor (${names}) but named-competitor comparisons are currently disabled (GATE_NAMED_COMPETITOR_COMPARISON). Use a category comparison to publish autonomously, or enable the flag.`));
     } else if (!blocks.some((b) => hasAttribution(extractCaption(b)))) {
       findings.push(finding('P1', 'COMPARISON_COMPETITOR_UNSOURCED',
         `Names a competitor (${names}) but no comparison-table caption carries an "as of <date>" + source attribution. Add e.g. caption="Attributes as of June 2026, per each company's public website."`));
     }
-    // Named-competitor posts ALWAYS get a human in the loop — even sourced + enabled.
-    findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_REVIEW',
-      `Names a competitor (${names}); named-competitor posts always route to human review before publishing.`));
+    // else: enabled + allowlisted + sourced + otherwise clean → PASS. The post
+    // still goes through the pipeline's trust-build human-approval ramp before
+    // publishing (no bespoke, un-approvable review state).
   }
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
