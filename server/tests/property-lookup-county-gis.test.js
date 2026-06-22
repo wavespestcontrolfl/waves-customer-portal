@@ -141,6 +141,23 @@ describe('lookupCountyParcelByPoint', () => {
     expect(parcel.landUseDescription).toBe('SINGLE FAMILY');
   });
 
+  test('parses regardless of ArcGIS attribute key case (codex P2 hardening)', async () => {
+    // Same Sarasota fields but UPPERCASE keys — the case-insensitive getter must
+    // still resolve them so a server casing quirk never silently disables a county.
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ features: [{
+        attributes: { ID: '0009112081', ACCOUNT: '0000008112', FULLADDRESS: '1 BAY ST', LOCCITY: 'VENICE', LSQFT: 6000, STCD: '0100', YRBL: 2018 },
+        geometry: { rings: RING },
+      }] }),
+    });
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+    expect(parcel).toMatchObject({
+      county: 'Sarasota', parcelId: '0009112081', paoParcelId: '0009112081',
+      situsAddress: '1 BAY ST', situsCity: 'VENICE', lotSqft: 6000, yearBuilt: 2018, dorUseCode: '0100',
+    });
+  });
+
   test('no features at the point → null', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ features: [] }) });
     expect(await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee' })).toBeNull();

@@ -106,9 +106,18 @@ function pickParcelFeature(features, lng, lat) {
   return pool[0]?.feature || null;
 }
 
-// Per-county layer + field map. `parse` receives the raw ArcGIS attributes and
-// returns the county-agnostic fields; geometry-derived lotSqft is filled by the
+// ArcGIS servers can return attribute keys in a different case than the field
+// definitions / requested outFields (hosted FeatureServers especially), and a
+// silent case mismatch would zero out a whole county's parse and quietly fall
+// back to FDOR. `parse` receives a case-INSENSITIVE getter g(name) so a casing
+// quirk can never disable a county. Geometry-derived lotSqft is filled by the
 // caller when the roll's own land figure is absent.
+function ciAttr(attrs) {
+  const map = {};
+  for (const [k, v] of Object.entries(attrs || {})) map[k.toLowerCase()] = v;
+  return (name) => map[String(name).toLowerCase()];
+}
+
 const COUNTY_LAYERS = {
   Manatee: {
     url: 'https://gis.manateepao.gov/arcgis/rest/services/Website/WebLayers/MapServer/0/query',
@@ -118,21 +127,21 @@ const COUNTY_LAYERS = {
       'BLDGS_LIVINGUNITS', 'CUR_DOR_LUC_CODE', 'CUR_MAN_LUC_DESC',
       'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR',
     ],
-    parse: (a) => ({
-      parcelId: cleanStr(a.PARID),
-      situsAddress: cleanStr(a.SITUS_ADDRESS),
-      situsCity: cleanStr(a.SITUS_POSTAL_CITY),
-      situsZip: zip5(a.SITUS_POSTAL_ZIP),
-      lotSqft: positiveOrNull(a.LAND_SQFT_CAMA),
-      livingAreaSqft: positiveOrNull(a.BLDGS_SQFT_LIVING),
-      stories: positiveOrNull(a.BLDG_R1_STORIES),
-      yearBuilt: positiveOrNull(a.BLDG_R1_YRBUILT),
-      residentialUnits: positiveOrNull(a.BLDGS_LIVINGUNITS),
-      dorUseCode: cleanStr(a.CUR_DOR_LUC_CODE),
-      landUseDescription: cleanStr(a.CUR_MAN_LUC_DESC),
-      subdivision: cleanStr(a.PAR_SUBDIV_NAME),
-      poolFlag: yesNoFlag(a.PAR_SWIMPOOL_FLAG),
-      rollYear: positiveOrNull(a.CUR_ROLL_YEAR),
+    parse: (g) => ({
+      parcelId: cleanStr(g('PARID')),
+      situsAddress: cleanStr(g('SITUS_ADDRESS')),
+      situsCity: cleanStr(g('SITUS_POSTAL_CITY')),
+      situsZip: zip5(g('SITUS_POSTAL_ZIP')),
+      lotSqft: positiveOrNull(g('LAND_SQFT_CAMA')),
+      livingAreaSqft: positiveOrNull(g('BLDGS_SQFT_LIVING')),
+      stories: positiveOrNull(g('BLDG_R1_STORIES')),
+      yearBuilt: positiveOrNull(g('BLDG_R1_YRBUILT')),
+      residentialUnits: positiveOrNull(g('BLDGS_LIVINGUNITS')),
+      dorUseCode: cleanStr(g('CUR_DOR_LUC_CODE')),
+      landUseDescription: cleanStr(g('CUR_MAN_LUC_DESC')),
+      subdivision: cleanStr(g('PAR_SUBDIV_NAME')),
+      poolFlag: yesNoFlag(g('PAR_SWIMPOOL_FLAG')),
+      rollYear: positiveOrNull(g('CUR_ROLL_YEAR')),
     }),
   },
   Sarasota: {
@@ -141,21 +150,21 @@ const COUNTY_LAYERS = {
       'account', 'id', 'fulladdress', 'loccity', 'loczip', 'subd',
       'pool', 'grnd_area', 'living', 'livunits', 'yrbl', 'lsqft', 'stcd',
     ],
-    parse: (a) => ({
+    parse: (g) => ({
       // PAO detail (/propertysearch/parcel/details) keys on the digit id.
-      parcelId: cleanStr(a.id) || cleanStr(a.account),
-      situsAddress: cleanStr(a.fulladdress),
-      situsCity: cleanStr(a.loccity),
-      situsZip: zip5(a.loczip),
-      lotSqft: positiveOrNull(a.lsqft),
-      livingAreaSqft: positiveOrNull(a.living),
+      parcelId: cleanStr(g('id')) || cleanStr(g('account')),
+      situsAddress: cleanStr(g('fulladdress')),
+      situsCity: cleanStr(g('loccity')),
+      situsZip: zip5(g('loczip')),
+      lotSqft: positiveOrNull(g('lsqft')),
+      livingAreaSqft: positiveOrNull(g('living')),
       stories: null, // not in the Sarasota layer
-      yearBuilt: positiveOrNull(a.yrbl),
-      residentialUnits: positiveOrNull(a.livunits),
-      dorUseCode: cleanStr(a.stcd),
+      yearBuilt: positiveOrNull(g('yrbl')),
+      residentialUnits: positiveOrNull(g('livunits')),
+      dorUseCode: cleanStr(g('stcd')),
       landUseDescription: null, // Sarasota carries the numeric code only
-      subdivision: cleanStr(a.subd),
-      poolFlag: yesNoFlag(a.pool),
+      subdivision: cleanStr(g('subd')),
+      poolFlag: yesNoFlag(g('pool')),
       rollYear: null,
     }),
   },
@@ -165,19 +174,19 @@ const COUNTY_LAYERS = {
       'ACCOUNT', 'FullPropertyAddress', 'propertyaddress', 'city', 'zipcode',
       'usecode', 'description', 'landuse', 'subneighborhood', 'CONDOID',
     ],
-    parse: (a) => ({
-      parcelId: cleanStr(a.ACCOUNT),
-      situsAddress: cleanStr(a.FullPropertyAddress) || cleanStr(a.propertyaddress),
-      situsCity: cleanStr(a.city),
-      situsZip: zip5(a.zipcode),
+    parse: (g) => ({
+      parcelId: cleanStr(g('ACCOUNT')),
+      situsAddress: cleanStr(g('FullPropertyAddress')) || cleanStr(g('propertyaddress')),
+      situsCity: cleanStr(g('city')),
+      situsZip: zip5(g('zipcode')),
       lotSqft: null, // no land figure in the ownership layer — use polygon area
       livingAreaSqft: null,
       stories: null,
       yearBuilt: null,
       residentialUnits: null,
-      dorUseCode: cleanStr(a.usecode),
-      landUseDescription: cleanStr(a.description) || cleanStr(a.landuse),
-      subdivision: cleanStr(a.subneighborhood),
+      dorUseCode: cleanStr(g('usecode')),
+      landUseDescription: cleanStr(g('description')) || cleanStr(g('landuse')),
+      subdivision: cleanStr(g('subneighborhood')),
       poolFlag: null,
       rollYear: null,
     }),
@@ -296,11 +305,10 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
       return null;
     }
 
-    const attrs = feature.attributes || {};
     const polygon = Array.isArray(feature?.geometry?.rings) && feature.geometry.rings.length
       ? feature.geometry.rings
       : null;
-    const parsed = layer.parse(attrs);
+    const parsed = layer.parse(ciAttr(feature.attributes || {}));
     if (!parsed.parcelId) return null;
 
     const polyArea = polygonAreaSqft(polygon);
