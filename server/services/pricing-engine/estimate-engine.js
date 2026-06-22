@@ -123,12 +123,16 @@ function manualOneTimeLinePrice(item = {}) {
   return Number.isFinite(num) ? num : 0;
 }
 
-// One-time / specialty lines a manual or custom discount may reduce. Mirrors the
-// discountable flag and skips quote-required / measurement-pending / zero-price
-// lines (no firm price to discount yet).
+// One-time / specialty lines a manual or custom discount may reduce. Honors the
+// full set of line-level discount-exclusion flags (e.g. the trap-only retainer
+// is priced as a one-time line but is explicitly discountEligible:false /
+// excludedFromCoupons:true) and skips quote-required / measurement-pending /
+// zero-price lines (no firm price to discount yet).
 function isManualOneTimeDiscountEligible(item) {
   if (!item) return false;
   if (item.discountable === false || item.discount?.discountable === false) return false;
+  if (item.discountEligible === false) return false;
+  if (item.excludedFromCoupons === true || item.excludedFromBundleDiscounts === true) return false;
   if (item.quoteRequired || item.requiresCustomQuote || item.requiresMeasurement) return false;
   return manualOneTimeLinePrice(item) > 0;
 }

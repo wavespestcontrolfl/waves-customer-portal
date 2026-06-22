@@ -1319,13 +1319,18 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
 
 function manualDiscountMonthlyAmount(manualDiscount) {
   if (!manualDiscount) return 0;
+  // recurringAmount is the authoritative recurring slice — prefer it over a
+  // server-provided monthlyAmount, which older/other bundle paths may still
+  // derive from the combined amount that now includes the one-time slice.
+  const recurring = Number(manualDiscount.recurringAmount);
+  if (Number.isFinite(recurring)) {
+    return recurring > 0 ? Math.round((recurring / 12) * 100) / 100 : 0;
+  }
   const monthly = Number(manualDiscount.monthlyAmount);
   if (Number.isFinite(monthly) && monthly > 0) return Math.round(monthly * 100) / 100;
-  // Only the recurring slice belongs on the recurring (per-month) total; the
-  // one-time slice is reflected in the one-time breakdown. Falls back to the
-  // full amount for legacy estimates saved before the slice fields existed.
-  const annual = Number(manualDiscount.recurringAmount ?? manualDiscount.amount);
-  return Number.isFinite(annual) && annual > 0 ? Math.round((annual / 12) * 100) / 100 : 0;
+  // Legacy estimates saved before the slice fields existed: amount was recurring-only.
+  const amount = Number(manualDiscount.amount);
+  return Number.isFinite(amount) && amount > 0 ? Math.round((amount / 12) * 100) / 100 : 0;
 }
 
 function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier }) {

@@ -128,6 +128,22 @@ describe('pricing engine manual recurring discount', () => {
     expect(md.capped).toBe(false);
   });
 
+  test('manual discount skips one-time lines flagged discountEligible:false (trap-only retainer)', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        trapOnlyRetainer: { plan: 'standard', billing: 'annual' },
+        exclusion: true,
+      },
+      manualDiscount: { source: 'custom', type: 'PERCENT', value: 15, label: 'Member' },
+    }));
+
+    const md = estimate.summary.manualDiscount;
+    // Only the eligible one-time line (exclusion) is discounted; the excluded
+    // trap-only retainer keeps its full price.
+    expect(md.eligibleServices).toEqual(['exclusion']);
+    expect(md.oneTimeDiscountableBase).toBeCloseTo(720, 2);
+  });
+
   test('manual percentage above 100 is rejected server-side', () => {
     expect(() => generateEstimate(baseInput({
       manualDiscount: { type: 'PERCENT', value: 101 },

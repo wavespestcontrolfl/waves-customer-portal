@@ -7895,6 +7895,34 @@ function normalizeOneTimeBreakdown(estData) {
     addRows(installationRows);
   }
 
+  // Manual / custom discounts carry a one-time slice that is pooled into the
+  // summary rather than pushed onto individual line prices. Emit it as an
+  // explicit discount row so the breakdown nets out correctly for BOTH shapes:
+  // mapped estimates (whose oneTime.total is already net — difference then
+  // reconciles to 0) and raw engineResult-backed estimates (which have no
+  // oneTime.total and otherwise sum gross line items).
+  const manualOneTimeSlice = [
+    result?.manualDiscount,
+    result?.totals?.manualDiscount,
+    result?.summary?.manualDiscount,
+  ]
+    .map((m) => Number(m?.oneTimeAmount))
+    .find((n) => Number.isFinite(n) && n > 0) || 0;
+  if (manualOneTimeSlice > 0) {
+    const manualLabel = [
+      result?.manualDiscount,
+      result?.totals?.manualDiscount,
+      result?.summary?.manualDiscount,
+    ].find((m) => m && Number(m.oneTimeAmount) > 0);
+    rows.push({
+      service: 'manual_discount',
+      label: manualLabel?.label || manualLabel?.catalogName || 'Discount',
+      amount: -Math.round(manualOneTimeSlice * 100) / 100,
+      detail: null,
+      kind: 'discount',
+    });
+  }
+
   const rowTotal = rows.reduce((sum, row) => sum + row.amount, 0);
   const rawExplicitTotal = Number(oneTime?.total ?? nestedOneTime?.total);
   // If we suppressed the WaveGuard setup row above (non-pest/mosquito estimate
@@ -10123,7 +10151,9 @@ async function buildPricingBundle(estimate) {
     if (!manual) return payload;
     const manualWithMonthly = {
       ...manual,
-      monthlyAmount: Math.round((manual.amount / 12) * 100) / 100,
+      // monthlyAmount is the per-month recurring figure, so it tracks only the
+      // recurring slice; the one-time slice is shown in the one-time breakdown.
+      monthlyAmount: Math.round((Number(manual.recurringAmount ?? manual.amount) / 12) * 100) / 100,
     };
     return {
       ...payload,

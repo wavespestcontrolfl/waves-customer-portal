@@ -296,6 +296,64 @@ describe('public estimate one-time breakdown', () => {
     expect(breakdown.total).toBe(499);
   });
 
+  test('applies the manual one-time discount slice to engineResult-backed breakdowns', () => {
+    // Raw engineResult estimates have no oneTime.total — the breakdown sums gross
+    // line items, so the pooled one-time discount must surface as its own row or
+    // the customer would be shown (and charged) the undiscounted total.
+    const breakdown = normalizeOneTimeBreakdown({
+      engineResult: {
+        lineItems: [
+          { service: 'exclusion', label: 'Rodent Exclusion', priceAfterDiscount: 720 },
+        ],
+        summary: {
+          manualDiscount: {
+            label: 'WaveGuard Member Discount',
+            type: 'PERCENT',
+            value: 15,
+            amount: 108,
+            recurringAmount: 0,
+            oneTimeAmount: 108,
+          },
+        },
+      },
+    });
+
+    expect(breakdown.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'exclusion', amount: 720 }),
+      expect.objectContaining({
+        service: 'manual_discount',
+        amount: -108,
+        kind: 'discount',
+        label: 'WaveGuard Member Discount',
+      }),
+    ]));
+    expect(breakdown.total).toBe(612);
+  });
+
+  test('manual one-time discount nets once for mapped estimates (oneTime.total already net)', () => {
+    const breakdown = normalizeOneTimeBreakdown({
+      result: {
+        oneTime: {
+          total: 612, // mapper already subtracted the 108 one-time slice
+          items: [{ service: 'exclusion', name: 'Rodent Exclusion', price: 720 }],
+        },
+        manualDiscount: {
+          label: 'WaveGuard Member Discount',
+          oneTimeAmount: 108,
+        },
+      },
+    });
+
+    // The explicit discount row replaces the generic "Other one-time services"
+    // adjustment, and the total stays net — no double subtraction.
+    expect(breakdown.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'exclusion', amount: 720 }),
+      expect.objectContaining({ service: 'manual_discount', amount: -108, kind: 'discount' }),
+    ]));
+    expect(breakdown.items.find((r) => r.service === 'one_time_adjustment')).toBeUndefined();
+    expect(breakdown.total).toBe(612);
+  });
+
   test('keeps free service-specific inspection rows visible in one-time breakdown', () => {
     const breakdown = normalizeOneTimeBreakdown({
       result: {
