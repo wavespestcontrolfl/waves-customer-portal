@@ -25,7 +25,7 @@ const CHANGELOG_IDENTITY = {
   version_from: 'v1.0',
   version_to: 'v1.1',
   changed_by: 'claude-2026-06-22',
-  category: 'price',
+  category: 'rule',  // allowed by pricing_changelog CHECK (bug|leak|rule|cost|architecture|documentation|infrastructure)
   summary: '15% across-the-board pre-slab termite price cut.',
 };
 
