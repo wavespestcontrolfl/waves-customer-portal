@@ -99,13 +99,28 @@ async function recoverStaleServiceReportDeliveryClaims(now = new Date(), knex = 
           updated_at = ?
       WHERE status = 'sending'
         AND locked_at <= ?
-      RETURNING status
+      RETURNING *
     `, [now, now, now, staleBefore]);
     const rows = result.rows || [];
+    const failedRows = rows.filter((row) => row.status === 'failed');
+    // A claim that goes stale on its final attempt is flipped straight to
+    // 'failed' here in bulk SQL, never through markDeliveryFailed — so without
+    // this it would skip the admin bell every other terminal failure raises,
+    // leaving a permanently undelivered report silent. This is exactly the
+    // crash-on-final-attempt case the delivery-failure alert (#1899) exists to
+    // catch. Best-effort and deduped per delivery id (shared key with
+    // markDeliveryFailed, so an overlapping normal failure can't double-alert),
+    // and the helper never throws, so it can't break the queue sweep.
+    for (const row of failedRows) {
+      await alertServiceReportDeliveryFailed({
+        delivery: row,
+        error: new Error(row.last_error || 'Recovered stale delivery claim'),
+      }, { knex });
+    }
     return {
       recovered: rows.length,
       retried: rows.filter((row) => row.status === 'queued').length,
-      failed: rows.filter((row) => row.status === 'failed').length,
+      failed: failedRows.length,
     };
   } catch (err) {
     if (isMissingQueueError(err)) return { recovered: 0, retried: 0, failed: 0, skipped: true };
