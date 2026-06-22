@@ -183,7 +183,18 @@ function collectSnapshot(sel) {
     }
   }
 
-  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants };
+  // Option-card variants (opt-in via adapter optionCardSelector): storefronts like DoMyOwn
+  // render each size as a card "<label> (<size>) $<price>". Collect the raw card text only;
+  // extract.variantsFromOptionCards (pure, Node-side) parses size+price from it.
+  let optionCardTexts = [];
+  if (sel.optionCardSelector) {
+    optionCardTexts = Array.from(document.querySelectorAll(sel.optionCardSelector))
+      .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .slice(0, 24);
+  }
+
+  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants, optionCardTexts };
 }
 
 // Find the first product link on a search-results page. Returns an absolute URL
@@ -333,11 +344,17 @@ function makeAdapter(config) {
   async function scrapeCandidate(page, vendor, product, url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
     if (config.settleMs) await page.waitForTimeout(config.settleMs);
+    // Option cards render client-side (e.g. DoMyOwn product-cards.js) — wait for them
+    // before snapshotting, else the size+price variants aren't in the DOM yet.
+    if (config.optionCardSelector) {
+      await page.waitForSelector(config.optionCardSelector, { timeout: config.optionCardWaitMs || 12000 }).catch(() => {});
+    }
     const sel = {
       titleSelector: config.titleSelector,
       priceSelectors: config.priceSelectors,
       availabilitySelector: config.availabilitySelector,
       magentoVariants: !!config.magentoVariants, // capture per-variant size+price (Magento jsonConfig)
+      optionCardSelector: config.optionCardSelector || null, // capture option-card size+price text (DoMyOwn)
     };
     const snapshot = await page.evaluate(collectSnapshot, sel);
 
