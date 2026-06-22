@@ -105,6 +105,14 @@ describe('bestMatchingLink (scored result selection)', () => {
     ], prod);
     expect(got).toBe('https://www.domyown.com/prodiamine-65-wdg-5-lb-p-2.html');
   });
+  test('a product-id digit is not mistaken for a pack-size token (25-lb-p-5 must not win for 5 lb)', () => {
+    const prod = { vendorProductName: 'Prodiamine 65 WDG', quantity: '5 lb' };
+    const got = bestMatchingLink([
+      'https://www.domyown.com/prodiamine-65-wdg-25-lb-p-5.html', // wrong size (25 lb), id happens to be 5
+      'https://www.domyown.com/prodiamine-65-wdg-5-lb-p-99.html', // right size (5 lb)
+    ], prod);
+    expect(got).toBe('https://www.domyown.com/prodiamine-65-wdg-5-lb-p-99.html');
+  });
   test('terse slug that omits the category word still matches (Bifen I/T -> bifen-it, beats bifen-xts)', () => {
     const bifen = { vendorProductName: 'Bifen I/T Insecticide', quantity: '96 oz' };
     const got = bestMatchingLink([

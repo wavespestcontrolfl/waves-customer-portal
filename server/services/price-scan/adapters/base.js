@@ -171,10 +171,14 @@ const GENERIC_NAME_TOKENS = new Set([
 ]);
 
 // Alphanumeric segments of a product URL path, as a Set for EXACT-segment matching
-// (so "sc" matches a "sc" segment, not a substring of "celsius").
+// (so "sc" matches a "sc" segment, not a substring of "celsius"). Strips the storefront
+// product-id suffix (DoMyOwn "...-p-12345.html") + extension first, so an id digit can't
+// masquerade as pack-size evidence (a "5 lb" token matching the "5" of "-p-5"); the
+// `-p-<id>` pattern is DoMyOwn-specific, so the strip is a harmless no-op elsewhere.
 function slugSegments(href) {
   let path = String(href);
   try { path = new URL(href).pathname; } catch { /* relative/garbage — match as-is */ }
+  path = path.replace(/\.html?$/i, '').replace(/-p-\d+$/i, '');
   return new Set(path.toLowerCase().match(/[a-z0-9]+/g) || []);
 }
 
