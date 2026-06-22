@@ -2397,7 +2397,49 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('data-estimate-ask-prompt="How does the bait work?"');
+    // Trenching is a liquid barrier, not a bait system — the chip matches the method.
+    expect(html).toContain('data-estimate-ask-prompt="How long does the barrier last?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+  });
+
+  test('server-rendered pre-slab estimate uses pre-slab ask prompt and never duplicates its copy', () => {
+    const html = renderPage('preslab-onetime-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 225,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 225,
+          items: [{
+            service: 'pre_slab_termiticide',
+            name: 'Pre-Slab Termiticide Treatment',
+            price: 225,
+            warrantyStatus: 'No extended warranty selected.',
+          }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    // Pre-slab is a soil treatment, not a bait system — the chip matches the method.
+    expect(html).toContain('data-estimate-ask-prompt="How does pre-slab treatment work?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+
+    // The service note and the warranty assurance each render exactly once —
+    // they used to print as one combined sentence in both the one-time note and
+    // the mini-guarantee, which showed the customer the same text twice.
+    const noteOccurrences = (html.match(/Includes pre-slab soil treatment for the measured slab area\./g) || []).length;
+    const warrantyOccurrences = (html.match(/Warranty terms depend on the selected warranty option\./g) || []).length;
+    expect(noteOccurrences).toBe(1);
+    expect(warrantyOccurrences).toBe(1);
+    expect(html).toContain('No extended warranty selected.');
   });
 
   test('server-rendered booking review buttons use explicit click listeners', () => {
