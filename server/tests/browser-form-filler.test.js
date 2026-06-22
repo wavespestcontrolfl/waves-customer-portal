@@ -444,6 +444,12 @@ describe('resolvePublicIps (DNS pin source, fail-closed)', () => {
     expect(await resolvePublicIps('2001:0:abcd::')).toEqual([]);        // Teredo
     expect(await resolvePublicIps('2606:4700:4700::1111')).toEqual(['2606:4700:4700::1111']); // genuine global IPv6 → kept
   });
+  test('P2: an IPv4-mapped IPv6 is judged by its EMBEDDED IPv4 against the full special-use set', async () => {
+    expect(await resolvePublicIps('::ffff:198.18.0.1')).toEqual([]);  // mapped benchmark → reject (isPrivateIp alone would miss it)
+    expect(await resolvePublicIps('::ffff:224.0.0.1')).toEqual([]);   // mapped multicast → reject
+    expect(await resolvePublicIps('::ffff:10.0.0.1')).toEqual([]);    // mapped private → reject
+    expect(await resolvePublicIps('::ffff:8.8.8.8')).toEqual(['::ffff:8.8.8.8']); // mapped genuinely-global → kept
+  });
   test('empty host → []', async () => {
     expect(await resolvePublicIps('')).toEqual([]);
   });

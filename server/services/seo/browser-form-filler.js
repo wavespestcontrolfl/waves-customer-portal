@@ -88,6 +88,12 @@ function isGloballyRoutable(ip) {
     if (ssrf.isPrivateIp(ip)) return false; // ::1, ::, fc/fd (ULA), fe80::/10 (link-local), v4-mapped private
     const h = ip.toLowerCase();
     if (h.startsWith('ff')) return false;                              // ff00::/8 multicast
+    // An IPv4-mapped IPv6 (::ffff:1.2.3.4) must be judged by its EMBEDDED IPv4 against the
+    // FULL IPv4 special-use set — isPrivateIp only catches mapped PRIVATE v4, so
+    // ::ffff:198.18.0.1 (benchmark) / ::ffff:224.0.0.1 (multicast) would otherwise pass.
+    const mappedV4 = h.match(/:((?:\d{1,3}\.){3}\d{1,3})$/);
+    if (mappedV4 && net.isIPv4(mappedV4[1])) return isGloballyRoutable(mappedV4[1]);
+    if (h.includes('::ffff:')) return false;                           // mapped HEX form we can't cleanly decode → fail closed
     // IPv4-translation / tunneling prefixes EMBED an IPv4 in the v6 address — a hostile
     // AAAA like 64:ff9b::a9fe:a9fe (169.254.169.254) would otherwise pass and pin Chromium
     // at internal/metadata IPv4 in a NAT64/6to4-routed env. Reject them outright.
