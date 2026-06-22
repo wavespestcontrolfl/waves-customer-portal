@@ -54,6 +54,12 @@ const adapter = makeAdapter({
     }
     const attempt = async () => {
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
+      // Re-validate the LANDED host: goto follows redirects, and we type the password into
+      // whatever page loaded — an open redirect / tampered URL could bounce off-host. Never
+      // fill credentials unless we're still on a trusted Veseris host.
+      if (!isTrustedVeserisLoginUrl(page.url())) {
+        throw new Error('veseris login aborted: navigation redirected off the trusted host');
+      }
       const email = page.locator('input[name="login[username]"]:visible').first();
       const pass = page.locator('input[name="login[password]"]:visible').first();
       await email.waitFor({ state: 'visible', timeout: 30000 });
