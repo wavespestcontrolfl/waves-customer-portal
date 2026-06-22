@@ -29,6 +29,7 @@ describe('customer auth tokens', () => {
     const token = generateToken('property-123', 'old-account');
     const query = {
       where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue({
         id: 'property-123',
         active: true,
