@@ -198,7 +198,39 @@ JSX component props like columns={[...]} are expected and render fine.
   rows={[{ label: "...", values: ["...","..."] }]} highlight={1} caption="..." />
   — side-by-side comparison (e.g. quarterly program vs one-time, DIY vs pro).
   columns + rows are REQUIRED; highlight is the 0-based option column to
-  emphasize. Prefer this over a plain markdown comparison table.
+  emphasize. Prefer this over a plain markdown comparison table. For a
+  decision / "which option is right for me" / "best [service] in [city]" brief
+  you may anchor the whole post on this component — see BUYER'S-GUIDE COMPARISON.
+
+BUYER'S-GUIDE COMPARISON — when the brief's intent is comparison / "how to
+choose" / a "best [service] in [city]" demand, you may anchor the post on a
+<ComparisonTable>. This is the HONEST way to earn that demand: help the reader
+choose; never fake a ranking or trash a competitor. Two modes:
+  1) CATEGORY mode (default, always allowed) — compare provider CATEGORIES, not
+     named businesses: columns like ["What to weigh","National chain","Local
+     SWFL company","DIY"]. Rows are neutral buying criteria (licensed & insured,
+     knows SWFL pests + soil/season, re-treat guarantee, recurring vs one-off,
+     who answers the phone). Let the reader conclude where a local licensed
+     company fits — never declare a winner. Needs no special data.
+  2) NAMED-COMPETITOR mode (gated + always human-reviewed) — you may name a real
+     competitor ONLY if get_competitor_facts() returns it, and you may state
+     ONLY the neutral attributes it returns for that competitor. NEVER name a
+     business the tool does not list (the publish gate hard-blocks an unlisted
+     name). Add a caption with attribution + an "as of" date, e.g.
+     caption="Attributes as of June 2026, per each company's public website."
+     Every named-competitor post routes to a human before it can publish — so
+     prefer category mode unless the brief specifically needs named businesses.
+RULES for either mode (the comparison-table publish gate enforces these — a
+violation routes the whole draft to review and wastes the run):
+  - NEVER disparaging language ("worst", "scam", "overpriced", "unreliable",
+    "hidden fees", …). State attributes; the reader judges.
+  - NEVER a self-declared ranking ("the best", "#1", "top-rated", "winner",
+    "better than everyone"). Neutral trade-offs only. (highlight={} to emphasize
+    a column is layout, not a claim — that's fine.)
+  - Compare cost qualitatively ("Varies", "Quote-based", "$$"), never a
+    hardcoded dollar figure — link to /pest-control-calculator/ for numbers.
+  - Do NOT put competitor attributes in claims_ledger (that ledger is for local
+    SWFL facts only) — cite competitor sources in the caption + notes_for_reviewer.
 
 TOOL USE:
 - Always call get_content_brief(opportunity_id) first to load the full brief
@@ -312,6 +344,12 @@ handles all of those after the gates pass.`,
           city: { type: 'string' },
         },
       },
+    },
+    {
+      type: 'custom',
+      name: 'get_competitor_facts',
+      description: 'For a NAMED-COMPETITOR comparison table only: returns the curated allowlist of competitors you may name, each with neutral, sourced, dated attributes. You may name ONLY businesses this returns, and state ONLY the attributes it lists. An empty list means no named competitors are curated — use a CATEGORY comparison instead.',
+      input_schema: { type: 'object', properties: {} },
     },
     {
       type: 'custom',

@@ -16,6 +16,7 @@
  *   get_existing_metadata    read only the frontmatter title + meta
  *   search_knowledge_base    delegate to existing wiki-qa (lazy load)
  *   check_existing_content   delegate to existing blog-writer overlap check
+ *   get_competitor_facts     curated allowlist of nameable competitors + facts
  *   emit_draft               capture the draft on the session — does NOT publish
  *   emit_metadata_only       capture the metadata rewrite on the session
  *
@@ -26,6 +27,7 @@
 
 const db = require('../../../models/db');
 const { normalizeContentUrl } = require('../content-registry');
+const competitorFacts = require('../competitor-facts');
 const logger = require('../../logger');
 const { etDateString, addETDays } = require('../../../utils/datetime-et');
 const { buildSeoRequirements } = require('../blog-seo-contract');
@@ -224,6 +226,17 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         return { keyword, city, matches };
       } catch (err) {
         return { error: `blog_posts read failed: ${err.message}` };
+      }
+    }
+
+    case 'get_competitor_facts': {
+      // Curated allowlist for NAMED-COMPETITOR comparison tables. Pure data —
+      // the comparison-table publish gate enforces that any business the writer
+      // names is on this list, so the two can never drift.
+      try {
+        return { competitors: competitorFacts.listForPrompt() };
+      } catch (err) {
+        return { error: `competitor-facts unavailable: ${err.message}` };
       }
     }
 

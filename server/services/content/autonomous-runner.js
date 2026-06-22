@@ -77,6 +77,7 @@ const getFactsSufficiency = lazy('facts-sufficiency', './facts-sufficiency');
 const getClaimsLedgerValidator = lazy('claims-ledger-validator', './claims-ledger-validator');
 const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
+const getComparisonTableGate = lazy('comparison-table-gate', './comparison-table-gate');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
@@ -573,6 +574,41 @@ class AutonomousRunner {
           reviewer_notes: notes,
         });
         await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_failed', { claimToken });
+        return finalized;
+      }
+    }
+
+    // 3d. Comparison-table gate — keeps the writer's <ComparisonTable>
+    // buyer's-guide listicles honest: no disparagement, no self-declared
+    // rankings, named competitors only from the curated competitor-facts
+    // allowlist, and every named-competitor post routed to a human. Applies to
+    // any body-content action; a draft with no comparison table passes
+    // untouched. P0/P1 → human review. namedCompetitorComparison is gated OFF
+    // in prod by default, so a named-competitor draft routes to review rather
+    // than auto-publishing until the owner enables it.
+    const comparisonGate = getComparisonTableGate();
+    if (comparisonGate && draft) {
+      let namedCompetitorEnabled = false;
+      try {
+        namedCompetitorEnabled = require('../../config/feature-gates').namedCompetitorComparison === true;
+      } catch (_) { namedCompetitorEnabled = false; }
+      let comparisonResult;
+      try {
+        comparisonResult = comparisonGate.evaluate(draft, { namedCompetitorEnabled });
+      } catch (err) {
+        logger.warn(`[autonomous-runner] comparison-table gate threw: ${err.message}`);
+        comparisonResult = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_ERROR', message: err.message }] };
+      }
+      run.comparison_table_result = comparisonResult;
+      if (!comparisonResult.pass) {
+        const blocking = comparisonResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+        const notes = `Comparison-table gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'comparison_table_failed',
+          reviewer_notes: notes,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken });
         return finalized;
       }
     }

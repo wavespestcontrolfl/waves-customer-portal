@@ -191,6 +191,17 @@ const gates = {
   // rollout — per-action-type trust-build before live publish).
   autonomousContentEngine: isProd ? process.env.GATE_AUTONOMOUS_CONTENT === 'true' : true,
 
+  // Named-competitor comparison tables in autonomous blog posts. The writer can
+  // ALWAYS emit a CATEGORY comparison ("national chain vs local SWFL company vs
+  // DIY"); this flag additionally lets it NAME a real competitor — but only one
+  // on the curated competitor-facts.js allowlist, never with disparagement or a
+  // self-declared ranking (comparison-table-gate.js enforces all of that, and
+  // routes every named-competitor post to human review regardless of this
+  // flag). Default OFF in prod (legal/brand sensitivity): ships dormant so a
+  // named-competitor draft routes to review instead of auto-publishing until
+  // GATE_NAMED_COMPETITOR_COMPARISON=true. Category comparisons are unaffected.
+  namedCompetitorComparison: isProd ? process.env.GATE_NAMED_COMPETITOR_COMPARISON === 'true' : true,
+
   // aeo_gap opportunity mining — feeds answer-engine (LLM) visibility gaps into
   // the content engine's opportunity_queue. Default OFF in prod: ships dormant
   // so it can be enabled (GATE_AEO_GAP_MINING=true) only after the
