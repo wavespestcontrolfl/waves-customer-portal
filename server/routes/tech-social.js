@@ -367,8 +367,15 @@ router.post('/publish', async (req, res, next) => {
       (typeof r.skipped === 'string' && r.skipped.startsWith('Validation:'))
         ? { ...r, skipped: 'Validation: caption rejected' }
         : r);
-    const rawNote = typeof req.body.techNote === 'string' ? req.body.techNote : '';
-    const safeNote = captionService.piiIssues(rawNote).length ? '' : rawNote;
+    const rawNote = (typeof req.body.techNote === 'string' ? req.body.techNote : '').slice(0, 500);
+    // Redact the note if it trips ANY guard captions get — phone (validateContent's
+    // unknown-number check) + email/street (piiIssues) — so customer PII a tech
+    // typed into the free-text note never lands in the audit row.
+    const noteIssues = [
+      ...(social.validateContent(rawNote, 'facebook').issues || []),
+      ...captionService.piiIssues(rawNote),
+    ];
+    const safeNote = noteIssues.length ? '' : rawNote;
 
     const location = WAVES_LOCATIONS.find((l) => l.id === locationId) || null;
     await logPost(buildPostLogRow({
