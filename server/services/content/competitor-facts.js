@@ -156,7 +156,7 @@ const COMPETITORS = [
   {
     id: 'hometeam-pest-defense',
     name: 'HomeTeam Pest Defense',
-    aliases: ['hometeam pest', 'home team pest defense', 'hometeam'],
+    aliases: ['hometeam pest', 'home team pest defense'], // not bare 'hometeam'
     attributes: {
       reach: { value: 'Multi-state (US, incl. Florida)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
@@ -174,7 +174,8 @@ const COMPETITORS = [
   {
     id: 'greenhouse-pest',
     name: 'Greenhouse Termite & Pest Control',
-    aliases: ['greenhouse termite and pest control', 'greenhouse termite & pest', 'greenhouse pest'],
+    // not bare 'greenhouse pest' — matches generic "greenhouse pest control" copy
+    aliases: ['greenhouse termite and pest control', 'greenhouse termite & pest'],
     attributes: {
       reach: { value: 'Regional (Florida West Coast — incl. Manatee/Sarasota/Charlotte)', source: 'https://mygreenhousepro.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://mygreenhousepro.com', asOf: '2026-06-22' },
