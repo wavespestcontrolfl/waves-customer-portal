@@ -1133,6 +1133,8 @@ export function calculateEstimate(inputs) {
     trenchingWarrantyTier,
     trenchingLabelConfirmed,
     boracareSqft: bcSqft,
+    boracareSurfaceLinearFt: bcSurfaceLF,
+    boracareSurfaceHeightFt: bcSurfaceHeight,
     boracareWallLinearFt: bcWallLF,
     boracareWallHeightFt: bcWallHeight,
     preslabSqft: psSqft,
@@ -2135,40 +2137,43 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Bora-Care ───────────────────────────────────────────── */
-  // Wall spraying: linear ft of wall × height → treatable area, folded into the
-  // BoraCare area (same coverage/labor/margin). Default 8 ft when height omitted.
+  // Surface treatment: linear ft of an accessible run (wall, foundation,
+  // framing, block) × height → treatable area, folded into the BoraCare area.
+  // Default 8 ft when height omitted. Legacy wall* inputs still accepted.
   // Coerce both components to numbers first — callers (e.g. the legacy
   // EstimatePage path) may spread raw string form values, and string + number
   // would concatenate ("1200" + 0 → "12000") and grossly over-price the job.
   const bcAtticSqft = Number(bcSqft) > 0 ? Number(bcSqft) : 0;
-  const bcWallLinear = Number(bcWallLF) > 0 ? Number(bcWallLF) : 0;
-  const bcWallSqft = bcWallLinear > 0
-    ? bcWallLinear * (Number(bcWallHeight) > 0 ? Number(bcWallHeight) : 8)
+  const bcSurfaceLFRaw = bcSurfaceLF ?? bcWallLF;
+  const bcSurfaceHeightRaw = bcSurfaceHeight ?? bcWallHeight;
+  const bcSurfaceLinear = Number(bcSurfaceLFRaw) > 0 ? Number(bcSurfaceLFRaw) : 0;
+  const bcSurfaceSqft = bcSurfaceLinear > 0
+    ? bcSurfaceLinear * (Number(bcSurfaceHeightRaw) > 0 ? Number(bcSurfaceHeightRaw) : 8)
     : 0;
-  const bcTotalSqft = bcAtticSqft + bcWallSqft;
+  const bcTotalSqft = bcAtticSqft + bcSurfaceSqft;
   if (svcBoracare && !isCommercial && bcTotalSqft > 0) {
     hasOT = true;
     const BC_GAL = 91.98, BC_COV = 275, BC_EQUIP = 17.50;
-    // Wall-only jobs (no attic/raw-wood input) skip the attic 3-gal / 2-hr
+    // Surface-only jobs (no attic/raw-wood input) skip the attic 3-gal / 2-hr
     // floors and price on actual gallons + actual labor, floored at $150.
-    const BC_MIN_JOB = 150, BC_WALL_LABOR_SQFT_PER_HR = 320;
-    const bcWallOnly = bcAtticSqft <= 0;
-    const gal = Math.max(bcWallOnly ? 1 : 3, Math.ceil(bcTotalSqft / BC_COV));
+    const BC_MIN_JOB = 150, BC_SURFACE_LABOR_SQFT_PER_HR = 640;
+    const bcSurfaceOnly = bcAtticSqft <= 0;
+    const gal = Math.max(bcSurfaceOnly ? 1 : 3, Math.ceil(bcTotalSqft / BC_COV));
     // v1.5: raised labor cap from 6 to 10 hrs — 4,500+ sf attics are multi-day in SWFL heat
     const isMultiDay = bcTotalSqft > 4500;
     const lhr = isMultiDay
       ? Math.min(10, Math.max(6, 1.5 + bcTotalSqft / 800))  // more aggressive rate for large attics
-      : bcWallOnly
-        ? Math.min(6, bcTotalSqft / BC_WALL_LABOR_SQFT_PER_HR)
+      : bcSurfaceOnly
+        ? Math.min(6, bcTotalSqft / BC_SURFACE_LABOR_SQFT_PER_HR)
         : Math.min(6, Math.max(2, 1.5 + bcTotalSqft / 1000));
     const cost = gal * BC_GAL + lhr * LABOR + BC_EQUIP;
     const rawPrice = Math.round(cost / 0.45);
-    const fp = otP(bcWallOnly ? Math.max(BC_MIN_JOB, rawPrice) : rawPrice);
-    const wallNote = bcWallSqft > 0 ? ' (incl. ' + bcWallSqft.toLocaleString() + ' sf wall)' : '';
-    const detail = '~' + bcTotalSqft.toLocaleString() + ' sf' + wallNote + ' | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
+    const fp = otP(bcSurfaceOnly ? Math.max(BC_MIN_JOB, rawPrice) : rawPrice);
+    const surfaceNote = bcSurfaceSqft > 0 ? ' (incl. ' + bcSurfaceSqft.toLocaleString() + ' sf surface)' : '';
+    const detail = '~' + bcTotalSqft.toLocaleString() + ' sf' + surfaceNote + ' | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
     otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft: bcTotalSqft, gal, lhr, isMultiDay });
   } else if (svcBoracare && !isCommercial) {
-    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft or wall linear ft required', quoteRequired: true });
+    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft or surface linear ft required', quoteRequired: true });
   }
 
   /* ── Pre-Slab Termiticide ────────────────────────────────── */

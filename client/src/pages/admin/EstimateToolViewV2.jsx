@@ -1999,8 +1999,8 @@ export default function EstimateToolViewV2({
     bedbugHeatScope: "ROOMS_ONLY",
     bedbugSubcontractCost: "",
     boracareSqft: "",
-    boracareWallLinearFt: "",
-    boracareWallHeightFt: "",
+    boracareSurfaceLinearFt: "",
+    boracareSurfaceHeightFt: "",
     preslabSqft: "",
     preslabProductKey: "termidor_sc",
     preslabLabelConfirmed: false,
@@ -3004,8 +3004,8 @@ export default function EstimateToolViewV2({
       // present-but-invalid entry (e.g. "-5") must reach the engine so its
       // invalid-measurement review path runs instead of being silently dropped.
       const boracareSqftRaw = String(form.boracareSqft ?? "").trim() || undefined;
-      const boracareWallLinearFt = String(form.boracareWallLinearFt ?? "").trim() || undefined;
-      const boracareWallHeightFt = String(form.boracareWallHeightFt ?? "").trim() || undefined;
+      const boracareSurfaceLinearFt = String(form.boracareSurfaceLinearFt ?? "").trim() || undefined;
+      const boracareSurfaceHeightFt = String(form.boracareSurfaceHeightFt ?? "").trim() || undefined;
       const preslabSqft = parsePositiveNumber(form.preslabSqft);
       const propertyPalmCount = parsePositiveInteger(form.palmCount);
       const palmTreatmentCountBlank = String(form.palmTreatmentCount || "").trim() === "";
@@ -3065,8 +3065,8 @@ export default function EstimateToolViewV2({
         trenchingWarrantyTier: form.trenchingWarrantyTier || "one_year_retreat",
         trenchingLabelConfirmed: !!form.trenchingLabelConfirmed,
         boracareSqft: boracareSqftRaw,
-        boracareWallLinearFt,
-        boracareWallHeightFt,
+        boracareSurfaceLinearFt,
+        boracareSurfaceHeightFt,
         preslabSqft,
         preslabProductKey: form.preslabProductKey || "termidor_sc",
         preslabLabelConfirmed: !!form.preslabLabelConfirmed,
@@ -3215,9 +3215,9 @@ export default function EstimateToolViewV2({
       if (boracareSqft) {
         profile.atticSqFt = boracareSqft;
       } else if (form.svcBoracare) {
-        // Wall-spray (or attic-cleared) Bora-Care quote: don't inherit a stale
-        // lookup attic value, or a wall-only job would be priced as attic+wall.
-        // An invalid attic entry is still sent raw via options (boracareSqft) so
+        // Surface-treatment (or attic-cleared) Bora-Care quote: don't inherit a
+        // stale lookup attic value, or a surface-only job would be priced as
+        // attic+surface. An invalid attic entry is still sent raw via options so
         // the server flags it for review rather than dropping it.
         delete profile.atticSqFt;
         delete profile.atticAreaSqFt;
@@ -3253,8 +3253,8 @@ export default function EstimateToolViewV2({
         selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
       const preSlabOnly =
         selectedServices.length === 1 && selectedServices[0] === "PRESLAB";
-      // Bora-Care is priced from attic/raw-wood sqft or wall linear ft, not the
-      // home/lot footprint, so a Bora-Care-only quote must not be gated on it.
+      // Bora-Care is priced from attic/raw-wood sqft or surface linear ft, not
+      // the home/lot footprint, so a Bora-Care-only quote must not be gated on it.
       const boraCareOnly =
         selectedServices.length === 1 && selectedServices[0] === "BORACARE";
       if (!bedBugOnly && !preSlabOnly && !boraCareOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
@@ -3639,8 +3639,8 @@ export default function EstimateToolViewV2({
       fleaExteriorAreaSource: "UNKNOWN",
       fleaExteriorZones: [],
       boracareSqft: "",
-      boracareWallLinearFt: "",
-      boracareWallHeightFt: "",
+      boracareSurfaceLinearFt: "",
+      boracareSurfaceHeightFt: "",
       preslabSqft: "",
       preslabProductKey: "termidor_sc",
       preslabLabelConfirmed: false,
@@ -3842,8 +3842,8 @@ export default function EstimateToolViewV2({
       !form.trenchingEstimateFromFootprint
       ? "Trenching needs measured perimeter LF before pricing."
       : null,
-    form.svcBoracare && !parsePositiveNumber(form.boracareSqft) && !parsePositiveNumber(form.boracareWallLinearFt)
-      ? "Bora-Care needs attic/raw wood sqft or wall linear ft."
+    form.svcBoracare && !parsePositiveNumber(form.boracareSqft) && !parsePositiveNumber(form.boracareSurfaceLinearFt)
+      ? "Bora-Care needs attic/raw wood sqft or surface linear ft."
       : null,
     form.svcPreslab && !parsePositiveNumber(form.preslabSqft)
       ? "Pre-Slab Termiticide Treatment needs slab sqft."
@@ -5218,16 +5218,16 @@ export default function EstimateToolViewV2({
                           placeholder="Admin-entered"
                         />
                       </FieldV2>
-                      <FieldV2 label="Wall Linear Ft (spray)">
+                      <FieldV2 label="Surface Linear Ft">
                         <InputV2
-                          k="boracareWallLinearFt"
+                          k="boracareSurfaceLinearFt"
                           type="number"
-                          placeholder="Linear ft of wall"
+                          placeholder="Linear ft of surface"
                         />
                       </FieldV2>
-                      <FieldV2 label="Wall Height (ft)">
+                      <FieldV2 label="Surface Height (ft)">
                         <InputV2
-                          k="boracareWallHeightFt"
+                          k="boracareSurfaceHeightFt"
                           type="number"
                           placeholder="Default 8"
                         />

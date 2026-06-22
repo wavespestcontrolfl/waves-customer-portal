@@ -1,5 +1,5 @@
 /**
- * Add small wall-job pricing levers to the Bora-Care config.
+ * Add small surface-treatment-job pricing levers to the Bora-Care config.
  *
  * Bora-Care pricing is DB-authoritative: db-bridge.syncConstantsFromDB loads
  * `pricing_config.onetime_boracare` over the in-code constants, so the
@@ -7,14 +7,15 @@
  * env that grows the row. This migration seeds the two new keys so the engine
  * (and any future admin edit) uses them:
  *
- *   - min_job_price (150): floor for a wall-spray (linear-ft) Bora-Care job so
- *     a tiny job still covers the truck roll.
- *   - wall_labor_sqft_per_hr (320): labor productivity for wall spraying, used
- *     in place of the attic 1.5h-base / 2h-floor curve on wall-only jobs.
+ *   - min_job_price (150): floor for a surface-treatment (linear-ft) Bora-Care
+ *     job so a tiny job still covers the truck roll.
+ *   - surface_labor_sqft_per_hr (640): labor productivity for linear-ft surface
+ *     spraying (walls, foundation, framing, block), used in place of the attic
+ *     1.5h-base / 2h-floor curve on surface-only jobs.
  *
- * Owner decision 2026-06-22: a 20 LF × 8 ft (160 sqft, ~30 min) wall job was
+ * Owner decision 2026-06-22: a 20 LF × 8 ft (160 sqft, ~15 min) surface job was
  * pricing at $808 because it inherited the attic 3-gallon / 2-hour floors; it
- * should land ~$282, floored at $150.
+ * should land ~$263, floored at $150.
  *
  * Read-modify-write so admin edits to gal_cost/coverage_sqft/equip_cost in the
  * same row survive.
@@ -22,9 +23,9 @@
 const CONFIG_KEY = 'onetime_boracare';
 const MIGRATION_TAG = 'migration:20260622000011';
 const MIN_JOB_PRICE = 150;
-const WALL_LABOR_SQFT_PER_HR = 320;
-const UP_REASON = 'Add wall-spray small-job pricing (min_job_price, wall_labor_sqft_per_hr) — owner decision 2026-06-22';
-const DOWN_REASON = 'Revert wall-spray small-job pricing keys';
+const SURFACE_LABOR_SQFT_PER_HR = 640;
+const UP_REASON = 'Add surface-treatment small-job pricing (min_job_price, surface_labor_sqft_per_hr) — owner decision 2026-06-22';
+const DOWN_REASON = 'Revert surface-treatment small-job pricing keys';
 
 async function loadRow(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
@@ -55,11 +56,11 @@ exports.up = async function (knex) {
   if (!loaded) return;
   const { data } = loaded;
   // Leave any prior admin-set values alone.
-  if (data.min_job_price !== undefined && data.wall_labor_sqft_per_hr !== undefined) return;
+  if (data.min_job_price !== undefined && data.surface_labor_sqft_per_hr !== undefined) return;
   const newData = {
     ...data,
     min_job_price: data.min_job_price ?? MIN_JOB_PRICE,
-    wall_labor_sqft_per_hr: data.wall_labor_sqft_per_hr ?? WALL_LABOR_SQFT_PER_HR,
+    surface_labor_sqft_per_hr: data.surface_labor_sqft_per_hr ?? SURFACE_LABOR_SQFT_PER_HR,
   };
   await save(knex, data, newData, UP_REASON);
 };
@@ -70,6 +71,6 @@ exports.down = async function (knex) {
   const { data } = loaded;
   const newData = { ...data };
   delete newData.min_job_price;
-  delete newData.wall_labor_sqft_per_hr;
+  delete newData.surface_labor_sqft_per_hr;
   await save(knex, data, newData, DOWN_REASON);
 };
