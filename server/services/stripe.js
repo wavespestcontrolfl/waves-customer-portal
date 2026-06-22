@@ -48,7 +48,7 @@ const {
   assertInvoicePaymentIntentTenderMatches,
   invoicePaymentStatusForIntent,
 } = require('./stripe-invoice-state');
-const { assertInvoiceCollectible } = require('./invoice-helpers');
+const { assertInvoiceCollectible, invoiceAmountDue } = require('./invoice-helpers');
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -941,6 +941,13 @@ const StripeService = {
     let base;
     let surcharge;
     let total;
+    let coveredByCredit = false;
+    // Account credit this charge drew down (post-apply credit_applied − pre-apply).
+    // Captured outside the transaction so the orphan path (Stripe charged, DB write
+    // failed → rollback) can re-persist it: the rollback reverts the draw-down while
+    // the card was charged the REDUCED amount, so without this the customer keeps
+    // both the discount and the restored credit and the orphan no longer matches.
+    let chargeAppliedCreditDelta = 0;
     try {
       await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
@@ -969,6 +976,37 @@ const StripeService = {
           }
         }
 
+        // The stale collection session (if any) was just cancelled, but its id
+        // is still on the row and applyAccountCreditToInvoice fail-closes on any
+        // attached PI. Clear it, then apply available account credit so the card
+        // is charged amount DUE, not the gross total — auto-apply otherwise only
+        // runs at dispatch completion, so this charge-now path (especially an
+        // invoice with an abandoned /pay PI, which would block the route-level
+        // apply) could collect gross while the customer's credit sits unused.
+        // Gated + idempotent; on full coverage there is nothing to charge.
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+          if (lockedInvoice.stripe_payment_intent_id) {
+            await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
+            lockedInvoice.stripe_payment_intent_id = null;
+          }
+          const { applyAccountCreditToInvoice } = require('./customer-credit');
+          await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
+            logger.warn(`[stripe] charge-time account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
+          const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+          if (recredited) Object.assign(lockedInvoice, recredited);
+          chargeAppliedCreditDelta = Math.round(
+            (((Number(lockedInvoice.credit_applied) || 0) - (Number(invoice.credit_applied) || 0)) * 100),
+          ) / 100;
+          if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            // Fully covered by account credit. COMMIT the credit draw-down +
+            // prepaid transition (return, don't throw — a throw would roll back
+            // the apply AND the PI clearing, stranding the invoice) and skip the
+            // card charge. Settled below, after the transaction commits.
+            coveredByCredit = true;
+            return;
+          }
+        }
+
         // On-demand funding fetch for legacy cards missing card_funding
         if (card.method_type === 'card' && !card.card_funding && card.stripe_payment_method_id) {
           try {
@@ -987,7 +1025,8 @@ const StripeService = {
           }
         }
 
-        const chargeInfo = computeChargeAmount(parseFloat(lockedInvoice.total), card.method_type, { funding: card.card_funding });
+        // Charge base = amount due (total − applied account credit), not raw total.
+        const chargeInfo = computeChargeAmount(invoiceAmountDue(lockedInvoice), card.method_type, { funding: card.card_funding });
         const { baseCents: invBaseCents, surchargeCents: invSurchargeCents, totalCents: invTotalCents, rateBps: invRateBps, policyVersion: invPolicyVersion } = chargeInfo;
         base = invBaseCents / 100;
         surcharge = invSurchargeCents / 100;
@@ -1048,7 +1087,10 @@ const StripeService = {
             payment_method: 'card',
             card_brand: card.card_brand || null,
             card_last_four: card.last_four || null,
-            total,
+            // `total` here is the CASH charged (amount due + surcharge); add back
+            // applied account credit so the invoice keeps its real total rather
+            // than collapsing to the reduced cash amount with credit_applied set.
+            total: Math.round((total + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
           });
         if (!invoiceRowsUpdated) throw new Error('Invoice is no longer collectible');
 
@@ -1071,6 +1113,10 @@ const StripeService = {
             ? `Invoice ${invoice.invoice_number} — card on file (includes $${surcharge.toFixed(2)} credit card surcharge)`
             : `Invoice ${invoice.invoice_number} — card on file`,
           metadata: JSON.stringify({
+            // Link to the invoice so /api/receipt/:token + the receipt email find
+            // this row (and its actual cash amount) instead of falling back to the
+            // pre-credit invoice.total when account credit was applied.
+            invoice_id: invoice.id,
             base_amount: base,
             card_surcharge: surcharge,
             surcharge_rate_bps: invRateBps,
@@ -1122,11 +1168,61 @@ const StripeService = {
       } catch (orphanErr) {
         logger.error(`[stripe] DOUBLE FAILURE: orphan-charges insert also failed for PI ${paymentIntent.id}: ${orphanErr.message}`);
       }
+      // The rollback reverted the account-credit draw-down, but the card was charged
+      // the REDUCED (credit-applied) amount. Re-persist that exact draw-down in a
+      // fresh committed transaction so the balance + invoice reflect the consumed
+      // credit and the orphan charge reconciles against the reduced amount due — else
+      // the customer keeps both the discount and the restored credit. Done directly
+      // (not via applyAccountCreditToInvoice, which fail-closes on the still-attached
+      // stale PI the rollback restored). Idempotent: only tops up to the charged level.
+      if (chargeAppliedCreditDelta > 0) {
+        try {
+          const { postCreditMovement, round2 } = require('./customer-credit');
+          await db.transaction(async (trx) => {
+            const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+            if (!locked) return;
+            const current = round2(locked.credit_applied || 0);
+            const target = round2((Number(invoice.credit_applied) || 0) + chargeAppliedCreditDelta);
+            if (current < target) {
+              await postCreditMovement({
+                customerId: invoice.customer_id,
+                delta: -round2(target - current),
+                source: 'adjustment',
+                invoiceId,
+                note: `Account credit consumed by orphaned card charge ${paymentIntent.id} (DB write failed post-charge)`,
+                createdBy: 'system:orphan_charge',
+              }, trx);
+              await trx('invoices').where({ id: invoiceId }).update({ credit_applied: target, updated_at: trx.fn.now() });
+            }
+          });
+        } catch (reErr) {
+          logger.error(`[stripe] CRITICAL: orphan credit re-persist failed for invoice ${invoiceId} (PI ${paymentIntent.id}): ${reErr.message}`);
+        }
+      }
       const chargedErr = new Error(`Stripe charge ${paymentIntent.id} succeeded but DB write failed for invoice ${invoice.invoice_number}`);
       chargedErr.code = 'STRIPE_CHARGED_DB_FAILED';
       chargedErr.stripePaymentIntentId = paymentIntent.id;
       chargedErr.amount = total;
       throw chargedErr;
+    }
+
+    if (coveredByCredit) {
+      // Account credit fully covered the invoice inside the committed transaction
+      // above (now prepaid) — no card was charged. Run the same post-payment side
+      // effects a real payment would (stop dunning, sync any annual-prepay term).
+      logger.info(`[stripe] Card-on-file: account credit fully covered invoice ${invoice.invoice_number} — no card charge`);
+      try {
+        await require('./invoice-followups').stopOnPayment(invoiceId);
+      } catch (e) {
+        logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
+      }
+      try {
+        const fresh = await db('invoices').where({ id: invoiceId }).first();
+        if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
+      } catch (e) {
+        logger.warn(`[stripe] term sync after credit coverage failed for ${invoiceId}: ${e.message}`);
+      }
+      return { covered_by_credit: true, status: 'prepaid', paymentId: null, paymentIntentId: null };
     }
 
     logger.info(`[stripe] Card-on-file charge succeeded: $${total} for invoice ${invoice.invoice_number}, PI ${paymentIntent.id}`);
@@ -1247,6 +1343,18 @@ const StripeService = {
         } catch (syncErr) {
           logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
         }
+        // Return any applied account credit to the customer's balance — a full
+        // refund gives back the cash, so the credit they used must return too
+        // (else it stays consumed). Idempotent vs the charge.refunded webhook.
+        try {
+          const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
+          if (inv) {
+            const { returnAppliedCreditOnRefund } = require('./customer-credit');
+            await db.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx));
+          }
+        } catch (creditErr) {
+          logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
+        }
       }
 
       const updated = await db('payments').where({ id: paymentId }).first();
@@ -1311,6 +1419,7 @@ const StripeService = {
     let baseAmount;
     let cardSurcharge;
     let cardTotal;
+    let coveredByCredit = false;
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -1321,7 +1430,74 @@ const StripeService = {
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
 
-        baseAmount = parseFloat(lockedInvoice.total);
+        // Auto-apply only does anything when the customer actually has account
+        // credit. Resolve the available balance once up front and gate BOTH the
+        // stale-PI triage and the apply on it, so an invoice for a customer with
+        // no credit runs the original PI lifecycle untouched (reuse an open PI,
+        // 409 on an in-flight one, replace a canceled one via the idempotency
+        // key). The triage must NEVER cancel/clear a PI when there's nothing to
+        // draw down. A missing customer row reads as zero.
+        let availableCredit = 0;
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit && lockedInvoice.customer_id) {
+          const creditRow = await trx('customers')
+            .where({ id: lockedInvoice.customer_id })
+            .first('account_credits');
+          availableCredit = Number(creditRow?.account_credits) || 0;
+        }
+
+        // Stale-PI triage BEFORE auto-apply: applyAccountCreditToInvoice
+        // fail-closes on any attached PI, and the reuse block below would
+        // otherwise re-price a dead PI at the gross amount. If the existing PI is
+        // non-live (no active payment row + a cancelable Stripe status), cancel it
+        // and clear the column so credit applies and a fresh PI is minted for
+        // amount due. Money actually in flight is left untouched (handled by the
+        // reuse block / its 409). The invoice is forUpdate-locked for the whole
+        // transaction, so this can't race a new PI; on any error it falls back to
+        // the pre-credit behaviour (the lone PI path has no double-charge risk).
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit
+          && availableCredit > 0
+          && lockedInvoice.stripe_payment_intent_id) {
+          try {
+            const existingPayment = await trx('payments')
+              .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
+              .first();
+            const terminalPayStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
+            const hasLivePayment = existingPayment && !terminalPayStatuses.includes(existingPayment.status);
+            if (!hasLivePayment) {
+              const existingPi = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+              const liveStatuses = ['processing', 'succeeded', 'requires_capture', 'requires_action'];
+              if (!liveStatuses.includes(existingPi.status)) {
+                if (existingPi.status !== 'canceled') await stripe.paymentIntents.cancel(existingPi.id);
+                await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
+                lockedInvoice.stripe_payment_intent_id = null;
+              }
+            }
+          } catch (e) {
+            logger.warn(`[stripe] pay-page stale-PI triage skipped for invoice ${invoiceId}: ${e.message}`);
+          }
+        }
+
+        // Apply available account credit before pricing so the customer pays
+        // amount due, not the gross total. This controlled setup POST — not the
+        // public-by-token GET — is the safe seam for it when the pay page is the
+        // first touch after credit was issued / a link is reused. Gated +
+        // idempotent; fail-closes on an attached PI. Full coverage COMMITS the
+        // prepaid transition (return, NOT throw → no rollback) and skips minting
+        // a PaymentIntent; settled after the transaction below.
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit && availableCredit > 0) {
+          const { applyAccountCreditToInvoice } = require('./customer-credit');
+          await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
+            logger.warn(`[stripe] pay-page account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
+          const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+          if (recredited) Object.assign(lockedInvoice, recredited);
+          if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            coveredByCredit = true;
+            return;
+          }
+        }
+
+        // Charge base = amount due (total − applied account credit), not raw total.
+        baseAmount = invoiceAmountDue(lockedInvoice);
         // PI starts at BASE amount only — no surcharge at setup time.
         // Card payments: surcharge is applied via the /quote → /finalize two-step flow.
         // Express Checkout (wallets): intentionally base-only in phase 1 (no surcharge).
@@ -1423,6 +1599,26 @@ const StripeService = {
         if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
       });
 
+      if (coveredByCredit) {
+        // Account credit fully covered the invoice in the committed transaction
+        // above — no PaymentIntent to mint. Run the same post-payment side effects
+        // a real payment would, and return a covered state (no clientSecret) so
+        // the pay page settles instead of charging.
+        try {
+          await require('./invoice-followups').stopOnPayment(invoiceId);
+        } catch (e) {
+          logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
+        }
+        try {
+          const fresh = await db('invoices').where({ id: invoiceId }).first();
+          if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
+        } catch (e) {
+          logger.warn(`[stripe] term sync after credit coverage failed for ${invoiceId}: ${e.message}`);
+        }
+        logger.info(`[stripe] Pay-page: account credit fully covered invoice ${invoice.invoice_number} — no PaymentIntent`);
+        return { covered_by_credit: true, status: 'prepaid', clientSecret: null, paymentIntentId: null, amount: 0 };
+      }
+
       logger.info(`[stripe] Invoice PaymentIntent created: ${paymentIntent.id} for invoice ${invoice.invoice_number} (base=$${baseAmount})`);
       return {
         clientSecret: paymentIntent.client_secret,
@@ -1481,7 +1677,8 @@ const StripeService = {
     // Element loads, so guard the update path too.
     const saveCard = !!opts.saveCard && !invoice.payer_id;
     const selectedMethodCategory = methodCategory || 'card';
-    const base = parseFloat(invoice.total);
+    // Charge base = amount due (total − applied account credit), not raw total.
+    const base = invoiceAmountDue(invoice);
     const baseCents = Math.round(base * 100);
 
     // Lock the PI to the selected tender family before Stripe can confirm.
@@ -1686,7 +1883,9 @@ const StripeService = {
 
     const methodType = pm.type || 'card';
     const funding = pm.card?.funding || null;
-    const baseAmount = parseFloat(invoice.total);
+    // Charge base = amount due (total − applied account credit), not raw total.
+    // The quote stores this as invoiceTotal below, so /finalize matches.
+    const baseAmount = invoiceAmountDue(invoice);
 
     const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
@@ -1758,7 +1957,9 @@ const StripeService = {
     // Re-derive charge from PM + invoice — never trust client-provided amounts
     const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
     const funding = pm.card?.funding || null;
-    const baseAmount = parseFloat(invoice.total);
+    // Charge base = amount due (total − applied account credit), not raw total —
+    // must match the same calc the quote captured as invoiceTotal.
+    const baseAmount = invoiceAmountDue(invoice);
 
     if (quote.invoiceTotal != null && Math.abs(baseAmount - quote.invoiceTotal) > 0.01) {
       throw new Error('Invoice total changed since quote was created. Please request a new quote.');
@@ -2358,7 +2559,8 @@ const StripeService = {
       }
 
       const actualMethodType = pmdType || resolvedPaymentMethod;
-      const invoiceBaseAmount = Number(invoice.total);
+      // Tender match prices from amount due (total − applied credit), not raw total.
+      const invoiceBaseAmount = invoiceAmountDue(invoice);
       assertInvoicePaymentIntentTenderMatches(pi, actualMethodType, invoiceBaseAmount);
 
       const paymentStatus = invoicePaymentStatusForIntent(pi, actualMethodType);
@@ -2470,7 +2672,8 @@ const StripeService = {
           throw new Error('Invoice has a different active payment');
         }
         if (paymentStatus === 'processing') {
-          const expected = computeChargeAmount(parseFloat(lockedInvoice.total), resolvedPaymentMethod);
+          // Expected ACH amount prices from amount due (total − applied credit).
+          const expected = computeChargeAmount(invoiceAmountDue(lockedInvoice), resolvedPaymentMethod);
           const expectedCents = Math.round(expected.total * 100);
           const actualCents = Number(pi.amount_received || pi.amount || 0);
           if (actualCents !== expectedCents) {
@@ -2499,7 +2702,11 @@ const StripeService = {
           // template can render "Bank •1234" via {card_line}.
           card_last_four: cardLastFour || bankLastFour,
           receipt_url: receiptUrl,
-          total: chargedTotal,
+          // chargedTotal is the CASH taken (amount due + surcharge). Add back any
+          // applied account credit so the invoice keeps its real total (credit +
+          // cash) — without this, total would collapse to the reduced cash amount
+          // and the credit_applied math (amount due) would double-count.
+          total: Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
         };
         if (paymentStatus === 'paid') {
           invoiceUpdates.paid_at = new Date().toISOString();

@@ -17,7 +17,7 @@ const {
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { isEnabled } = require('../config/feature-gates');
-const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
@@ -827,7 +827,8 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   if (invoiceForTenderGuard
     && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)
     && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
-    const invoiceBaseAmount = Number(invoiceForTenderGuard.total);
+    // Tender match prices from amount due (total − applied account credit).
+    const invoiceBaseAmount = invoiceAmountDue(invoiceForTenderGuard);
     try {
       assertInvoicePaymentIntentTenderMatches(paymentIntent, details.paymentMethod, invoiceBaseAmount);
     } catch (err) {
@@ -913,7 +914,12 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         stripe_payment_intent_id: piId,
         stripe_charge_id: paymentIntent.latest_charge || null,
       };
-      if (chargedTotal !== null) fallbackInvoiceUpdates.total = chargedTotal;
+      // chargedTotal is CASH taken (amount due + surcharge); add back applied
+      // account credit so the invoice keeps its real total instead of collapsing
+      // to the reduced cash amount while credit_applied remains.
+      if (chargedTotal !== null) {
+        fallbackInvoiceUpdates.total = Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100;
+      }
       if (details.paymentMethod) fallbackInvoiceUpdates.payment_method = details.paymentMethod;
       if (details.cardBrand) fallbackInvoiceUpdates.card_brand = details.cardBrand;
       if (details.cardLastFour) fallbackInvoiceUpdates.card_last_four = details.cardLastFour;
@@ -932,7 +938,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       }
       fallbackLinkedInvoiceId = lockedInvoice.id;
 
-      const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoice.total);
+      const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoiceAmountDue(invoice));
       const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
       await trx('payments').insert({
         customer_id: invoice.customer_id,
@@ -941,7 +947,7 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         stripe_charge_id: paymentIntent.latest_charge || null,
         payment_date: etDateString(),
         amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
-        base_amount_cents: Math.round(Number(paymentIntent.metadata?.base_amount || invoice.total) * 100),
+        base_amount_cents: Math.round(Number(paymentIntent.metadata?.base_amount || invoiceAmountDue(invoice)) * 100),
         surcharge_amount_cents: Math.round(Number(paymentIntent.metadata?.card_surcharge || 0) * 100),
         surcharge_rate_bps: Number(paymentIntent.metadata?.surcharge_rate_bps || 0),
         surcharge_policy_version: paymentIntent.metadata?.surcharge_policy_version || null,
@@ -984,7 +990,12 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     paid_at: new Date().toISOString(),
     stripe_charge_id: paymentIntent.latest_charge || null,
   };
-  if (chargedTotal !== null) invoiceUpdates.total = chargedTotal;
+  // chargedTotal is CASH taken (amount due + surcharge); add back the row's own
+  // applied account credit IN SQL (the matched invoice isn't in this outer scope)
+  // so the invoice keeps its real total (credit + cash), not just the cash.
+  if (chargedTotal !== null) {
+    invoiceUpdates.total = db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [chargedTotal]);
+  }
   if (details.paymentMethod) invoiceUpdates.payment_method = details.paymentMethod;
   if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
@@ -1439,6 +1450,42 @@ async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
 }
 
 /**
+ * Resolve the invoice a refunded charge belongs to, trying every link the
+ * different payment paths leave behind, so a full refund can restore applied
+ * account credit. A charge-only reconciled payment carries NO payment_intent —
+ * only payments.metadata.invoice_id (and the invoice's own stripe_charge_id) —
+ * so a PI-only lookup would skip the restore and strand the credit. Runs on the
+ * caller's trx. Returns the invoice id or null.
+ */
+async function resolveRefundedInvoiceId(trx, { pmt, charge, chargeId }) {
+  // 1. payments.metadata.invoice_id — set by the admin reconcile route and by
+  //    credit-applied manual / card-on-file payments.
+  let metaInvoiceId = null;
+  if (pmt?.metadata) {
+    try {
+      const m = typeof pmt.metadata === 'string' ? JSON.parse(pmt.metadata) : pmt.metadata;
+      metaInvoiceId = m && m.invoice_id ? m.invoice_id : null;
+    } catch { /* non-JSON metadata — fall through */ }
+  }
+  if (metaInvoiceId) {
+    const inv = await trx('invoices').where({ id: metaInvoiceId }).first('id');
+    if (inv) return inv.id;
+  }
+  // 2. payment intent — saved-card / pay-page charges link the invoice by PI.
+  const pi = pmt?.stripe_payment_intent_id || charge?.payment_intent || null;
+  if (pi) {
+    const inv = await trx('invoices').where({ stripe_payment_intent_id: pi }).first('id');
+    if (inv) return inv.id;
+  }
+  // 3. charge id — the reconcile route also stamps invoices.stripe_charge_id.
+  if (chargeId) {
+    const inv = await trx('invoices').where({ stripe_charge_id: chargeId }).first('id');
+    if (inv) return inv.id;
+  }
+  return null;
+}
+
+/**
  * charge.refunded — Update refund status on payments table
  */
 async function handleChargeRefunded(charge) {
@@ -1542,17 +1589,61 @@ async function handleChargeRefunded(charge) {
     return; // statement refund fully handled; no homeowner refund-email path
   }
 
-  await db('payments')
-    .where({ stripe_charge_id: chargeId })
-    .update({
-      status: isFullRefund ? 'refunded' : 'paid',
-      refund_amount: cumulativeRefundAmountDollars,
-      refund_status: isFullRefund ? 'full' : 'partial',
-      stripe_refund_id: refundId,
-    });
-
-  const refundedPayment = await db('payments').where({ stripe_charge_id: chargeId }).first();
-
+  // Generic (homeowner invoice) refund. Atomic + durable: the payment refund stamp
+  // and the account-credit restore commit together or not at all; a failure BUBBLES
+  // to the route handler (→ HTTP 500) so Stripe RETRIES the event rather than acking
+  // it with the customer's returned credit stranded. Safe to retry: keyed on
+  // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
+  // row lock, so a replayed event is a no-op once the credit is back on the balance.
+  const refundedPayment = await db.transaction(async (trx) => {
+    await trx('payments')
+      .where({ stripe_charge_id: chargeId })
+      .update({
+        status: isFullRefund ? 'refunded' : 'paid',
+        refund_amount: cumulativeRefundAmountDollars,
+        refund_status: isFullRefund ? 'full' : 'partial',
+        stripe_refund_id: refundId,
+      });
+    const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
+    let result = pmt;
+    if (isFullRefund) {
+      // Resolve the invoice from every available link (PI, metadata.invoice_id,
+      // charge.payment_intent, invoices.stripe_charge_id) — a reconciled
+      // charge-only payment has no PI, so a PI-only lookup would skip the restore
+      // and strand the customer's applied credit.
+      const invId = await resolveRefundedInvoiceId(trx, { pmt, charge, chargeId });
+      if (invId) {
+        const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
+        await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+        // Pre-settlement refund: charge.refunded arrived before payment_intent.succeeded
+        // wrote the payments row (the update above hit 0 rows → pmt is null), but the
+        // invoice still resolved + was marked 'refunded'. The later succeeded handler
+        // skips refunded invoices, so without a row here the refunded receipt PDF + the
+        // refund email have nothing to read. Insert a durable refunded marker (mirrors
+        // the statement pre-settlement branch). Idempotent: a replay updates this row
+        // above and finds it via pmt, so it won't double-insert.
+        if (!pmt) {
+          const inv = await trx('invoices').where({ id: invId }).first('customer_id', 'invoice_number');
+          const [marker] = await trx('payments').insert({
+            customer_id: inv?.customer_id || null,
+            processor: 'stripe',
+            stripe_payment_intent_id: charge.payment_intent || null,
+            stripe_charge_id: chargeId,
+            payment_date: etDateString(),
+            amount: (charge.amount || refundAmountCents) / 100,
+            status: 'refunded',
+            refund_amount: cumulativeRefundAmountDollars,
+            refund_status: 'full',
+            stripe_refund_id: refundId,
+            description: `Invoice ${inv?.invoice_number || invId} fully refunded`,
+            metadata: JSON.stringify({ invoice_id: invId, source: 'invoice_refund' }),
+          }).returning('*');
+          result = marker;
+        }
+      }
+    }
+    return result;
+  });
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
@@ -1889,7 +1980,8 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       return;
     }
 
-    const expected = computeChargeAmount(parseFloat(lockedInvoice.total), 'us_bank_account');
+    // Expected ACH amount prices from amount due (total − applied account credit).
+    const expected = computeChargeAmount(invoiceAmountDue(lockedInvoice), 'us_bank_account');
     const expectedCents = Math.round(expected.total * 100);
     const actualCents = Number(paymentIntent.amount || 0);
     if (actualCents !== expectedCents) {
@@ -1937,7 +2029,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         stripe_payment_intent_id: piId,
         payment_date: etDateString(),
         amount,
-        base_amount_cents: Math.round(Number(paymentIntent.metadata?.base_amount || invoice.total) * 100),
+        base_amount_cents: Math.round(Number(paymentIntent.metadata?.base_amount || invoiceAmountDue(invoice)) * 100),
         surcharge_amount_cents: Math.round(Number(paymentIntent.metadata?.card_surcharge || 0) * 100),
         surcharge_rate_bps: Number(paymentIntent.metadata?.surcharge_rate_bps || 0),
         surcharge_policy_version: paymentIntent.metadata?.surcharge_policy_version || null,
@@ -1961,7 +2053,10 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
-        total: amount,
+        // `amount` is the ACH cash (already reduced by applied credit); add the
+        // row's credit_applied back IN SQL so total stays the real value — else the
+        // succeeded handler recomputes amount due off the collapsed total.
+        total: db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [amount]),
       });
   });
 

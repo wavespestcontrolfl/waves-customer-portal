@@ -6,7 +6,8 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { auditPaymentReconcile, ipFromReq, uaFromReq } = require('../services/audit-log');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
+const { computeChargeAmount } = require('../services/stripe-pricing');
 
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require('stripe')(stripeKey) : null;
@@ -123,12 +124,31 @@ router.post('/reconcile', async (req, res, next) => {
         return res.status(400).json({ error: `Charge is ${chargeDetails.status}, not succeeded` });
       }
 
-      // Sanity check amount (within $1 tolerance for tax rounding)
-      const chargeAmt = chargeDetails.amount / 100;
-      const invoiceTotal = parseFloat(invoice.total || 0);
-      if (Math.abs(chargeAmt - invoiceTotal) > 1) {
+      // Amount agreement, keyed on the amount DUE (total − applied account credit),
+      // not the gross total. This route records a FLAT collected amount; it does NOT
+      // persist the surcharge breakdown (base/surcharge/rate/policy/funding) the way
+      // the Stripe + webhook charge paths do. So only NON-surcharged charges may be
+      // reconciled here.
+      //
+      // Detect a surcharge at CENTS precision BEFORE the broad $1 tax-rounding
+      // tolerance: a small surcharge (e.g. $0.58 on a $20 invoice — 2.9%) is under $1
+      // and would otherwise slip through and be booked flat with no breakdown,
+      // overstating revenue. Compare against the surcharge-inclusive total computed
+      // the credit-funded worst case (so it's caught even when the retrieved charge
+      // reports funding=null); a surcharged charge belongs to the normal flow.
+      const chargeAmtCents = Math.round(chargeDetails.amount);
+      const amountDue = invoiceAmountDue(invoice);
+      const surcharged = computeChargeAmount(amountDue, 'card', { funding: 'credit' });
+      if (surcharged.surchargeCents > 0 && Math.abs(chargeAmtCents - surcharged.totalCents) <= 1) {
         return res.status(400).json({
-          error: `Amount mismatch — charge is $${chargeAmt.toFixed(2)} but invoice is $${invoiceTotal.toFixed(2)}`,
+          error: `This charge includes a $${(surcharged.surchargeCents / 100).toFixed(2)} card surcharge. Surcharged charges are recorded through the normal payment flow with their surcharge breakdown — only non-surcharged charges can be reconciled here.`,
+        });
+      }
+      // Otherwise require the bare amount due within $1 (tax rounding).
+      const chargeAmt = chargeAmtCents / 100;
+      if (Math.abs(chargeAmt - amountDue) > 1) {
+        return res.status(400).json({
+          error: `Amount mismatch — charge is $${chargeAmt.toFixed(2)} but invoice amount due is $${amountDue.toFixed(2)}`,
         });
       }
 
@@ -151,7 +171,7 @@ router.post('/reconcile', async (req, res, next) => {
       // recording a materially different collected amount would silently
       // drift revenue reports from the invoice ledger (e.g. a $1 typo on a
       // $500 invoice). Edit the invoice first if the total really changed.
-      const invoiceTotal = parseFloat(invoice.total || 0);
+      const invoiceTotal = invoiceAmountDue(invoice);
       if (Math.abs(Number(amount) - invoiceTotal) > 1) {
         return res.status(400).json({
           error: `Amount mismatch — collected $${Number(amount).toFixed(2)} but invoice is $${invoiceTotal.toFixed(2)}. Edit the invoice total first if it changed.`,
@@ -180,7 +200,7 @@ router.post('/reconcile', async (req, res, next) => {
     // reconciles honor the operator-supplied amount, else the invoice total.
     const collectedAmount = chargeDetails
       ? chargeDetails.amount / 100
-      : (amount != null ? Number(amount) : parseFloat(invoice.total));
+      : (amount != null ? Number(amount) : invoiceAmountDue(invoice));
 
     // Also create a payments ledger row so revenue reports pick up the collection
     try {

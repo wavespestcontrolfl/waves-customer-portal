@@ -12,6 +12,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { invoiceAmountDue } = require('./invoice-helpers');
 
 function tierDaysForOverdue(daysSince) {
   if (daysSince < 14) return 7;
@@ -119,7 +120,8 @@ const LatePaymentService = {
         kind: 'invoice', entityType: 'invoices', entityId: inv.id, customerId: customer.id,
         codePrefix: invoiceShortCodePrefix(inv),
       });
-      const totalAmount = parseFloat(inv.total || 0);
+      // Dun for amount DUE (total − applied account credit), not the gross total.
+      const totalAmount = invoiceAmountDue(inv);
 
       let formattedDate = '';
       if (inv.service_date) {

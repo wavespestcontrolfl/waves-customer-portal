@@ -6,6 +6,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { currency } = require('./email-template');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { invoiceAmountDue } = require('./invoice-helpers');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -449,7 +450,9 @@ async function sendPaymentFailed({
     payment_url: payUrl,
     invoice_title: invoice?.title || invoice?.service_type || clean(payment?.description).replace(/\s+[-\u2014]\s+FAILED$/i, '') || '',
     invoice_number: invoice?.invoice_number || '',
-    amount_due: money(payment?.amount || invoice?.total),
+    // No payments row yet on an interactive failure → fall back to amount DUE
+    // (total − applied credit), not the gross total, to match /pay and the charge.
+    amount_due: money(payment?.amount || (invoice ? invoiceAmountDue(invoice) : 0)),
     failed_payment_date: displayDate(payment?.payment_date || payment?.created_at),
     retry_date: displayDate(payment?.next_retry_at),
     payment_method_label: method?.last4 ? method.label : '',

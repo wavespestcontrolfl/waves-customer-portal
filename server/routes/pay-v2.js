@@ -112,6 +112,9 @@ router.get('/:token', async (req, res, next) => {
     // renders on the consolidated statement. Fail closed on the pay surface
     // (receipts stay permanent; the block is here, not in getByToken).
     if (data.payer_statement_id) return res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
+    // NOTE: this is an UNAUTHENTICATED public-by-token GET (link previews /
+    // scanners hit it). It must stay read-only for money state — account credit
+    // is auto-applied from the controlled POST /:token/setup path, never here.
 
     // Third-party Bill-To: an AP contact opening the emailed pay link must see
     // the payer as "Billed to" (not the homeowner) and must not be offered
@@ -147,6 +150,11 @@ router.get('/:token', async (req, res, next) => {
         taxRate: parseFloat(data.tax_rate),
         taxAmount: parseFloat(data.tax_amount),
         total: parseFloat(data.total),
+        // Amount the customer actually pays = total − applied account credit, so
+        // the displayed amount matches what Stripe/Terminal charge to the cent.
+        // creditApplied drives the "Account credit applied" line.
+        amountDue: parseFloat(data.amount_due != null ? data.amount_due : data.total),
+        creditApplied: parseFloat(data.credit_applied || 0),
         dueDate: data.due_date,
         paidAt: data.paid_at,
         cardBrand: data.card_brand,
@@ -265,6 +273,10 @@ router.post('/:token/setup', async (req, res, next) => {
       baseAmount: result.baseAmount,
       cardSurchargeRate: result.cardSurchargeRate,
       publishableKey: stripeConfig.publishableKey,
+      // Account credit may have fully covered the invoice at setup (no PI minted) —
+      // surface it so the pay page can show "covered" instead of a card form.
+      coveredByCredit: !!result.covered_by_credit,
+      status: result.status,
     });
   } catch (err) {
     logger.error(`[pay-v2] Setup error: ${err.message}`);

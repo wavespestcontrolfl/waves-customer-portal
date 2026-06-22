@@ -1102,6 +1102,11 @@ export default function PayPageV2() {
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  // Guards POST /setup to once per (token, saveCard): the partial-credit display
+  // sync below mutates `data`, which would otherwise re-run the setup effect and
+  // re-POST /setup — churning the just-minted PaymentIntent (the second call sees
+  // it as requires_payment_method and the stale-PI triage cancels/replaces it).
+  const setupPostedRef = useRef(null);
   const [saveCard, setSaveCard] = useState(saveCardDefault);
 
   useEffect(() => {
@@ -1156,6 +1161,12 @@ export default function PayPageV2() {
       });
       return;
     }
+    // Post /setup at most once per (token, saveCard). The partial-credit display
+    // sync mutates `data` (a dependency of this effect); without this guard that
+    // would re-run the effect and re-POST /setup, churning the PaymentIntent.
+    const setupKey = `${token}:${saveCardDefault ? 1 : 0}`;
+    if (setupPostedRef.current === setupKey) return;
+    setupPostedRef.current = setupKey;
     setPaymentState('setup');
     fetch(`${API_BASE}/pay/${token}/setup`, {
       method: 'POST',
@@ -1168,6 +1179,41 @@ export default function PayPageV2() {
         return setup;
       })
       .then((setup) => {
+        // Account credit fully covered the invoice at setup (no PI minted, null
+        // clientSecret) — flip to the existing "covered, nothing due" prepaid
+        // state instead of mounting a card form that would hang on "Loading
+        // payment form…" with a null secret.
+        if (setup.coveredByCredit || setup.status === 'prepaid') {
+          setData((prev) => (prev ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid' } } : prev));
+          setPaymentState('idle');
+          return;
+        }
+        // Setup may have auto-applied a PARTIAL account credit (first seam to
+        // apply it on a reused link) — the PI is now initialized at the reduced
+        // setup.baseAmount, so sync the displayed amount due + credit line to it.
+        // Otherwise the page would keep showing the pre-credit gross from the
+        // earlier read-only GET while Stripe charges the reduced amount.
+        const setupAmountDue = Number(setup.amountDue ?? setup.baseAmount ?? setup.amount);
+        if (Number.isFinite(setupAmountDue)) {
+          setData((prev) => {
+            if (!prev?.invoice) return prev;
+            const total = Number(prev.invoice.total ?? setupAmountDue);
+            const creditApplied = setup.creditApplied != null
+              ? Math.max(0, Number(setup.creditApplied))
+              : Math.max(0, Math.round((total - setupAmountDue) * 100) / 100);
+            // CRITICAL: return the SAME object reference when nothing changed. The
+            // setup effect depends on `data`, so handing back a new object every
+            // time would re-run it and re-POST /setup forever. Only the first
+            // partial-credit sync changes the amount; the idempotent re-run no-ops.
+            const prevAmountDue = Number(prev.invoice.amountDue ?? prev.invoice.total);
+            const prevCredit = Number(prev.invoice.creditApplied || 0);
+            if (Math.abs(prevAmountDue - setupAmountDue) < 0.005
+              && Math.abs(prevCredit - creditApplied) < 0.005) {
+              return prev;
+            }
+            return { ...prev, invoice: { ...prev.invoice, amountDue: setupAmountDue, creditApplied } };
+          });
+        }
         setStripeSetup({
           clientSecret: setup.clientSecret,
           paymentIntentId: setup.paymentIntentId,
@@ -1178,6 +1224,10 @@ export default function PayPageV2() {
         setPaymentState('ready');
       })
       .catch((err) => {
+        // Allow a retry: the guard was set before the POST to stop the
+        // partial-credit sync from re-posting an IN-FLIGHT setup, but a failed
+        // setup must be retryable (else the customer is stuck until a reload).
+        setupPostedRef.current = null;
         setPaymentState('error');
         setPaymentError(err.message);
         if (!err.serverReported) {
@@ -1415,7 +1465,7 @@ export default function PayPageV2() {
             <div>
               <div style={eyebrow}>Amount due</div>
               <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
-                {fmtCurrency(invoice.total)}
+                {fmtCurrency(invoice.amountDue ?? invoice.total)}
               </div>
               <div style={{ marginTop: 8, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
                 Pay securely online. Credit card surcharge, if any, is shown before payment.
@@ -1619,7 +1669,10 @@ export default function PayPageV2() {
               {depositCreditTotal > 0 && (
                 <SummaryRow label="Deposit paid at acceptance" value={`− ${fmtCurrency(depositCreditTotal)}`} />
               )}
-              <SummaryRow label="Total due" value={fmtCurrency(invoice.total)} strong />
+              {Number(invoice.creditApplied) > 0 && (
+                <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
+              )}
+              <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
             </div>
 
             {invoice.notes && (
@@ -1642,7 +1695,7 @@ export default function PayPageV2() {
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
                 <div style={{ fontSize: 26, fontWeight: 900, color: 'var(--text)', lineHeight: 1 }}>
-                  {fmtCurrency(invoice.total)}
+                  {fmtCurrency(invoice.amountDue ?? invoice.total)}
                 </div>
                 <div style={{ marginTop: 6, fontSize: 14, color: 'var(--text-muted)' }}>
                   {invoiceStatusLabel}

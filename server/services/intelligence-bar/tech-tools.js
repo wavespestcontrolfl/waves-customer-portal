@@ -370,7 +370,9 @@ async function checkCustomerStatus(input) {
   const balance = await db('invoices')
     .where({ customer_id: customer.id })
     .whereIn('status', ['sent', 'viewed', 'overdue'])
-    .sum('total as owed').first();
+    // Amount due, not gross total — applied account credit reduces what's owed.
+    .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) as owed'))
+    .first();
 
   const health = await db('customer_health_scores')
     .where({ customer_id: customer.id })

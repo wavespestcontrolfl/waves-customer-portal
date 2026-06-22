@@ -281,7 +281,7 @@ function depositCreditTotalFromLineItems(lineItems) {
 }
 
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
-  const { highlightTotal = true, paidStamp = false, refundAmount = 0, customer = null } = opts;
+  const { highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null } = opts;
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 10;
@@ -323,9 +323,22 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     y += 20;
   }
 
+  // Account credit applied (referral reward etc.): a deduction from the gross
+  // total, surfacing the reduced Amount due the customer actually pays.
+  const creditApplied = Number(invoice.credit_applied || 0);
+  if (creditApplied > 0) {
+    row('Account credit applied', `− ${currency(creditApplied)}`);
+    row('Amount due', currency(Math.max(0, total - creditApplied)), NAVY, true);
+  }
+
   if (refundAmount > 0) {
+    // Net paid = cash in − cash refunded. Use the payment's actual charged amount
+    // (cashPaid) when known: the gross total overstates net paid for a
+    // credit-applied invoice, and a full refund zeroes credit_applied so amount
+    // due can't be reconstructed from the invoice here.
+    const netBasis = cashPaid > 0 ? cashPaid : total;
     row('Refunded', `− ${currency(refundAmount)}`, RED, true);
-    row('Net paid', currency(total - refundAmount), NAVY, true);
+    row('Net paid', currency(Math.max(0, netBasis - refundAmount)), NAVY, true);
   }
   doc.restore();
 
@@ -412,7 +425,16 @@ function generateReceiptPDF(invoice, payment, res) {
   doc.pipe(res);
 
   const refundAmount = payment ? Number(payment.refund_amount || 0) : 0;
-  const fullRefund = refundAmount > 0 && refundAmount >= Number(invoice.total || 0);
+  // A full refund returns all the CASH the customer was charged. Base "full vs
+  // partial" on the payment's actual charged amount (the same basis
+  // StripeService.refund uses) — robust even after a full refund zeroes
+  // invoice.credit_applied. Fall back to amount due (total − credit) only when
+  // the payment cash amount is unavailable.
+  const cashPaid = payment ? Number(payment.amount || 0) : 0;
+  const cashBasis = cashPaid > 0
+    ? cashPaid
+    : Math.max(0, Number(invoice.total || 0) - Number(invoice.credit_applied || 0));
+  const fullRefund = refundAmount > 0 && refundAmount >= cashBasis - 0.005;
 
   const statusLabel = fullRefund ? 'Refunded' : refundAmount > 0 ? 'Partially Refunded' : 'Paid';
   const statusColor = fullRefund ? RED : refundAmount > 0 ? WAVES_BLUE : GREEN;
@@ -430,6 +452,7 @@ function generateReceiptPDF(invoice, payment, res) {
     highlightTotal: true,
     paidStamp: !refundAmount,
     refundAmount,
+    cashPaid,
     customer,
   });
 
