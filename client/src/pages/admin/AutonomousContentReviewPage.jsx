@@ -233,7 +233,9 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     try {
       const next = await adminFetch(`/admin/content/autonomous/review/${selectedId}/decision`, {
         method: "POST",
-        body: { decision, note: reviewNote },
+        // Bind the decision to the run currently displayed — the server rejects
+        // it if a requeue/re-run replaced it since this view loaded.
+        body: { decision, note: reviewNote, run_id: selected?.run?.id || null },
       });
       setDetail(next.item);
       setReviewNote("");
@@ -458,6 +460,16 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                         disabled={!!actionPending}
                         pending={actionPending === "approve_trust_build"}
                         onClick={() => submitDecision("approve_trust_build")}
+                      />
+                    )}
+                    {reviewActions.can_approve_named_competitor && (
+                      <ActionButton
+                        icon={CheckCircle2}
+                        label="Approve & publish"
+                        tone="green"
+                        disabled={!!actionPending}
+                        pending={actionPending === "approve_named_competitor"}
+                        onClick={() => submitDecision("approve_named_competitor")}
                       />
                     )}
                     <ActionButton
