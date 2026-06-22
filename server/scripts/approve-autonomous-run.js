@@ -35,7 +35,11 @@ if (!RUN_ID) {
       .where('id', RUN_ID)
       .where('outcome', 'completed_pending_review')
       .where('shadow_mode', false)
-      .where('skip_reason', 'like', 'trust_build_%')
+      // Approvable pending-review runs: trust-build ramp + named-competitor
+      // comparisons (which never auto-publish — a human approves each one).
+      .where((qb) => qb
+        .where('skip_reason', 'like', 'trust_build_%')
+        .orWhere('skip_reason', 'named_competitor_review'))
       .update({
         trust_build_approved_at: new Date(),
         trust_build_approved_by: APPROVED_BY,

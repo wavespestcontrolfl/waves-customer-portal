@@ -268,11 +268,15 @@ function reviewActions({ opportunity, run }) {
 }
 
 function isTrustBuildRun(run) {
+  // Approvable pending-review runs: the trust-build ramp AND named-competitor
+  // comparisons (which never auto-publish — a human approves each one). Both use
+  // the same approve action / approve-autonomous-run.js script.
   return !!(
     run
     && run.outcome === 'completed_pending_review'
     && run.shadow_mode === false
-    && /^trust_build_\d+_of_\d+$/.test(String(run.skip_reason || ''))
+    && (/^trust_build_\d+_of_\d+$/.test(String(run.skip_reason || ''))
+      || run.skip_reason === 'named_competitor_review')
   );
 }
 

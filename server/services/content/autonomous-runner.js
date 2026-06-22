@@ -601,6 +601,9 @@ class AutonomousRunner {
         comparisonResult = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_ERROR', message: err.message }] };
       }
       run.comparison_table_result = comparisonResult;
+      // A clean draft that NAMES a competitor must still never auto-publish — it
+      // routes to the (approvable) human-review queue at the trust-build step.
+      run.comparison_requires_review = comparisonResult.requiresHumanReview === true;
       if (!comparisonResult.pass) {
         const blocking = comparisonResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
         const notes = `Comparison-table gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
@@ -803,7 +806,12 @@ class AutonomousRunner {
     // publishing guards + daily/weekly caps downstream still apply.
     const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
-    const trustBuildSatisfied = autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD;
+    // A named-competitor comparison is never auto-publish-eligible: even with
+    // trust built / AUTO_PUBLISH on, it must clear human review first (legal/
+    // brand surface). It still uses the approvable trust-build review path.
+    const forceNamedCompetitorReview = run.comparison_requires_review === true;
+    const trustBuildSatisfied = !forceNamedCompetitorReview
+      && (autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
     // 7. Decide outcome.
@@ -833,9 +841,10 @@ class AutonomousRunner {
         return finalized;
       }
       const reason = !gatesPass ? 'gate_fail'
+        : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
-      const trustBuildNote = reason.startsWith('trust_build_')
+      const trustBuildNote = (reason.startsWith('trust_build_') || reason === 'named_competitor_review')
         ? 'Review autonomous_runs.draft_payload, then approve with server/scripts/approve-autonomous-run.js --id=<run_id> --by=<operator>.'
         : null;
       const finalized = await finalize(run, t0, {

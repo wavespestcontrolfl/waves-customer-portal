@@ -168,10 +168,17 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED' && f.severity === 'P1')).toBe(true);
   });
 
-  test('finding C: a known competitor with feature ENABLED + sourced caption PASSES (flows to the trust-build approval ramp)', () => {
+  test('finding C: a known competitor with feature ENABLED + sourced caption PASSES but requiresHumanReview', () => {
     const r = gate.evaluate(wrap(NAMED_TABLE('Attributes as of June 2026, per each company public website.')), { namedCompetitorEnabled: true });
     expect(r.pass).toBe(true);
     expect(r.findings).toHaveLength(0);
+    expect(r.requiresHumanReview).toBe(true); // never auto-publishes
+  });
+
+  test('requiresHumanReview is false for a category-only comparison', () => {
+    const r = gate.evaluate(wrap(CATEGORY_TABLE), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(false);
   });
 
   test('extractCaption handles caption="..." and caption={\'...\'}', () => {
@@ -243,5 +250,64 @@ describe('comparison-table-gate', () => {
     const r = gate.evaluate({ body: fabricated }, { namedCompetitorEnabled: true });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /Orkin/.test(f.message))).toBe(true);
+  });
+
+  // ── Round-4 findings ──
+
+  test('R4-1: a curated value with appended uncurated text is rejected', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[{ label: "Reach", values: ["National (US); free termite inspections","Local"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
+  });
+
+  test('R4-3: a later UNsourced table naming the same competitor is flagged even if an earlier one is sourced', () => {
+    const sourced = NAMED_TABLE('Attributes as of June 2026, per each company public website.');
+    const unsourced = NAMED_TABLE('A second quick look.');
+    const r = gate.evaluate({ body: `${sourced}\n\n${unsourced}` }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED' && /Orkin/.test(f.message))).toBe(true);
+  });
+
+  test('R4-4: an uncurated fact in the ROW LABEL with an affirmative cell is rejected', () => {
+    const t = `<ComparisonTable
+      columns={["What to weigh","Orkin","Local SWFL company"]}
+      rows={[{ label: "90-day money-back guarantee", values: ["Yes","No"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
+  });
+
+  test('R4-5: standalone self-ranking ("Waves is the best.") is caught', () => {
+    for (const phrase of ['Waves is the best.', 'Waves is the top choice for your home']) {
+      const r = gate.evaluate({ body: `${phrase}\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    // "the best time to treat" is still safe.
+    expect(gate.evaluate({ body: `The best time to treat is spring.\n\n${CATEGORY_TABLE}` }, {})
+      .findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+  });
+
+  test('R4-6: a legal-entity business name in a cell or title is caught', () => {
+    const cell = `<ComparisonTable
+      columns={["What to weigh","Provider","Local SWFL company"]}
+      rows={[{ label: "Who", values: ["Bob's Bugs LLC","Waves"] }]}
+      caption="A guide." />`;
+    expect(gate.evaluate({ body: cell }, { namedCompetitorEnabled: true })
+      .findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Bob's Bugs LLC/.test(f.message))).toBe(true);
+    const titled = gate.evaluate(
+      { body: CATEGORY_TABLE, frontmatter: { title: "Acme Exterminators Inc vs Waves" } },
+      { namedCompetitorEnabled: true });
+    expect(titled.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Acme Exterminators Inc/.test(f.message))).toBe(true);
+  });
+
+  test('R4-7: a negative reliability claim about a named competitor in PROSE is caught', () => {
+    const r = gate.evaluate({ body: `Orkin never answers the phone when you call.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    // The same reliability word with no nearby competitor (DIY efficacy) is NOT flagged.
+    expect(gate.evaluate({ body: `DIY sprays are unreliable on termites.\n\n${CATEGORY_TABLE}` }, {})
+      .findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
   });
 });
