@@ -15,9 +15,12 @@ export function computeProvisionalState(dataQuality) {
   const total = Number(dataQuality.totalCriticalFields) > 0
     ? Number(dataQuality.totalCriticalFields)
     : 4;
+  // Prefer the precise per-field array; if a payload omits it (a legacy/partial
+  // data-quality shape), fall back to total−verified so an unconfirmed critical
+  // fact still counts as needing verification rather than silently passing.
   const missing = Array.isArray(dataQuality.missingCriticalFields)
     ? dataQuality.missingCriticalFields.length
-    : 0;
+    : Math.max(0, total - verified);
   const provisional = dataQuality.level === 'low' || missing > 0;
   return { provisional, verified, total, missing };
 }

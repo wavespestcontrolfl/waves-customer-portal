@@ -1454,6 +1454,8 @@ function buildProviderStatus() {
   };
 }
 
+const FALLBACK_CRITICAL_FIELDS = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
+
 function buildFallbackPropertyDataQuality(rc) {
   if (!rc) {
     return {
@@ -1465,9 +1467,15 @@ function buildFallbackPropertyDataQuality(rc) {
       verifiedCriticalFields: 0,
       totalCriticalFields: 4,
       fieldVerifyCount: 4,
+      // Mirror buildPropertyDataQuality so consumers (the property panel's
+      // "Missing" badges, the provisional-estimate guard) get the same shape on
+      // the fallback path — without it a fallback lookup looks like nothing is
+      // missing and a thin quote skips the provisional warning.
+      missingCriticalFields: [...FALLBACK_CRITICAL_FIELDS],
     };
   }
-  const critical = [rc.squareFootage, rc.lotSize, rc.stories, rc.propertyType].filter(Boolean).length;
+  const missingCriticalFields = FALLBACK_CRITICAL_FIELDS.filter((f) => !rc[f]);
+  const critical = FALLBACK_CRITICAL_FIELDS.length - missingCriticalFields.length;
   return {
     level: critical >= 3 ? 'medium' : 'low',
     score: critical >= 3 ? 60 : 35,
@@ -1476,7 +1484,8 @@ function buildFallbackPropertyDataQuality(rc) {
     sourceTypes: rc._aiSourceTypes || [],
     verifiedCriticalFields: critical,
     totalCriticalFields: 4,
-    fieldVerifyCount: 4 - critical,
+    fieldVerifyCount: missingCriticalFields.length,
+    missingCriticalFields,
   };
 }
 
@@ -3109,6 +3118,7 @@ module.exports._private = {
   applyParcelTurfBound,
   applySatelliteAttachmentType,
   applyVisionPropertyTypeEvidence,
+  buildFallbackPropertyDataQuality,
   computeFootprintTurf,
   buildFieldVerifyFlags,
   buildParcelOverlayParam,

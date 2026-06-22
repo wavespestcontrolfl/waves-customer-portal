@@ -44,6 +44,19 @@ describe("computeProvisionalState", () => {
     expect(s.provisional).toBe(false);
   });
 
+  it("derives provisional from totals when missingCriticalFields is absent (server fallback shape)", () => {
+    // The server fallback payload (buildFallbackPropertyDataQuality) historically
+    // omitted missingCriticalFields; a 3/4 'medium' fallback must still be
+    // provisional — one critical fact is unconfirmed.
+    const s = computeProvisionalState({
+      level: "medium",
+      verifiedCriticalFields: 3,
+      totalCriticalFields: 4,
+    });
+    expect(s.missing).toBe(1);
+    expect(s.provisional).toBe(true);
+  });
+
   it("handles a missing/empty data-quality object without throwing", () => {
     expect(computeProvisionalState(null)).toEqual({ provisional: false, verified: 0, total: 4, missing: 0 });
     expect(computeProvisionalState(undefined).provisional).toBe(false);
