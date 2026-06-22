@@ -158,8 +158,12 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
 
   if (ch === 'both') {
     const smsOk = await smsAttempt();
-    await sendAppointmentNoticeEmail(emailArgs);
-    return smsOk;
+    const emailRes = await sendAppointmentNoticeEmail(emailArgs);
+    const emailOk = !!emailRes?.ok;
+    // Neither channel reached the customer — raise the same human-follow-up
+    // alert the SMS-only path uses.
+    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    return smsOk || emailOk;
   }
 
   // 'sms' default — unchanged behavior.
@@ -432,15 +436,29 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
 
 async function getReminderPrefs(customerId) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+
+  // Delivery channel is an account-level "how to reach me" preference, set only
+  // on the account owner's row in the portal. Reminders load prefs by each
+  // appointment's service-property customer id, so a secondary property would
+  // otherwise miss the channel choice and default to SMS — resolve it from the
+  // account owner (customers.account_id points at the primary customer id).
+  let channelPrefs = prefs;
+  const customer = await db('customers').where({ id: customerId }).first('account_id').catch(() => null);
+  const ownerId = customer?.account_id;
+  if (ownerId && String(ownerId) !== String(customerId)) {
+    const ownerPrefs = await db('notification_prefs').where({ customer_id: ownerId }).first().catch(() => null);
+    if (ownerPrefs) channelPrefs = ownerPrefs;
+  }
+
   return {
     raw: prefs || {},
     smsEnabled: prefs?.sms_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,
     serviceReminder24h: prefs?.service_reminder_24h !== false,
-    confirmationChannel: apptChannel(prefs?.appointment_confirmation_channel),
-    reminder72hChannel: apptChannel(prefs?.service_reminder_72h_channel),
-    reminder24hChannel: apptChannel(prefs?.service_reminder_24h_channel),
+    confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
+    reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel),
+    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel),
   };
 }
 

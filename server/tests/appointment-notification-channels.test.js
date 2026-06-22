@@ -104,9 +104,27 @@ describe('deliverAppointmentNotice channel routing', () => {
 
   test("'both': sends SMS and email", async () => {
     const smsAttempt = jest.fn(async () => true);
-    await deliverAppointmentNotice(args({ channel: 'both', smsAttempt }));
+    const reached = await deliverAppointmentNotice(args({ channel: 'both', smsAttempt }));
 
+    expect(reached).toBe(true);
     expect(smsAttempt).toHaveBeenCalledTimes(1);
     expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test("'both': SMS blocked but email delivered still counts as reached", async () => {
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverAppointmentNotice(args({ channel: 'both', smsAttempt }));
+
+    expect(reached).toBe(true);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test("'both': both channels fail -> raises no-reachable-channel alert", async () => {
+    AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValue({ ok: false, skipped: true, reason: 'missing_email' });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverAppointmentNotice(args({ channel: 'both', smsAttempt }));
+
+    expect(reached).toBe(false);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 });

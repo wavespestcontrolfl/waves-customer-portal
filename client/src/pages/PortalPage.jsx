@@ -2903,7 +2903,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
               const items = [
-                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a visit is booked or rescheduled', icon: 'checkCircle', locked: false, defaultOn: true },
+                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'checkCircle', locked: false, defaultOn: true },
                 { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
                 { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
                 { key: 'techEnRoute', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
@@ -2940,22 +2940,30 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       )}
                     </div>
                   </div>
-                  {p.channelKey && (
-                    <select
-                      value={prefs[p.channelKey] || 'sms'}
-                      onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
-                      disabled={!isOn || !!prefsLocked[p.channelKey]}
-                      aria-label={`Delivery method for ${p.label}`}
-                      style={{
-                        fontSize: 12, fontWeight: 800, color: B.blueDeeper,
-                        border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
-                        background: '#fff', fontFamily: 'inherit', flexShrink: 0,
-                        cursor: isOn ? 'pointer' : 'not-allowed', opacity: isOn ? 1 : 0.4,
-                      }}
-                    >
-                      {CHANNEL_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  )}
+                  {p.channelKey && (() => {
+                    // Email/Both can only be offered once an email is on file —
+                    // otherwise the backend silently falls back to SMS and the
+                    // customer would think email was configured when it wasn't.
+                    const hasEmail = !!customer.email;
+                    const opts = hasEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+                    const selectable = isOn && hasEmail;
+                    return (
+                      <select
+                        value={hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
+                        onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
+                        disabled={!selectable || !!prefsLocked[p.channelKey]}
+                        aria-label={`Delivery method for ${p.label}`}
+                        style={{
+                          fontSize: 12, fontWeight: 800, color: B.blueDeeper,
+                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
+                          background: '#fff', fontFamily: 'inherit', flexShrink: 0,
+                          cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
+                        }}
+                      >
+                        {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    );
+                  })()}
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                     <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
                       width: 44, height: 24, borderRadius: 12,
