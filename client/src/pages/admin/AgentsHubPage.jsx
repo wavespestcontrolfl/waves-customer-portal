@@ -94,7 +94,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName="grid-cols-4"
+        navGridClassName="grid-cols-2 md:grid-cols-4"
         action={
           tab === TABS.OVERVIEW
             ? {

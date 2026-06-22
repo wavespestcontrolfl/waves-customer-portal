@@ -3200,10 +3200,12 @@ function MobileEstimateRow({
   );
 }
 
-// Mobile list view for /admin/estimates. Strict 1:1 on data + endpoint
-// (GET /admin/estimates) with EstimatePipelineViewV2. KPI bar, Leads tab,
-// and Pricing Logic tab are desktop-only by design.
-function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
+// Mobile estimates list — the touch-optimized counterpart to
+// EstimatePipelineViewV2, rendered under the Estimates tab on mobile. Strict
+// 1:1 on data + endpoint (GET /admin/estimates). The Leads, Create Estimate,
+// and Pricing Logic tabs render their own sections under the shared
+// PipelineCommandHeader, which now drives all four tabs on mobile too.
+function EstimatesMobileListView({ onCreateFromAddress }) {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3475,31 +3477,9 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
     // edge-to-edge overrides, list rows are cards (not hairlined rows).
     <div style={{ fontFamily: ROBOTO }}>
-      {/* Title row — matches the shared command header scale on mobile. */}
-      <div
-        className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
-        style={{ fontFamily: ROBOTO }}
-      >
-        <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <h1
-              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
-              style={{ fontFamily: ROBOTO }}
-            >
-              Pipeline
-            </h1>
-            <button
-              type="button"
-              onClick={onNew}
-              aria-label="Add estimate"
-              className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring hover:bg-zinc-800"
-              style={{ width: 36, height: 36 }}
-            >
-              <Plus size={20} strokeWidth={2} />
-            </button>
-          </div>
-        </div>
-      </div>
+      {/* Title + tab switcher come from the page-level PipelineCommandHeader
+          now that the mobile estimates list renders under the shared tabs;
+          the list owns only its search/filter row and rows below. */}
       {/* Search + Add/filter row — mirrors Customers mobile block. */}
       <div className="mb-3">
         {" "}
@@ -3697,9 +3677,6 @@ export default function EstimatesPageV2() {
   const [activeTab, setActiveTab] = useState(
     initialTab || (hasPrefill ? "new" : "leads"),
   );
-  const [mobileView, setMobileView] = useState(
-    initialTab === "new" || hasPrefill ? "new" : "list",
-  ); // 'list' | 'new'
 
   // Watch URL params for incoming prefill. Two cases this needs to handle:
   //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
@@ -3726,10 +3703,8 @@ export default function EstimatesPageV2() {
     if (hasIncoming) {
       setPrefill(incoming);
       setActiveTab("new");
-      setMobileView("new");
     } else if (hasTabParam) {
       setActiveTab(tabParam);
-      setMobileView(tabParam === "new" ? "new" : "list");
     }
     if (hasIncoming) {
       const stripped = new URLSearchParams(searchParams);
@@ -3738,18 +3713,6 @@ export default function EstimatesPageV2() {
       setSearchParams(stripped, { replace: true });
     }
   }, [searchParams, setSearchParams, readLeadPrefill]);
-
-  function clearPrefill() {
-    setPrefill({
-      leadId: "",
-      customerId: "",
-      address: "",
-      customerName: "",
-      customerPhone: "",
-      customerEmail: "",
-      serviceInterest: "",
-    });
-  }
 
   const selectTab = useCallback(
     (key) => {
@@ -3763,66 +3726,32 @@ export default function EstimatesPageV2() {
     [searchParams, setSearchParams],
   );
 
-  // Mobile: list (default) + create-estimate flow. Leads + Pricing Logic are
-  // desktop-only per CLAUDE.md Rule 1 (mobile IA scope confirmed with owner).
-  if (isMobile) {
-    if (mobileView === "new") {
-      return (
-        <div style={{ fontFamily: ROBOTO }}>
-          {" "}
-          <button
-            type="button"
-            onClick={() => {
-              setMobileView("list");
-              clearPrefill();
-            }}
-            aria-label="Back to estimates"
-            className="inline-flex items-center gap-1 mb-3 h-9 px-2 -ml-2 rounded-md text-14 text-zinc-700 hover:bg-zinc-100 u-focus-ring"
-          >
-            {" "}
-            <ArrowLeft size={18} strokeWidth={1.75} aria-hidden />
-            Back
-          </button>{" "}
-          <EstimateToolViewV2
-            initialLeadId={prefill.leadId}
-            initialCustomerId={prefill.customerId}
-            initialAddress={prefill.address}
-            initialCustomerName={prefill.customerName}
-            initialCustomerPhone={prefill.customerPhone}
-            initialCustomerEmail={prefill.customerEmail}
-            initialServiceInterest={prefill.serviceInterest}
-          />{" "}
-        </div>
-      );
-    }
-    return (
-      <EstimatesMobileListView
-        onNew={() => {
-          clearPrefill();
-          setMobileView("new");
-        }}
-        onCreateFromAddress={(addr) => {
-          setPrefill({
-            leadId: "",
-            customerId: "",
-            address: addr || "",
-            customerName: "",
-            customerPhone: "",
-            customerEmail: "",
-            serviceInterest: "",
-          });
-          setMobileView("new");
-        }}
-      />
-    );
-  }
-
   return (
     <div style={{ fontFamily: ROBOTO }}>
       {" "}
       <PipelineCommandHeader activeTab={activeTab} onTabChange={selectTab} />
       {activeTab === "leads" && <LeadsSection />}
-      {activeTab === "estimates" && <EstimatePipelineViewV2 />}
+      {activeTab === "estimates" &&
+        // Estimates list: mobile gets the touch-optimized card list with its
+        // own filters/sort; desktop gets the full table/board pipeline view.
+        (isMobile ? (
+          <EstimatesMobileListView
+            onCreateFromAddress={(addr) => {
+              setPrefill({
+                leadId: "",
+                customerId: "",
+                address: addr || "",
+                customerName: "",
+                customerPhone: "",
+                customerEmail: "",
+                serviceInterest: "",
+              });
+              selectTab("new");
+            }}
+          />
+        ) : (
+          <EstimatePipelineViewV2 />
+        ))}
       {activeTab === "new" && (
         <EstimateToolViewV2
           initialLeadId={prefill.leadId}
