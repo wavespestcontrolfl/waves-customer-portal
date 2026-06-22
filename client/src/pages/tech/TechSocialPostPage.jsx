@@ -108,7 +108,9 @@ export default function TechSocialPostPage() {
   const [resolvedLocation, setResolvedLocation] = useState(null);
   const [genModel, setGenModel] = useState(null); // actual caption model, for the audit row
   const [selected, setSelected] = useState(() => new Set(PLATFORMS.map((p) => p.key)));
+  const [posted, setPosted] = useState(() => new Set()); // platforms already published — never re-send
   const [publishResults, setPublishResults] = useState(null);
+  const [enabled, setEnabled] = useState(null); // backend readiness (TECH_SOCIAL_ENABLED); null = loading
 
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -119,7 +121,9 @@ export default function TechSocialPostPage() {
 
   // Locations for the picker + best-effort device location for nearest auto-detect.
   useEffect(() => {
-    techRequest('/tech/social/locations').then((d) => setLocations(d.locations || [])).catch(() => {});
+    techRequest('/tech/social/locations')
+      .then((d) => { setLocations(d.locations || []); setEnabled(d.enabled !== false); })
+      .catch(() => {});
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
@@ -179,6 +183,14 @@ export default function TechSocialPostPage() {
         }),
       });
       setPublishResults(data);
+      // No backend idempotency key — never let a second tap re-post a platform
+      // that already succeeded. Mark succeeded as posted and drop them from the
+      // selection so a follow-up Publish only retries the ones that failed.
+      const succeeded = new Set((data.results || []).filter((r) => r.success).map((r) => r.platform));
+      if (succeeded.size) {
+        setPosted((prev) => new Set([...prev, ...succeeded]));
+        setSelected((prev) => new Set([...prev].filter((k) => !succeeded.has(k))));
+      }
       const ok = (data.results || []).filter((r) => r.success).length;
       setNotice(ok ? `Published to ${ok} platform${ok > 1 ? 's' : ''}.` : 'Nothing published — see results below.');
     } catch (err) {
@@ -196,7 +208,7 @@ export default function TechSocialPostPage() {
   const reset = () => {
     setPhoto(null); setTechNote(''); setLocationId(''); setCaptions(null); setValidation({});
     setResolvedLocation(null); setGenModel(null); setSelected(new Set(PLATFORMS.map((p) => p.key)));
-    setPublishResults(null); setError(''); setNotice('');
+    setPosted(new Set()); setPublishResults(null); setError(''); setNotice('');
   };
 
   const toggle = (key) => setSelected((s) => {
@@ -206,6 +218,8 @@ export default function TechSocialPostPage() {
   });
 
   const resultFor = (key) => (publishResults?.results || []).find((r) => r.platform === key);
+  // Publishable platforms still selected (not yet posted) — drives the Publish button.
+  const nativeRemaining = PLATFORMS.filter((p) => p.publish && selected.has(p.key)).length;
 
   return (
     <div style={{ minHeight: '100vh', background: D.bg, color: D.text, fontFamily: BODY, padding: 16 }}>
@@ -214,7 +228,11 @@ export default function TechSocialPostPage() {
       {error ? <Card style={{ borderColor: D.red, background: '#2a1416' }}><span style={{ color: D.red }}>{error}</span></Card> : null}
       {notice ? <Card style={{ borderColor: D.green, background: '#0f2a1c' }}><span style={{ color: D.green }}>{notice}</span></Card> : null}
 
-      {step === 'capture' ? (
+      {enabled === false ? (
+        <Card style={{ borderColor: D.amber }}>
+          <span style={{ color: D.amber }}>Field social posting isn’t turned on yet. Ask an admin to enable it.</span>
+        </Card>
+      ) : step === 'capture' ? (
         <>
           <Card>
             <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white, marginBottom: 10 }}>Photo</div>
@@ -274,7 +292,7 @@ export default function TechSocialPostPage() {
               <Card key={p.key}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: HEAD, fontWeight: 700, color: D.white, fontSize: 15 }}>
-                    <input type="checkbox" checked={selected.has(p.key)} onChange={() => toggle(p.key)} style={{ width: 18, height: 18 }} />
+                    <input type="checkbox" checked={selected.has(p.key)} disabled={posted.has(p.key)} onChange={() => toggle(p.key)} style={{ width: 18, height: 18 }} />
                     {p.label}
                     {!p.publish ? <span style={{ color: D.amber, fontSize: 11, fontWeight: 600 }}>{p.note}</span> : null}
                   </label>
@@ -288,7 +306,9 @@ export default function TechSocialPostPage() {
                 {issues.length ? <div style={{ color: D.amber, fontSize: 12, marginTop: 6 }}>⚠ {issues.join('; ')}</div> : null}
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button onClick={() => copyCaption(p.key)} style={{ ...btn('#0b131b', D.teal), minHeight: 38, fontSize: 13 }}>Copy</button>
-                  {res ? (
+                  {posted.has(p.key) ? (
+                    <span style={{ alignSelf: 'center', fontSize: 13, color: D.green }}>✓ posted</span>
+                  ) : res ? (
                     <span style={{ alignSelf: 'center', fontSize: 13, color: res.success ? D.green : res.skipped ? D.muted : res.dryRun ? D.amber : D.red }}>
                       {res.success ? '✓ posted' : res.dryRun ? 'dry run' : res.skipped ? `skipped: ${res.skipped}` : `✗ ${res.error || 'failed'}`}
                     </span>
@@ -304,11 +324,16 @@ export default function TechSocialPostPage() {
               <div style={{ color: D.muted, fontSize: 12, marginBottom: 8 }}>TikTok has no posting API. Copy the caption and post your photo/video in the app.</div>
               <button onClick={() => copyCaption('tiktok')} style={btn(D.amber, '#1a1205')}>Copy TikTok caption</button>
             </Card>
+          ) : publishResults?.tiktokIssues?.length ? (
+            <Card style={{ borderColor: D.red, background: '#2a1416' }}>
+              <div style={{ fontFamily: HEAD, fontWeight: 700, color: D.white, marginBottom: 6 }}>TikTok caption needs a fix</div>
+              <div style={{ color: D.red, fontSize: 12 }}>⚠ {publishResults.tiktokIssues.join('; ')} — edit it above, then publish again.</div>
+            </Card>
           ) : null}
 
           <div style={{ display: 'grid', gap: 8 }}>
-            <button onClick={publish} disabled={busy === 'publish'} style={btn(D.teal, D.white, busy === 'publish')}>
-              {busy === 'publish' ? 'Publishing…' : 'Publish selected'}
+            <button onClick={publish} disabled={busy === 'publish' || nativeRemaining === 0} style={btn(D.teal, D.white, busy === 'publish' || nativeRemaining === 0)}>
+              {busy === 'publish' ? 'Publishing…' : posted.size > 0 ? 'Publish remaining' : 'Publish selected'}
             </button>
             <button onClick={reset} disabled={!!busy} style={btn('transparent', D.muted, !!busy)}>Start over</button>
           </div>

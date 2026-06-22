@@ -3,7 +3,7 @@ const techSocial = require('../routes/tech-social');
 
 const { normalizeVision, normalizeCaptions, validateCaptions } = captionService._test;
 const { resolveCaptionLocation, PLATFORM_LIMITS } = captionService;
-const { selectPublishPlatforms, buildPostLogRow, PUBLISHABLE } = techSocial._test;
+const { selectPublishPlatforms, buildPostLogRow, buildTiktokClipboard, PUBLISHABLE } = techSocial._test;
 
 describe('resolveCaptionLocation', () => {
   test('explicit valid locationId wins', () => {
@@ -105,6 +105,28 @@ describe('selectPublishPlatforms', () => {
   });
 });
 
+describe('buildTiktokClipboard', () => {
+  test('not requested → null clipboard, no issues', () => {
+    expect(buildTiktokClipboard({ tiktok: 'whatever' }, false)).toEqual({ clipboard: null, tiktokIssues: [] });
+  });
+
+  test('valid edited caption → returned for clipboard', () => {
+    const r = buildTiktokClipboard({ tiktok: 'Chinch bugs love Venice lawns in June — check the blade base.' }, true);
+    expect(r.clipboard.tiktok).toContain('Chinch');
+    expect(r.tiktokIssues).toEqual([]);
+  });
+
+  test('caption with pricing is withheld (brand rules still apply to manual copy)', () => {
+    const r = buildTiktokClipboard({ tiktok: 'DM us — only $49/visit!' }, true);
+    expect(r.clipboard).toBeNull();
+    expect(r.tiktokIssues.length).toBeGreaterThan(0);
+  });
+
+  test('empty caption → withheld', () => {
+    expect(buildTiktokClipboard({}, true).clipboard).toBeNull();
+  });
+});
+
 describe('buildPostLogRow', () => {
   const base = {
     techNote: 'roach behind dishwasher',
@@ -137,7 +159,9 @@ describe('buildPostLogRow', () => {
   });
 
   test('records the actual caption model, null when unknown (never hardcoded)', () => {
-    expect(buildPostLogRow({ ...base, model: 'claude-sonnet-4-6', results: [{ success: true }] }).ai_model).toBe('claude-sonnet-4-6');
+    // Non-Anthropic sentinel — AGENTS.md bans literal Anthropic model IDs outside models.js.
+    const SENTINEL = 'unit-test-model-id';
+    expect(buildPostLogRow({ ...base, model: SENTINEL, results: [{ success: true }] }).ai_model).toBe(SENTINEL);
     expect(buildPostLogRow({ ...base, results: [{ success: true }] }).ai_model).toBeNull();
   });
 });

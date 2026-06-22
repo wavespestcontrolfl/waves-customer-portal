@@ -80,6 +80,17 @@ function buildPostLogRow({ techNote, captions, results, imageUrl, location, mode
   };
 }
 
+// Validate the TikTok caption before handing it back for manual posting. TikTok
+// has no API so it skips the native publish/validate path — but the brand rules
+// (pricing/safety/phone) still apply, so withhold the clipboard if it fails.
+function buildTiktokClipboard(captions, tiktokRequested) {
+  if (!tiktokRequested) return { clipboard: null, tiktokIssues: [] };
+  const tt = String(captions?.tiktok || '').trim();
+  if (!tt) return { clipboard: null, tiktokIssues: ['No TikTok caption'] };
+  const v = social.validateContent(tt, 'facebook'); // tiktok validates under the facebook ruleset
+  return v.valid ? { clipboard: { tiktok: tt }, tiktokIssues: [] } : { clipboard: null, tiktokIssues: v.issues };
+}
+
 async function logPost(row) {
   try {
     const cols = await db('social_media_posts').columnInfo();
@@ -95,7 +106,7 @@ async function logPost(row) {
 
 // GET /api/tech/social/locations — service-area locations for the GBP picker.
 router.get('/locations', (req, res) => {
-  res.json({ locations: WAVES_LOCATIONS.map(pickLocation) });
+  res.json({ enabled: techSocialEnabled(), locations: WAVES_LOCATIONS.map(pickLocation) });
 });
 
 // POST /api/tech/social/generate — vision + captions, no persistence.
@@ -142,6 +153,12 @@ router.post('/publish', async (req, res, next) => {
     const { photo, captions, platforms, locationId, model } = req.body || {};
     if (!captions || typeof captions !== 'object') {
       return res.status(400).json({ error: 'No captions to publish' });
+    }
+    // Photo-first contract: publishing without a photo would post captions that
+    // describe an image the public never sees. Require it (the hosting-failure
+    // guard below only triggers when a photo was supplied).
+    if (!photo || !photo.data) {
+      return res.status(400).json({ error: 'A photo is required to publish' });
     }
     // Same size cap as /generate — /publish must not re-accept an oversized
     // client photo and push it through uploadImageToS3/Sharp unbounded.
@@ -238,15 +255,12 @@ router.post('/publish', async (req, res, next) => {
       `ok=${results.filter((r) => r.success).length}/${results.length} imageHosted=${!!imageUrl}`
     );
 
-    res.json({
-      results,
-      clipboard: tiktokRequested ? { tiktok: (captions.tiktok || '') } : null,
-      imageHosted: !!imageUrl,
-    });
+    const { clipboard, tiktokIssues } = buildTiktokClipboard(captions, tiktokRequested);
+    res.json({ results, clipboard, tiktokIssues, imageHosted: !!imageUrl });
   } catch (err) {
     next(err);
   }
 });
 
 module.exports = router;
-module.exports._test = { selectPublishPlatforms, buildPostLogRow, techSocialEnabled, PUBLISHABLE };
+module.exports._test = { selectPublishPlatforms, buildPostLogRow, buildTiktokClipboard, techSocialEnabled, PUBLISHABLE };
