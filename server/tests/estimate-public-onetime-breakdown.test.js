@@ -4114,7 +4114,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Invoice includes WaveGuard setup');
     expect(html).not.toContain('we open the $99 setup invoice');
     // Prepay is still offered, now with a 5% discount: $660 → $627.
-    expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.05">$627');
+    expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.05" data-prepay-floor="0">$627');
   });
 
   test('monthly-billed pest tier: $99 setup, first visit billed-after, no contradictory Invoice total', () => {
@@ -4225,8 +4225,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('<strong>-$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
     // Annual plan total $660 → prepay invoice $627 (5% off the recurring annual).
-    expect(html).toContain('data-prepay-discount-rate="0.05">$627</strong>');
-    expect(html).toContain('data-prepay-copy-total data-prepay-discount-rate="0.05">$627</span>');
+    expect(html).toContain('data-prepay-discount-rate="0.05" data-prepay-floor="0">$627</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-discount-rate="0.05" data-prepay-floor="0">$627</span>');
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
     expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 627;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');

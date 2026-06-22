@@ -3279,6 +3279,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
   const prepayDiscountAmount = annualPrepayWaivesMembership ? 0 : prepayResolved.discount;
   const prepayDiscountRate = annualPrepayWaivesMembership ? 0 : prepayResolved.rate;
+  // The client recompute uses the CONFIGURED rate + the floor (not the rounded
+  // effective rate) so a tier change reproduces the exact server amount:
+  // max(annual*(1-rate), floor). Keeps fee math cents-authoritative.
+  const prepayClientRate = annualPrepayWaivesMembership ? 0 : prepayResolved.discountRate;
+  const prepayFloor = annualPrepayWaivesMembership ? 0 : prepayResolved.floor;
   const prepayDiscountPctLabel = `${Math.round(prepayDiscountRate * 100)}%`;
   // Annual prepay is offered to NEW customers only (unchanged invariant) and only
   // when it carries an incentive: the setup waiver (pest/mosquito) or the prepay
@@ -3348,9 +3353,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
-          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-discount-rate="${prepayClientRate}" data-prepay-floor="${prepayFloor}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayDiscountRate}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
+        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total data-prepay-discount-rate="${prepayClientRate}" data-prepay-floor="${prepayFloor}">${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -4245,12 +4250,14 @@ ${shellQuestionsBar()}
     });
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
       const discountRate = Number(el.dataset.prepayDiscountRate || 0);
-      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
+      const floor = Number(el.dataset.prepayFloor || 0);
+      const invoiceTotal = Math.max(Math.round(annual * (1 - discountRate) * 100) / 100, floor, 0);
       el.textContent = fmt(invoiceTotal);
     });
     document.querySelectorAll('[data-prepay-copy-total]').forEach((el) => {
       const discountRate = Number(el.dataset.prepayDiscountRate || 0);
-      const invoiceTotal = Math.max(0, Math.round(annual * (1 - discountRate) * 100) / 100);
+      const floor = Number(el.dataset.prepayFloor || 0);
+      const invoiceTotal = Math.max(Math.round(annual * (1 - discountRate) * 100) / 100, floor, 0);
       el.textContent = fmt(invoiceTotal);
     });
     let firstVisitTotal = 0;

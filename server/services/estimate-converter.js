@@ -607,13 +607,16 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
 // clamps the result, so callers never quote a total below what is actually billed.
 function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], estimateData = {} } = {}) {
   const base = Math.round((Number(baseAnnual) || 0) * 100) / 100;
-  if (!(base > 0)) return { amount: 0, discount: 0, rate: 0 };
+  if (!(base > 0)) return { amount: 0, discount: 0, rate: 0, discountRate: 0, floor: 0 };
   const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
   const discounted = Math.round(base * (1 - discountRate) * 100) / 100;
-  const floor = nonDiscountableRecurringAnnualFloor(estimateData);
+  const floor = Math.max(0, Math.round(nonDiscountableRecurringAnnualFloor(estimateData) * 100) / 100);
   const amount = Math.max(discounted, floor);
   const discount = Math.max(0, Math.round((base - amount) * 100) / 100);
-  return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000 };
+  // `rate` is the EFFECTIVE (possibly floor-reduced) rate for display labels;
+  // `discountRate` is the CONFIGURED rate + `floor` so the client recompute can
+  // reproduce this exact (cents-authoritative) amount as max(annual*(1-rate), floor).
+  return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000, discountRate, floor };
 }
 
 function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
