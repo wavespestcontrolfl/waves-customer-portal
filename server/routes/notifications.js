@@ -89,7 +89,12 @@ function channelValue(value) {
   return CHANNEL_VALUES.includes(value) ? value : 'sms';
 }
 
-function preferencePayload(prefs = {}) {
+// Delivery channels are an account-level preference resolved from the primary
+// profile, so they only belong on the account payload. Property payloads omit
+// them (`includeChannels: false`) — otherwise a secondary property's local
+// default channels would clobber the account channels when the client merges a
+// property response into the top-level prefs.
+function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
   return {
     appointmentConfirmation: prefs.appointment_confirmation !== false,
     serviceReminder72h: prefs.service_reminder_72h !== false,
@@ -106,10 +111,12 @@ function preferencePayload(prefs = {}) {
     paymentConfirmationSms: prefs.payment_confirmation_sms !== false,
     appointmentNotifyPrimary: prefs.appointment_notify_primary === true,
     serviceReportNotifyPrimary: prefs.service_report_notify_primary === true,
-    // Per-notification delivery channel (sms | email | both)
-    appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
-    serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
-    serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
+    ...(includeChannels ? {
+      // Per-notification delivery channel (sms | email | both)
+      appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel),
+      serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
+      serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
+    } : {}),
   };
 }
 
@@ -364,7 +371,7 @@ router.get('/property-preferences', async (req, res, next) => {
           state: p.state,
           zip: p.zip,
         },
-        preferences: preferencePayload(byCustomerId.get(String(p.id)) || {}),
+        preferences: preferencePayload(byCustomerId.get(String(p.id)) || {}, { includeChannels: false }),
         // Legacy single-contact shape (slot 1) — kept for older clients.
         serviceContact: serviceContactPayload({
           name: p.service_contact_name,
@@ -531,7 +538,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     }
 
     const prefs = await ensurePrefs(req.params.customerId);
-    const payload = preferencePayload(prefs);
+    const payload = preferencePayload(prefs, { includeChannels: false });
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.params.customerId,
