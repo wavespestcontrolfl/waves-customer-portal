@@ -440,12 +440,6 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isPositiveNumber(product.marginDivisor) || Number(product.marginDivisor) >= 1) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.marginDivisor must be positive and less than 1`);
     }
-    if (product.floorBeforeVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorBeforeVolumeDiscount)) {
-      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorBeforeVolumeDiscount must be non-negative`);
-    }
-    if (product.floorAfterVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
-      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorAfterVolumeDiscount must be non-negative`);
-    }
   }
 
   const palm = PALM || {};
@@ -1274,20 +1268,31 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(termiticide, 'equipCost', ps.ps_equip ?? ps.equipCost ?? ps.equip_cost, Number);
       setNumber(termiticide, 'complianceAdminCost', ps.complianceAdminCost ?? ps.compliance_admin_cost, money);
       setNumber(termiticide, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
-      const minimumsOverlay = ps.minimums || ps.minimums_by_context;
-      if (minimumsOverlay && typeof minimumsOverlay === 'object' && !Array.isArray(minimumsOverlay)) {
-        for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
-          const tiers = minimumsOverlay[context];
-          if (!Array.isArray(tiers)) continue;
-          termiticide.minimums[context] = tiers
-            .map((tier) => ({
-              maxSqFt: tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity' || tier.max_sqft === Infinity || tier.max_sqft === 'Infinity'
-                ? 'Infinity'
-                : Number(tier.maxSqFt ?? tier.max_sqft),
-              floor: money(tier.floor ?? tier.minimum),
-            }))
-            .filter((tier) => (Number.isFinite(tier.maxSqFt) || tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity') && Number.isFinite(tier.floor));
-        }
+      // Contextual floors are stored as flat top-level array keys
+      // (minimums_<context>) so the admin panel's inline table editor persists
+      // them; a nested `minimums` / `minimums_by_context` object is still
+      // accepted for back-compat.
+      const flatMinimumKeyByContext = {
+        standalone: 'minimums_standalone',
+        builderBatch: 'minimums_builderBatch',
+        sameTripAddOn: 'minimums_sameTripAddOn',
+      };
+      const nestedMinimumsOverlay = ps.minimums || ps.minimums_by_context;
+      const nestedMinimums = nestedMinimumsOverlay && typeof nestedMinimumsOverlay === 'object' && !Array.isArray(nestedMinimumsOverlay)
+        ? nestedMinimumsOverlay
+        : {};
+      for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+        const flatTiers = ps[flatMinimumKeyByContext[context]];
+        const tiers = Array.isArray(flatTiers) ? flatTiers : nestedMinimums[context];
+        if (!Array.isArray(tiers)) continue;
+        termiticide.minimums[context] = tiers
+          .map((tier) => ({
+            maxSqFt: tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity' || tier.max_sqft === Infinity || tier.max_sqft === 'Infinity'
+              ? 'Infinity'
+              : Number(tier.maxSqFt ?? tier.max_sqft),
+            floor: money(tier.floor ?? tier.minimum),
+          }))
+          .filter((tier) => (Number.isFinite(tier.maxSqFt) || tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity') && Number.isFinite(tier.floor));
       }
       const includeDriveOverlay = ps.includeDriveCostByContext || ps.include_drive_cost_by_context;
       if (includeDriveOverlay && typeof includeDriveOverlay === 'object' && !Array.isArray(includeDriveOverlay)) {
@@ -1310,8 +1315,6 @@ async function syncConstantsFromDB(dbInstance) {
         setNumber(target, 'containerOz', data.containerOz ?? data.container_oz ?? data.bottleOz ?? data.bottle_oz, Number);
         setNumber(target, 'productOzPer10SqFt', data.productOzPer10SqFt ?? data.product_oz_per_10_sqft, Number);
         setNumber(target, 'marginDivisor', data.marginDivisor ?? data.margin_divisor, Number);
-        setNumber(target, 'floorBeforeVolumeDiscount', data.floorBeforeVolumeDiscount ?? data.floor_before_volume_discount, money);
-        setNumber(target, 'floorAfterVolumeDiscount', data.floorAfterVolumeDiscount ?? data.floor_after_volume_discount, money);
         setBoolean(target, 'requiresLabelConfirmation', data.requiresLabelConfirmation ?? data.requires_label_confirmation);
         setBoolean(target, 'requiresCertificateOfCompliance', data.requiresCertificateOfCompliance ?? data.requires_certificate_of_compliance);
         setStringArray(target, 'warnings', data.warnings);
