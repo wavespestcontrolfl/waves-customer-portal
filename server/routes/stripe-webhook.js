@@ -103,6 +103,11 @@ async function paymentDetailsFromIntent(paymentIntent) {
     cardFunding: null,
     isWallet: false,
     receiptUrl: null,
+    // `resolved` = the method/funding came from ACTUAL Stripe data (charge or PM),
+    // NOT the payment_method_types[0] default. Callers that must distinguish a
+    // real card from an ACH (e.g. statement surcharge validation) check this so a
+    // transient lookup failure isn't treated as a card.
+    resolved: false,
   };
   let resolvedFromStripeDetails = false;
 
@@ -141,6 +146,7 @@ async function paymentDetailsFromIntent(paymentIntent) {
     }
   }
 
+  details.resolved = resolvedFromStripeDetails;
   if (resolvedFromStripeDetails || !paymentIntent.payment_method) return details;
 
   try {
@@ -155,11 +161,14 @@ async function paymentDetailsFromIntent(paymentIntent) {
       details.cardLastFour = pm.card.last4 || details.cardLastFour;
       details.cardFunding = pm.card.funding || details.cardFunding;
       details.isWallet = !!pm.card.wallet || details.isWallet;
+      details.resolved = true;
     } else if (pm?.us_bank_account) {
       details.paymentMethod = 'us_bank_account';
       details.cardLastFour = pm.us_bank_account.last4 || details.cardLastFour;
+      details.resolved = true;
     } else if (pm?.type) {
       details.paymentMethod = pm.type;
+      details.resolved = true;
     }
   } catch (err) {
     logger.warn(`[stripe-webhook] payment method lookup failed for PI ${paymentIntent.id}: ${err.message}`);
@@ -611,6 +620,13 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
     // a reused PI; the same client secret could then be confirmed with a
     // different tender).
     const details = await paymentDetailsFromIntent(paymentIntent);
+    // If the actual method/funding couldn't be resolved (transient Stripe lookup
+    // failure), the `paymentMethod` default is `card` — settling now would either
+    // strand a legit ACH (fail-closed on null funding) or mis-validate. THROW so
+    // Stripe retries the webhook; the lookup almost always succeeds on retry.
+    if (!details.resolved) {
+      throw new Error(`statement S-${statementId} PI ${piId}: payment method/funding unresolved (transient lookup) — retrying`);
+    }
     const methodType = details.paymentMethod || 'card';
     const funding = details.cardFunding || null;
     const paymentMethod = methodType === 'us_bank_account' ? 'ach' : 'card';
