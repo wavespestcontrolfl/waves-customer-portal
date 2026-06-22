@@ -39,12 +39,12 @@ function parseQuality(q) {
  * Lease up to n unworked prospects of a lane, atomically. FOR UPDATE SKIP LOCKED
  * so parallel Hermes subagents never grab the same row.
  */
-async function claim({ n = 10, type = 'signup' } = {}) {
+async function claim({ n = 10, type = 'signup', requireContactEmail = false } = {}) {
   const types = type === 'outreach' ? OUTREACH_TYPES : SIGNUP_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
 
   return db.transaction(async (trx) => {
-    const rows = await trx('seo_link_prospects')
+    let q = trx('seo_link_prospects')
       .where({ status: 'prospect' })
       .whereIn('link_type', types)
       .whereNull('claimed_at')
@@ -52,7 +52,14 @@ async function claim({ n = 10, type = 'signup' } = {}) {
       // draft — a drafted prospect stays status='prospect' until the operator approves
       // the send (M3b); send_error rows await human reconciliation. Without this they'd
       // be re-claimed and re-drafted, reopening a possibly-sent message.
-      .whereRaw("COALESCE(outreach_status, 'none') NOT IN ('drafted', 'sending', 'sent', 'send_error')")
+      .whereRaw("COALESCE(outreach_status, 'none') NOT IN ('drafted', 'sending', 'sent', 'send_error')");
+    // The in-process auto-drafter emails a stored contact and can't fill a web form,
+    // so it claims only prospects that already have a contact_email — leaving
+    // form-only prospects untouched (status='prospect') for manual handling rather
+    // than claiming+skipping them every run. External callers (Hermes) omit this and
+    // do their own recipient research.
+    if (requireContactEmail) q = q.whereNotNull('contact_email');
+    const rows = await q
       .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
       .orderBy('domain_rating', 'desc')
       .limit(limit)
@@ -227,7 +234,18 @@ async function sweepExpiredClaims(maxHours = 6) {
   return { released };
 }
 
+/** Release specific leases back to the pool (e.g. a dry-run that claimed but won't
+ *  report). Only clears rows still claimed; never touches status/attempts. */
+async function releaseClaims(ids = []) {
+  if (!Array.isArray(ids) || ids.length === 0) return { released: 0 };
+  const released = await db('seo_link_prospects')
+    .whereIn('id', ids)
+    .whereNotNull('claimed_at')
+    .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
+  return { released };
+}
+
 module.exports = {
-  claim, report, sweepExpiredClaims, mapReportToPatch, businessProfile, isValidEmail,
+  claim, report, sweepExpiredClaims, releaseClaims, mapReportToPatch, businessProfile, isValidEmail,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS,
 };

@@ -579,6 +579,20 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Link prospect claim sweep failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 2:00AM — Backlink outreach drafter: claim outreach prospects, draft 1:1
+  // pitches via Claude, park as 'drafted' for the morning approval queue. NEVER
+  // sends. Gated by outreachDrafter (default OFF in prod) — independent of the
+  // send gate, so drafts can be reviewed before sends are armed.
+  cron.schedule('0 2 * * *', async () => {
+    if (!isEnabled('outreachDrafter')) return;
+    logger.info('Running: Backlink outreach drafter');
+    try {
+      const drafter = require('./seo/backlink-outreach-drafter');
+      const r = await drafter.run({ batchSize: 10 });
+      logger.info(`[outreach-drafter] cron: claimed=${r.claimed} drafted=${r.drafted} skipped=${r.skipped} failed=${r.failed}`);
+    } catch (err) { logger.error(`Backlink outreach drafter failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // WEEKLY MONDAY 1:30AM — Full site technical audit
   cron.schedule('30 1 * * 1', async () => {
     if (!isEnabled('seoIntelligence')) return;
