@@ -146,18 +146,31 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   const ch = apptChannel(channel);
   const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel };
 
+  // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
+  // accept flow) throw on a blocked/undeliverable send; for email/both that must
+  // not abort the email leg or bubble out of the booking/accept flow — treat a
+  // throw as "not reached" so the email still goes out and the alert logic runs.
+  const runSms = async () => {
+    try {
+      return await smsAttempt();
+    } catch (err) {
+      logger.warn(`[appt-remind] ${kind} SMS attempt threw for ${customerId}: ${err.message}`);
+      return false;
+    }
+  };
+
   if (ch === 'email') {
     const res = await sendAppointmentNoticeEmail(emailArgs);
     if (res?.ok) return true;
     // No usable email (none on file / suppressed) — reach them by text instead.
     logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
-    const smsOk = await smsAttempt();
+    const smsOk = await runSms();
     if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
     return smsOk;
   }
 
   if (ch === 'both') {
-    const smsOk = await smsAttempt();
+    const smsOk = await runSms();
     const emailRes = await sendAppointmentNoticeEmail(emailArgs);
     const emailOk = !!emailRes?.ok;
     // Neither channel reached the customer — raise the same human-follow-up
@@ -167,7 +180,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   }
 
   // 'sms' default — unchanged behavior.
-  const smsOk = await smsAttempt();
+  const smsOk = await runSms();
   if (!smsOk) await deliverAppointmentEmailFallback(emailArgs);
   return smsOk;
 }
@@ -206,13 +219,20 @@ async function scheduledServiceApptTime(scheduledServiceId) {
 // prefs-lookup failure falls back to the plain SMS send.
 async function deliverConfirmationByChannel({ customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', smsAttempt }) {
   let channel = 'sms';
+  let confirmationOn = true;
   try {
     const prefs = await getReminderPrefs(customerId);
     channel = prefs.confirmationChannel;
+    confirmationOn = prefs.appointmentConfirmation;
   } catch (err) {
     logger.warn(`[appt-remind] confirmation channel lookup failed for ${customerId}: ${err.message} — sending SMS`);
   }
-  if (channel === 'sms') return smsAttempt();
+  // Default 'sms', OR the customer opted out of New Appointment Confirmation:
+  // run the caller's SMS send only. That send goes through sendCustomerMessage,
+  // which already enforces the appointment_confirmation opt-out (suppressing it
+  // for opted-out customers) — and we must NOT email them, because the email
+  // path bypasses that validator.
+  if (channel === 'sms' || !confirmationOn) return smsAttempt();
 
   // email / both — resolve the appointment time for the email body when the
   // caller didn't pass one, so the confirmation email shows the right ET slot.

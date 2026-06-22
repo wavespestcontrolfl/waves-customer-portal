@@ -2417,11 +2417,13 @@ const CallRecordingProcessor = {
               // channel (sms | email | both). Default 'sms' keeps the exact prior
               // send; email/both also emails the confirmation.
               const AppointmentReminders = require('./appointment-reminders');
-              await AppointmentReminders.deliverConfirmationByChannel({
+              let smsRan = false;
+              const confirmationReached = await AppointmentReminders.deliverConfirmationByChannel({
                 customerId,
                 scheduledServiceId,
                 serviceLabel: serviceType,
                 smsAttempt: async () => {
+                  smsRan = true;
                   const sendResult = await sendCustomerMessage({
                     to: smsPhone,
                     body: smsBody,
@@ -2454,6 +2456,13 @@ const CallRecordingProcessor = {
                   return true;
                 },
               });
+              if (!smsRan) {
+                // Email-only confirmation channel: smsAttempt never runs, but the
+                // schedule row was created — record it so the route-decision log
+                // (created_scheduled_service_id / final_action_taken) reflects reality.
+                logger.info(`[call-proc] Appointment confirmation emailed (no SMS) for customer ${customerId}`);
+                appointmentResult = { smsSent: false, emailSent: confirmationReached, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
+              }
             } else {
               logger.info(`[call-proc] Skipping duplicate appointment SMS to customer ${customerId} (sent within last 10 min)`);
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };

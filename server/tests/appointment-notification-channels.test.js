@@ -119,6 +119,15 @@ describe('deliverAppointmentNotice channel routing', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test("'both': a throwing SMS leg does not abort the email leg or bubble", async () => {
+    const smsAttempt = jest.fn(async () => { throw new Error('customer SMS blocked'); });
+    const reached = await deliverAppointmentNotice(args({ channel: 'both', smsAttempt }));
+
+    expect(reached).toBe(true); // email still delivered
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test("'both': both channels fail -> raises no-reachable-channel alert", async () => {
     AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValue({ ok: false, skipped: true, reason: 'missing_email' });
     const smsAttempt = jest.fn(async () => false);
@@ -228,6 +237,22 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
     const callArg = AppointmentEmail.sendAppointmentConfirmationEmail.mock.calls[0][0];
     expect(callArg.appointmentTime instanceof Date).toBe(true);
+  });
+
+  test('opted-out customer (confirmation toggle off) is not emailed even on the email channel', async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'email', appointment_confirmation: false })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const smsAttempt = jest.fn(async () => false);
+    const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', smsAttempt });
+
+    // Falls to the SMS-only path, where sendCustomerMessage's validator suppresses
+    // it for the opted-out customer; the email path (which bypasses that check) is
+    // never taken.
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    expect(reached).toBe(false);
   });
 
   test('falls back to the SMS send when channel prefs are unavailable', async () => {
