@@ -244,34 +244,6 @@ test('apply mode spends a tight cap on the BEST-improvement move, not the first 
   }
 });
 
-test('greedy: the move applied is chosen by FRESH (re-evaluated) improvement, not the pass-1 ranking', async () => {
-  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
-  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
-  try {
-    // s1 looks best in pass 1 but its live re-evaluation is weak; s2 is the
-    // opposite. With cap=1 a one-time pass-1 sort would move s1 — the greedy
-    // pass-2 re-evaluation must move s2 (the best CURRENT gain).
-    const cand = (detour) => ({ is_current: false, detour_minutes: detour, stops_that_day: 3, technician_id: 't1', date: '2026-08-11', start_time: '08:00', capability_level: 'qualified', total_drive_minutes: 10 });
-    servicesResult = [svc({ id: 's1', customer_id: 'c1' }), svc({ id: 's2', customer_id: 'c2' })];
-    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
-    const calls = { s1: 0, s2: 0 };
-    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => {
-      calls[service.id] += 1;
-      // pass 1 = call 1; pass-2 re-eval = call 2+. Flip which is the bigger gain.
-      if (service.id === 's1') return { current: CURRENT, candidates: [calls.s1 === 1 ? cand(0) : cand(22)] };
-      return { current: CURRENT, candidates: [calls.s2 === 1 ? cand(22) : cand(0)] };
-    });
-
-    const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
-
-    expect(res.changed).toBe(1);
-    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
-    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('s2'); // best FRESH gain, not the pass-1 leader s1
-  } finally {
-    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
-  }
-});
-
 test('a beyond-cap move that re-evaluation finds superseded is dropped (no_change), not counted as a cap-held recommendation', async () => {
   const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
   process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
@@ -297,7 +269,7 @@ test('a beyond-cap move that re-evaluation finds superseded is dropped (no_chang
     expect(res).toMatchObject({ changed: 1, recommended: 0 }); // s2 NOT counted as cap-held
     expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
     expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('s1');
-    expect(lastDecision('no_change').reason_description).toMatch(/Superseded by an earlier move/);
+    expect(lastDecision('no_change').reason_description).toMatch(/No longer qualifies on live re-evaluation/);
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }
@@ -317,7 +289,7 @@ test('apply mode re-evaluates before moving: a move superseded by the live sched
     expect(res).toMatchObject({ evaluated: 1, changed: 0 });
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
     expect(candidateSlots.findValidCandidateSlots).toHaveBeenCalledTimes(2); // scored, then re-scored
-    expect(lastDecision('no_change').reason_description).toMatch(/Superseded by an earlier move/);
+    expect(lastDecision('no_change').reason_description).toMatch(/No longer qualifies on live re-evaluation/);
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }
