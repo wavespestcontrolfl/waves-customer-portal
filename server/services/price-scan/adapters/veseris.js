@@ -54,11 +54,36 @@ const adapter = makeAdapter({
     }
     const attempt = async () => {
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
-      const email = page.locator('input[name="login[username]"]:visible').first();
+      // Re-validate the LANDED host: goto follows redirects, and we type the password into
+      // whatever page loaded — an open redirect / tampered URL could bounce off-host. Never
+      // fill credentials unless we're still on a trusted Veseris host.
+      if (!isTrustedVeserisLoginUrl(page.url())) {
+        throw new Error('veseris login aborted: navigation redirected off the trusted host');
+      }
       const pass = page.locator('input[name="login[password]"]:visible').first();
-      await email.waitFor({ state: 'visible', timeout: 30000 });
-      await email.fill(creds.email || creds.username);
-      await pass.fill(creds.password);
+      await page.locator('input[name="login[username]"]:visible').first().waitFor({ state: 'visible', timeout: 30000 });
+      // Validate the host AND write BOTH credentials in ONE page-context execution — no await
+      // between the check and the writes, so there is no window for a delayed redirect to slip
+      // the password onto a foreign page (a check-then-await-fill is racy: Playwright locators
+      // are live across navigations and each awaited fill is another navigation point). The
+      // trusted-host predicate is inlined to match isTrustedVeserisLoginUrl.
+      const filled = await page.evaluate(({ user, pw }) => {
+        const h = location.hostname.toLowerCase();
+        if (location.protocol !== 'https:' || !(h === 'veseris.com' || h.endsWith('.veseris.com'))) return 'offhost';
+        const u = document.querySelector('input[name="login[username]"]');
+        const p = document.querySelector('input[name="login[password]"]');
+        if (!u || !p) return 'nofields';
+        for (const [el, v] of [[u, user], [p, pw]]) {
+          el.focus();
+          el.value = v;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return 'ok';
+      }, { user: creds.email || creds.username, pw: creds.password });
+      if (filled !== 'ok') {
+        throw new Error(`veseris login aborted: ${filled === 'offhost' ? 'navigation redirected off the trusted host' : 'login fields not found'}`);
+      }
       const submit = page.locator(
         'form:has(input[name="login[password]"]) button[type="submit"]:visible, form:has(input[name="login[password]"]) button:visible',
       ).first();
