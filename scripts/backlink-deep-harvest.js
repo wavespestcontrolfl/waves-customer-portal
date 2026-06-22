@@ -126,14 +126,21 @@ async function harvest(db, args) {
 
   // 2. bulk spam scores → drop spam/PBN
   const spam = new Map();
+  let spamChunkFails = 0;
   for (let i = 0; i < candidates.length; i += 1000) {
     const chunk = candidates.slice(i, i + 1000).map((c) => c.domain);
-    const resp = await dataforseo.bulkSpamScore(chunk);
-    for (const it of items(resp)) spam.set(normDomain(it.target), Number(it.spam_score) || 0);
+    const rows = items(await dataforseo.bulkSpamScore(chunk));
+    if (!rows.length) { spamChunkFails += chunk.length; continue; } // null/empty = DFS hiccup
+    for (const it of rows) spam.set(normDomain(it.target), Number(it.spam_score) || 0);
   }
   const preSpam = candidates.length;
-  candidates = candidates.filter((c) => (spam.get(c.domain) ?? 0) < SPAM_MAX);
-  console.log(`[harvest] dropped ${preSpam - candidates.length} spam/PBN (spam_score >= ${SPAM_MAX}); ${candidates.length} survive`);
+  // Fail CLOSED: a domain with no returned spam score is EXCLUDED, not assumed
+  // clean — a transient DataForSEO failure must not leak unscreened PBNs into LLM
+  // scoring/promotion (the spam gate runs before we spend that budget). Logged,
+  // not silent, so a degraded run is visible.
+  const unscored = candidates.filter((c) => !spam.has(c.domain)).length;
+  candidates = candidates.filter((c) => spam.has(c.domain) && spam.get(c.domain) < SPAM_MAX);
+  console.log(`[harvest] dropped ${preSpam - candidates.length} (spam>=${SPAM_MAX} or unscored: ${unscored} no-score${spamChunkFails ? `, ${spamChunkFails} in failed chunks` : ''}); ${candidates.length} survive`);
 
   // 3. score (LLM classify + contact-find + composite)
   const scoreInput = candidates.map((c) => ({
