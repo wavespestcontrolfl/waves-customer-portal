@@ -20,27 +20,30 @@ function fakeAnthropic(planObj, verifyObj) {
   return { messages: { create: async () => { n += 1; return { content: [{ text: JSON.stringify(n === 1 ? planObj : verifyObj) }] }; } } };
 }
 const nap = { business_name: 'Waves Pest Control', website: 'https://wavespestcontrol.com', email: 'contact@wavespestcontrol.com', phone: '(941) 318-7612', address: { street: 'x', city: 'Bradenton', state: 'FL', zip: '34211' }, category: 'Pest Control', description: 'desc' };
+// Default injected deps: a stub DNS resolver returns a public IP so we never hit the
+// network, plus whatever launchBrowser/anthropic the test supplies.
+const deps = (over = {}) => ({ resolveHostIps: async () => ['203.0.113.10'], ...over });
 
 describe('fillCitationForm', () => {
   test('blocked (account/captcha/payment) → fail-closed, no actions executed', async () => {
     const log = [];
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic({ form_present: true, blocked: 'captcha', actions: [] }),
-    });
+    }));
     expect(r.outcome).toBe('blocked_captcha');
     expect(log).toHaveLength(0); // never filled anything
   });
 
   test('free form → fills allowed actions, submits, confirms → placed (on-host live_url kept)', async () => {
     const log = [];
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#name', value: 'Waves' }, { action: 'submit', selector: '#go' }] },
         { success: true, pending: false, live_url: 'https://x.com/biz/waves' },
       ),
-    });
+    }));
     expect(r.outcome).toBe('placed');
     expect(r.liveUrl).toBe('https://x.com/biz/waves');
     expect(log).toContainEqual(['fill', '#name', 'Waves']);
@@ -48,40 +51,40 @@ describe('fillCitationForm', () => {
 
   test('P1: an OFF-host live_url is dropped (reported pending, never stored for the verifier)', async () => {
     const log = [];
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
         { success: true, pending: false, live_url: 'http://169.254.169.254/latest/meta-data/' },
       ),
-    });
+    }));
     expect(r.outcome).toBe('placed');
     expect(r.liveUrl).toBeNull();   // off-host URL not trusted
     expect(r.pending).toBe(true);   // → pending so the row isn't stranded
   });
 
-  test('P1: a click on a submit-like control is skipped (no early submit before the final submit)', async () => {
+  test('P1: model-emitted clicks are never executed (only fill/select/check + final submit)', async () => {
     const log = [];
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic(
-        { form_present: true, blocked: null, actions: [{ action: 'click', selector: 'button#submitNow' }, { action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { form_present: true, blocked: null, actions: [{ action: 'click', selector: 'button.btn-primary' }, { action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
         { success: true, pending: false, live_url: 'https://x.com/ok' },
       ),
-    });
+    }));
     expect(r.outcome).toBe('placed');
-    expect(log.find((a) => a[1] === '#submitNow')).toBeUndefined(); // the submit-like click never fired
+    expect(log.find((a) => a[1] === 'button.btn-primary')).toBeUndefined(); // arbitrary click never fired
     expect(log).toContainEqual(['fill', '#n', 'W']);
-    expect(log).toContainEqual(['click', '#go']); // only the explicit final submit clicked
+    expect(log).toContainEqual(['click', '#go']); // only the explicit final submit pressed a button
   });
 
   test('P1: plan with no single final submit → failed up front, nothing filled', async () => {
     const log = [];
     // two submits → ambiguous; reject before touching the page
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'submit', selector: '#a' }, { action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#b' }] }, {}),
-    });
+    }));
     expect(r.outcome).toBe('failed');
     expect(r.errorCode).toBe('no_submit');
     expect(log).toHaveLength(0); // rejected before any fill
@@ -89,76 +92,112 @@ describe('fillCitationForm', () => {
 
   test('ignores non-allowlisted action types (e.g. upload) the model might emit', async () => {
     const log = [];
-    await fillCitationForm({ submitUrl: 'https://x.com/add', nap }, {
+    await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'upload', selector: '#logo', file: 'logo' }, { action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
         { success: true, live_url: null },
       ),
-    });
+    }));
     expect(log.find((a) => a[0] === 'upload')).toBeUndefined(); // upload never executed
     expect(log).toContainEqual(['fill', '#n', 'W']);
   });
 
   test('no submit action in plan → failed (never half-submits silently)', async () => {
     const log = [];
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log),
       anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }] }, {}),
-    });
+    }));
     expect(r.outcome).toBe('failed');
     expect(r.errorCode).toBe('no_submit');
   });
 
   test('no LLM client → failed (no blind submission)', async () => {
     const prev = process.env.ANTHROPIC_API_KEY; delete process.env.ANTHROPIC_API_KEY;
-    const r = await fillCitationForm({ submitUrl: 'https://x.com', nap }, { launchBrowser: async () => fakeBrowser([]) });
+    const r = await fillCitationForm({ submitUrl: 'https://x.com', nap, expectedHost: 'x.com' }, deps({ launchBrowser: async () => fakeBrowser([]) }));
     expect(r.outcome).toBe('failed');
     if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+  });
+
+  test('missing expectedHost → failed (browser is pinned + egress-locked to it)', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap }, deps({
+      launchBrowser: async () => fakeBrowser([]),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [] }),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('no_expected_host');
+  });
+
+  test('host that does not resolve to a public IP → failed, browser never launched', async () => {
+    let launched = false;
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+      resolveHostIps: async () => [], // private/unresolvable → fail closed
+      launchBrowser: async () => { launched = true; return fakeBrowser([]); },
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [] }),
+    });
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('host_not_public');
+    expect(launched).toBe(false);
   });
 
   test('off-host redirect → failed, before any model call or fill', async () => {
     const log = [];
     let called = 0;
-    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser(log, { landedUrl: 'https://evil.example/add' }),
       anthropic: { messages: { create: async () => { called += 1; return { content: [{ text: '{}' }] }; } } },
-    });
+    }));
     expect(r.outcome).toBe('failed');
     expect(r.errorCode).toBe('offsite_redirect');
     expect(called).toBe(0); // never sent a screenshot to the model
     expect(log).toHaveLength(0);
   });
 
-  test('only fill/select/check/click/submit are allowed actions', () => {
-    expect([..._internals.ALLOWED_ACTIONS].sort()).toEqual(['check', 'click', 'fill', 'select', 'submit']);
+  test('only fill/select/check/submit are allowed actions (no click/upload)', () => {
+    expect([..._internals.ALLOWED_ACTIONS].sort()).toEqual(['check', 'fill', 'select', 'submit']);
   });
 });
 
-describe('requestAllowed (per-request SSRF guard)', () => {
+describe('requestAllowed (egress lock — pinned host only)', () => {
   const { requestAllowed } = _internals;
-  const pub = async () => true;   // host resolves to a public IP
-  const priv = async () => false; // host resolves to a private/internal IP
+  test('allows the pinned apex host', () => {
+    expect(requestAllowed({ url: 'https://x.com/add', expectedHost: 'x.com' })).toBe(true);
+  });
+  test('allows www of the pinned host (pinned to the same IP)', () => {
+    expect(requestAllowed({ url: 'https://www.x.com/add', expectedHost: 'x.com' })).toBe(true);
+  });
+  test('blocks any off-host request (no off-host sub-resources → no exfil channel)', () => {
+    expect(requestAllowed({ url: 'https://cdn.other.com/a.css', expectedHost: 'x.com' })).toBe(false);
+    expect(requestAllowed({ url: 'https://evil.example/x', expectedHost: 'x.com' })).toBe(false);
+  });
+  test('blocks an unpinned sub-domain (only apex/www are pinned)', () => {
+    expect(requestAllowed({ url: 'https://listings.x.com/biz', expectedHost: 'x.com' })).toBe(false);
+  });
+  test('blocks a look-alike host that merely ends with the string', () => {
+    expect(requestAllowed({ url: 'https://notx.com/add', expectedHost: 'x.com' })).toBe(false);
+  });
+  test('blocks localhost / metadata IP-literal hosts', () => {
+    expect(requestAllowed({ url: 'http://169.254.169.254/latest/meta-data/', expectedHost: 'x.com' })).toBe(false);
+    expect(requestAllowed({ url: 'http://localhost:8080/x', expectedHost: 'x.com' })).toBe(false);
+  });
+  test('blocks garbage / empty urls', () => {
+    expect(requestAllowed({ url: 'not a url', expectedHost: 'x.com' })).toBe(false);
+    expect(requestAllowed({ url: '', expectedHost: 'x.com' })).toBe(false);
+  });
+});
 
-  test('allows a public same-host top-level navigation', async () => {
-    expect(await requestAllowed({ url: 'https://x.com/add', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(true);
+describe('resolvePublicIps (DNS pin source, fail-closed)', () => {
+  const { resolvePublicIps } = _internals;
+  test('returns a public IP literal as-is', async () => {
+    expect(await resolvePublicIps('8.8.8.8')).toEqual(['8.8.8.8']);
   });
-  test('blocks a top-level navigation that leaves the allowlisted host', async () => {
-    expect(await requestAllowed({ url: 'https://evil.example/add', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
+  test('rejects a private/loopback IP literal → []', async () => {
+    expect(await resolvePublicIps('127.0.0.1')).toEqual([]);
+    expect(await resolvePublicIps('169.254.169.254')).toEqual([]);
+    expect(await resolvePublicIps('10.0.0.5')).toEqual([]);
   });
-  test('allows a top-level navigation to a sub-domain of the allowlisted host', async () => {
-    expect(await requestAllowed({ url: 'https://listings.x.com/biz/waves', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(true);
-    // but not a look-alike that merely ends with the string
-    expect(await requestAllowed({ url: 'https://notx.com/add', isNavigation: true, isTopFrame: true }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
-  });
-  test('allows a public off-host SUB-resource (CDN/font), which is not a navigation', async () => {
-    expect(await requestAllowed({ url: 'https://cdn.other.com/a.css', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(true);
-  });
-  test('blocks a public-looking host that resolves to a private IP (DNS rebinding)', async () => {
-    expect(await requestAllowed({ url: 'https://rebind.example/a', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: priv })).toBe(false);
-  });
-  test('blocks localhost / metadata IP-literal hosts outright (before any DNS)', async () => {
-    expect(await requestAllowed({ url: 'http://169.254.169.254/latest/meta-data/', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
-    expect(await requestAllowed({ url: 'http://localhost:8080/x', isNavigation: false, isTopFrame: false }, { expectedHost: 'x.com', resolvePublic: pub })).toBe(false);
+  test('empty host → []', async () => {
+    expect(await resolvePublicIps('')).toEqual([]);
   });
 });

@@ -8,6 +8,13 @@
  * allowlist of domains — without one it submits nothing. When the engine discovers
  * a gate the classifier missed (login/CAPTCHA/payment), it RECLASSIFIES the row
  * (→ needs_account / pay_and_submit) so it's never auto-retried.
+ *
+ * DEPLOYMENT PREREQUISITE (SSRF): this drives a real headless browser against
+ * untrusted directory pages. browser-form-filler pins Chromium's DNS to a verified
+ * public IP and egress-locks it to the one allowlisted host, but the required
+ * network-layer backstop is an egress firewall on the Railway service blocking
+ * RFC1918 / 169.254 / ::1 / fc00::/7. Do NOT set GATE_SIGNUP_RUNNER=true in prod
+ * until that firewall is in place.
  */
 
 const logger = require('../logger');

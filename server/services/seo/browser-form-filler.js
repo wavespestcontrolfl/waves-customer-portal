@@ -9,13 +9,28 @@
  * the model only emits a constrained action plan; unexpected output → fail (never
  * an open-ended agent action).
  *
- * Injectable (launchBrowser, anthropic) so the orchestration is unit-testable
- * without a real browser. Returns { outcome, liveUrl, screenshot(Buffer), errorCode, notes }.
+ * SSRF model (server-side browser on an untrusted page): a separate in-JS DNS
+ * preflight CANNOT stop Chromium re-resolving to a private IP (rebinding), so this
+ * does TWO things instead — (1) PIN Chromium's DNS for the allowlisted host to a
+ * pre-verified PUBLIC IP via --host-resolver-rules, so the browser connects to the IP
+ * we checked (no second lookup), and (2) ABORT every request to any other host at the
+ * route layer BEFORE it connects (no off-host sub-resources → no JS exfiltration). The
+ * browser therefore only ever contacts the one verified-public pinned host.
+ *   DEPLOYMENT PREREQUISITE: before GATE_SIGNUP_RUNNER is enabled in prod, the Railway
+ *   service running this MUST also have an egress firewall blocking RFC1918 / 169.254 /
+ *   ::1 / fc00::/7 — the network-layer backstop for any residual. The runner is gated
+ *   OFF + allowlist-supervised until that is in place.
+ *
+ * Injectable (launchBrowser, anthropic, resolveHostIps) so the orchestration is
+ * unit-testable without a real browser/DNS. Returns { outcome, liveUrl, screenshot,
+ * errorCode, notes }.
  */
 
+const dns = require('dns');
+const net = require('net');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
-const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname (sync) + hostResolvesPublic (DNS)
+const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname + isPrivateIp
 
 function hostOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
@@ -23,36 +38,40 @@ function hostOf(url) {
 
 // A host is "on the allowlisted domain" if it equals it or is a sub-domain of it
 // (a directory may host the live listing / confirmation on a sub-domain). Same
-// registrable domain only — never an off-domain host.
+// registrable domain only — never an off-domain host. Used for what we STORE/verify
+// (live_url, redirect sanity); the browser EGRESS guard below is stricter still.
 function hostMatchesExpected(host, expected) {
   return !!expected && (host === expected || host.endsWith(`.${expected}`));
 }
 
-// A selector that looks like a submit control — we never let a model-emitted `click`
-// hit one (the real submission goes through the explicit final `submit` action), so a
-// stray click can't submit the form early and trigger a duplicate listing on retry.
-function isSubmitControl(sel) {
-  return /submit/i.test(String(sel || ''));
-}
-
 /**
- * Per-request SSRF decision for the Playwright route guard. Applied to EVERY request
- * the browser makes (top-level navigation, redirect, sub-resource). Blocks:
- *  (a) localhost / intranet / private-IP-literal hosts (sync, no DNS),
- *  (b) a top-level navigation that leaves the allowlisted host (we only ever fill +
- *      submit on expectedHost; a hostile redirect off-host is refused), and
- *  (c) any host that resolves to a private/internal IP — closes the DNS-rebinding
- *      gap a one-shot preflight can't (a public-looking host can resolve private).
- * Public off-host SUB-resources (CDN/fonts/analytics) are allowed so the page still
- * renders for the vision model. resolvePublic is injected (cached DNS) for testing.
+ * Egress decision for the Playwright route guard. The browser may ONLY contact the
+ * pinned allowlisted host (apex or its www, which we pin to the same verified public
+ * IP); EVERY other request — off-host sub-resource, redirect, or a non-www sub-domain
+ * we didn't pin — is aborted BEFORE it connects, so nothing unpinned is ever resolved
+ * and there is no off-host channel to exfiltrate through. Synchronous (no DNS): the
+ * private-IP safety comes from pinning + the deployment egress firewall, not a lookup.
  */
-async function requestAllowed({ url, isNavigation, isTopFrame }, { expectedHost, resolvePublic }) {
+function requestAllowed({ url, expectedHost }) {
   let host = '';
   try { host = new URL(url).hostname; } catch { return false; }
   if (!host || ssrf.isBlockedHostname(host)) return false;
-  if (expectedHost && isNavigation && isTopFrame && !hostMatchesExpected(hostOf(url), expectedHost)) return false;
-  if (!(await resolvePublic(host))) return false;
-  return true;
+  return !!expectedHost && hostOf(url) === expectedHost; // apex/www of the pinned host only
+}
+
+/**
+ * Resolve a host to its PUBLIC IPs for DNS-pinning. Fail-closed: returns [] if the
+ * host doesn't resolve or ANY returned address is private/internal (so we never pin —
+ * and therefore never launch a browser against — a host that resolves to an internal
+ * address). An IP literal is returned only if it is itself public.
+ */
+async function resolvePublicIps(host) {
+  if (!host) return [];
+  if (net.isIP(host)) return ssrf.isPrivateIp(host) ? [] : [host];
+  let addrs;
+  try { addrs = await dns.promises.lookup(host, { all: true }); } catch { return []; }
+  if (!addrs.length || addrs.some((a) => ssrf.isPrivateIp(a.address))) return [];
+  return [...new Set(addrs.map((a) => a.address))];
 }
 
 let chromium;
@@ -62,7 +81,10 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODEL = process.env.MODEL_SIGNUP_FILLER || MODELS.FLAGSHIP; // vision + reasoning; no temperature needed
 const NAV_TIMEOUT = 30000;
-const ALLOWED_ACTIONS = new Set(['fill', 'select', 'check', 'click', 'submit']); // NOT 'upload' (no file/account), NOT captcha bypass
+// NO 'click': arbitrary clicks can submit a form early (then we'd report failed and
+// retry → duplicate listing). Citation forms need only fill/select/check + the single
+// final 'submit'. Also NOT 'upload' (no file/account), NOT captcha bypass.
+const ALLOWED_ACTIONS = new Set(['fill', 'select', 'check', 'submit']);
 
 function parseJson(text) {
   if (!text) return null;
@@ -72,7 +94,15 @@ function parseJson(text) {
   try { return JSON.parse(cleaned.slice(s, e + 1)); } catch { return null; }
 }
 
-const defaultLaunch = () => chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+// hostResolverRules pins Chromium's DNS to a pre-verified public IP so it can't
+// re-resolve the allowlisted host to a private address mid-run (rebinding).
+const defaultLaunch = ({ hostResolverRules } = {}) => chromium.launch({
+  headless: true,
+  args: [
+    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+    ...(hostResolverRules ? [`--host-resolver-rules=${hostResolverRules}`] : []),
+  ],
+});
 
 function planPrompt(nap) {
   const a = nap.address || {};
@@ -97,9 +127,9 @@ If (and only if) blocked is null and form_present is true, return an ordered "ac
 
 Return ONLY JSON (no markdown):
 {"form_present":bool,"blocked":null|"account"|"captcha"|"payment"|"phone",
- "actions":[{"action":"fill|select|check|click","selector":"CSS","value":"..."},{"action":"submit","selector":"CSS"}],
+ "actions":[{"action":"fill|select|check","selector":"CSS","value":"..."},{"action":"submit","selector":"CSS"}],
  "notes":"≤15 words"}
-Rules: robust selectors (input[name=...]/#id over classes); do NOT include file uploads; do NOT attempt to bypass a CAPTCHA; end with one "submit".`;
+Rules: robust selectors (input[name=...]/#id over classes); use ONLY fill/select/check then end with exactly one "submit" as the final action; do NOT emit "click" (the final submit is the only button press), file uploads, or any CAPTCHA step. If completing the listing needs a multi-step wizard, an account, or a button that isn't the final submit, set form_present:false.`;
 }
 
 async function callVision(anthropic, screenshotB64, text) {
@@ -117,39 +147,36 @@ async function callVision(anthropic, screenshotB64, text) {
  * fillCitationForm — submit one free citation form. Returns a structured outcome;
  * never throws (engine errors → { outcome:'failed' }).
  */
-async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launchBrowser = defaultLaunch, anthropic } = {}) {
+async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launchBrowser = defaultLaunch, anthropic, resolveHostIps = resolvePublicIps } = {}) {
   let client = anthropic;
   if (!client && Anthropic && process.env.ANTHROPIC_API_KEY) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   if (!client) return { outcome: 'failed', errorCode: 'no_anthropic', notes: 'no LLM client' };
   if (!launchBrowser) return { outcome: 'failed', errorCode: 'no_browser', notes: 'playwright unavailable' };
+  // expectedHost is mandatory — the browser is pinned + egress-locked to it.
+  if (!expectedHost) return { outcome: 'failed', errorCode: 'no_expected_host', notes: 'expectedHost required (pinned egress)' };
+
+  // Resolve the allowlisted host to a verified PUBLIC IP and PIN Chromium's DNS to it
+  // so the browser connects to the address we checked (no rebinding to an internal IP).
+  // Fail-closed: if it doesn't resolve public, never launch.
+  const ips = await resolveHostIps(expectedHost);
+  if (!ips || !ips.length) return { outcome: 'failed', errorCode: 'host_not_public', notes: `${expectedHost} did not resolve to a public IP` };
+  const pinnedIp = ips[0];
+  const hostResolverRules = `MAP ${expectedHost} ${pinnedIp},MAP www.${expectedHost} ${pinnedIp}`;
 
   let browser;
   try {
-    browser = await launchBrowser();
+    browser = await launchBrowser({ hostResolverRules });
     const context = await browser.newContext();
     const page = await context.newPage();
-    // Defense in depth (the runner host-validates the entry URL): screen EVERY request
-    // the browser makes — top-level navigation, redirect, OR sub-resource. Blocks
-    // literal-private hosts, top-level navs that leave the allowlisted host, and any
-    // host that resolves to a private/internal IP (DNS-rebinding guard the one-shot
-    // preflight can't catch). A hostile allowlisted page therefore can't pivot the
-    // Railway browser to internal/metadata targets. DNS results cached per host/run.
+    // EGRESS LOCK: the browser may contact ONLY the pinned allowlisted host (apex/www).
+    // Every other request — off-host sub-resource, redirect, unpinned sub-domain — is
+    // aborted BEFORE it connects, so nothing unpinned is resolved and there is no
+    // off-host channel for a hostile page to exfiltrate through or pivot internally.
     if (typeof context.route === 'function') {
-      const publicCache = new Map();
-      const resolvePublic = async (h) => {
-        if (!publicCache.has(h)) publicCache.set(h, await ssrf.hostResolvesPublic(h));
-        return publicCache.get(h);
-      };
-      await context.route('**/*', async (route) => {
-        const req = route.request();
-        let allowed = false;
-        try {
-          allowed = await requestAllowed(
-            { url: req.url(), isNavigation: req.isNavigationRequest(), isTopFrame: !req.frame().parentFrame() },
-            { expectedHost, resolvePublic },
-          );
-        } catch { allowed = false; }
-        return allowed ? route.continue() : route.abort();
+      await context.route('**/*', (route) => {
+        let ok = false;
+        try { ok = requestAllowed({ url: route.request().url(), expectedHost }); } catch { ok = false; }
+        return ok ? route.continue() : route.abort();
       });
     }
     await page.goto(submitUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
@@ -176,18 +203,16 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'plan must end with exactly one submit action' };
     }
 
-    // Execute ONLY the allowlisted, deterministic actions; ignore anything else the
-    // model emitted (no uploads, no open-ended navigation, no captcha steps). Skip a
-    // `click` on a submit-looking control so nothing submits before the final submit.
+    // Execute ONLY the allowlisted, deterministic actions (fill/select/check); any
+    // other action the model emitted — click, upload, captcha step — is not in
+    // ALLOWED_ACTIONS and is skipped. The single final 'submit' is the only button press.
     let submitted = false;
     for (const act of plan.actions) {
       if (!act || !ALLOWED_ACTIONS.has(act.action) || !act.selector) continue;
-      if (act.action === 'click' && isSubmitControl(act.selector)) { logger.warn(`[form-filler] skipping click on submit-like control ${act.selector}`); continue; }
       try {
         if (act.action === 'fill') await page.fill(act.selector, String(act.value ?? ''));
         else if (act.action === 'select') await page.selectOption(act.selector, String(act.value ?? ''));
         else if (act.action === 'check') await page.check(act.selector);
-        else if (act.action === 'click') await page.click(act.selector);
         else if (act.action === 'submit') { await page.click(act.selector); submitted = true; await page.waitForLoadState('domcontentloaded').catch(() => {}); }
         await page.waitForTimeout(250 + Math.random() * 500);
       } catch (e) {
@@ -223,4 +248,4 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
 }
 
 module.exports = { fillCitationForm };
-module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf, hostMatchesExpected, isSubmitControl };
+module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf, hostMatchesExpected, resolvePublicIps };
