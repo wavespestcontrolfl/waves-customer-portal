@@ -25,6 +25,15 @@ function hasUrlBoundary(candidate, clean) {
   return next === '/' || next === '?' || next === '#';
 }
 
+// A SERP location can be a named place (location_name) or a "lat,lng" coordinate
+// (location_coordinate). Some small markets (e.g. Parrish, FL) aren't in
+// DataForSEO's named-location DB and 40501 on location_name, so callers can pass
+// coordinates instead.
+function serpLocation(location) {
+  const s = String(location || '').trim();
+  return /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/.test(s) ? { location_coordinate: s } : { location_name: location };
+}
+
 class DataForSEO {
   constructor() {
     this.login = process.env.DATAFORSEO_LOGIN;
@@ -96,10 +105,11 @@ class DataForSEO {
   // SERP — organic results. Caller-overridable device so the serp-profiler
   // can cache distinct mobile vs desktop snapshots; defaults to mobile to
   // preserve the prior call shape (serp-analyzer.js etc. pass 2 args).
+  // `location` may be a place name OR a "lat,lng" coordinate (see serpLocation).
   async serpOrganic(keyword, location = 'Bradenton,Florida,United States', device = 'mobile') {
     return this.request('/serp/google/organic/live/advanced', [{
       keyword,
-      location_name: location,
+      ...serpLocation(location),
       language_name: 'English',
       device,
       os: device === 'desktop' ? 'macos' : 'iOS',
@@ -110,7 +120,7 @@ class DataForSEO {
   async serpMaps(keyword, location = 'Bradenton,Florida,United States') {
     return this.request('/serp/google/maps/live/advanced', [{
       keyword,
-      location_name: location,
+      ...serpLocation(location),
       language_name: 'English',
     }]);
   }
