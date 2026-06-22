@@ -11,6 +11,11 @@ export function isNativeApp() {
   try { return Capacitor.isNativePlatform(); } catch { return false; }
 }
 
+/** The Capacitor platform: 'ios' | 'android' | 'web'. */
+export function nativePlatform() {
+  try { return Capacitor.getPlatform(); } catch { return 'web'; }
+}
+
 /**
  * Whether a customer session JWT is present. Customer-only on purpose — the
  * native shell is the customer app (staff/tech use WavesPay; /admin + /tech are

@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const apns = require('./apns');
+const fcm = require('./fcm');
 
 let webpush;
 let vapidConfigured = false;
@@ -46,6 +47,17 @@ async function sendSubscription(sub, notification) {
     return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
   }
 
+  // Android (Capacitor) subscriptions deliver via FCM, same routing shape as iOS.
+  if (sub.platform === 'android') {
+    const result = await fcm.send(sub.device_token, notification);
+    if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
+    if (result.expired) {
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      return { sent: false, expired: true, reason: result.reason };
+    }
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+  }
+
   if (!webpush || !vapidConfigured) return { sent: false, skipped: true, reason: 'push_not_configured' };
   try {
     await webpush.sendNotification(JSON.parse(sub.subscription_data), JSON.stringify(notification));
@@ -67,6 +79,7 @@ class PushNotificationService {
       configured: vapidConfigured,
       error: vapidSetupError,
       apns: apns.status(),
+      fcm: fcm.status(),
     };
   }
 
