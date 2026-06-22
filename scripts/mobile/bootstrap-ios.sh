@@ -39,6 +39,20 @@ fi
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
 
+# Capacitor's iOS push plugin only fires the JS 'registration' event if
+# AppDelegate forwards the UIKit APNs callbacks to Capacitor's NotificationCenter
+# names. The default Capacitor template includes these, but a regenerated/older
+# template may not — verify and inject if missing (idempotent).
+APPDELEGATE="ios/App/App/AppDelegate.swift"
+if [ -f "$APPDELEGATE" ]; then
+  if grep -q "capacitorDidRegisterForRemoteNotifications" "$APPDELEGATE"; then
+    echo "==> AppDelegate APNs forwarding present ✓"
+  else
+    echo "==> Injecting APNs registration forwarding into AppDelegate.swift…"
+    perl -0pi -e 's/\n\}\s*$/\n\n    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {\n        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)\n    }\n\n    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {\n        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)\n    }\n}\n/' "$APPDELEGATE"
+  fi
+fi
+
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"
 cat <<'NOTES'

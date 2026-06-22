@@ -16,7 +16,7 @@ exists mainly to (a) get an App Store listing and (b) swap web-push → APNs.
 | File | Purpose |
 |---|---|
 | `client/capacitor.config.ts` | App id `com.wavespestcontrol.portal`, name "Waves", load mode (remote vs bundled), push/splash plugin config |
-| `client/src/native/nativePush.js` | Guarded APNs registration via the injected `window.Capacitor` bridge — **no-op on web** |
+| `client/src/native/nativePush.js` | APNs registration — `@capacitor/core` `isNativePlatform()` guard + dynamic import of `@capacitor/push-notifications`; caches the token pre-login and flushes it after auth. **No-op on web** |
 | `client/src/main.jsx` | Calls `initNativePush()` after mount (guarded) |
 | `client/package.json` | Capacitor deps + `cap:*` scripts |
 | `scripts/mobile/bootstrap-ios.sh` | One command: install → build → `cap add ios` → sync → open Xcode |
