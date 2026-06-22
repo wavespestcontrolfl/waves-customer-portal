@@ -196,6 +196,18 @@ describe('fireStep guards', () => {
     expect(followups[10]).toMatchObject({ step_index: 1, touches_sent: 0 }); // advanced, not re-counted
   });
 
+  test('an in-flight send race does NOT advance or pause (winner owns the outcome)', async () => {
+    // EMAIL_SEND_IN_PROGRESS: the winning attempt is only queued, not delivered.
+    // Advancing here would skip the reminder if the winner later fails. (Regression
+    // for codex P2 round 3 on #1969.)
+    statements[10] = { id: 10, payer_id: 5, status: 'sent', total: 100, due_date: '2026-06-01', token: 'tok', terms_snapshot: 'net30' };
+    followups[10] = { id: 1, statement_id: 10, payer_id: 5, status: 'active', step_index: 0, touches_sent: 0 };
+    mockSendTemplate = async () => { const e = new Error('in flight'); e.code = 'EMAIL_SEND_IN_PROGRESS'; throw e; };
+    const r = await Followups.fireStep(10, 0);
+    expect(r).toMatchObject({ fired: false, reason: 'in_flight' });
+    expect(followups[10]).toMatchObject({ status: 'active', step_index: 0, touches_sent: 0 }); // unchanged
+  });
+
   test('pauses when there is no AP email (never falls back to the homeowner)', async () => {
     statements[10] = { id: 10, payer_id: 5, status: 'sent', total: 100, due_date: '2026-06-01', token: 'tok', terms_snapshot: 'net30' };
     mockResolveAp = async () => ({ apEmail: null, company: null });

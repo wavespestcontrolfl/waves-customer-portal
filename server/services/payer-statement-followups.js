@@ -168,9 +168,12 @@ async function sendFollowupEmail(stmt, step, { forceRetry = false } = {}) {
     if (result?.sent === false) return { ok: false, blocked: !!result.blocked, reason: result.reason || 'suppressed' };
     return { ok: true };
   } catch (err) {
-    // Lost the idempotency race to a concurrent tick — another run is delivering
-    // this exact step. Not a failure; advance without double-counting.
-    if (err.code === 'EMAIL_SEND_IN_PROGRESS') return { ok: true, deduped: true };
+    // Lost the idempotency race — a concurrent send for this exact step holds an
+    // in-flight (only `queued`, not yet delivered) row. Do NOT advance and do NOT
+    // pause: the winner owns the outcome (it may still fail and auto-retry under
+    // the same key). Signal `inFlight` so fireStep re-evaluates next tick rather
+    // than skipping the reminder.
+    if (err.code === 'EMAIL_SEND_IN_PROGRESS') return { ok: false, inFlight: true };
     logger.error(`[payer-statement-followups] step ${step.id} email failed for S-${stmt.id}: ${err.message}`);
     return { ok: false, error: err.message };
   }
@@ -196,6 +199,10 @@ async function fireStep(statementId, stepIndex, { forceRetry = false } = {}) {
   if (!step) { await markCompleted(seq.id); return { fired: false, reason: 'chain_exhausted' }; }
 
   const result = await sendFollowupEmail(stmt, step, { forceRetry });
+  // A concurrent send for this exact step is in flight (race). Don't advance and
+  // don't pause — the winner owns the outcome; re-evaluate on the next tick so a
+  // winner that later fails isn't skipped past.
+  if (result.inFlight) return { fired: false, reason: 'in_flight' };
   if (!result.ok && !result.deduped) {
     await db('payer_statement_followups').where({ id: seq.id }).update({
       status: 'paused',
