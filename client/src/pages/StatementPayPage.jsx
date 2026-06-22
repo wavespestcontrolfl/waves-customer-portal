@@ -230,7 +230,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
     <div>
       <div ref={mountRef} />
       {selectedMethod !== "us_bank_account" && pct && !awaitingConfirm && (
-        <p style={{ fontSize: 13, color: COLORS.textCaption, marginTop: 10 }}>
+        <p style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 10 }}>
           Credit cards add up to {pct}% to cover processing. Debit cards and bank transfers have no added fee.
         </p>
       )}
@@ -522,7 +522,7 @@ export default function StatementPayPage() {
         />
       )}
 
-      <p style={{ marginTop: 20, fontSize: 13, color: COLORS.textCaption, lineHeight: 1.5 }}>
+      <p style={{ marginTop: 20, fontSize: 14, color: COLORS.textCaption, lineHeight: 1.5 }}>
         Questions about this statement? <HelpPhoneLink tone="dark" inline /> or reply to the email it came from.
       </p>
     </BrandCard>,
