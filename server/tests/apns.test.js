@@ -20,6 +20,15 @@ describe('apns provider token', () => {
     expect(decoded.iss).toBe('TEAM123456');
     expect(decoded.iat).toBe(iat);
   });
+
+  test('throws on a malformed signing key (send() wraps this so it fails soft)', () => {
+    expect(() => signProviderToken({
+      signingKey: 'not-a-valid-p8-key',
+      keyId: 'ABC1234567',
+      teamId: 'TEAM123456',
+      iat: 1700000000,
+    })).toThrow();
+  });
 });
 
 describe('buildApnsPayload', () => {

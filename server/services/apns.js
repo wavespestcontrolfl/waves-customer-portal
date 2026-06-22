@@ -107,6 +107,17 @@ function send(deviceToken, notification) {
     if (!configured) return resolve({ ok: false, skipped: true, reason: 'apns_not_configured' });
     if (!deviceToken) return resolve({ ok: false, failed: true, reason: 'missing_device_token' });
 
+    // Build the provider token first — ES256 signing can throw on a malformed
+    // .p8 (bad key / stray quotes). Resolve a failed result instead of letting
+    // the promise reject, so a config mistake fails soft and never aborts the
+    // surrounding send loop (sendToCustomer / sendToAdmins).
+    let token;
+    try {
+      token = providerToken();
+    } catch (err) {
+      return resolve({ ok: false, failed: true, reason: `apns_sign_failed: ${err.message}` });
+    }
+
     let client;
     try {
       client = http2.connect(cfg.production ? HOST_PROD : HOST_SANDBOX);
@@ -123,31 +134,36 @@ function send(deviceToken, notification) {
 
     client.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
 
-    const body = Buffer.from(JSON.stringify(buildApnsPayload(notification)));
-    const req = client.request({
-      ':method': 'POST',
-      ':path': `/3/device/${deviceToken}`,
-      authorization: `bearer ${providerToken()}`,
-      'apns-topic': cfg.bundleId,
-      'apns-push-type': 'alert',
-      'content-type': 'application/json',
-      'content-length': body.length,
-    });
+    // Any synchronous throw building/sending the request also fails soft.
+    try {
+      const body = Buffer.from(JSON.stringify(buildApnsPayload(notification)));
+      const req = client.request({
+        ':method': 'POST',
+        ':path': `/3/device/${deviceToken}`,
+        authorization: `bearer ${token}`,
+        'apns-topic': cfg.bundleId,
+        'apns-push-type': 'alert',
+        'content-type': 'application/json',
+        'content-length': body.length,
+      });
 
-    let status = 0;
-    let data = '';
-    req.on('response', (headers) => { status = headers[':status']; });
-    req.setEncoding('utf8');
-    req.on('data', (chunk) => { data += chunk; });
-    req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
-    req.on('end', () => {
-      let reason = null;
-      if (data) { try { reason = JSON.parse(data).reason; } catch { /* non-JSON body */ } }
-      const result = classifyApnsResponse(status, reason);
-      if (!result.ok && !result.expired) logger.error(`[apns] send failed status=${status} reason=${reason}`);
-      finish(result);
-    });
-    req.end(body);
+      let status = 0;
+      let data = '';
+      req.on('response', (headers) => { status = headers[':status']; });
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { data += chunk; });
+      req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+      req.on('end', () => {
+        let reason = null;
+        if (data) { try { reason = JSON.parse(data).reason; } catch { /* non-JSON body */ } }
+        const result = classifyApnsResponse(status, reason);
+        if (!result.ok && !result.expired) logger.error(`[apns] send failed status=${status} reason=${reason}`);
+        finish(result);
+      });
+      req.end(body);
+    } catch (err) {
+      finish({ ok: false, failed: true, reason: err.message });
+    }
   });
 }
 
