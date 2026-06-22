@@ -22,6 +22,11 @@ router.post('/native-subscribe', async (req, res, next) => {
     if (platform !== 'ios') return res.status(400).json({ error: 'unsupported platform' });
     if (!token || typeof token !== 'string') return res.status(400).json({ error: 'device token required' });
 
+    // deviceInfo is optional client metadata — only trust it if it's a string,
+    // else fall back to the user-agent. Guards against a non-string (e.g. a JSON
+    // object) 500ing on .slice() before the token is saved.
+    const safeDeviceInfo = (typeof deviceInfo === 'string' && deviceInfo) || req.headers['user-agent'] || 'iOS';
+
     const row = {
       customer_id: req.customerId,
       role: 'customer',
@@ -30,7 +35,7 @@ router.post('/native-subscribe', async (req, res, next) => {
       // subscription_data is NOT NULL on the table; store the token as JSON so
       // the constraint holds without a schema change for the web column.
       subscription_data: JSON.stringify({ token }),
-      device_info: (deviceInfo || req.headers['user-agent'] || 'iOS').slice(0, 100),
+      device_info: safeDeviceInfo.slice(0, 100),
       active: true,
     };
 
