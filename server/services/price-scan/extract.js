@@ -338,10 +338,13 @@ function extractDomPrice(snapshot = {}) {
 // (Magento jsonConfig), while the page-level JSON-LD Offer/title carry no size — so the
 // size-gated JSON-LD path abandons the whole multi-variant page even though the size IS
 // stated, just elsewhere. Variant labels vary ("Pack (4x30gm)", "8 Ounce"); normalize the
-// gram abbreviation "gm"->"g" so the multipack/size parser recognizes it. (Scoped here so
-// the heavily-tuned extractSizeToken regex stays untouched.)
+// gram abbreviation "gm"/"gms" -> "gram" so the size parser recognizes it. It must become
+// "gram", NOT bare "g": extractSizeToken intentionally rejects a lone "g" on a SINGLE-size
+// label (pesticide formulation codes like "Dominion 2L", "2G"), so "30 gm" -> "30g" would
+// be dropped, while "30 gram" parses. (Scoped here so the tuned extractSizeToken stays
+// untouched; the multipack path accepts "g" too, but "gram" is correct for both.)
 function normalizeSizeLabel(label) {
-  return String(label == null ? '' : label).replace(/(\d)\s*gms?\b/gi, '$1g');
+  return String(label == null ? '' : label).replace(/(\d)\s*gms?\b/gi, '$1 gram');
 }
 
 // Pick the variant whose stated size matches the requested pack. These size-explicit

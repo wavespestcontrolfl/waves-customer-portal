@@ -575,10 +575,15 @@ describe('price-scan extract', () => {
   });
 
   describe('normalizeSizeLabel', () => {
-    test('normalizes the gram abbreviation "gm"/"gms" to "g"', () => {
-      expect(normalizeSizeLabel('Pack (4x30gm)')).toBe('Pack (4x30g)');
-      expect(normalizeSizeLabel('30 gm')).toBe('30g'); // the optional space is consumed; still parseable
-      expect(normalizeSizeLabel('30gms')).toBe('30g');
+    test('normalizes the gram abbreviation "gm"/"gms" to "gram" (NOT bare "g")', () => {
+      // Must be "gram": extractSizeToken rejects a lone "g" on a single-size label, so
+      // "30g" would be dropped — "30 gram" parses. Both single and multipack forms covered.
+      expect(normalizeSizeLabel('Pack (4x30gm)')).toBe('Pack (4x30 gram)');
+      expect(normalizeSizeLabel('30 gm')).toBe('30 gram');
+      expect(normalizeSizeLabel('30gms')).toBe('30 gram');
+      // and the normalized forms actually parse:
+      expect(quantityToOz(extractSizeToken(normalizeSizeLabel('30 gm')))).toBeCloseTo(1.06, 2); // single 30 g
+      expect(quantityToOz(extractSizeToken(normalizeSizeLabel('Pack (4x30gm)')))).toBeCloseTo(4.23, 2); // 4 x 30 g
     });
     test('leaves a label with no gram abbreviation untouched', () => {
       expect(normalizeSizeLabel('1 Gallon')).toBe('1 Gallon');
@@ -604,6 +609,11 @@ describe('price-scan extract', () => {
     });
     test('size not offered -> null (never substitutes a different variant)', () => {
       expect(pickVariantOffer(variants, { targetOz: 16 })).toBeNull(); // no 16 oz variant
+    });
+    test('a SINGLE-gram variant label ("30 gm") still matches (codex P1 regression)', () => {
+      const got = pickVariantOffer([{ size: '30 gm', price: 9.5 }], { targetOz: quantityToOz('30 gram') });
+      expect(got).toMatchObject({ price: 9.5 });
+      expect(quantityToOz(got.quantity)).toBeCloseTo(1.06, 2);
     });
     test('among same-size variants, prefers in-stock then cheapest, flags competingSameSize', () => {
       const same = [
