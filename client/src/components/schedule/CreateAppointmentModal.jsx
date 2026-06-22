@@ -560,12 +560,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     applyScheduleEstimate(match.id);
   }, [defaultEstimateId, scheduleEstimates, scheduleEstimatesLoading]);
 
+  // Custom discounts ship as a percentage/fixed_amount preset with amount 0 (or
+  // the variable_* types) — the operator supplies the value when applying it.
+  const isCustomAmountDiscount = (d) =>
+    d?.discount_type === 'variable_amount' ||
+    (d?.discount_type === 'fixed_amount' &&
+      (d?.discount_key === 'custom_dollar' || !(Number(d?.amount) > 0)));
+  const isCustomPercentageDiscount = (d) =>
+    d?.discount_type === 'variable_percentage' ||
+    (d?.discount_type === 'percentage' &&
+      (d?.discount_key === 'custom_percent' || !(Number(d?.amount) > 0)));
   const formatDiscountLabel = (d) => {
     if (!d) return '';
     if (d.discount_type === 'free_service') return 'Free';
     if (d.discount_type === 'percentage' || d.discount_type === 'variable_percentage') {
+      if (isCustomPercentageDiscount(d)) return 'custom %';
       return `${Number(d.amount || 0).toFixed(Number(d.amount || 0) % 1 ? 2 : 0)}%`;
     }
+    if (isCustomAmountDiscount(d)) return 'custom $';
     return `$${Number(d.amount || 0).toFixed(2)}`;
   };
   const lineBaseAmount = (svc) => {
@@ -603,7 +615,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       setTimeout(() => setToast(''), 2400);
       return;
     }
-    if (previewLineDiscount(discount, base) <= 0) {
+    // Custom discounts carry no preset amount — prompt the operator for one
+    // and store it as the line discount's amount so the preview/totals/payload
+    // all flow through previewLineDiscount unchanged.
+    let amount = discount.amount;
+    if (isCustomAmountDiscount(discount)) {
+      const raw = window.prompt(`Discount amount for ${discount.name} ($)`, '');
+      if (raw === null) return;
+      const customAmount = Math.round((Number(raw) || 0) * 100) / 100;
+      if (!(customAmount > 0)) {
+        setToast('Enter a discount amount greater than $0');
+        setTimeout(() => setToast(''), 2400);
+        return;
+      }
+      amount = customAmount;
+    } else if (isCustomPercentageDiscount(discount)) {
+      const raw = window.prompt(`Discount percentage for ${discount.name} (%)`, '');
+      if (raw === null) return;
+      const customPct = Number(raw);
+      if (!Number.isFinite(customPct) || customPct <= 0 || customPct > 100) {
+        setToast('Enter a discount percentage between 0 and 100');
+        setTimeout(() => setToast(''), 2400);
+        return;
+      }
+      amount = customPct;
+    }
+    if (previewLineDiscount({ ...discount, amount }, base) <= 0) {
       setToast('Discount has no amount for this service line');
       setTimeout(() => setToast(''), 2400);
       return;
@@ -614,7 +651,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         id: discount.id,
         name: discount.name,
         discount_type: discount.discount_type,
-        amount: discount.amount,
+        amount,
         max_discount_dollars: discount.max_discount_dollars,
       },
     } : s)));
