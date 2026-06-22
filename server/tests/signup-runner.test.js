@@ -163,4 +163,17 @@ describe('run — outcomes', () => {
     expect(r.placed).toBe(0);
     expect(r.failed).toBe(1);
   });
+  test('a run-level config error (no_anthropic) ABORTS the batch + releases claims, no attempts burned', async () => {
+    worker.claim.mockResolvedValue([prospect({ id: 'p1' }), prospect({ id: 'p2' })]);
+    fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'no_anthropic' });
+    const r = await runner.run({ allow: ['citysquares.com'] });
+    expect(r.aborted).toBe('no_anthropic');
+    expect(r.failed).toBe(0);                           // no per-prospect attempts consumed
+    expect(worker.report).not.toHaveBeenCalled();       // never reports failed
+    expect(fillCitationForm).toHaveBeenCalledTimes(1);  // stops at the first run-level error
+    expect(worker.releaseClaims).toHaveBeenCalledWith([
+      { id: 'p1', lease_token: '2026-06-22T00:00:00.000Z' },
+      { id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' },
+    ]);
+  });
 });

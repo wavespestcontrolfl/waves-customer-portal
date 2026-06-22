@@ -1,9 +1,11 @@
 const { fillCitationForm, _internals } = require('../services/seo/browser-form-filler');
 
 // Fake Playwright page/browser that records actions and serves canned screenshots.
-// failFillSel: a selector whose fill() throws, to exercise the fail-closed pre-submit path.
-// ctxOpts: an object that captures the newContext(options); wsLog: records routeWebSocket patterns.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, ctxOpts = null, wsLog = null } = {}) {
+// failFillSel: a selector whose fill() throws (fail-closed pre-submit path).
+// failClickSel: a selector whose click() throws (submit not actionable).
+// ctxOpts: captures newContext(options); wsLog: records routeWebSocket patterns;
+// clickOptsLog: records [selector, options] for clicks that pass options.
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null } = {}) {
   const page = {
     goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
     url: () => landedUrl,
@@ -11,7 +13,7 @@ function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel 
     fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); },
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
     check: async (sel) => actionsLog.push(['check', sel]),
-    click: async (sel) => actionsLog.push(['click', sel]),
+    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); actionsLog.push(['click', sel]); },
   };
   const ctx = { newPage: async () => page, route: async () => {} };
   if (wsLog) ctx.routeWebSocket = async (pattern) => { wsLog.push(pattern); };
@@ -104,6 +106,28 @@ describe('fillCitationForm', () => {
     expect(r.outcome).toBe('placed');
     expect(r.pending).toBe(true);
     expect(log).toContainEqual(['click', '#go']); // the submit DID happen → never retry
+  });
+
+  test('P1: the submit click is dispatched with noWaitAfter (nav errors can’t make it retryable)', async () => {
+    const clickOptsLog = [];
+    await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { clickOptsLog }),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    const submitClick = clickOptsLog.find((c) => c[0] === '#go');
+    expect(submitClick).toBeDefined();
+    expect(submitClick[1]).toMatchObject({ noWaitAfter: true });
+  });
+
+  test('P1: a non-actionable submit button (click throws pre-dispatch) → submit_failed (retryable, nothing sent)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log, { failClickSel: '#go' }),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_failed');
+    expect(log).toContainEqual(['fill', '#n', 'W']); // fields filled, but submit never dispatched
   });
 
   test('P2: a pre-submit field action missing its selector → fail-closed (not submitted)', async () => {

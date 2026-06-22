@@ -238,16 +238,19 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       }
     }
 
-    // The submit click is the point of no return. If it THROWS the click didn't land
-    // (no listing created) → retryable failed. If it SUCCEEDS, we never auto-retry
-    // again (a retry could duplicate a listing that actually went through), regardless
-    // of how the confirmation reads.
+    // The submit click is the point of no return. Split ACTIONABILITY (was the button
+    // found/enabled — auto-waited before dispatch) from the triggered NAVIGATION
+    // (noWaitAfter:true so click() does NOT wait for, and cannot throw on, the POST's
+    // redirect being aborted/timing out). So: click() throws ONLY if the button was
+    // never actionable → nothing dispatched → genuinely retryable. Once it dispatches
+    // (no throw), the POST may have landed — we NEVER auto-retry; any later navigation
+    // /verification error becomes placed+pending below.
     try {
-      await page.click(last.selector);
-      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      await page.click(last.selector, { noWaitAfter: true });
     } catch (e) {
-      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit click failed (not submitted): ${e.message}` };
+      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit not actionable (nothing dispatched): ${e.message}` };
     }
+    await page.waitForLoadState('domcontentloaded').catch(() => {}); // best-effort settle; never fatal post-dispatch
 
     // Submit landed → from here ANY error still yields a PENDING placement, never a
     // retryable failure (a retry could duplicate the listing). Verification is

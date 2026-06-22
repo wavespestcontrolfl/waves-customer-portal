@@ -25,6 +25,11 @@ const { uploadEvidence } = require('./signup-evidence');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname / hostResolvesPublic
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
 
+// Filler errorCodes that are RUN-LEVEL (environment/config), identical for every
+// prospect and NOT the prospect's fault — a misconfigured cron must abort the batch +
+// release claims rather than burn each allowlisted prospect's attempts to MAX_ATTEMPTS.
+const RUN_LEVEL_ERRORS = new Set(['no_anthropic', 'no_browser']);
+
 const CATEGORY = 'Pest Control';
 const DESCRIPTION = 'Family-owned pest control and lawn care serving Southwest Florida — pest, lawn, mosquito, termite, and rodent control.';
 
@@ -133,7 +138,8 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   const samples = [];
   const releaseAtEnd = [];
 
-  for (const p of claimed) {
+  for (let i = 0; i < claimed.length; i++) {
+    const p = claimed[i];
     const domain = normDomain(p.target_domain);
     const rawUrl = p.target_url || `https://${domain}/`;
 
@@ -182,6 +188,15 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // No submittable form here — mark off-lane so we stop claiming it.
       await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       counts.skipped++;
+    } else if (RUN_LEVEL_ERRORS.has(result.errorCode)) {
+      // Environment/config failure (no LLM client, no browser) — same for every
+      // prospect and not theirs to pay for. ABORT the batch: release this row and all
+      // remaining claimed rows WITHOUT reporting failed (no attempts consumed), so a
+      // misconfigured cron can't churn through and reject allowlisted prospects.
+      logger.error(`[signup-runner] run-level error '${result.errorCode}' — aborting batch, releasing ${claimed.length - i} claim(s), no attempts consumed`);
+      for (let j = i; j < claimed.length; j++) releaseAtEnd.push({ id: claimed[j].id, lease_token: claimed[j].lease_token });
+      counts.aborted = result.errorCode;
+      break;
     } else {
       // Engine error / unconfirmed — retryable via the worker contract (MAX_ATTEMPTS).
       await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: `runner: ${result.errorCode || 'failed'}` });
