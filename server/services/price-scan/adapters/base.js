@@ -177,16 +177,17 @@ function slugSegments(href) {
   return new Set(path.toLowerCase().match(/[a-z0-9]+/g) || []);
 }
 
-// PURE: rank the result links by how well their URL slug matches the product, best
-// first. Modern storefront search is a relevance-ranked widget — the RIGHT product is
-// often not first (a DoMyOwn "Taurus SC" search lists Talstar above Taurus). The
-// product's BRAND token (first >=3-char name token) MUST appear as a slug segment, so
-// a listing for a product we don't carry is never returned; among brand matches the
-// link sharing the most distinctive name + pack-size tokens ranks highest ("bifen-it"
-// over "bifen-xts" even though that slug also carries the generic "insecticide", and
-// the size-specific page over the generic one). Same-brand variants we can't tell
-// apart by slug (Talstar P vs Talstar XTRA) tie and keep widget order — the caller
-// opens them in turn and lets verifyMatch choose. Returns [] when nothing qualifies.
+// PURE: RANK the result links by how well their URL slug matches the product, best
+// first — a ranking, NOT a gate. Modern storefront search is a relevance-ranked widget
+// (a "Taurus SC" search lists Talstar above Taurus), so the caller opens the top few in
+// turn and lets verifyMatch (EPA / formulation / size) be the sole authority. A
+// brand-token (first >=3-char name token) hit is a heavy boost so the exact product
+// ranks first and the fast path verifies immediately; the most distinctive name +
+// pack-size tokens then order the rest ("bifen-it" over "bifen-xts", the size-specific
+// page over the generic one). Crucially, non-brand links are KEPT (ranked last), not
+// discarded — a generic-equivalent listing with a DIFFERENT brand but the SAME EPA reg
+// is exactly what verifyMatch is meant to accept, so it must still reach verification.
+// Returns [] only for an empty input.
 function rankedMatchingLinks(hrefs, product) {
   const list = (hrefs || []).filter(Boolean);
   if (!list.length) return [];
@@ -199,16 +200,18 @@ function rankedMatchingLinks(hrefs, product) {
   // LETTERS are dropped as noise.
   const sizeToks = [...new Set((String((product && product.quantity) || '').toLowerCase().match(/[a-z0-9]+/g) || [])
     .filter((t) => !nameToks.includes(t) && (t.length >= 2 || /\d/.test(t))))];
+  const BRAND_BOOST = 1000; // brand-matched links always rank above non-brand ones
   const scored = [];
   for (const href of list) {
     const seg = slugSegments(href);
-    if (!seg.has(brand)) continue; // brand is mandatory
-    const score = scoreToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0)
+    const score = (seg.has(brand) ? BRAND_BOOST : 0)
+      + scoreToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0)
       + sizeToks.reduce((n, t) => n + (seg.has(t) ? 1 : 0), 0);
     scored.push({ href, score });
   }
   // Stable sort by score desc — preserves widget order for ties (e.g. same-brand
-  // variants we can't tell apart by slug, like Talstar P vs Talstar XTRA).
+  // variants we can't tell apart by slug, like Talstar P vs Talstar XTRA; or the
+  // non-brand tail where an EPA-equivalent may sit).
   return scored.map((s, i) => ({ ...s, i })).sort((a, b) => (b.score - a.score) || (a.i - b.i)).map((s) => s.href);
 }
 

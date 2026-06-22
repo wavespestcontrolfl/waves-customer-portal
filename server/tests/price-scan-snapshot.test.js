@@ -89,15 +89,13 @@ describe('bestMatchingLink (scored result selection)', () => {
   test('size tokens break the tie toward the size-specific page', () => {
     expect(bestMatchingLink(links, product)).toBe('https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html');
   });
-  test('returns null when the product is not in the results (no false grab)', () => {
+  test('picks the brand match over a different brand that only shares a generic token', () => {
+    // Ordering only — the cross-brand "no false grab" guarantee now lives in verifyMatch
+    // (EPA/name). "termidor-sc" shares "sc" but must rank BELOW the taurus product.
     expect(bestMatchingLink([
-      'https://www.domyown.com/talstar-professional-insecticide-p-97.html',
       'https://www.domyown.com/termidor-sc-p-184.html',
-    ], product)).toBeNull();
-  });
-  test('a shared generic formulation token (sc) does NOT cross-match another brand', () => {
-    // "Taurus SC" shares "sc" with "termidor-sc"; brand (taurus) is mandatory, so no grab.
-    expect(bestMatchingLink(['https://www.domyown.com/termidor-sc-p-184.html'], product)).toBeNull();
+      'https://www.domyown.com/taurus-sc-termiticide-p-1816.html',
+    ], product)).toMatch(/taurus-sc-termiticide/);
   });
   test('a single-digit pack size still steers to the right size variant (5 lb, not 25 lb)', () => {
     const prod = { vendorProductName: 'Prodiamine 65 WDG', quantity: '5 lb' };
@@ -142,11 +140,14 @@ describe('rankedMatchingLinks (try same-brand variants in turn)', () => {
     ], { vendorProductName: '2,4-D Amine Weed Killer' });
     expect(ranked).toHaveLength(1);
   });
-  test('excludes non-brand links entirely (never opened/verified)', () => {
-    expect(rankedMatchingLinks([
-      'https://www.domyown.com/bifen-it-p-226.html',
+  test('brand match ranks FIRST but non-brand links are kept last (for EPA-equivalent verify)', () => {
+    // codex: a same-EPA generic equivalent has a DIFFERENT brand; it must not be gated
+    // out before verifyMatch can accept it on EPA+size. Brand match leads; equivalent stays.
+    const ranked = rankedMatchingLinks([
+      'https://www.domyown.com/generic-fipronil-9-sc-p-50.html', // different brand, may share EPA
       'https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html',
-    ], { vendorProductName: 'Taurus SC Termiticide', quantity: '78 oz' }))
-      .toEqual(['https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html']);
+    ], { vendorProductName: 'Taurus SC Termiticide', quantity: '78 oz' });
+    expect(ranked[0]).toMatch(/taurus-sc-termiticide/); // exact brand first (fast path)
+    expect(ranked).toContain('https://www.domyown.com/generic-fipronil-9-sc-p-50.html'); // equivalent kept for verify
   });
 });
