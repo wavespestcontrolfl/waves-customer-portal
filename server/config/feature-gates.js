@@ -138,6 +138,12 @@ const gates = {
   // OFF in prod.
   outreachDrafter: isProd ? process.env.GATE_OUTREACH_DRAFTER === 'true' : true,
 
+  // Signup Runner — the citation/directory submission lane: the classifier cron
+  // and (Phase 1b) the fail-closed browser runner that auto-submits FREE listings
+  // and parks account/payment/CAPTCHA-gated ones. Never spends money (payments are
+  // Phase 2). Default OFF in prod; the manual classify/run CLIs work regardless.
+  signupRunner: isProd ? process.env.GATE_SIGNUP_RUNNER === 'true' : true,
+
   // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
   // Marketplace add-on flags as spam. Explicit opt-in everywhere: until the
   // gate is on, verdicts are only logged (shadow) and never block a caller.

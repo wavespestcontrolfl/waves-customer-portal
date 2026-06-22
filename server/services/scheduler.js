@@ -579,6 +579,19 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Link prospect claim sweep failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // WEEKLY SUN 3:00AM — Signup-lane classifier: triage directory/citation prospects
+  // (free / paid / account-gated / off-target) → automation_policy, so the runner
+  // only ever auto-submits the free, automation-safe ones. Read-mostly.
+  cron.schedule('0 3 * * 0', async () => {
+    if (!isEnabled('signupRunner')) return;
+    logger.info('Running: signup-lane classifier');
+    try {
+      const classifier = require('./seo/signup-classifier');
+      const r = await classifier.run({ limit: 200 });
+      logger.info(`[signup-classifier] classified=${r.classified} ${JSON.stringify(r.byPolicy)}`);
+    } catch (err) { logger.error(`Signup classifier failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 2:00AM — Backlink outreach drafter: claim outreach prospects, draft 1:1
   // pitches via Claude, park as 'drafted' for the morning approval queue. NEVER
   // sends. Gated by outreachDrafter (default OFF in prod) — independent of the
