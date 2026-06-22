@@ -15,7 +15,7 @@ exists mainly to (a) get an App Store listing and (b) swap web-push → APNs.
 
 | File | Purpose |
 |---|---|
-| `client/capacitor.config.ts` | App id `com.wavespestcontrol.portal`, name "Waves", load mode (remote vs bundled), push/splash plugin config |
+| `client/capacitor.config.json` | App id `com.wavespestcontrol.portal`, name "Waves", load mode (remote vs bundled), push/splash plugin config. JSON (not `.ts`) because the client is a pure-JS project — a `.ts` config would force a TypeScript dependency. |
 | `client/src/native/nativePush.js` | APNs registration — `@capacitor/core` `isNativePlatform()` guard + dynamic import of `@capacitor/push-notifications`; caches the token pre-login and flushes it after auth. **No-op on web** |
 | `client/src/main.jsx` | Calls `initNativePush()` after mount (guarded) |
 | `client/package.json` | Capacitor deps + `cap:*` scripts |
@@ -38,7 +38,7 @@ Then in Xcode: pick your signing Team, add the **Push Notifications** and
 **Background Modes → Remote notifications** capabilities, and run on a **real
 device** (push doesn't work in the simulator).
 
-## Load modes (set in `capacitor.config.ts`)
+## Load modes (set in `capacitor.config.json`)
 
 - **MODE A — remote (spike default):** `server.url` points at the live portal.
   Fastest path; web deploys ship without resubmitting the app; the Bearer-JWT

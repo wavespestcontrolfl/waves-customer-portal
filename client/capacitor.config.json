@@ -1,0 +1,23 @@
+{
+  "appId": "com.wavespestcontrol.portal",
+  "appName": "Waves",
+  "webDir": "dist",
+  "ios": {
+    "contentInset": "always",
+    "backgroundColor": "#0f1923"
+  },
+  "server": {
+    "url": "https://portal.wavespestcontrol.com",
+    "cleartext": false
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    },
+    "SplashScreen": {
+      "launchShowDuration": 600,
+      "backgroundColor": "#0f1923",
+      "showSpinner": false
+    }
+  }
+}
