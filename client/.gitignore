@@ -4,5 +4,12 @@
 # and instead ignore only ios/App/Pods/ and ios/App/build/.
 ios/
 
+# Capacitor-generated native Android project (regenerate with scripts/mobile/bootstrap-android.sh).
+# Same policy as ios/ — keep generated output out of git for now. Once it needs
+# hand-edited native files (google-services.json, signing config, custom
+# AndroidManifest), commit client/android/ and ignore only android/.gradle/,
+# android/build/, android/app/build/, and android/app/google-services.json.
+android/
+
 # Capacitor CLI scratch
 .capacitor/

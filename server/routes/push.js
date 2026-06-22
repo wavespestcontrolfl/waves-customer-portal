@@ -1,13 +1,13 @@
 /**
- * Customer-facing native push routes (iOS / APNs).
+ * Customer-facing native push routes (iOS / APNs + Android / FCM).
  *
- *   POST /api/push/native-subscribe    — register an APNs device token
+ *   POST /api/push/native-subscribe    — register an APNs (iOS) or FCM (Android) device token
  *   POST /api/push/native-unsubscribe  — deactivate a device token
  *
  * The browser/web-push subscribe path lives in admin-push.js + the
  * client lib/push-subscribe.js helper. This file is only for the native
  * Capacitor shell (client/src/native/nativePush.js posts here). It is scoped
- * to the customer session — the iOS app we ship is the customer app.
+ * to the customer session — the native apps we ship are the customer app.
  */
 const express = require('express');
 const router = express.Router();
@@ -19,18 +19,18 @@ router.use(authenticate);
 router.post('/native-subscribe', async (req, res, next) => {
   try {
     const { platform, token, deviceInfo } = req.body || {};
-    if (platform !== 'ios') return res.status(400).json({ error: 'unsupported platform' });
+    if (platform !== 'ios' && platform !== 'android') return res.status(400).json({ error: 'unsupported platform' });
     if (!token || typeof token !== 'string') return res.status(400).json({ error: 'device token required' });
 
     // deviceInfo is optional client metadata — only trust it if it's a string,
     // else fall back to the user-agent. Guards against a non-string (e.g. a JSON
     // object) 500ing on .slice() before the token is saved.
-    const safeDeviceInfo = (typeof deviceInfo === 'string' && deviceInfo) || req.headers['user-agent'] || 'iOS';
+    const safeDeviceInfo = (typeof deviceInfo === 'string' && deviceInfo) || req.headers['user-agent'] || (platform === 'android' ? 'Android' : 'iOS');
 
     const row = {
       customer_id: req.customerId,
       role: 'customer',
-      platform: 'ios',
+      platform,
       device_token: token,
       // subscription_data is NOT NULL on the table; store the token as JSON so
       // the constraint holds without a schema change for the web column.
@@ -59,7 +59,7 @@ router.post('/native-subscribe', async (req, res, next) => {
 router.post('/native-unsubscribe', async (req, res, next) => {
   try {
     const { token } = req.body || {};
-    const q = db('push_subscriptions').where({ customer_id: req.customerId, platform: 'ios' });
+    const q = db('push_subscriptions').where({ customer_id: req.customerId }).whereIn('platform', ['ios', 'android']);
     if (token) q.andWhere({ device_token: token });
     await q.update({ active: false });
     res.json({ ok: true });
