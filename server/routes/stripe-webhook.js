@@ -712,7 +712,27 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType) {
       if (moved) logger.info(`[stripe-webhook] statement S-${statementId} → processing (ACH in flight) via PI ${piId}`);
     }
   } else if (eventType === 'failed' || eventType === 'canceled') {
-    await db.transaction((trx) => Settle.revertStatementProcessing(statementId, piId, { database: trx }));
+    const reverted = await db.transaction((trx) => Settle.revertStatementProcessing(statementId, piId, { database: trx }));
+    // A `failed` that actually REVERTED a `processing` statement = a confirmed
+    // payment bounced (ACH return days later, or a post-confirm card decline) —
+    // the silent revert leaves AP/operators no signal, so raise a durable admin
+    // notification. (A `failed` on an unconfirmed PI — a normal pay-page decline,
+    // not processing — reverts nothing and stays quiet; `canceled` is usually our
+    // own replaceable-PI cancel.)
+    if (eventType === 'failed' && reverted) {
+      const reasonMsg = paymentIntent.last_payment_error?.message || 'bank/card declined';
+      try {
+        await db('notifications').insert({
+          recipient_type: 'admin',
+          category: 'payment',
+          title: `⚠️ Statement payment failed: S-${statementId}`,
+          body: `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
+          icon: '⚠️',
+          link: '/admin/payers',
+        });
+      } catch (e) { logger.error(`[stripe-webhook] statement S-${statementId} failure notification insert failed: ${e.message}`); }
+      logger.warn(`[stripe-webhook] statement S-${statementId} payment FAILED after confirmation via PI ${piId} (${reasonMsg}) — reverted to payable`);
+    }
   }
 }
 

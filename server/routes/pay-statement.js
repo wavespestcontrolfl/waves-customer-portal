@@ -34,12 +34,14 @@ const statementPayLimiter = rateLimit({
   message: { error: 'Too many requests — please slow down.' },
 });
 
-// Gate every route — off ⇒ the public statement-pay surface does not exist —
-// and rate-limit. A 64-hex token format gate lives in loadStatementByToken.
-router.use(statementPayLimiter, (req, res, next) => {
+// Gate FIRST — off ⇒ the public statement-pay surface does not exist (always
+// 404, before the limiter, so a disabled gate can't be probed via a 429 once an
+// IP exceeds the rate). Then rate-limit the enabled surface. A 64-hex token
+// format gate lives in loadStatementByToken.
+router.use((req, res, next) => {
   if (!isEnabled('payerStatements')) return res.status(404).json({ error: 'Not found' });
   next();
-});
+}, statementPayLimiter);
 
 const TOKEN_RE = /^[0-9a-f]{64}$/i; // payer_statements.token = randomBytes(32).hex
 
