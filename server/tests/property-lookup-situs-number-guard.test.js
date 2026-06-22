@@ -24,6 +24,13 @@ jest.mock('../services/property-lookup/parcel-gis', () => ({
   lookupParcelByPoint: jest.fn(),
   parcelGisTimeoutMs: jest.fn(() => 4000),
 }));
+// County GIS layer is tried first; neutralize only its network lookup so the
+// FDOR mock parcel above is the one the situs guard sees (this suite targets
+// that guard, not county GIS). Pure helpers stay real via requireActual.
+jest.mock('../services/property-lookup/county-parcel-gis', () => ({
+  ...jest.requireActual('../services/property-lookup/county-parcel-gis'),
+  lookupCountyParcelByPoint: jest.fn().mockResolvedValue(null),
+}));
 
 const logger = require('../services/logger');
 const { lookupParcelByPoint } = require('../services/property-lookup/parcel-gis');

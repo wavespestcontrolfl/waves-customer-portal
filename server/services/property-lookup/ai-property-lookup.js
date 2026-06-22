@@ -21,6 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
+const { lookupCountyParcelByPoint, countyUseDescToPropertyType, dorMajorCategory } = require('./county-parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -749,13 +750,28 @@ function dorUcPropertyType(code) {
 // Weight 97 (cadastral): county-grade data on an annual vintage — it joins
 // the merge as supporting evidence but never short-circuits live PAO / AI
 // lookups (new construction outruns the roll).
+// Shapes a parcel-GIS match (county roll layer OR FDOR statewide cadastral) as
+// a merge-ready evidence record. A county GIS parcel (parcel.gisProvider set)
+// carries the county land-use DESCRIPTION — "Half Duplex/Paired Villa",
+// "Condominia" — which the conservative numeric DOR-code map can't split from a
+// detached home, so the description wins the propertyType when present. The
+// per-field weight comes from the source URL via classifyPropertySource: county
+// GIS hosts score `county` (100), the FDOR statewide layer `cadastral` (97).
 function buildCadastralRecord(parcel, address) {
   if (!parcel) return null;
+  const isCountyGis = Boolean(parcel.gisProvider);
+  const provider = parcel.gisProvider || 'fdor_cadastral';
+  const useDescType = countyUseDescToPropertyType(parcel.landUseDescription);
   const parsed = {
     squareFootage: coerceInt(parcel.livingAreaSqft, 500, 15000),
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
-    propertyType: dorUcPropertyType(parcel.dorUseCode),
+    stories: coerceInt(parcel.stories, 1, 4),
+    propertyType: useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode)),
+    // County-assessed pool flag (tri-state). For a new build where county GIS is
+    // the only public-record hit, this carries the pool into pest/mosquito
+    // pricing instead of leaving it for vision to (maybe) catch.
+    hasPool: parcel.poolFlag ?? null,
     source: parcel.sourceUrl || null,
     confidence: 'high',
     county: parcel.county,
@@ -763,23 +779,37 @@ function buildCadastralRecord(parcel, address) {
   };
   if (!hasAnyPropertyFact(parsed)) return null;
 
-  const record = shapeAsPropertyRecord(parsed, address, 'fdor_cadastral');
-  record._source = 'cadastral';
+  const record = shapeAsPropertyRecord(parsed, address, provider);
+  record._source = isCountyGis ? 'county' : 'cadastral';
+  // The county land-use DESCRIPTION (not the numeric DOR code) produced the
+  // type — the authoritative classification that splits paired villas / condos
+  // from the generic "Single Family" the PAO building-type text and DOR code
+  // both report. applyCountyGisTypeOverride uses this to let it win the type
+  // field on a same-weight county-vs-county merge tie.
+  record._typeFromUseDesc = Boolean(useDescType);
   record._raw = {
     ...(record._raw || {}),
-    _source: 'cadastral',
-    _provider: 'fdor_cadastral',
+    _source: record._source,
+    _provider: provider,
     parcelId: parcel.parcelId,
     county: parcel.county,
     dorUseCode: parcel.dorUseCode,
-    assessmentYear: parcel.assessmentYear,
+    landUseDescription: parcel.landUseDescription || null,
+    // `landUse` is the key commercialSignalText/detectCategory read: surface the
+    // county description here so a county-GIS-only record whose use is
+    // commercial / municipal / common-area routes to the manual commercial
+    // quote path instead of defaulting to Single Family pricing — even when
+    // countyUseDescToPropertyType returned null for it (codex P1).
+    landUse: parcel.landUseDescription || null,
+    subdivision: parcel.subdivision || null,
+    assessmentYear: parcel.assessmentYear ?? parcel.rollYear ?? null,
   };
   record.addressLine1 = parcel.situsAddress || '';
   record.city = parcel.situsCity || '';
   record.state = 'FL';
   record.zipCode = parcel.situsZip || '';
   record.county = parcel.county;
-  record._aiProviders = ['fdor_cadastral'];
+  record._aiProviders = [provider];
   return record;
 }
 
@@ -816,6 +846,95 @@ function attachParcelMeta(merged, parcel) {
     residentialUnits: parcel.residentialUnits,
     vintage: parcel.assessmentYear,
   };
+  return merged;
+}
+
+// Non-detached residential types the county land-use description captures but
+// the PAO building-type text / numeric DOR code flatten to "Single Family".
+const COUNTY_GIS_SPECIFIC_TYPES = new Set(['Townhome', 'Interior Townhome', 'Condo', 'Duplex', 'Multifamily']);
+
+// mergePropertyRecords keeps _raw from the WINNING record, so when a PAO record
+// wins the tie the county GIS land-use description is dropped — and a commercial
+// / municipal / common-area GIS use would no longer reach detectCategory (which
+// reads _raw.landUse), letting a generic PAO type price the parcel as
+// residential. Carry the GIS land-use onto the merged record (append, never
+// clobber) so the commercial-routing signal survives regardless of which record
+// won. No-op for FDOR parcels (no landUse). (codex P1)
+function preserveCountyGisLandUse(merged, cadastralRecord) {
+  const gisLandUse = cadastralRecord?._raw?.landUse;
+  if (!merged || !gisLandUse) return merged;
+  merged._raw = merged._raw || {};
+  const existing = merged._raw.landUse;
+  if (!existing) {
+    merged._raw.landUse = gisLandUse;
+  } else if (!String(existing).toLowerCase().includes(String(gisLandUse).toLowerCase())) {
+    merged._raw.landUse = `${existing} ${gisLandUse}`;
+  }
+  return merged;
+}
+
+// A merged type the GIS description is allowed to UPGRADE — blank, or the
+// generic residential label the PAO building-type text / DOR code report for
+// everything (the exact value a paired villa or condo gets flattened to).
+function isGenericResidentialType(value) {
+  if (isMissingPropertyValue(value)) return true;
+  return /^(single\s*family|single-family|residential|sfr)\b/i.test(String(value).trim());
+}
+
+// Field-specific override for propertyType only. The merge caps every county
+// source at the same score, so a same-weight PAO record (generic "Single
+// Family") wins the tie over the county GIS record by input order — losing the
+// specific classification the county roll carries, whether from the land-use
+// DESCRIPTION ("Half Duplex/Paired Villa") or the DOR major category (04 condo /
+// 08 multifamily, the only type signal Sarasota's code-only layer has). When the
+// county GIS record (weight 100, the source that ties the PAO) has a specific
+// type, let it win the TYPE field ONLY when the merged value is blank or generic
+// residential; every other field keeps the normal merge (PAO's live sqft/year
+// untouched). It never overwrites an already-specific merged type (another live
+// county/AI "Condo", "Duplex", "Commercial", …) — that genuine conflict is left
+// as-is but flagged for verification. FDOR cadastral (weight 97) is excluded: it
+// loses the merge on score, so it must not override here.
+function applyCountyGisTypeOverride(merged, cadastralRecord) {
+  if (!merged || cadastralRecord?._source !== 'county') return merged;
+  const gisType = cadastralRecord.propertyType;
+  if (isMissingPropertyValue(gisType) || !COUNTY_GIS_SPECIFIC_TYPES.has(gisType)) return merged;
+  if (!isMissingPropertyValue(merged.propertyType)
+      && normalizeEvidenceValue(merged.propertyType) === normalizeEvidenceValue(gisType)) return merged;
+
+  // Merged type is already specific AND disagrees — don't overwrite one
+  // specific source with another; surface the conflict for operator review.
+  if (!isGenericResidentialType(merged.propertyType)) {
+    if (merged._fieldEvidence?.propertyType) {
+      merged._fieldEvidence.propertyType.disagreement = true;
+      merged._fieldEvidence.propertyType.fieldVerify = true;
+      merged._dataQuality = buildPropertyDataQuality(merged._fieldEvidence, merged._aiProviders || []);
+    }
+    return merged;
+  }
+
+  // Blank / generic residential → upgrade to the specific county classification.
+  merged.propertyType = gisType;
+  const gisEvidence = cadastralRecord._fieldEvidence?.propertyType?.[0];
+  if (merged._fieldEvidence) {
+    const prior = merged._fieldEvidence.propertyType;
+    merged._fieldEvidence.propertyType = {
+      value: gisType,
+      confidence: 'high',
+      sourceType: 'county',
+      sourceLabel: SOURCE_TYPE_LABELS.county,
+      winningSource: gisEvidence?.url || null,
+      winningProvider: gisEvidence?.provider || cadastralRecord._provider || null,
+      score: SOURCE_TYPE_WEIGHTS.county,
+      disagreement: Boolean(prior && !isMissingPropertyValue(prior.value)
+        && normalizeEvidenceValue(prior.value) !== normalizeEvidenceValue(gisType)),
+      fieldVerify: false,
+      evidence: [
+        { field: 'propertyType', value: gisType, provider: gisEvidence?.provider || cadastralRecord._provider || null, url: gisEvidence?.url || null, sourceType: 'county', sourceQuality: SOURCE_TYPE_WEIGHTS.county, confidence: 'high' },
+        ...((prior?.evidence) || []),
+      ],
+    };
+    merged._dataQuality = buildPropertyDataQuality(merged._fieldEvidence, merged._aiProviders || []);
+  }
   return merged;
 }
 
@@ -1109,8 +1228,21 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   let parcel = null;
   if (canUseParcelGis(geoContext)) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
-    parcel = await lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: gisTimeoutMs })
-      .catch(() => null);
+    // County roll layer first: fresher than the annual FDOR statewide roll (new
+    // plats appear sooner) and it carries the land-use description that splits
+    // paired villas / condos from detached homes. FDOR statewide is the
+    // fallback, within whatever county budget remains.
+    parcel = await lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
+      county: geoContext.county,
+      timeoutMs: gisTimeoutMs,
+    }).catch(() => null);
+    if (!parcel) {
+      const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
+      if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
+        parcel = await lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })
+          .catch(() => null);
+      }
+    }
     if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
       // The rooftop point landed inside a parcel whose situs is a different
       // building (multi-building complex master parcel). Drop the GIS match
@@ -1161,7 +1293,8 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
 
   if (countyRecord && hasCountyPricingCore(countyRecord)) {
     const merged = mergePropertyRecords([countyRecord, cadastralRecord].filter(Boolean), searchAddress);
-    return attachParcelMeta(merged, parcel);
+    preserveCountyGisLandUse(merged, cadastralRecord);
+    return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
   const results = await Promise.allSettled([
@@ -1178,7 +1311,8 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   ].filter(Boolean);
 
   if (!records.length) return null;
-  return attachParcelMeta(mergePropertyRecords(records, searchAddress), parcel);
+  const merged = preserveCountyGisLandUse(mergePropertyRecords(records, searchAddress), cadastralRecord);
+  return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
 async function searchManateeParcel(address, timeoutMs, startedAt = Date.now()) {
@@ -2911,7 +3045,10 @@ function classifyPropertySource(url) {
   const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
   const path = parsed.pathname.toLowerCase();
 
-  if (host.includes('manateepao.gov') || host.includes('sc-pa.com') || host.includes('ccappraiser.com')) {
+  // County appraiser sites AND each county's own parcel GIS map service
+  // (county-parcel-gis.js) — all county-grade authoritative rolls.
+  if (host.includes('manateepao.gov') || host.includes('sc-pa.com') || host.includes('ccappraiser.com')
+      || host.includes('scgov.net') || host.includes('charlottecountyfl.gov')) {
     return { type: 'county', weight: SOURCE_TYPE_WEIGHTS.county };
   }
   if (host.includes('arcgis.com') && path.includes('florida_statewide_cadastral')) {
@@ -3062,8 +3199,10 @@ module.exports = {
   lookupPropertyFromAITrio,
   lookupPropertyFromCountyByParcel,
   _private: {
+    applyCountyGisTypeOverride,
     attachParcelMeta,
     buildCadastralRecord,
+    preserveCountyGisLandUse,
     buildPropertyDataQuality,
     canonicalLookupAddress,
     canUseParcelGis,
