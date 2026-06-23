@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
+import useIsMobile from "../../hooks/useIsMobile";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -241,19 +242,16 @@ function LeadsWorkspaceNav({ active, onChange, counts }) {
       key: "pipeline",
       label: "Pipeline",
       count: counts.pipeline,
-      desc: "Lead intake and follow-up work",
     },
     {
       key: "sources",
       label: "Sources",
       count: counts.sources,
-      desc: "Attribution, numbers, and source cost",
     },
     {
       key: "analytics",
       label: "ROI Analytics",
       count: counts.analytics,
-      desc: "Channel return and response performance",
     },
   ];
   return (
@@ -282,7 +280,7 @@ function LeadsWorkspaceNav({ active, onChange, counts }) {
               type="button"
               onClick={() => onChange(t.key)}
               style={{
-                minHeight: 72,
+                minHeight: 48,
                 padding: "12px 14px",
                 border: "none",
                 borderRight:
@@ -326,16 +324,6 @@ function LeadsWorkspaceNav({ active, onChange, counts }) {
                 >
                   {t.count ?? 0}
                 </span>{" "}
-              </div>{" "}
-              <div
-                style={{
-                  marginTop: 6,
-                  fontSize: 12,
-                  color: C.muted,
-                  lineHeight: 1.35,
-                }}
-              >
-                {t.desc}
               </div>{" "}
             </button>
           );
@@ -578,6 +566,7 @@ const LOST_REASONS = [
 // ═══════════════════════════════════════════════════════════════════════════
 export function LeadsSection() {
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const [tab, setTab] = useState("pipeline");
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
@@ -1167,15 +1156,18 @@ export function LeadsSection() {
                 <thead>
                   {" "}
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                    {[
-                      "Name / Phone",
-                      "Source",
-                      "Service",
-                      "Urgency",
-                      "Status",
-                      "Response",
-                      "Actions",
-                    ].map((h) => (
+                    {(isMobile
+                      ? ["Name / Phone", "Status"]
+                      : [
+                          "Name / Phone",
+                          "Source",
+                          "Service",
+                          "Urgency",
+                          "Status",
+                          "Response",
+                          "Actions",
+                        ]
+                    ).map((h) => (
                       <th
                         key={h}
                         style={{
@@ -1239,44 +1231,50 @@ export function LeadsSection() {
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
                           </td>{" "}
-                          <td style={{ padding: "12px 16px" }}>
-                            {lead.source_name ? (
-                              <Badge
-                                label={
-                                  lead.source_name.length > 25
-                                    ? lead.source_name.slice(0, 22) + "..."
-                                    : lead.source_name
-                                }
-                                color={C.teal}
-                              />
-                            ) : (
-                              <span style={{ color: C.muted, fontSize: 12 }}>
-                                --
-                              </span>
-                            )}
-                          </td>{" "}
-                          <td
-                            style={{
-                              padding: "12px 16px",
-                              color: C.text,
-                              fontSize: 13,
-                            }}
-                          >
-                            {lead.service_interest || "--"}
-                          </td>{" "}
-                          <td style={{ padding: "12px 16px" }}>
-                            {" "}
-                            <Badge
-                              label={lead.urgency || "normal"}
-                              color={
-                                lead.urgency === "urgent"
-                                  ? C.red
-                                  : lead.urgency === "high"
-                                    ? C.amber
-                                    : C.muted
-                              }
-                            />{" "}
-                          </td>{" "}
+                          {!isMobile && (
+                            <>
+                              <td style={{ padding: "12px 16px" }}>
+                                {lead.source_name ? (
+                                  <Badge
+                                    label={
+                                      lead.source_name.length > 25
+                                        ? lead.source_name.slice(0, 22) + "..."
+                                        : lead.source_name
+                                    }
+                                    color={C.teal}
+                                  />
+                                ) : (
+                                  <span
+                                    style={{ color: C.muted, fontSize: 12 }}
+                                  >
+                                    --
+                                  </span>
+                                )}
+                              </td>{" "}
+                              <td
+                                style={{
+                                  padding: "12px 16px",
+                                  color: C.text,
+                                  fontSize: 13,
+                                }}
+                              >
+                                {lead.service_interest || "--"}
+                              </td>{" "}
+                              <td style={{ padding: "12px 16px" }}>
+                                {" "}
+                                <Badge
+                                  label={lead.urgency || "normal"}
+                                  color={
+                                    lead.urgency === "urgent"
+                                      ? C.red
+                                      : lead.urgency === "high"
+                                        ? C.amber
+                                        : C.muted
+                                  }
+                                />{" "}
+                              </td>{" "}
+                            </>
+                          )}
                           <td
                             style={{ padding: "12px 16px" }}
                             onClick={(e) => e.stopPropagation()}
@@ -1305,73 +1303,81 @@ export function LeadsSection() {
                               ))}
                             </select>{" "}
                           </td>{" "}
-                          <td
-                            style={{
-                              padding: "12px 16px",
-                              ...mono,
-                              fontSize: 13,
-                              color:
-                                lead.response_time_minutes != null
-                                  ? lead.response_time_minutes < 15
-                                    ? C.green
-                                    : lead.response_time_minutes < 60
-                                      ? C.amber
-                                      : C.red
-                                  : C.muted,
-                            }}
-                          >
-                            {lead.status === "new" &&
-                            lead.response_time_minutes == null &&
-                            lead.first_contact_at ? (
-                              <SpeedToLeadTimer
-                                firstContactAt={lead.first_contact_at}
-                              />
-                            ) : (
-                              fmtTime(lead.response_time_minutes)
-                            )}
-                          </td>{" "}
-                          <td
-                            style={{ padding: "12px 16px" }}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <button
-                              type="button"
-                              aria-label={`Delete lead for ${
-                                [lead.first_name, lead.last_name]
-                                  .filter(Boolean)
-                                  .join(" ") || "unknown"
-                              }`}
-                              title="Delete lead"
-                              disabled={deletingLeadId === lead.id}
-                              onClick={() => deleteLead(lead)}
-                              style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: 6,
-                                border: `1px solid ${C.red}33`,
-                                borderRadius: 6,
-                                padding: "5px 8px",
-                                background: C.white,
-                                color: C.red,
-                                fontSize: 12,
-                                fontWeight: 600,
-                                cursor:
-                                  deletingLeadId === lead.id
-                                    ? "not-allowed"
-                                    : "pointer",
-                                opacity: deletingLeadId === lead.id ? 0.5 : 1,
-                              }}
-                            >
-                              <Trash2 size={14} strokeWidth={1.8} />
-                              {deletingLeadId === lead.id
-                                ? "Deleting"
-                                : "Delete"}
-                            </button>
-                          </td>{" "}
+                          {!isMobile && (
+                            <>
+                              <td
+                                style={{
+                                  padding: "12px 16px",
+                                  ...mono,
+                                  fontSize: 13,
+                                  color:
+                                    lead.response_time_minutes != null
+                                      ? lead.response_time_minutes < 15
+                                        ? C.green
+                                        : lead.response_time_minutes < 60
+                                          ? C.amber
+                                          : C.red
+                                      : C.muted,
+                                }}
+                              >
+                                {lead.status === "new" &&
+                                lead.response_time_minutes == null &&
+                                lead.first_contact_at ? (
+                                  <SpeedToLeadTimer
+                                    firstContactAt={lead.first_contact_at}
+                                  />
+                                ) : (
+                                  fmtTime(lead.response_time_minutes)
+                                )}
+                              </td>{" "}
+                              <td
+                                style={{ padding: "12px 16px" }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  aria-label={`Delete lead for ${
+                                    [lead.first_name, lead.last_name]
+                                      .filter(Boolean)
+                                      .join(" ") || "unknown"
+                                  }`}
+                                  title="Delete lead"
+                                  disabled={deletingLeadId === lead.id}
+                                  onClick={() => deleteLead(lead)}
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    border: `1px solid ${C.red}33`,
+                                    borderRadius: 6,
+                                    padding: "5px 8px",
+                                    background: C.white,
+                                    color: C.red,
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    cursor:
+                                      deletingLeadId === lead.id
+                                        ? "not-allowed"
+                                        : "pointer",
+                                    opacity:
+                                      deletingLeadId === lead.id ? 0.5 : 1,
+                                  }}
+                                >
+                                  <Trash2 size={14} strokeWidth={1.8} />
+                                  {deletingLeadId === lead.id
+                                    ? "Deleting"
+                                    : "Delete"}
+                                </button>
+                              </td>{" "}
+                            </>
+                          )}
                         </tr>
                         {isExpanded && (
                           <tr>
-                            <td colSpan={7} style={{ padding: 0 }}>
+                            <td
+                              colSpan={isMobile ? 2 : 7}
+                              style={{ padding: 0 }}
+                            >
                               {" "}
                               <div
                                 style={{
@@ -2288,7 +2294,7 @@ export function LeadsSection() {
                   {leads.length === 0 && (
                     <tr>
                       <td
-                        colSpan={7}
+                        colSpan={isMobile ? 2 : 7}
                         style={{
                           padding: 40,
                           textAlign: "center",
