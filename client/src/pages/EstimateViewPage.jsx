@@ -1027,13 +1027,23 @@ function isGermanRoachCleanoutBreakdownItem(item = {}) {
   return raw.includes('german roach') || (raw.includes('roach') && raw.includes('cleanout'));
 }
 
+function isBoraCareBreakdownItem(item = {}) {
+  if (['bora_care', 'boracare'].includes(String(item.service || '').toLowerCase())) return true;
+  const raw = [item.label, item.name, item.displayName]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('bora care') || raw.includes('boracare');
+}
+
 function germanRoachVisitPhrase(visits) {
   const n = Number(visits) || 0;
   const words = { 1: 'One visit', 2: 'Two visits', 3: 'Three visits', 4: 'Four visits' };
   return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
 }
 
-function oneTimePriceCopy(breakdown = {}) {
+export function oneTimePriceCopy(breakdown = {}) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const germanRoachItem = items.find(isGermanRoachCleanoutBreakdownItem);
   if (germanRoachItem) {
@@ -1057,6 +1067,11 @@ function oneTimePriceCopy(breakdown = {}) {
     });
     return 'Includes pre-slab soil treatment for the measured slab area. Certificate/termite-treatment documentation is provided when required. Warranty terms depend on the selected warranty option.'
       + (hasExtendedWarranty ? '' : ' No extended warranty selected.');
+  }
+  // Bora-Care is a borate wood treatment, not a pest visit — mirror the SSR copy
+  // and omit the 30-day pest callback/guarantee line the default fallback carries.
+  if (items.some(isBoraCareBreakdownItem)) {
+    return 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi. Pay on the service day, no recurring schedule.';
   }
   return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }
