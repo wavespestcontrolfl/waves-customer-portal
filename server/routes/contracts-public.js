@@ -99,6 +99,28 @@ router.get('/:token', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Branded PDF "review copy" of the agreement. Available while the share
+// token is live (sent/viewed). Signing nulls the token (single-use), so a
+// signed contract no longer resolves here — the executed copy is delivered
+// by the post-sign email instead. Read-only: never mutates contract status.
+router.get('/:token/pdf', async (req, res, next) => {
+  try {
+    const contract = await loadByToken(req.params.token);
+    if (!contract) return res.status(404).json({ error: 'Contract not found' });
+    if (isExpired(contract)) return res.status(410).json({ error: 'Contract link expired' });
+    if (['cancelled', 'voided'].includes(contract.status)) {
+      return res.status(410).json({ error: 'Contract is no longer available', status: contract.status });
+    }
+
+    const customer = await db('customers')
+      .where({ id: contract.customer_id })
+      .first('first_name', 'last_name', 'company_name');
+
+    const { generateContractPDF } = require('../services/pdf/contract-pdf');
+    generateContractPDF(contract, customer || {}, res, { signed: contract.status === 'signed' });
+  } catch (err) { next(err); }
+});
+
 router.post('/:token/sign', async (req, res, next) => {
   try {
     const signedName = String(req.body?.signedName || '').trim();

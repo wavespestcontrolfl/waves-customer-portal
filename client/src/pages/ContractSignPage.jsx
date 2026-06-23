@@ -293,6 +293,26 @@ export default function ContractSignPage() {
               }}>
                 {contract.contractTextSnapshot}
               </div>
+              {!signed && (
+                <a
+                  href={`${API_BASE}/contracts/${encodeURIComponent(token)}/pdf`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    marginTop: 14,
+                    fontSize: 14,
+                    fontWeight: 750,
+                    color: 'var(--brand)',
+                    textDecoration: 'none',
+                  }}
+                >
+                  <Icon name="download" size={16} strokeWidth={2} />
+                  Download PDF
+                </a>
+              )}
             </div>
           </BrandCard>
 
