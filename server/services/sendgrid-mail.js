@@ -104,7 +104,7 @@ function asmBlockFor(groupId) {
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header.
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const payload = {
@@ -143,7 +143,11 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
   });
   if (!res.ok) {
     const text = await res.text();
-    logger.error(`[sendgrid] sendOne ${res.status}: ${text}`);
+    // The raw SendGrid body can echo the offending address (e.g. "... does not match a
+    // verified Sender Identity: <email>"). PII-sensitive best-effort callers pass
+    // suppressErrorLog and log a sanitized status themselves; the error (status/body)
+    // is still thrown so they can classify it.
+    if (!suppressErrorLog) logger.error(`[sendgrid] sendOne ${res.status}: ${text}`);
     // Expose the HTTP status (like apiCall does) so callers can tell a definite
     // rejection (4xx — not accepted, safe to retry after a fix) from an ambiguous
     // 5xx/network failure (may have been accepted). The price-match draft queue

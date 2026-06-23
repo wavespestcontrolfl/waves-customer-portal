@@ -5,6 +5,7 @@
 
 const { randomUUID } = require('crypto');
 const sendgrid = require('../sendgrid-mail');
+const logger = require('../logger');
 const { composeMarkEmail } = require('./mark-email');
 
 // Mark Roczkowski, SiteOne rep. Overridable via env; defaults to the known
@@ -12,6 +13,27 @@ const { composeMarkEmail } = require('./mark-email');
 const markEmail = () => process.env.MARK_EMAIL || 'mmroczkowski@siteone.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
+
+// Owner-copy notification: when a draft is STAGED (not sent), email the owner the
+// exact composed draft plus a review link, so a staged draft never sits unseen.
+// Opt-in (PRICE_MATCH_NOTIFY_OWNER=true) so it stays inert in dev/tests and is a
+// flag-flip in prod. Recipient defaults to the owner address (the SendGrid from).
+const ownerNotifyEnabled = () => process.env.PRICE_MATCH_NOTIFY_OWNER === 'true';
+const ownerNotifyEmail = () => process.env.PRICE_MATCH_OWNER_EMAIL || fromEmail();
+const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
+// Bound the best-effort owner-copy send: SendGrid's fetch has no timeout and createDraft
+// runs under the price-scan-weekly advisory lock, so a stalled request must not hold the
+// lock/DB connection. It's a convenience email — timing out just skips it.
+const OWNER_NOTIFY_TIMEOUT_MS = Number(process.env.PRICE_MATCH_NOTIFY_TIMEOUT_MS) || 8000;
+const sameAddress = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+
+// Resolve `promise` but reject if it hasn't settled within `ms`. Clears its timer so a
+// fast resolve leaves no dangling handle.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // A 'sending' claim older than this is considered stuck (crash between claim and
 // finalize) and is safe to reclaim — comfortably longer than any real send, so we
@@ -56,7 +78,65 @@ async function createDraft(db, matches, opts = {}) {
       included_count: composed.includedCount,
     })
     .returning('*');
+  // Best-effort owner copy AFTER the draft is persisted — never let a notify
+  // failure lose the draft (the draft is the source of truth; the email is a
+  // convenience). notifyOwnerOfStagedDraft swallows its own errors.
+  await notifyOwnerOfStagedDraft(row, composed, opts);
   return row;
+}
+
+// Email the owner a copy of a freshly STAGED draft (the exact email that would go
+// to Mark) plus a review link. Goes ONLY to the owner — never to Mark — and never
+// throws: a mailer outage must not fail draft creation. No-op unless opted in.
+// `opts.sendgrid` is injectable for tests.
+async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
+  if (!ownerNotifyEnabled()) return;
+  const mailer = opts.sendgrid || sendgrid;
+  try {
+    if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) return;
+    const to = ownerNotifyEmail();
+    // FAIL CLOSED: the owner-copy address must never resolve to the external rep. A
+    // mis-set PRICE_MATCH_OWNER_EMAIL (or a from-address fallback) that equals the draft
+    // recipient would otherwise auto-deliver the draft to Mark before any admin approval,
+    // breaking the never-auto-send invariant. Skip rather than leak.
+    if (sameAddress(to, row.recipient) || sameAddress(to, markEmail())) {
+      // Don't log the address itself — email addresses in logs are PII (repo rule).
+      logger.warn(`[price-scan] owner draft-notify SKIPPED (draft ${row && row.id}) — owner-copy address resolves to the rep; set a distinct PRICE_MATCH_OWNER_EMAIL`);
+      return;
+    }
+    const reviewUrl = `${adminPortalUrl()}/admin/price-match`;
+    const n = row.included_count;
+    const subject = `[Review] Price-match draft ready — ${n} ${n === 1 ? 'opportunity' : 'opportunities'} for Mark`;
+    const banner = `A price-match draft was just staged. It has NOT been sent — review and send it from ${reviewUrl}. Below is the exact email that will go to Mark (${row.recipient}) once you approve it.`;
+    const sendPromise = mailer.sendOne({
+      to,
+      fromEmail: fromEmail(),
+      fromName: FROM_NAME,
+      subject,
+      html: `<p>${banner}</p><hr/>${composed.html}`,
+      text: `${banner}\n\n----\n\n${composed.text}`,
+      categories: ['price-match', 'price-match-owner-copy'],
+      // PII: a SendGrid validation body echoes the address — suppress sendOne's raw-body
+      // log on this best-effort path; the catch below logs only a sanitized status.
+      suppressErrorLog: true,
+    });
+    // Swallow a LATE rejection (if the timeout already won the race) so it can't surface
+    // as an unhandled rejection; the awaited race below still reports a prompt failure.
+    sendPromise.catch(() => {});
+    await withTimeout(sendPromise, OWNER_NOTIFY_TIMEOUT_MS, 'owner draft-notify');
+  } catch (err) {
+    // NEVER interpolate err.message: a SendGrid validation rejection echoes the
+    // offending address (`SendGrid 400: ... does not match a verified Sender
+    // Identity: <email>`), which would leak the owner/rep email into Railway logs
+    // on this best-effort path. Log the draft id plus a sanitized status/category.
+    const status = sendFailureStatus(err);
+    const reason = status != null
+      ? `SendGrid ${status}`
+      : (err && typeof err.message === 'string' && /timed out/.test(err.message))
+        ? 'timed out'
+        : 'send error';
+    logger.warn(`[price-scan] owner draft-notify email failed (draft ${row && row.id}): ${reason}`);
+  }
 }
 
 // status may be a single value or an array (e.g. the 'active' view shows pending
