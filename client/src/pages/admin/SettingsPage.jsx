@@ -1345,6 +1345,9 @@ function LinkedInConnectSection() {
   };
 
   const connected = !!status?.connected;
+  // OAuth succeeded but the authorizing member doesn't administer the configured
+  // company page — every company-page post will 403, so flag it instead of green.
+  const orgMismatch = connected && status?.orgVerified === false;
   return (
     <Card style={{ marginBottom: 20 }}>
       <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
@@ -1395,12 +1398,16 @@ function LinkedInConnectSection() {
             <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
               Waves Pest Control
             </div>
-            <div style={{ fontSize: 11, color: connected ? D.green : D.muted }}>
-              {connected ? "● Connected" : "○ Not connected"}
-              {connected && status?.tokenExpiresAt
+            <div style={{ fontSize: 11, color: orgMismatch ? D.amber : connected ? D.green : D.muted }}>
+              {orgMismatch
+                ? "⚠ Connected, but this account doesn't administer the configured company page — Reconnect as a page admin"
+                : connected
+                ? "● Connected"
+                : "○ Not connected"}
+              {connected && !orgMismatch && status?.tokenExpiresAt
                 ? ` · token expires ${new Date(status.tokenExpiresAt).toLocaleDateString()}`
                 : ""}
-              {connected && !status?.hasRefreshToken
+              {connected && !orgMismatch && !status?.hasRefreshToken
                 ? " · no refresh token (re-auth ~60 days)"
                 : ""}
             </div>

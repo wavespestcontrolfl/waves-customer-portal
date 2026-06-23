@@ -39,6 +39,12 @@ const ORG_ACLS_URL = 'https://api.linkedin.com/rest/organizationAcls';
 // so bump LINKEDIN_API_VERSION when the current one is deprecated. Scopes per the
 // docs' Permissions table: w_organization_social (post) + r_organization_social
 // (read/verify); both require an ADMINISTRATOR/CONTENT_ADMIN page role.
+// NOTE: verifyOrgAccess() hits /organizationAcls, which needs an org-admin READ
+// scope (e.g. rw_organization_admin) that we deliberately DON'T request by default
+// — it broadens the consent screen and many apps aren't approved for it. Without
+// it the ACL call 403s and _recordOrgVerification() records null (verification
+// skipped, never a false "unverified"). To enable the company-admin check, add the
+// admin scope to LINKEDIN_SCOPES once the LinkedIn app is approved for it.
 const API_VERSION = process.env.LINKEDIN_API_VERSION || '202606';
 const SCOPES = (process.env.LINKEDIN_SCOPES || 'w_organization_social r_organization_social')
   .split(/[\s,]+/).filter(Boolean);

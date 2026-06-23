@@ -1178,6 +1178,22 @@ const SocialMediaService = {
     // Generate content for each platform and post
     const fbReady = !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
     const igReady = fbReady && !!INSTAGRAM_ACCOUNT_ID && !!generatedImageUrl;
+    // LinkedIn is "ready" only when an admin has actually completed OAuth (tokens
+    // in DB) AND a company id exists — `configured` alone (CLIENT_ID/SECRET) would
+    // mark it enabled and the loop would call postToLinkedIn → "not connected"
+    // failures → consecutive-failure alerts. Mirror assertSocialPublishingReady so
+    // we SKIP (not fail) until the page is connected. Only probe when requested.
+    let linkedinReady = false;
+    let linkedinReason = !SOCIAL_FLAGS.linkedinEnabled ? 'Disabled' : 'LinkedIn not configured (LINKEDIN_CLIENT_ID/SECRET)';
+    if (requestedPlatforms.has('linkedin') && SOCIAL_FLAGS.linkedinEnabled) {
+      const linkedinSvc = require('./linkedin');
+      if (linkedinSvc.configured) {
+        const ls = await linkedinSvc.getStatus();
+        if (!ls.connected) linkedinReason = 'LinkedIn not connected — authorize in Settings → Integrations';
+        else if (!ls.companyId) linkedinReason = 'LINKEDIN_COMPANY_ID not set';
+        else linkedinReady = true;
+      }
+    }
     const platforms = [
       {
         key: 'facebook',
@@ -1196,9 +1212,8 @@ const SocialMediaService = {
       },
       {
         key: 'linkedin',
-        enabled: SOCIAL_FLAGS.linkedinEnabled && require('./linkedin').configured,
-        reason: !SOCIAL_FLAGS.linkedinEnabled ? 'Disabled'
-          : 'LinkedIn not configured (LINKEDIN_CLIENT_ID/SECRET)',
+        enabled: linkedinReady,
+        reason: linkedinReason,
       },
     ].filter((platform) => requestedPlatforms.has(platform.key));
 

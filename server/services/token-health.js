@@ -289,15 +289,27 @@ async function checkLinkedIn() {
       return result;
     }
 
+    if (!status.companyId) {
+      // Creds + OAuth present but no org to post to — createPost() would throw
+      // ("LINKEDIN_COMPANY_ID not configured"), so don't show a green card the
+      // publish path can't honor.
+      const result = { platform, status: 'not_configured', lastError: 'LINKEDIN_COMPANY_ID not set', expiresAt: status.tokenExpiresAt || null };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+      return result;
+    }
+
     const expiresAt = status.tokenExpiresAt || null;
     const expired = expiresAt ? new Date(expiresAt).getTime() <= Date.now() : false;
-    // An expired access token still refreshes at post time when a refresh token
-    // exists (approved apps); only flag 'expired' when there's nothing to refresh.
-    const healthy = !expired || status.hasRefreshToken;
+    // An expired access token only refreshes at post time when a refresh token
+    // exists AND has not itself expired (approved apps). Once the grant can no
+    // longer refresh, report 'expired' so re-auth is prompted before the next post.
+    const refreshViable = status.hasRefreshToken
+      && (!status.refreshTokenExpiresAt || new Date(status.refreshTokenExpiresAt).getTime() > Date.now());
+    const healthy = !expired || refreshViable;
     const result = {
       platform,
       status: healthy ? 'healthy' : 'expired',
-      lastError: healthy ? null : 'Access token expired — re-authorize (no refresh token)',
+      lastError: healthy ? null : 'Access/refresh token expired — re-authorize in Settings → Integrations',
       expiresAt,
     };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
