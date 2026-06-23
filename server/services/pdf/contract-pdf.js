@@ -57,6 +57,17 @@ function customerName(customer = {}, fallback = '') {
   return name || customer.company_name || fallback || '';
 }
 
+// Mirrors serializeContract / documentRequiresSignature in services/contracts:
+// non-document-template contracts (e.g. autopay) always require a signature;
+// document-library contracts honor the snapshot/template flag. View-only
+// docs (Bora-Care outline, product guides) must NOT show a signature block.
+function contractRequiresSignature(contract = {}) {
+  if (contract.contract_type !== 'document_template') return true;
+  if (contract.requires_signature_snapshot != null) return contract.requires_signature_snapshot !== false;
+  if (contract.document_template_requires_signature != null) return contract.document_template_requires_signature !== false;
+  return true;
+}
+
 // Drawn on page 1 only — full navy header bar with logo, contact block, and
 // FL license, then a soft title band carrying the agreement title + status.
 function drawHeader(doc, title, { signed }) {
@@ -157,6 +168,7 @@ function signatureBlock(doc, contract, { signed }) {
 
 function generateContractPDF(contract, customer, sink, opts = {}) {
   const signed = opts.signed != null ? !!opts.signed : contract.status === 'signed';
+  const requiresSignature = contractRequiresSignature(contract);
   const title = contract.title || 'Waves Agreement';
 
   const doc = new PDFDocument({
@@ -184,7 +196,9 @@ function generateContractPDF(contract, customer, sink, opts = {}) {
   drawFooter(doc);
 
   let y = recipientBlock(doc, {
-    recipient: customerName(customer, contract.signed_name),
+    // Prefer the contract's recipient override (e.g. property manager,
+    // company contact) before the account customer / signed name.
+    recipient: contract.recipient_name || customerName(customer, contract.signed_name),
     requestedDate: contract.shared_at || contract.created_at,
   });
 
@@ -198,10 +212,13 @@ function generateContractPDF(contract, customer, sink, opts = {}) {
       paragraphGap: 6,
     });
 
-  signatureBlock(doc, contract, { signed });
+  // View-only documents (requires_signature=false) get no signature block —
+  // the signing page labels them "no signature required", and the PDF must
+  // not contradict that by asking for a signature that can't be given.
+  if (requiresSignature) signatureBlock(doc, contract, { signed });
 
   // E-sign disclosure line (small print) under the signature block.
-  if (contract.esign_disclosure_snapshot) {
+  if (requiresSignature && contract.esign_disclosure_snapshot) {
     if (doc.y + 30 > FOOTER_TOP - 12) doc.addPage();
     doc.moveDown(0.6);
     doc.fontSize(7.5).font('Helvetica-Oblique').fillColor(MUTED)

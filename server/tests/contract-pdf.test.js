@@ -52,4 +52,22 @@ describe('contract-pdf', () => {
     const buf = await buildContractPDFBuffer({ ...baseContract, signed_name: 'Pat Owner' }, {}, {});
     await isPdf(buf);
   });
+
+  test('renders a view-only document-template contract (no signature block)', async () => {
+    const viewOnly = {
+      ...baseContract,
+      title: 'Bora-Care Wood Treatment — Treatment Outline',
+      contract_type: 'document_template',
+      requires_signature_snapshot: false,
+      esign_disclosure_snapshot: null,
+    };
+    const buf = await buildContractPDFBuffer(viewOnly, customer, {});
+    await isPdf(buf);
+  });
+
+  test('renders with a recipient-name override', async () => {
+    const override = { ...baseContract, contract_type: 'document_template', recipient_name: 'Acme Property Mgmt' };
+    const buf = await buildContractPDFBuffer(override, customer, {});
+    await isPdf(buf);
+  });
 });

@@ -295,7 +295,7 @@ export default function ContractSignPage() {
               </div>
               {!signed && (
                 <a
-                  href={`${API_BASE}/contracts/${encodeURIComponent(token)}/pdf`}
+                  href={`${API_BASE}/contracts/${encodeURIComponent(token)}?format=pdf`}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{

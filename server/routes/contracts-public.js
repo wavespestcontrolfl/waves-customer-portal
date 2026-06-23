@@ -95,29 +95,20 @@ router.get('/:token', async (req, res, next) => {
     }
 
     const latest = await loadByToken(req.params.token);
-    res.json({ contract: serializeContract(latest, { includeAudit: false }) });
-  } catch (err) { next(err); }
-});
 
-// Branded PDF "review copy" of the agreement. Available while the share
-// token is live (sent/viewed). Signing nulls the token (single-use), so a
-// signed contract no longer resolves here — the executed copy is delivered
-// by the post-sign email instead. Read-only: never mutates contract status.
-router.get('/:token/pdf', async (req, res, next) => {
-  try {
-    const contract = await loadByToken(req.params.token);
-    if (!contract) return res.status(404).json({ error: 'Contract not found' });
-    if (isExpired(contract)) return res.status(410).json({ error: 'Contract link expired' });
-    if (['cancelled', 'voided'].includes(contract.status)) {
-      return res.status(410).json({ error: 'Contract is no longer available', status: contract.status });
+    // Branded PDF "review copy" served from this already-approved public
+    // surface (/api/contracts/:token) via ?format=pdf — not a new route.
+    // Signing nulls the single-use token, so signed contracts hit the 410
+    // guard above; the executed copy is delivered by the post-sign email.
+    if (req.query.format === 'pdf') {
+      const customer = await db('customers')
+        .where({ id: latest.customer_id })
+        .first('first_name', 'last_name', 'company_name');
+      const { generateContractPDF } = require('../services/pdf/contract-pdf');
+      return generateContractPDF(latest, customer || {}, res, { signed: latest.status === 'signed' });
     }
 
-    const customer = await db('customers')
-      .where({ id: contract.customer_id })
-      .first('first_name', 'last_name', 'company_name');
-
-    const { generateContractPDF } = require('../services/pdf/contract-pdf');
-    generateContractPDF(contract, customer || {}, res, { signed: contract.status === 'signed' });
+    res.json({ contract: serializeContract(latest, { includeAudit: false }) });
   } catch (err) { next(err); }
 });
 
