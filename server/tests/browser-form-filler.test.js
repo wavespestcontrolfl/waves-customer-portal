@@ -7,17 +7,22 @@ const { fillCitationForm, _internals } = require('../services/seo/browser-form-f
 // clickOptsLog: records [selector, options] for clicks that pass options.
 // submitReq: {method,url,nav} — a synthetic request fired THROUGH the real route guard
 // when the submit is clicked, so submitDispatched/submitAborted get exercised offline.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null, formAction = null } = {}) {
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null, submitReqs = null, formAction = null } = {}) {
   let routeHandler = null;
+  // Fire one OR a SEQUENCE of synthetic requests through the real route guard (submitReqs
+  // models e.g. an on-host form POST followed by an off-host confirmation redirect).
   const fireSubmitReq = async () => {
-    if (!submitReq || !routeHandler) return;
-    const req = {
-      url: () => submitReq.url,
-      method: () => submitReq.method || 'POST',
-      isNavigationRequest: () => !!submitReq.nav,
-      frame: () => ({ parentFrame: () => null }),
-    };
-    await routeHandler({ request: () => req, abort: async () => {}, continue: async () => {} });
+    if (!routeHandler) return;
+    const reqs = submitReqs || (submitReq ? [submitReq] : []);
+    for (const sr of reqs) {
+      const req = {
+        url: () => sr.url,
+        method: () => sr.method || 'POST',
+        isNavigationRequest: () => !!sr.nav,
+        frame: () => ({ parentFrame: () => null }),
+      };
+      await routeHandler({ request: () => req, abort: async () => {}, continue: async () => {} });
+    }
   };
   const page = {
     goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
@@ -126,6 +131,42 @@ describe('fillCitationForm', () => {
   test('P2: an off-host submit request → submit_blocked (nothing reached the directory)', async () => {
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://evil.example/submit' } }), // POST goes off-host → aborted
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_blocked');
+  });
+
+  test('P2: on-host submit THEN off-host confirmation redirect → placed (dispatch preserved, not parked)', async () => {
+    // The form POST reaches the pinned host, then the response redirects to an off-host
+    // confirmation/tracking page (a GET navigation the egress lock aborts). The submission
+    // already landed → must stay placed+pending, NOT be misread as submit_blocked.
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReqs: [
+        { method: 'POST', url: 'https://x.com/submit' },                          // form data reaches the pinned host
+        { method: 'GET', url: 'https://confirm.tracking.example/ok', nav: true }, // off-host post-submit redirect → aborted
+      ] }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null }, // unconfirmed by the page
+      ),
+    }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
+  });
+
+  test('P2: a body-bearing submit going OFF-host stays submit_blocked even if an on-host request also dispatched', async () => {
+    // Protection preserved: the REAL form POST leaves the host (blocked) while an on-host
+    // analytics POST also fires. The form data never reached the directory → submit_blocked,
+    // never falsely placed off the on-host dispatch.
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReqs: [
+        { method: 'POST', url: 'https://x.com/track' },         // on-host analytics POST (dispatch)
+        { method: 'POST', url: 'https://evil.example/submit' }, // the real form POST goes off-host → aborted
+      ] }),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
         { success: false, pending: false, rejected: false, live_url: null },
