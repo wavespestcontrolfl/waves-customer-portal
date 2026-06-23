@@ -55,6 +55,7 @@ function variantsFromShopify(data) {
     size: extractSizeToken(v.title) ? v.title : (data.title || v.title),
     price: Number(v.price) / 100,
     availabilityRaw: v.available === false ? 'OutOfStock' : (v.available === true ? 'InStock' : null),
+    id: v.id != null ? v.id : null, // Shopify variant id -> variant-specific proof URL
   }));
 }
 
@@ -102,6 +103,10 @@ async function fetchCandidate(page, vendor, product) {
     if (!data) continue;
     const offer = targetOz ? pickVariantOffer(variantsFromShopify(data), { targetOz }) : null;
     const productUrl = `${origin}/products/${handle}`;
+    // Proof link points at the PRICED variant, not the page default — on a multi-variant
+    // product the matched size is often not the default, so the review queue must open the
+    // exact variant the price/availability came from. Falls back to the bare product URL.
+    const proofUrl = offer && offer.variantId != null ? `${productUrl}?variant=${offer.variantId}` : productUrl;
     if (!offer) {
       if (!fallback && data.variants && data.variants.length) {
         fallback = {
@@ -118,7 +123,7 @@ async function fetchCandidate(page, vendor, product) {
     const bodyText = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000) || null;
     const cand = {
       price: offer.price, currency: 'USD', availability: offer.availability,
-      name: data.title || null, quantity: offer.quantity, source_url: productUrl, text: bodyText,
+      name: data.title || null, quantity: offer.quantity, source_url: proofUrl, text: bodyText,
       competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: vid, vendor: vname,
     };
     const verdict = verifyMatch({ name: cand.name, text: bodyText, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);

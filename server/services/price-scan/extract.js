@@ -390,7 +390,7 @@ function pickVariantOffer(variants, opts = {}) {
     const token = extractSizeToken(normalizeSizeLabel(v && v.size));
     const oz = quantityToOz(token);
     if (!oz || Math.abs(oz - opts.targetOz) / opts.targetOz > tol) continue;
-    pool.push({ price, availabilityRaw: (v && v.availabilityRaw) || null, size: token });
+    pool.push({ price, availabilityRaw: (v && v.availabilityRaw) || null, size: token, id: (v && v.id != null) ? v.id : null });
   }
   if (!pool.length) return null;
   let best = null;
@@ -399,7 +399,10 @@ function pickVariantOffer(variants, opts = {}) {
     const availability = mapAvailability(o.availabilityRaw);
     const rank = AVAIL_RANK[availability] ?? 1;
     if (!best || rank > bestRank || (rank === bestRank && o.price < best.price)) {
-      best = { price: o.price, currency: 'USD', availability, quantity: o.size };
+      // variantId: the source variant's id (when the caller supplied one), so an adapter
+      // can build a variant-specific proof URL pointing at the PRICED variant, not the
+      // page default. null for variant sources that have no id (Magento/option-card).
+      best = { price: o.price, currency: 'USD', availability, quantity: o.size, variantId: o.id };
       bestRank = rank;
     }
   }

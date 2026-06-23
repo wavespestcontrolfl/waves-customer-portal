@@ -3,15 +3,22 @@ const { pickVariantOffer } = require('../services/price-scan/extract');
 const { selectAdapterKey, getAdapter } = require('../services/price-scan/adapters/registry');
 
 describe('shopify variantsFromShopify', () => {
-  test('maps cents->dollars, size from variant title, stock from available', () => {
+  test('maps cents->dollars, size from variant title, stock from available, carries variant id', () => {
     const data = { title: 'Bifen 7.9F Select', variants: [
-      { title: '1 Gallon', price: 4450, available: true },
-      { title: '1 Pint', price: 3500, available: false },
+      { id: 111, title: '1 Gallon', price: 4450, available: true },
+      { id: 222, title: '1 Pint', price: 3500, available: false },
     ] };
     expect(variantsFromShopify(data)).toEqual([
-      { size: '1 Gallon', price: 44.5, availabilityRaw: 'InStock' },
-      { size: '1 Pint', price: 35.0, availabilityRaw: 'OutOfStock' },
+      { size: '1 Gallon', price: 44.5, availabilityRaw: 'InStock', id: 111 },
+      { size: '1 Pint', price: 35.0, availabilityRaw: 'OutOfStock', id: 222 },
     ]);
+  });
+  test('pickVariantOffer preserves the matched variant id (for variant-specific proof URLs)', () => {
+    const v = variantsFromShopify({ title: 'Bifen 7.9F', variants: [
+      { id: 111, title: '1 Gallon', price: 4450, available: true },
+      { id: 222, title: '1 Pint', price: 3500, available: true },
+    ] });
+    expect(pickVariantOffer(v, { targetOz: 128 })).toMatchObject({ price: 44.5, quantity: '1 Gallon', variantId: 111 });
   });
   test('single "Default Title" variant borrows the size from the product title', () => {
     const data = { title: 'Dominion 2L - 27.5 oz', variants: [{ title: 'Default Title', price: 5999, available: true }] };
