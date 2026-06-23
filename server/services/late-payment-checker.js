@@ -15,6 +15,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { gates } = require('../config/feature-gates');
 const StripeService = require('./stripe');
+const { sendMicrodepositVerificationEmail } = require('./microdeposit-verification-email');
 
 function tierDaysForOverdue(daysSince) {
   if (daysSince < 14) return 7;
@@ -72,6 +73,10 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain) {
       metadata: { original_message_type: 'bank_verification_incomplete' },
     });
     if (sendResult.blocked || sendResult.sent === false) return 'skip';
+    // Branded email sidecar — best-effort; the SMS re-nudge already succeeded, so a
+    // missing email address or send failure must NOT downgrade the 'sent' outcome.
+    await sendMicrodepositVerificationEmail({ invoice: inv, customer, touchKey: `${tierDays}d` })
+      .catch((e) => logger.warn(`[late-payment] micro-deposit email sidecar failed for invoice ${inv.id}: ${e.message}`));
     await db('activity_log').insert({
       customer_id: customer.id,
       action: 'microdeposit_verification_reminder',
