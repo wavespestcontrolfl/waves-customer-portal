@@ -13,17 +13,40 @@ jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(as
 // Shape/host rejections in validateSubmitUrl happen BEFORE these are consulted.
 jest.mock('../services/seo/contact-finder', () => ({ _internals: { isBlockedHostname: () => false, hostResolvesPublic: async () => true } }));
 
-// Minimal knex-ish mock supporting db('t').insert(...) and the lease-guarded
-// db('t').where({id}).where('claimed_at', lease).update(...) chain.
+// Minimal knex-ish mock. Supports the three chains the runner uses:
+//  - db('t').insert(...)                                         (recordAttempt)
+//  - db('t').where({id}).where('claimed_at', lease).update(...)  (leaseGuardedReclassify)
+//  - db('t').whereIn(...).whereRaw(...).whereRaw(...).first()    (alreadyPlacedAt)
+// alreadyPlacedAt is answered from an in-memory placement registry (mockPlaced) that
+// worker.report populates on a 'placed' report — faithfully simulating the durable DB
+// placement the real report writes, so the in-batch + cross-run de-dupe is exercised
+// end-to-end. mockQueryKey captures the (domain, location) the last alreadyPlacedAt
+// filtered on, so the following placed report records exactly that key.
 // (jest.mock factories may only reference `mock`-prefixed outer variables.)
 const mockUpdate = jest.fn(async () => 1);
 const mockInsert = jest.fn(async () => [1]);
 const mockWhere = jest.fn();
+const mockPlaced = new Set();
+const mockQueryKey = { domain: null, location: null, last: null };
 jest.mock('../models/db', () => {
-  const chain = { update: mockUpdate };
-  mockWhere.mockImplementation(() => chain); // chainable: .where(...).where(...)
-  chain.where = mockWhere;
-  return jest.fn(() => ({ insert: mockInsert, where: mockWhere }));
+  const builder = {
+    insert: mockInsert,
+    update: mockUpdate,
+    whereIn: () => builder,
+    whereRaw: (sql, bindings) => {
+      const v = Array.isArray(bindings) ? bindings[0] : undefined;
+      if (/target_domain/.test(sql)) mockQueryKey.domain = v;
+      else if (/location/.test(sql)) mockQueryKey.location = v;
+      return builder;
+    },
+    first: async () => {
+      mockQueryKey.last = `${mockQueryKey.domain}|${mockQueryKey.location}`;
+      return mockPlaced.has(mockQueryKey.last) ? { id: 'existing' } : undefined;
+    },
+  };
+  mockWhere.mockImplementation(() => builder); // chainable: .where(...).where(...)
+  builder.where = mockWhere;
+  return jest.fn(() => builder);
 });
 
 const worker = require('../services/seo/link-prospect-worker');
@@ -34,10 +57,17 @@ const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify } = ru
 const prospect = (o = {}) => ({ id: 'p1', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
 
 beforeEach(() => {
-  worker.claim.mockReset(); worker.report.mockReset(); worker.report.mockResolvedValue({ ok: true });
+  worker.claim.mockReset(); worker.report.mockReset();
+  // A 'placed' report writes status='placed' + quality_signals.location in the real worker;
+  // mirror that into the placement registry so the next prospect's alreadyPlacedAt sees it.
+  worker.report.mockImplementation(async (body) => {
+    if (body && body.outcome === 'placed' && mockQueryKey.last) mockPlaced.add(mockQueryKey.last);
+    return { ok: true };
+  });
   worker.releaseClaims.mockReset(); worker.releaseClaims.mockResolvedValue({ released: 0 });
   fillCitationForm.mockReset(); mockUpdate.mockClear(); mockInsert.mockClear(); mockWhere.mockClear();
   mockUpdate.mockResolvedValue(1);
+  mockPlaced.clear(); mockQueryKey.domain = null; mockQueryKey.location = null; mockQueryKey.last = null;
 });
 
 describe('leaseGuardedReclassify (optimistic lease guard)', () => {
@@ -126,16 +156,19 @@ describe('run — safety gates', () => {
     expect(fillCitationForm).not.toHaveBeenCalled();
     expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]);
   });
-  test('de-dupes same directory + SAME location → submit one, release the true duplicate', async () => {
+  test('de-dupes same directory + SAME location → submit one, PARK the durable duplicate (skip)', async () => {
     worker.claim.mockResolvedValue([
       prospect({ id: 'p1', target_page: 'https://wavespestcontrol.com/a' }),
       prospect({ id: 'p2', target_page: 'https://wavespestcontrol.com/b' }), // same citysquares.com, both → primary location
     ]);
     fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: null, pending: true, screenshot: Buffer.from('png') });
     const r = await runner.run({ allow: ['citysquares.com'] });
-    expect(fillCitationForm).toHaveBeenCalledTimes(1);
+    expect(fillCitationForm).toHaveBeenCalledTimes(1); // only the first (domain, location) submits
     expect(r.placed).toBe(1);
-    expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]); // true dup released
+    expect(r.skipped).toBe(1); // the durable duplicate is parked (reclassified skip), never resubmitted
+    // p2 is reclassified to skip (so it's never re-claimed) + a skipped attempt is logged
+    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null }));
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', error_code: 'duplicate_placement' }));
   });
   test('same directory, DIFFERENT locations → both submit (per-location listings are allowed)', async () => {
     worker.claim.mockResolvedValue([

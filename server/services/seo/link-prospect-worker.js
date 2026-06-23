@@ -153,11 +153,16 @@ function mapReportToPatch(outcome, body = {}, existingQuality = null) {
     // Pending = submitted to a slow-moderation directory; the live URL may be unknown
     // until approval. cited_homepage = this placement links to the homepage (signup
     // runner), so the verifier reconciles THIS row against the homepage, not its
-    // target_page — scoping the homepage rule to runner-created rows only.
-    if (body.pending || body.cited_homepage) {
+    // target_page — scoping the homepage rule to runner-created rows only. location =
+    // the GBP location this placement is for; the signup runner's durable de-dupe
+    // (alreadyPlacedAt) keys on (target_domain, quality_signals.location) so a multi-
+    // location business gets one listing PER location per directory, and a SECOND row
+    // for the SAME (domain, location) is recognized as a duplicate even across runs.
+    if (body.pending || body.cited_homepage || body.location) {
       const quality = parseQuality(existingQuality);
       if (body.pending) { quality.pending = true; quality.submitted_at = now.toISOString(); }
       if (body.cited_homepage) quality.cited_homepage = true;
+      if (body.location) quality.location = String(body.location);
       patch.quality_signals = JSON.stringify(quality);
     }
     return patch;

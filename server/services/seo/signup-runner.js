@@ -24,6 +24,7 @@ const { fillCitationForm } = require('./browser-form-filler');
 const { uploadEvidence } = require('./signup-evidence');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
+const { CITY_TO_LOCATION } = require('../../config/locations'); // canonical city/service-area → GBP locId
 
 // Filler errorCodes that are RUN-LEVEL (environment/outage), identical for every
 // prospect and NOT the prospect's fault — a misconfigured/degraded run must abort the
@@ -68,27 +69,24 @@ function validateSubmitUrl(rawUrl, allowedDomain) {
   return u.toString();
 }
 
-// City/id tokens to look for in a prospect's page/domain to map it to a GBP location
-// (e.g. a /pest-control-sarasota-fl money page or a sarasota-specific directory → Sarasota).
-function locationTokens(loc) {
-  const tokens = [];
-  if (loc.id) tokens.push(String(loc.id).toLowerCase());                 // 'lakewood-ranch'
-  const city = String(loc.name || '').split(',')[0].trim().toLowerCase(); // 'Sarasota, FL' → 'sarasota'
-  if (city) { tokens.push(city.replace(/\s+/g, '-'), city.replace(/\s+/g, '')); }
-  return [...new Set(tokens.filter(Boolean))];
-}
+// Pick the GBP location for a prospect using the CANONICAL city→location map (which
+// includes service-area aliases: North Port/Englewood/Nokomis/Port Charlotte → Venice,
+// Siesta Key/Lido Key/Osprey → Sarasota, Palmetto/Ellenton/Ruskin/Apollo Beach →
+// Parrish, Lakewood Ranch/University Park → Bradenton). Match the city/area token in the
+// prospect's target page/domain → its GBP; else the default (primary). Longest city
+// first so multi-word areas (e.g. 'north port') win over a shorter substring.
+const SORTED_CITIES = Object.keys(CITY_TO_LOCATION).sort((a, b) => b.length - a.length);
 
-// Pick the GBP location for a prospect: the one whose city/id token appears in the
-// prospect's target page/domain ("per-location when known"); otherwise the default
-// (primary) location. Citations must list the address/phone of the location being cited.
 function pickLocation(profile, prospect) {
   const locs = profile.locations || [];
   const def = locs.find((l) => l.id === profile.default_location_id) || locs[0] || {};
   if (!prospect) return def;
   const hay = `${prospect.target_page || ''} ${prospect.target_domain || ''}`.toLowerCase();
-  for (const loc of locs) {
-    if (loc.id === def.id) continue;
-    if (locationTokens(loc).some((t) => hay.includes(t))) return loc;
+  for (const city of SORTED_CITIES) {
+    if (hay.includes(city) || hay.includes(city.replace(/\s+/g, '-')) || hay.includes(city.replace(/\s+/g, ''))) {
+      const loc = locs.find((l) => l.id === CITY_TO_LOCATION[city]);
+      if (loc) return loc;
+    }
   }
   return def;
 }
@@ -107,6 +105,23 @@ function napFromLocation(profile, loc) {
 
 function buildNap(profile, prospect = null) {
   return napFromLocation(profile, pickLocation(profile, prospect));
+}
+
+// DURABLE de-dupe: is there already an ACTIVE (placed/live/indexed) signup placement for
+// this directory domain + GBP location? A multi-location business gets one listing per
+// location on a directory, so a SECOND prospect row for the SAME (domain, location) is a
+// duplicate — even across runs. Earlier same-run placements are already reported, so this
+// one check covers both the in-batch and cross-run cases. quality_signals.location is
+// stamped on every runner placement (see the placed report below).
+async function alreadyPlacedAt(domain, locId) {
+  const dom = normDomain(domain);
+  if (!dom) return false;
+  const row = await db('seo_link_prospects')
+    .whereIn('status', ['placed', 'live', 'indexed'])
+    .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [dom])
+    .whereRaw("COALESCE(quality_signals->>'location','') = ?", [String(locId || 'default')])
+    .first();
+  return !!row;
 }
 
 async function recordAttempt(p, result, evidenceKey) {
@@ -172,11 +187,6 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   const counts = { claimed: claimed.length, placed: 0, blocked: 0, failed: 0, skipped: 0 };
   const samples = [];
   const releaseAtEnd = [];
-  // De-dupe per (domain + location), NOT per domain: a multi-location business legitimately
-  // gets one listing PER location on the same directory (Waves Pest Control Venice, Waves
-  // Pest Control Parrish, … each with its own page/NAP). Only a second row for the SAME
-  // (directory, location) is a true duplicate.
-  const submittedPlacements = new Set();
 
   for (let i = 0; i < claimed.length; i++) {
     const p = claimed[i];
@@ -188,10 +198,12 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     if (allowlist.length && !allowlist.includes(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
 
     const loc = pickLocation(profile, p); // the GBP location this prospect maps to
-    const placementKey = `${domain} ${loc.id || 'default'}`;
-    // Same directory + same location already submitted this run → true duplicate. Release
-    // the extra (no attempt consumed). Different locations on the same directory pass.
-    if (submittedPlacements.has(placementKey)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
+    if (await alreadyPlacedAt(domain, loc.id)) {
+      await leaseGuardedReclassify(p, { automation_policy: 'skip' });
+      await recordAttempt(p, { outcome: 'skipped', errorCode: 'duplicate_placement', notes: `already placed for ${domain} / ${loc.id || 'default'}` }, null);
+      counts.skipped++;
+      continue;
+    }
 
     // SSRF: validate the ACTUAL navigated URL (target_url can differ from the
     // allowlisted target_domain) before launching a browser at it. An unsafe URL
@@ -206,10 +218,6 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       continue;
     }
 
-    // Committing to a real submission → claim this (domain, location) so no sibling row
-    // submits the SAME placement again this run. (Parked-unsafe rows above don't claim it,
-    // so a sibling with a valid URL still gets its chance.)
-    submittedPlacements.add(placementKey);
     const nap = napFromLocation(profile, loc); // per-location NAP (Venice/Parrish/… address+phone)
     const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic });
 
@@ -236,7 +244,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // verifier must reconcile THIS row against the homepage (not its money-page
       // target_page). A durable flag scopes the homepage rule to runner-created rows only —
       // manual/strategy directory rows keep target_page.
-      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, cited_homepage: true, notes: 'auto-submitted citation' });
+      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, cited_homepage: true, location: String(loc.id || 'default'), notes: 'auto-submitted citation' });
       if (rep && rep.ok) { counts.placed++; }
       else {
         // report rejected (e.g. stale lease) — don't claim success; the row stays

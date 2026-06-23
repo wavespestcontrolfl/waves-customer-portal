@@ -38,6 +38,15 @@ describe('link prospect worker — report mapping', () => {
     const p2 = mapReportToPatch('placed', { live_url: 'https://x.com/biz', notes: 'editorial' });
     expect(p2.quality_signals).toBeUndefined();
   });
+  test('location persists to quality_signals (so alreadyPlacedAt de-dupes per GBP location)', () => {
+    const p = mapReportToPatch('placed', { pending: true, cited_homepage: true, location: 'sarasota', notes: 'auto-submitted citation' });
+    const q = JSON.parse(p.quality_signals);
+    expect(q.location).toBe('sarasota');
+    expect(q.cited_homepage).toBe(true);
+    // location alone (no pending/cited_homepage flags) still stamps quality_signals
+    const p2 = mapReportToPatch('placed', { live_url: 'https://x.com/biz', location: 'default' });
+    expect(JSON.parse(p2.quality_signals).location).toBe('default');
+  });
 
   test('skipped marks rejected and releases lease', () => {
     const p = mapReportToPatch('skipped', { notes: 'ToS prohibits automation' });
