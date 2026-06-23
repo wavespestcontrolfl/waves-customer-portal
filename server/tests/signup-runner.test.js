@@ -2,7 +2,10 @@ jest.mock('../services/seo/link-prospect-worker', () => ({
   claim: jest.fn(),
   report: jest.fn(async () => ({ ok: true })),
   releaseClaims: jest.fn(async () => ({ released: 0 })),
-  businessProfile: () => ({ brand: 'Waves Pest Control', website: 'https://wavespestcontrol.com', contact_email: 'contact@wavespestcontrol.com', default_location_id: 'bradenton', locations: [{ id: 'bradenton', name: 'Bradenton, FL', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612' }] }),
+  businessProfile: () => ({ brand: 'Waves Pest Control', website: 'https://wavespestcontrol.com', contact_email: 'contact@wavespestcontrol.com', default_location_id: 'bradenton', locations: [
+    { id: 'bradenton', name: 'Bradenton, FL', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612' },
+    { id: 'sarasota', name: 'Sarasota, FL', address: '100 Main St, Sarasota, FL 34236', phone: '(941) 555-2000' },
+  ] }),
 }));
 jest.mock('../services/seo/browser-form-filler', () => ({ fillCitationForm: jest.fn() }));
 jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(async () => 'backlink-evidence/x.png') }));
@@ -10,17 +13,40 @@ jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(as
 // Shape/host rejections in validateSubmitUrl happen BEFORE these are consulted.
 jest.mock('../services/seo/contact-finder', () => ({ _internals: { isBlockedHostname: () => false, hostResolvesPublic: async () => true } }));
 
-// Minimal knex-ish mock supporting db('t').insert(...) and the lease-guarded
-// db('t').where({id}).where('claimed_at', lease).update(...) chain.
+// Minimal knex-ish mock. Supports the three chains the runner uses:
+//  - db('t').insert(...)                                         (recordAttempt)
+//  - db('t').where({id}).where('claimed_at', lease).update(...)  (leaseGuardedReclassify)
+//  - db('t').whereIn(...).whereRaw(...).whereRaw(...).first()    (alreadyPlacedAt)
+// alreadyPlacedAt is answered from an in-memory placement registry (mockPlaced) that
+// worker.report populates on a 'placed' report — faithfully simulating the durable DB
+// placement the real report writes, so the in-batch + cross-run de-dupe is exercised
+// end-to-end. mockQueryKey captures the (domain, location) the last alreadyPlacedAt
+// filtered on, so the following placed report records exactly that key.
 // (jest.mock factories may only reference `mock`-prefixed outer variables.)
 const mockUpdate = jest.fn(async () => 1);
 const mockInsert = jest.fn(async () => [1]);
 const mockWhere = jest.fn();
+const mockPlaced = new Set();
+const mockQueryKey = { domain: null, location: null, last: null };
 jest.mock('../models/db', () => {
-  const chain = { update: mockUpdate };
-  mockWhere.mockImplementation(() => chain); // chainable: .where(...).where(...)
-  chain.where = mockWhere;
-  return jest.fn(() => ({ insert: mockInsert, where: mockWhere }));
+  const builder = {
+    insert: mockInsert,
+    update: mockUpdate,
+    whereIn: () => builder,
+    whereRaw: (sql, bindings) => {
+      const v = Array.isArray(bindings) ? bindings[0] : undefined;
+      if (/target_domain/.test(sql)) mockQueryKey.domain = v;
+      else if (/location/.test(sql)) mockQueryKey.location = v;
+      return builder;
+    },
+    first: async () => {
+      mockQueryKey.last = `${mockQueryKey.domain}|${mockQueryKey.location}`;
+      return mockPlaced.has(mockQueryKey.last) ? { id: 'existing' } : undefined;
+    },
+  };
+  mockWhere.mockImplementation(() => builder); // chainable: .where(...).where(...)
+  builder.where = mockWhere;
+  return jest.fn(() => builder);
 });
 
 const worker = require('../services/seo/link-prospect-worker');
@@ -31,10 +57,17 @@ const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify } = ru
 const prospect = (o = {}) => ({ id: 'p1', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
 
 beforeEach(() => {
-  worker.claim.mockReset(); worker.report.mockReset(); worker.report.mockResolvedValue({ ok: true });
+  worker.claim.mockReset(); worker.report.mockReset();
+  // A 'placed' report writes status='placed' + quality_signals.location in the real worker;
+  // mirror that into the placement registry so the next prospect's alreadyPlacedAt sees it.
+  worker.report.mockImplementation(async (body) => {
+    if (body && body.outcome === 'placed' && mockQueryKey.last) mockPlaced.add(mockQueryKey.last);
+    return { ok: true };
+  });
   worker.releaseClaims.mockReset(); worker.releaseClaims.mockResolvedValue({ released: 0 });
   fillCitationForm.mockReset(); mockUpdate.mockClear(); mockInsert.mockClear(); mockWhere.mockClear();
   mockUpdate.mockResolvedValue(1);
+  mockPlaced.clear(); mockQueryKey.domain = null; mockQueryKey.location = null; mockQueryKey.last = null;
 });
 
 describe('leaseGuardedReclassify (optimistic lease guard)', () => {
@@ -61,9 +94,18 @@ describe('buildNap / parseAddress', () => {
   test('parses the canonical address line into structured fields', () => {
     expect(parseAddress('13649 Luxe Ave #110, Bradenton, FL 34211')).toEqual({ street: '13649 Luxe Ave #110', city: 'Bradenton', state: 'FL', zip: '34211' });
   });
-  test('assembles NAP from the business profile default location', () => {
+  test('assembles NAP from the default (primary) location when no prospect / no match', () => {
     const nap = buildNap(worker.businessProfile());
     expect(nap).toMatchObject({ business_name: 'Waves Pest Control', phone: '(941) 318-7612', address: { city: 'Bradenton', zip: '34211' } });
+  });
+  test('picks the per-location NAP when the prospect page maps to a GBP city', () => {
+    const nap = buildNap(worker.businessProfile(), { target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl', target_domain: 'citysquares.com' });
+    expect(nap).toMatchObject({ phone: '(941) 555-2000', address: { city: 'Sarasota', zip: '34236' } });
+    expect(nap.website).toBe('https://wavespestcontrol.com'); // always the homepage for citations
+  });
+  test('falls back to the primary NAP when the prospect maps to no known city', () => {
+    const nap = buildNap(worker.businessProfile(), { target_page: 'https://wavespestcontrol.com/', target_domain: 'citysquares.com' });
+    expect(nap.address.city).toBe('Bradenton');
   });
 });
 
@@ -113,6 +155,29 @@ describe('run — safety gates', () => {
     await runner.run({ allow: ['citysquares.com'] });
     expect(fillCitationForm).not.toHaveBeenCalled();
     expect(worker.releaseClaims).toHaveBeenCalledWith([{ id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' }]);
+  });
+  test('de-dupes same directory + SAME location → submit one, PARK the durable duplicate (skip)', async () => {
+    worker.claim.mockResolvedValue([
+      prospect({ id: 'p1', target_page: 'https://wavespestcontrol.com/a' }),
+      prospect({ id: 'p2', target_page: 'https://wavespestcontrol.com/b' }), // same citysquares.com, both → primary location
+    ]);
+    fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: null, pending: true, screenshot: Buffer.from('png') });
+    const r = await runner.run({ allow: ['citysquares.com'] });
+    expect(fillCitationForm).toHaveBeenCalledTimes(1); // only the first (domain, location) submits
+    expect(r.placed).toBe(1);
+    expect(r.skipped).toBe(1); // the durable duplicate is parked (reclassified skip), never resubmitted
+    // p2 is reclassified to skip (so it's never re-claimed) + a skipped attempt is logged
+    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null }));
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', error_code: 'duplicate_placement' }));
+  });
+  test('same directory, DIFFERENT locations → both submit (per-location listings are allowed)', async () => {
+    worker.claim.mockResolvedValue([
+      prospect({ id: 'p3', target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl' }), // → Sarasota
+      prospect({ id: 'p4', target_page: 'https://wavespestcontrol.com/' }),                          // → primary (Bradenton)
+    ]);
+    fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: null, pending: true, screenshot: Buffer.from('png') });
+    await runner.run({ allow: ['citysquares.com'] });
+    expect(fillCitationForm).toHaveBeenCalledTimes(2); // two distinct (domain, location) placements → both submitted
   });
 });
 

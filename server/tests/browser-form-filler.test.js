@@ -7,21 +7,27 @@ const { fillCitationForm, _internals } = require('../services/seo/browser-form-f
 // clickOptsLog: records [selector, options] for clicks that pass options.
 // submitReq: {method,url,nav} — a synthetic request fired THROUGH the real route guard
 // when the submit is clicked, so submitDispatched/submitAborted get exercised offline.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null } = {}) {
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null, submitReqs = null, formAction = null } = {}) {
   let routeHandler = null;
+  // Fire one OR a SEQUENCE of synthetic requests through the real route guard (submitReqs
+  // models e.g. an on-host form POST followed by an off-host confirmation redirect).
   const fireSubmitReq = async () => {
-    if (!submitReq || !routeHandler) return;
-    const req = {
-      url: () => submitReq.url,
-      method: () => submitReq.method || 'POST',
-      isNavigationRequest: () => !!submitReq.nav,
-      frame: () => ({ parentFrame: () => null }),
-    };
-    await routeHandler({ request: () => req, abort: async () => {}, continue: async () => {} });
+    if (!routeHandler) return;
+    const reqs = submitReqs || (submitReq ? [submitReq] : []);
+    for (const sr of reqs) {
+      const req = {
+        url: () => sr.url,
+        method: () => sr.method || 'POST',
+        isNavigationRequest: () => !!sr.nav,
+        frame: () => ({ parentFrame: () => null }),
+      };
+      await routeHandler({ request: () => req, abort: async () => {}, continue: async () => {} });
+    }
   };
   const page = {
     goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
     url: () => landedUrl,
+    $eval: async () => (formAction || ''), // the form's resolved action (or '' → guard uses the fallback heuristic)
     screenshot: async () => Buffer.from('png'),
     fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); },
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
@@ -134,6 +140,98 @@ describe('fillCitationForm', () => {
     expect(r.errorCode).toBe('submit_blocked');
   });
 
+  test('P2: on-host submit THEN off-host confirmation redirect → placed (dispatch preserved, not parked)', async () => {
+    // The form POST reaches the pinned host, then the response redirects to an off-host
+    // confirmation/tracking page (a GET navigation the egress lock aborts). The submission
+    // already landed → must stay placed+pending, NOT be misread as submit_blocked.
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReqs: [
+        { method: 'POST', url: 'https://x.com/submit' },                          // form data reaches the pinned host
+        { method: 'GET', url: 'https://confirm.tracking.example/ok', nav: true }, // off-host post-submit redirect → aborted
+      ] }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null }, // unconfirmed by the page
+      ),
+    }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
+  });
+
+  test('P2: a form that NAVIGATES off-host stays submit_blocked even if an on-host request also dispatched', async () => {
+    // Protection preserved: the REAL form submit navigates off-host (its data leaves the host
+    // → blocked) while an on-host analytics POST also fires. Never falsely placed off the
+    // on-host dispatch — a body-bearing NAVIGATION off-host is the form itself leaving.
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReqs: [
+        { method: 'POST', url: 'https://x.com/track' },                      // on-host analytics POST (dispatch)
+        { method: 'POST', url: 'https://evil.example/submit', nav: true },   // the real form NAVIGATES off-host → aborted
+      ] }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_blocked');
+  });
+
+  test('P2: a form whose DECLARED action posts off-host → submit_blocked before clicking (off-host XHR/cross-domain submit)', async () => {
+    // The form's action targets an off-pin host (the real payload would be aborted by the
+    // egress lock). Reading the action up front classifies this deterministically — even an
+    // on-host beacon that also fires must NOT rescue it. We bail before the point of no return.
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log, {
+        formAction: 'https://api.offsite.example/submit',                 // form posts its data off the pinned host
+        submitReqs: [{ method: 'POST', url: 'https://x.com/track' }],     // on-host beacon also fires — must not rescue it
+      }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_blocked');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined(); // bailed BEFORE clicking (deterministic, pre-submit)
+  });
+
+  test('P2: an on-host (relative) declared action proceeds → placed; an off-host beacon is ignored', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], {
+        formAction: '/submit',                                                  // relative → resolves to x.com (on-host)
+        submitReqs: [
+          { method: 'POST', url: 'https://x.com/submit' },                      // form data reaches the pinned host
+          { method: 'POST', url: 'https://www.google-analytics.com/collect' },  // off-host analytics beacon (ignored)
+        ],
+      }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
+  });
+
+  test('P2: an off-host analytics/sendBeacon POST does NOT park a real on-host submit (non-nav → not the form)', async () => {
+    // The form POST lands on-host (dispatch); the page also fires an off-host analytics
+    // POST (body-bearing but NOT a navigation). The beacon must not be mistaken for the
+    // form leaving the host → still placed+pending, not submit_blocked.
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReqs: [
+        { method: 'POST', url: 'https://x.com/submit' },                       // form data reaches the pinned host
+        { method: 'POST', url: 'https://www.google-analytics.com/collect' },   // off-host analytics beacon (non-nav) → aborted
+      ] }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null }, // unconfirmed by the page
+      ),
+    }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
+  });
+
   test('P2: a STRING "true" from the verifier is NOT treated as confirmed (strict booleans only)', async () => {
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser([]), // no submit request dispatched
@@ -145,6 +243,32 @@ describe('fillCitationForm', () => {
     // "true" !== true → not confirmed, and nothing reached the host → must NOT be placed
     expect(r.outcome).toBe('failed');
     expect(r.errorCode).toBe('no_submit_evidence');
+  });
+
+  test('P2: rejected WINS over a contradictory success (success:true + rejected:true → submit_rejected)', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://x.com/submit' } }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: true, pending: false, rejected: true, live_url: null }, // contradictory page
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_rejected'); // the rejection parks it instead of a phantom placed
+  });
+
+  test('a body-bearing same-host request after the click IS evidence (incl. a JS POST to another path) → placed+pending', async () => {
+    // A JS-intercepted form posting to a DIFFERENT same-host endpoint must still count —
+    // missing it would make a completed submission look retryable (duplicate risk).
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://x.com/api/save' } }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
   });
 
   test('P2: a clear post-submit REJECTION page → submit_rejected, not placed (verifier won’t poll a phantom)', async () => {
@@ -213,25 +337,15 @@ describe('fillCitationForm', () => {
     expect(wsLog).toContain('**/*'); // WebSocket routing armed
   });
 
-  test('P1: an IPv6 pinned host is bracketed in --host-resolver-rules', async () => {
+  test('pins the host to its verified global IPv4 (IPv4-only — no brackets/IPv6)', async () => {
     let rules = null;
     await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
-      resolveHostIps: async () => ['2606:4700:4700::1111'],
-      launchBrowser: async (opts) => { rules = opts && opts.hostResolverRules; return fakeBrowser([]); },
-      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
-    });
-    expect(rules).toContain('[2606:4700:4700::1111]');
-  });
-
-  test('prefers an IPv4 address for the pin when both v4 and v6 resolve', async () => {
-    let rules = null;
-    await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, {
-      resolveHostIps: async () => ['2606:4700:4700::1111', '203.0.113.7'],
+      resolveHostIps: async () => ['203.0.113.7'], // resolvePublicIps returns only global IPv4
       launchBrowser: async (opts) => { rules = opts && opts.hostResolverRules; return fakeBrowser([]); },
       anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
     });
     expect(rules).toContain('MAP x.com 203.0.113.7');
-    expect(rules).not.toContain('[');
+    expect(rules).not.toContain('['); // never an IPv6 (bracketed) pin
   });
 
   test('P2: pins the ACTUAL navigated host (www) to its OWN IP, not just the apex', async () => {
@@ -438,17 +552,15 @@ describe('resolvePublicIps (DNS pin source, fail-closed)', () => {
     expect(await resolvePublicIps('240.0.0.1')).toEqual([]);    // reserved
     expect(await resolvePublicIps('1.1.1.1')).toEqual(['1.1.1.1']); // genuinely global → kept
   });
-  test('P1: rejects IPv4-translating/tunneling IPv6 prefixes (NAT64/6to4/Teredo embed an IPv4)', async () => {
+  test('IPv4-ONLY pinning: every IPv6 literal → [] (incl. global, NAT64/6to4/Teredo, mapped)', async () => {
+    // We pin IPv4 only and never try to vet the IPv6 special-use space; an IPv6-only host
+    // fails closed (host_not_public → parked) rather than risk a NAT64/6to4/mapped bypass.
+    expect(await resolvePublicIps('2606:4700:4700::1111')).toEqual([]); // genuine global IPv6 → still [] (IPv4-only)
     expect(await resolvePublicIps('64:ff9b::a9fe:a9fe')).toEqual([]);   // NAT64 embedding 169.254.169.254
-    expect(await resolvePublicIps('2002:c0a8:0101::')).toEqual([]);     // 6to4 embedding 192.168.1.1
+    expect(await resolvePublicIps('2002:c0a8:0101::')).toEqual([]);     // 6to4
     expect(await resolvePublicIps('2001:0:abcd::')).toEqual([]);        // Teredo
-    expect(await resolvePublicIps('2606:4700:4700::1111')).toEqual(['2606:4700:4700::1111']); // genuine global IPv6 → kept
-  });
-  test('P2: an IPv4-mapped IPv6 is judged by its EMBEDDED IPv4 against the full special-use set', async () => {
-    expect(await resolvePublicIps('::ffff:198.18.0.1')).toEqual([]);  // mapped benchmark → reject (isPrivateIp alone would miss it)
-    expect(await resolvePublicIps('::ffff:224.0.0.1')).toEqual([]);   // mapped multicast → reject
-    expect(await resolvePublicIps('::ffff:10.0.0.1')).toEqual([]);    // mapped private → reject
-    expect(await resolvePublicIps('::ffff:8.8.8.8')).toEqual(['::ffff:8.8.8.8']); // mapped genuinely-global → kept
+    expect(await resolvePublicIps('::ffff:8.8.8.8')).toEqual([]);       // mapped global v4 → [] (IPv6 literal)
+    expect(await resolvePublicIps('::1')).toEqual([]);                  // loopback
   });
   test('empty host → []', async () => {
     expect(await resolvePublicIps('')).toEqual([]);

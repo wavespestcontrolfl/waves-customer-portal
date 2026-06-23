@@ -24,6 +24,7 @@ const { fillCitationForm } = require('./browser-form-filler');
 const { uploadEvidence } = require('./signup-evidence');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
+const { CITY_TO_LOCATION } = require('../../config/locations'); // canonical city/service-area → GBP locId
 
 // Filler errorCodes that are RUN-LEVEL (environment/outage), identical for every
 // prospect and NOT the prospect's fault — a misconfigured/degraded run must abort the
@@ -68,17 +69,59 @@ function validateSubmitUrl(rawUrl, allowedDomain) {
   return u.toString();
 }
 
-function buildNap(profile) {
-  const loc = (profile.locations || []).find((l) => l.id === profile.default_location_id) || (profile.locations || [])[0] || {};
+// Pick the GBP location for a prospect using the CANONICAL city→location map (which
+// includes service-area aliases: North Port/Englewood/Nokomis/Port Charlotte → Venice,
+// Siesta Key/Lido Key/Osprey → Sarasota, Palmetto/Ellenton/Ruskin/Apollo Beach →
+// Parrish, Lakewood Ranch/University Park → Bradenton). Match the city/area token in the
+// prospect's target page/domain → its GBP; else the default (primary). Longest city
+// first so multi-word areas (e.g. 'north port') win over a shorter substring.
+const SORTED_CITIES = Object.keys(CITY_TO_LOCATION).sort((a, b) => b.length - a.length);
+
+function pickLocation(profile, prospect) {
+  const locs = profile.locations || [];
+  const def = locs.find((l) => l.id === profile.default_location_id) || locs[0] || {};
+  if (!prospect) return def;
+  const hay = `${prospect.target_page || ''} ${prospect.target_domain || ''}`.toLowerCase();
+  for (const city of SORTED_CITIES) {
+    if (hay.includes(city) || hay.includes(city.replace(/\s+/g, '-')) || hay.includes(city.replace(/\s+/g, ''))) {
+      const loc = locs.find((l) => l.id === CITY_TO_LOCATION[city]);
+      if (loc) return loc;
+    }
+  }
+  return def;
+}
+
+function napFromLocation(profile, loc) {
   return {
     business_name: profile.brand,
-    website: profile.website,
+    website: profile.website, // citations link to the homepage (verifier reconciles homepage)
     email: profile.contact_email,
-    phone: loc.phone || '',
-    address: parseAddress(loc.address || WAVES_ADDRESS_LINE),
+    phone: (loc && loc.phone) || '',
+    address: parseAddress((loc && loc.address) || WAVES_ADDRESS_LINE),
     category: CATEGORY,
     description: DESCRIPTION,
   };
+}
+
+function buildNap(profile, prospect = null) {
+  return napFromLocation(profile, pickLocation(profile, prospect));
+}
+
+// DURABLE de-dupe: is there already an ACTIVE (placed/live/indexed) signup placement for
+// this directory domain + GBP location? A multi-location business gets one listing per
+// location on a directory, so a SECOND prospect row for the SAME (domain, location) is a
+// duplicate — even across runs. Earlier same-run placements are already reported, so this
+// one check covers both the in-batch and cross-run cases. quality_signals.location is
+// stamped on every runner placement (see the placed report below).
+async function alreadyPlacedAt(domain, locId) {
+  const dom = normDomain(domain);
+  if (!dom) return false;
+  const row = await db('seo_link_prospects')
+    .whereIn('status', ['placed', 'live', 'indexed'])
+    .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [dom])
+    .whereRaw("COALESCE(quality_signals->>'location','') = ?", [String(locId || 'default')])
+    .first();
+  return !!row;
 }
 
 async function recordAttempt(p, result, evidenceKey) {
@@ -140,7 +183,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   const claimed = await worker.claim({ n: batchSize, type: 'signup', automationPolicy: 'submit_free', ...(dryRun ? { preview: true } : { domains: allowlist }) });
   if (!claimed.length) { logger.info('[signup-runner] no submit_free prospects to claim'); return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0 }; }
 
-  const nap = buildNap(worker.businessProfile());
+  const profile = worker.businessProfile();
   const counts = { claimed: claimed.length, placed: 0, blocked: 0, failed: 0, skipped: 0 };
   const samples = [];
   const releaseAtEnd = [];
@@ -153,6 +196,14 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     // Dry-run rows are PREVIEW-only (not leased) → just sample them; nothing to release.
     if (dryRun) { samples.push({ domain, submitUrl: rawUrl }); continue; }
     if (allowlist.length && !allowlist.includes(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
+
+    const loc = pickLocation(profile, p); // the GBP location this prospect maps to
+    if (await alreadyPlacedAt(domain, loc.id)) {
+      await leaseGuardedReclassify(p, { automation_policy: 'skip' });
+      await recordAttempt(p, { outcome: 'skipped', errorCode: 'duplicate_placement', notes: `already placed for ${domain} / ${loc.id || 'default'}` }, null);
+      counts.skipped++;
+      continue;
+    }
 
     // SSRF: validate the ACTUAL navigated URL (target_url can differ from the
     // allowlisted target_domain) before launching a browser at it. An unsafe URL
@@ -167,6 +218,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       continue;
     }
 
+    const nap = napFromLocation(profile, loc); // per-location NAP (Venice/Parrish/… address+phone)
     const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic });
 
     // Run-level/environment/outage error (no LLM client, no browser, planning-LLM
@@ -188,7 +240,11 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // No confirmed live URL → report as PENDING (slow-moderation), never as a
       // resolved placement worker.report would reject for a missing live_url.
       const pending = !!result.pending || !result.liveUrl;
-      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, notes: 'auto-submitted citation' });
+      // cited_homepage: the runner submits the HOMEPAGE as the listing website, so the
+      // verifier must reconcile THIS row against the homepage (not its money-page
+      // target_page). A durable flag scopes the homepage rule to runner-created rows only —
+      // manual/strategy directory rows keep target_page.
+      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, cited_homepage: true, location: String(loc.id || 'default'), notes: 'auto-submitted citation' });
       if (rep && rep.ok) { counts.placed++; }
       else {
         // report rejected (e.g. stale lease) — don't claim success; the row stays

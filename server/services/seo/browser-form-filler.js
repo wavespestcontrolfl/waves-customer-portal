@@ -65,62 +65,42 @@ function requestAllowed({ url, allowedHosts }) {
 const BLOCKED_VALUES = new Set([null, 'account', 'captcha', 'payment', 'phone']);
 
 /**
- * Is `ip` a GLOBAL-UNICAST (publicly-routable) address? We pin/allow ONLY these —
- * an allowlist stance, not merely "not RFC1918". Rejects every IANA special-use range
- * (private, loopback, link-local, CGNAT, benchmark 198.18/15, the TEST-NETs, protocol-
- * assignment 192.0.0/24, multicast, reserved/broadcast; IPv6 ULA/link-local/multicast/
- * unspecified/doc) so a malicious directory DNS record can't point the browser at
- * special-use infrastructure that routes internally. Builds on ssrf.isPrivateIp.
+ * Is `ip` a globally-routable PUBLIC IPv4? Allowlist stance (not merely "not RFC1918"):
+ * rejects every IANA IPv4 special-use range — private, loopback, link-local, CGNAT,
+ * benchmark 198.18/15, the TEST-NETs, protocol-assignment 192.0.0/24, 6to4 relay
+ * 192.88.99/24, multicast, reserved/broadcast. IPv6 is intentionally NOT handled here:
+ * pinning is IPv4-ONLY (see resolvePublicIps) so we never have to classify the sprawling
+ * IPv6 special-use space (NAT64/6to4/Teredo/mapped/...), which proved too error-prone.
  */
-function isGloballyRoutable(ip) {
-  if (net.isIPv4(ip)) {
-    if (ssrf.isPrivateIp(ip)) return false; // 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 100.64/10
-    const [a, b, c] = ip.split('.').map(Number);
-    if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;     // 192.0.0/24 (IETF), 192.0.2/24 (TEST-NET-1)
-    if (a === 198 && (b === 18 || b === 19)) return false;              // 198.18/15 (benchmark)
-    if (a === 198 && b === 51 && c === 100) return false;              // 198.51.100/24 (TEST-NET-2)
-    if (a === 203 && b === 0 && c === 113) return false;               // 203.0.113/24 (TEST-NET-3)
-    if (a === 192 && b === 88 && c === 99) return false;               // 192.88.99/24 (6to4 relay anycast, deprecated)
-    if (a >= 224) return false;                                        // 224/4 multicast + 240/4 reserved + 255.255.255.255
-    return true;
-  }
-  if (net.isIPv6(ip)) {
-    if (ssrf.isPrivateIp(ip)) return false; // ::1, ::, fc/fd (ULA), fe80::/10 (link-local), v4-mapped private
-    const h = ip.toLowerCase();
-    if (h.startsWith('ff')) return false;                              // ff00::/8 multicast
-    // An IPv4-mapped IPv6 (::ffff:1.2.3.4) must be judged by its EMBEDDED IPv4 against the
-    // FULL IPv4 special-use set — isPrivateIp only catches mapped PRIVATE v4, so
-    // ::ffff:198.18.0.1 (benchmark) / ::ffff:224.0.0.1 (multicast) would otherwise pass.
-    const mappedV4 = h.match(/:((?:\d{1,3}\.){3}\d{1,3})$/);
-    if (mappedV4 && net.isIPv4(mappedV4[1])) return isGloballyRoutable(mappedV4[1]);
-    if (h.includes('::ffff:')) return false;                           // mapped HEX form we can't cleanly decode → fail closed
-    // IPv4-translation / tunneling prefixes EMBED an IPv4 in the v6 address — a hostile
-    // AAAA like 64:ff9b::a9fe:a9fe (169.254.169.254) would otherwise pass and pin Chromium
-    // at internal/metadata IPv4 in a NAT64/6to4-routed env. Reject them outright.
-    if (h.startsWith('64:ff9b:') || h === '64:ff9b::' || h.startsWith('64:ff9b::')) return false; // NAT64 (RFC6052/8215)
-    if (h.startsWith('2002:')) return false;                           // 6to4 (RFC3056)
-    if (h.startsWith('2001:0:') || h.startsWith('2001:0000:')) return false; // Teredo (RFC4380)
-    if (h.startsWith('2001:db8') || h.startsWith('2001:0db8')) return false; // 2001:db8::/32 documentation
-    if (h === '::1' || h === '::') return false;
-    return true;
-  }
-  return false;
+function isGloballyRoutableV4(ip) {
+  if (!net.isIPv4(ip)) return false;
+  if (ssrf.isPrivateIp(ip)) return false; // 0/8, 10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, 100.64/10
+  const [a, b, c] = ip.split('.').map(Number);
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;     // 192.0.0/24 (IETF), 192.0.2/24 (TEST-NET-1)
+  if (a === 198 && (b === 18 || b === 19)) return false;             // 198.18/15 (benchmark)
+  if (a === 198 && b === 51 && c === 100) return false;              // 198.51.100/24 (TEST-NET-2)
+  if (a === 203 && b === 0 && c === 113) return false;               // 203.0.113/24 (TEST-NET-3)
+  if (a === 192 && b === 88 && c === 99) return false;               // 192.88.99/24 (6to4 relay anycast)
+  if (a >= 224) return false;                                        // 224/4 multicast + 240/4 reserved + 255.255.255.255
+  return true;
 }
 
 /**
- * Resolve a host to its globally-routable PUBLIC IPs for DNS-pinning. Fail-closed:
- * returns [] if the host doesn't resolve or ANY returned address is not global-unicast
- * (so we never pin — and therefore never launch a browser against — a host that
- * resolves to an internal/special-use address). An IP literal is returned only if it
- * is itself globally routable.
+ * Resolve a host to its globally-routable PUBLIC IPv4 addresses for DNS-pinning.
+ * IPv4-ONLY by design: we pin Chromium to a verified-global IPv4 via --host-resolver-
+ * rules; an IPv6-only host (or an IP that isn't a clean global IPv4) fails closed
+ * (→ host_not_public → the runner parks it) rather than us trying to vet the IPv6
+ * special-use space. Fail-closed: returns [] if the host doesn't resolve to ≥1 global
+ * IPv4 or if ANY resolved IPv4 is special-use (split-horizon defense).
  */
 async function resolvePublicIps(host) {
   if (!host) return [];
-  if (net.isIP(host)) return isGloballyRoutable(host) ? [host] : [];
+  if (net.isIP(host)) return isGloballyRoutableV4(host) ? [host] : []; // IPv6 literal → [] (IPv4-only pinning)
   let addrs;
   try { addrs = await dns.promises.lookup(host, { all: true }); } catch { return []; }
-  if (!addrs.length || !addrs.every((a) => isGloballyRoutable(a.address))) return [];
-  return [...new Set(addrs.map((a) => a.address))];
+  const v4 = [...new Set(addrs.map((a) => a.address).filter((ip) => net.isIPv4(ip)))];
+  if (!v4.length || !v4.every(isGloballyRoutableV4)) return [];
+  return v4;
 }
 
 let chromium;
@@ -215,13 +195,11 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   const pinned = new Set();
   for (const h of new Set([expectedHost, `www.${expectedHost}`, navHost])) {
     const hips = await resolveHostIps(h);
-    if (!hips || !hips.length) continue; // no public record → not pinned (not a rebinding vector)
-    // Prefer IPv4; an IPv6 replacement must be bracketed ([addr]) in --host-resolver-rules.
-    const raw = hips.find((ip) => net.isIPv4(ip)) || hips[0];
-    rules.push(`MAP ${h} ${net.isIPv6(raw) ? `[${raw}]` : raw}`);
+    if (!hips || !hips.length) continue; // no public IPv4 record → not pinned (IPv4-only; not a rebinding vector)
+    rules.push(`MAP ${h} ${hips[0]}`); // resolveHostIps returns only globally-routable IPv4
     pinned.add(h);
   }
-  if (!pinned.has(navHost)) return { outcome: 'failed', errorCode: 'host_not_public', notes: `${navHost} did not resolve to a public IP` };
+  if (!pinned.has(navHost)) return { outcome: 'failed', errorCode: 'host_not_public', notes: `${navHost} did not resolve to a public IPv4` };
   const hostResolverRules = rules.join(',');
 
   // Submission EVIDENCE tracking (set by the route guard during the submit phase):
@@ -230,12 +208,21 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   //    / confirmation) → positive evidence something landed at the directory.
   //  - submitAborted: a submit/navigation request went OFF the pinned host and was
   //    aborted → that attempt reached nothing.
+  //  - submitNavOffHost: a body-bearing NAVIGATION (the form actually submitting/posting
+  //    its data and navigating) went off the pinned host and was aborted → the real
+  //    submission left the host (blocked). Deliberately NAVIGATION-scoped: an incidental
+  //    off-host analytics/sendBeacon POST during the submit phase is body-bearing but NOT
+  //    a navigation, so it must NOT count as the form leaving the host (else a real on-host
+  //    submission gets parked just because the page pinged analytics). Conversely a mere
+  //    off-host GET redirect to a confirmation page is a navigation but NOT body-bearing,
+  //    so it doesn't count either — the submission already landed on-host.
   // We only take the no-retry placed path on verification OR submitDispatched; with
   // neither we treat it as "nothing submitted" (retryable / parked), so a no-op or
   // off-host submit never strands a row as placed.
   let submitPhase = false;
   let submitAborted = false;
   let submitDispatched = false;
+  let submitNavOffHost = false;
 
   let browser;
   try {
@@ -256,18 +243,30 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     if (typeof context.route === 'function') {
       await context.route('**/*', (route) => {
         const req = route.request();
-        // A "submission request" = a body-bearing method (POST/PUT/PATCH — the form post)
-        // OR a navigation (a full-page form submit, incl. a GET-method form, or a
-        // confirmation redirect). Sub-resource GETs (css/img/xhr fetches) don't count.
+        // Submission evidence = any BODY-BEARING same-host request (POST/PUT/PATCH — incl.
+        // a JS form that intercepts submit and posts to a different same-host endpoint) OR
+        // a navigation, fired after the click. We intentionally keep this BROAD so a real
+        // submit is never missed (which would make a completed submission look retryable →
+        // duplicate). The strand-vs-false-place tradeoff is handled by the decision
+        // ORDER below: an off-host (aborted) submit is preferred over loose dispatch, so an
+        // analytics POST can't mark an actually-off-host submission as placed.
         let isSubmitReq = false;
-        try { isSubmitReq = submitPhase && (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method() || 'GET').toUpperCase()) || req.isNavigationRequest()); } catch { isSubmitReq = false; }
+        let isFormNav = false;
+        try {
+          const method = String(req.method() || 'GET').toUpperCase();
+          const isBody = !['GET', 'HEAD', 'OPTIONS'].includes(method); // body-bearing = carries form data
+          const isNav = req.isNavigationRequest();
+          isFormNav = submitPhase && isBody && isNav;     // body-bearing NAVIGATION = the form itself submitting+navigating
+          isSubmitReq = submitPhase && (isBody || isNav); // any submit-ish request (incl. analytics POST / GET redirect)
+        } catch { isSubmitReq = false; isFormNav = false; }
         let ok = false;
         try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
         if (!ok) {
-          if (isSubmitReq) submitAborted = true;   // a submit/nav attempt went off-host → reached nothing
+          if (isSubmitReq) submitAborted = true;       // a submit/nav request went off-host → reached nothing
+          if (isFormNav) submitNavOffHost = true;      // the form NAVIGATED off-host with its data → real submit blocked
           return route.abort();
         }
-        if (isSubmitReq) submitDispatched = true;  // a submit/nav request reached the pinned host → evidence
+        if (isSubmitReq) submitDispatched = true;  // the submit request reached the pinned host → evidence
         return route.continue();
       });
     }
@@ -320,6 +319,29 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     const last = plan.actions[plan.actions.length - 1];
     if (submitCount !== 1 || !last || last.action !== 'submit' || !last.selector) {
       return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'plan must end with exactly one submit action' };
+    }
+
+    // DETERMINISTIC off-host-action guard (before we fill or click): read the submit's form
+    // `action` up front. If the form posts to an off-pin host, the egress lock will abort the
+    // real submission no matter what incidental same-host/analytics traffic fires — so a
+    // body-bearing fetch/XHR or cross-domain form submit to an off-host endpoint can't be
+    // misread as placed. We classify submit_blocked NOW rather than guess from post-click
+    // network evidence. Reading the DECLARED action is the only thing that disambiguates an
+    // off-host XHR submit from an incidental off-host analytics beacon — they're identical on
+    // the wire. An empty / relative-on-host action (or a javascript:/# action that doesn't
+    // resolve to a host) falls through to the post-click heuristic.
+    let declaredActionHost = '';
+    try {
+      const rawAction = await page.$eval(last.selector, (el) => {
+        const form = el.form || (el.closest && el.closest('form'));
+        return form ? (form.getAttribute('action') || '') : '';
+      });
+      if (rawAction && String(rawAction).trim()) {
+        try { declaredActionHost = new URL(String(rawAction), page.url()).hostname.toLowerCase(); } catch { declaredActionHost = ''; }
+      }
+    } catch { declaredActionHost = ''; }
+    if (declaredActionHost && !pinned.has(declaredActionHost)) {
+      return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot1, notes: `form action posts off the pinned host (${declaredActionHost}) — not submitted` };
     }
 
     // FAIL-CLOSED: every pre-submit field action must succeed. A failed fill/select/
@@ -379,19 +401,32 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     const claimedLive = verify && typeof verify.live_url === 'string' && /^https?:\/\//.test(verify.live_url) ? verify.live_url : null;
     const onHostClaim = claimedLive && hostMatchesExpected(hostOf(claimedLive), expectedHost) ? claimedLive : null;
     // STRICT booleans only — the verifier output is LLM/page-influenced, so a string
-    // "false"/"true" must NOT be truthy-coerced into a confirmation. Anything that isn't
-    // exactly `true` is treated as not-that-state (→ falls through to the evidence path).
-    const confirmed = !!verify && (verify.success === true || verify.pending === true);
-    const rejected = !confirmed && !!verify && verify.rejected === true;
+    // "false"/"true" must NOT be truthy-coerced. `rejected` is computed INDEPENDENTLY and
+    // WINS over success/pending: on a contradictory page (thank-you copy + a validation/
+    // gate error), a clear rejection must park the row, not record a phantom placement.
+    const rejected = !!verify && verify.rejected === true;
+    const confirmed = !rejected && !!verify && (verify.success === true || verify.pending === true);
     const placed = (msg) => ({ outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2 || shot1, notes: [(verify && verify.notes) || msg, onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200) });
 
-    // EVIDENCE-based outcome (not "a click happened"). placed (no-retry → no dup) ONLY
-    // when the verifier confirmed OR a submit/nav request actually reached the pinned
-    // host. A clear rejection, an off-host (nothing-sent) submit, or no observed
-    // submission at all → NOT placed (so the verifier never polls a phantom listing).
-    if (confirmed) return placed('submitted');
+    // EVIDENCE-based outcome (not "a click happened"), ordered so the SAFE verdict wins on
+    // ambiguity: a clear rejection, then a confirmation, then a form that NAVIGATED off-host
+    // (its data was blocked → nothing reached the directory) PREFERRED over loose dispatch
+    // evidence, then on-host dispatch, then a bare off-host abort, then no-evidence. So a row
+    // is only marked placed (no-retry → no dup) when confirmed, or a real submit reached the
+    // pinned host and the form never navigated its data off-host.
     if (rejected) return { outcome: 'failed', errorCode: 'submit_rejected', screenshot: shot2 || shot1, notes: (verify && verify.notes) || 'directory rejected the submission' };
+    if (confirmed) return placed('submitted');
+    // The form NAVIGATED off-host with its data → blocked by the egress lock, directory never
+    // got it. Stays submit_blocked even if an on-host request also dispatched, so a genuinely
+    // off-host submission is never falsely marked placed.
+    if (submitNavOffHost) return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot2 || shot1, notes: 'form navigated off the pinned host (aborted) — nothing submitted' };
+    // A submit reached the pinned host and the form never navigated its data off-host. A
+    // later off-host abort here is an incidental analytics/sendBeacon POST or a post-submit
+    // confirmation/login/tracking redirect — NOT the submission leaving — so the row already
+    // landed at the directory: preserve it as placed.
     if (submitDispatched) return placed('submitted; unconfirmed (request reached host)');
+    // A submit/nav request went off-host but nothing on-host dispatched either (e.g. a
+    // GET-form submit navigating off-host) → nothing reached the directory.
     if (submitAborted) return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot2 || shot1, notes: 'submit request went off the pinned host (aborted) — nothing submitted' };
     return { outcome: 'failed', errorCode: 'no_submit_evidence', screenshot: shot2 || shot1, notes: 'submit clicked but no submission request observed and unconfirmed' };
   } catch (err) {

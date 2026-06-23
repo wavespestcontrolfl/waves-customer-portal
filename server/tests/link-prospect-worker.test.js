@@ -1,4 +1,18 @@
-const { mapReportToPatch, businessProfile } = require('../services/seo/link-prospect-worker');
+const { mapReportToPatch, businessProfile, effectiveAutomationPolicy } = require('../services/seo/link-prospect-worker');
+
+describe('link prospect worker — signup claim safety policy', () => {
+  test('signup claims default to submit_free (Hermes path with no policy can\'t lease parked rows)', () => {
+    expect(effectiveAutomationPolicy('signup', null)).toBe('submit_free');
+    expect(effectiveAutomationPolicy('signup', undefined)).toBe('submit_free');
+  });
+  test('an explicit policy is honored; "any" deliberately bypasses the filter', () => {
+    expect(effectiveAutomationPolicy('signup', 'needs_account')).toBe('needs_account');
+    expect(effectiveAutomationPolicy('signup', 'any')).toBeNull();
+  });
+  test('outreach lane has no automation_policy filter', () => {
+    expect(effectiveAutomationPolicy('outreach', null)).toBeNull();
+  });
+});
 
 describe('link prospect worker — report mapping', () => {
   test('placed records live_url/anchor/evidence, sets status=placed, releases lease', () => {
@@ -14,6 +28,24 @@ describe('link prospect worker — report mapping', () => {
     expect(p.evidence_url).toBe('https://shot/1.png');
     expect(p.claimed_at).toBeNull();
     expect(p.claimed_by).toBeNull();
+  });
+  test('cited_homepage persists to quality_signals (so the verifier reconciles homepage)', () => {
+    const p = mapReportToPatch('placed', { pending: true, cited_homepage: true, notes: 'auto-submitted citation' });
+    const q = JSON.parse(p.quality_signals);
+    expect(q.cited_homepage).toBe(true);
+    expect(q.pending).toBe(true);
+    // a placement WITHOUT the flag must not set it
+    const p2 = mapReportToPatch('placed', { live_url: 'https://x.com/biz', notes: 'editorial' });
+    expect(p2.quality_signals).toBeUndefined();
+  });
+  test('location persists to quality_signals (so alreadyPlacedAt de-dupes per GBP location)', () => {
+    const p = mapReportToPatch('placed', { pending: true, cited_homepage: true, location: 'sarasota', notes: 'auto-submitted citation' });
+    const q = JSON.parse(p.quality_signals);
+    expect(q.location).toBe('sarasota');
+    expect(q.cited_homepage).toBe(true);
+    // location alone (no pending/cited_homepage flags) still stamps quality_signals
+    const p2 = mapReportToPatch('placed', { live_url: 'https://x.com/biz', location: 'default' });
+    expect(JSON.parse(p2.quality_signals).location).toBe('default');
   });
 
   test('skipped marks rejected and releases lease', () => {

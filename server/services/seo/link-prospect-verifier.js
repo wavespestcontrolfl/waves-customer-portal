@@ -29,6 +29,19 @@ const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
+const OUR_HOMEPAGE = `https://${OUR_DOMAIN}`;
+
+// THE single source of truth for "what URL should this prospect's backlink point at":
+// a row the SIGNUP RUNNER created (flagged quality_signals.cited_homepage — it submits the
+// homepage as the listing website) → the homepage; everything else → its money-page
+// target_page. Scoped by the flag, NOT link_type, so a MANUAL/strategy directory/citation
+// row (same link_types) with a real money-page target still verifies against that page.
+// Used by the DataForSEO reconcile, the crawl fallback, AND the Omega dofollow
+// confirmation so every path agrees.
+function expectedTargetUrl(prospect) {
+  const q = parseQuality(prospect && prospect.quality_signals);
+  return q.cited_homepage ? OUR_HOMEPAGE : (prospect && prospect.target_page);
+}
 const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
 
 function stripUrl(u) {
@@ -68,7 +81,9 @@ function matchesTargetUrl(candidate, expected) {
 }
 
 function backlinkTargetsProspect(link, prospect) {
-  const expected = normalizeComparableUrl(prospect.target_page);
+  // Citations link to the homepage; reconcile signup-lane rows against the homepage so an
+  // approved homepage listing matches (else it never matches target_page → stays pending).
+  const expected = normalizeComparableUrl(expectedTargetUrl(prospect));
   if (!expected) return false;
   const candidates = [
     link.target_url,
@@ -79,6 +94,43 @@ function backlinkTargetsProspect(link, prospect) {
     link.url,
   ].map(normalizeComparableUrl).filter(Boolean);
   return candidates.some((candidate) => matchesTargetUrl(candidate, expected));
+}
+
+// seo_backlinks.first_seen is the calendar date (ET) a link was FIRST discovered.
+// Normalize whatever pg hands back — a JS Date for a `date`/`timestamp` column, or a
+// 'YYYY-MM-DD…' string for a text column — to a bare 'YYYY-MM-DD' for a lexical compare.
+// (A `date` column arrives as a Date at UTC midnight, so toISOString().slice(0,10)
+// returns the stored calendar date with no timezone shift — do NOT re-apply ET here.)
+function comparableFirstSeen(row) {
+  const v = row && row.first_seen;
+  if (!v) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
+}
+
+// Inclusive lower bound (ET calendar date) for a backlink that could only be OUR
+// just-approved placement: the day AFTER submission. seo_backlinks.first_seen is DATE-only
+// (no time component), and the weekly backlink scan and the citation runner are BOTH
+// scheduled Sunday 03:30 ET — so a directory→homepage link that pre-existed our citation
+// but was (re)discovered the SAME ET day we submit shares our submission date and can't be
+// told apart by date alone. Treat same-day as ambiguous → require first_seen STRICTLY after
+// the submission day. A slow-moderation citation is never discovered the same day anyway,
+// so the day-after floor loses nothing real while closing the same-day false-promotion.
+// (backlink-monitor writes first_seen as an ET date and we derive the floor via etDateString
+// too, so both sides are ET calendar dates — no UTC/ET skew.)
+function placementFloorEt(submittedAt) {
+  const t = Date.parse(submittedAt || '');
+  if (Number.isNaN(t)) return null;
+  return etDateString(new Date(t + 24 * 60 * 60 * 1000));
+}
+
+// True if this backlink was first seen on/after the placement floor. No floor (no usable
+// submitted_at) → don't tighten (preserve legacy behavior). Unknown first_seen → exclude:
+// we can't prove the link post-dates our submission, so it must not promote a pending row.
+function firstSeenOnOrAfter(row, floorDate) {
+  if (!floorDate) return true;
+  const fs = comparableFirstSeen(row);
+  return fs ? fs >= floorDate : false;
 }
 
 // Find an ACTIVE inbound link in seo_backlinks that corresponds to this prospect's
@@ -102,12 +154,45 @@ async function reconcileFromProfile(prospect) {
 async function reconcileByDomain(prospect) {
   const dom = comparableDomain(prospect.target_domain);
   if (!dom) return null;
+  const q = parseQuality(prospect.quality_signals);
+  // AMBIGUITY GUARD for homepage-cited rows: they all target the bare homepage, so a
+  // single directory→homepage backlink can't be attributed to a specific per-location
+  // listing. If MORE THAN ONE pending homepage-cited row exists for this directory
+  // (multi-location placements — Venice, Parrish, …), the domain reconcile is ambiguous:
+  // matching the one homepage backlink to all of them would mark every location row live
+  // off one link and duplicate-Omega the same source_url. Bail → they await a known
+  // live_url (profile reconcile / crawl) or manual reconciliation.
+  if (q.cited_homepage) {
+    // Count ALL active homepage-cited placements for this directory — pending AND
+    // already live/indexed (NOT just pending): once one location row is live for the
+    // directory, a later pending sibling must STILL be treated as ambiguous (else it'd
+    // reconcile against the existing homepage backlink and mark a 2nd location live +
+    // duplicate-Omega the same source_url). >1 (i.e. this row has a sibling) → bail.
+    const siblings = await db('seo_link_prospects')
+      .whereIn('status', ['placed', 'live', 'indexed'])
+      .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [dom])
+      .whereRaw("COALESCE(quality_signals->>'cited_homepage','') = 'true'")
+      .count('* as c').first();
+    if (Number(siblings && siblings.c) > 1) return null;
+  }
   const rows = await db('seo_backlinks')
     // Active only — never promote/index from a 'disavowed' (or 'lost') link.
     .where({ status: 'active' })
     .whereRaw("lower(regexp_replace(source_domain, '^www\\.', '')) = ?", [dom])
     .orderBy('last_checked', 'desc')
     .limit(25);
+  // TEMPORAL GUARD for homepage-cited placements: these target only the bare homepage,
+  // so ANY pre-existing directory→homepage backlink (a prior free listing, an unrelated
+  // link DataForSEO already indexed) satisfies backlinkTargetsProspect and would falsely
+  // promote this still-pending, unapproved submission to live with that OLD source_url.
+  // Only count links FIRST SEEN strictly AFTER our submission day (submitted_at, set on
+  // pending placements) as evidence OUR listing went live — same-day is ambiguous given a
+  // date-only first_seen. Scoped to homepage-cited rows WITH a submission timestamp, so
+  // money-page rows and the moved-profile/fresh-URL reconciles are unchanged.
+  if (q.cited_homepage && q.submitted_at) {
+    const floor = placementFloorEt(q.submitted_at);
+    return rows.find((row) => firstSeenOnOrAfter(row, floor) && backlinkTargetsProspect(row, prospect)) || null;
+  }
   return rows.find((row) => backlinkTargetsProspect(row, prospect)) || null;
 }
 
@@ -161,7 +246,7 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowCon
   // Omega credit. DataForSEO's is_dofollow is unreliable (defaults true), so we
   // trust it only when a crawl already parsed the rel attribute (dofollowConfirmed).
   if (!dofollowConfirmed) {
-    const c = await crawlFn(liveUrl, prospect.target_page);
+    const c = await crawlFn(liveUrl, expectedTargetUrl(prospect));
     if (!c.found || c.isDofollow === false) {
       // Not dofollow (or not reachable right now): release the claim, don't spend.
       const release = { quality_signals: db.raw("quality_signals - 'omega_inflight'"), updated_at: new Date() };
@@ -313,7 +398,7 @@ async function verifyOne(prospect) {
 
     // 2. Crawl fallback — fresh links, or a moved/false-lost page. The crawl parses
     // the real rel attribute, so its dofollow verdict is authoritative.
-    const crawl = await crawlForLink(prospect.live_url, prospect.target_page);
+    const crawl = await crawlForLink(prospect.live_url, expectedTargetUrl(prospect));
     if (crawl.found) {
       return markLive(prospect, {
         isDofollow: crawl.isDofollow, anchorText: crawl.anchorText, dofollowConfirmed: true,
@@ -371,5 +456,6 @@ async function run({ limit = 200 } = {}) {
 module.exports = { run, verifyOne, crawlForLink, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
-  comparableDomain, parseQuality,
+  comparableDomain, parseQuality, expectedTargetUrl,
+  comparableFirstSeen, placementFloorEt, firstSeenOnOrAfter,
 };
