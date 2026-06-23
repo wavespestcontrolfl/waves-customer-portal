@@ -1514,43 +1514,57 @@ const SOURCE_ICON = {
 // view, so the highlight is the "you're here" cue. Shared by the desktop and
 // mobile estimate lists. Returns the id to highlight while the cue is active,
 // else null. `rows` is the currently rendered (post-filter) estimate list.
-function useEstimateDeepLinkHighlight({ loading, rows, filter, setFilter }) {
-  const targetId = useMemo(
-    () => new URLSearchParams(window.location.search).get("estimateId") || null,
-    [],
-  );
-  const [scrolled, setScrolled] = useState(false);
-  const [faded, setFaded] = useState(false);
-  const settledRef = useRef(false);
+//
+// Tracks the live ?estimateId param (not a one-time snapshot) so a second
+// notification click re-triggers the cue while the list stays mounted, and only
+// settles after a clean load — a target that's missing mid-load or after a
+// failed fetch is retried, not given up on.
+function useEstimateDeepLinkHighlight({ loading, error, rows, filter, setFilter }) {
+  const [searchParams] = useSearchParams();
+  const targetId = searchParams.get("estimateId") || null;
+  const [activeId, setActiveId] = useState(null);
+  // The id we've already resolved (scrolled to, or confirmed absent). Lets a
+  // new target re-run while older ones stay settled.
+  const settledRef = useRef(null);
 
-  // Locate + scroll to the target once it appears in the rendered list.
   useEffect(() => {
-    if (!targetId || faded || settledRef.current || loading) return;
+    // Target changed (new click, or param cleared) — reset so it resolves anew.
+    if (settledRef.current !== null && settledRef.current !== targetId) {
+      settledRef.current = null;
+      setActiveId(null);
+    }
+    if (!targetId || settledRef.current === targetId) return;
+
     const present = rows.some((e) => String(e.id) === String(targetId));
-    if (!present) {
-      // Not in the current filter — widen to All (where every non-archived
-      // estimate lives) once, then re-check on the next load. If it's still
-      // absent under All it's archived/deleted; give up quietly.
-      if (filter !== "all") setFilter("all");
-      else settledRef.current = true;
+    if (present) {
+      settledRef.current = targetId;
+      const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
+      document
+        .querySelector(`[data-estimate-id="${sel}"]`)
+        ?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      setActiveId(targetId);
       return;
     }
-    settledRef.current = true;
-    const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
-    const node = document.querySelector(`[data-estimate-id="${sel}"]`);
-    node?.scrollIntoView?.({ behavior: "smooth", block: "center" });
-    setScrolled(true);
-  }, [targetId, faded, loading, rows, filter, setFilter]);
+    // Not in the rendered list yet. While the load is in flight or has failed,
+    // wait — a Retry may still bring the target in; don't settle prematurely.
+    if (loading || error) return;
+    // Loaded cleanly but absent under the current filter — widen to All (where
+    // every non-archived estimate lives) once, then re-check on the next load.
+    if (filter !== "all") {
+      setFilter("all");
+      return;
+    }
+    settledRef.current = targetId; // genuinely absent (archived / deleted)
+  }, [targetId, loading, error, rows, filter, setFilter]);
 
-  // Fade the highlight a few seconds after landing on it. Keyed on `scrolled`
-  // (flips once) so the timer is set up exactly once.
+  // Fade the highlight a few seconds after it activates.
   useEffect(() => {
-    if (!scrolled) return undefined;
-    const t = setTimeout(() => setFaded(true), 2600);
+    if (!activeId) return undefined;
+    const t = setTimeout(() => setActiveId(null), 2600);
     return () => clearTimeout(t);
-  }, [scrolled]);
+  }, [activeId]);
 
-  return targetId && scrolled && !faded ? targetId : null;
+  return activeId;
 }
 
 function EstimatePipelineViewV2() {
@@ -1833,6 +1847,7 @@ function EstimatePipelineViewV2() {
 
   const highlightId = useEstimateDeepLinkHighlight({
     loading,
+    error,
     rows: filtered,
     filter,
     setFilter,
@@ -3537,6 +3552,7 @@ function EstimatesMobileListView({ onCreateFromAddress }) {
 
   const highlightId = useEstimateDeepLinkHighlight({
     loading,
+    error,
     rows: flat,
     filter,
     setFilter,
@@ -3773,12 +3789,18 @@ export default function EstimatesPageV2() {
     );
     const tabParam = searchParams.get("tab");
     const hasTabParam = TABS.some((t) => t.key === tabParam);
-    if (!hasIncoming && !hasTabParam) return;
+    // A notification deep-link (?estimateId=) that arrives via client-side
+    // navigation while this page is already mounted must still snap to the
+    // Estimates tab so the row can be scrolled to + highlighted.
+    const hasEstimateId = !!searchParams.get("estimateId");
+    if (!hasIncoming && !hasTabParam && !hasEstimateId) return;
     if (hasIncoming) {
       setPrefill(incoming);
       setActiveTab("new");
     } else if (hasTabParam) {
       setActiveTab(tabParam);
+    } else if (hasEstimateId) {
+      setActiveTab("estimates");
     }
     if (hasIncoming) {
       const stripped = new URLSearchParams(searchParams);
