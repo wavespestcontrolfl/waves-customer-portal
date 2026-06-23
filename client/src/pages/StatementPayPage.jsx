@@ -368,6 +368,18 @@ export default function StatementPayPage() {
       .then(({ ok, d }) => {
         if (!alive) return;
         if (!ok) {
+          // RETRY-AFTER-REDIRECT FIRST: on the failed-redirect recovery path the
+          // statement row can still be lagging as `processing`, so the backend
+          // 409s (now carrying inProgress) before it can reset/mint a PI. The right
+          // guidance is "refresh in a moment" — the recovery completes once the
+          // webhook lands — NOT the steady-state processing notice below, which
+          // would imply nothing to do and then block re-setup until a full reload.
+          const staleRetry = retryAfterRedirect
+            && (d?.inProgress || /in progress/i.test(d?.error || ""));
+          if (staleRetry) {
+            setSetupError("We're still updating your statement after your last attempt — please refresh in a moment.");
+            return;
+          }
           // Benign in-flight states are NOT failures — show calm guidance.
           if (d?.microdepositPending) {
             setSetupNotice(
@@ -384,12 +396,7 @@ export default function StatementPayPage() {
             );
             return;
           }
-          // A 409 on the retry path means the statement is still processing (the
-          // webhook hasn't reverted the failed attempt yet) — say so plainly.
-          const stale = retryAfterRedirect && /in progress/i.test(d?.error || "");
-          setSetupError(stale
-            ? "We're still updating your statement after your last attempt — please refresh in a moment."
-            : (d?.error || "Could not start the payment."));
+          setSetupError(d?.error || "Could not start the payment.");
           return;
         }
         setSetup(d);
