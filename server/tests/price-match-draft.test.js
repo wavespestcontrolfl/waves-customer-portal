@@ -443,4 +443,14 @@ describe('createDraft owner-copy notification (PRICE_MATCH_NOTIFY_OWNER)', () =>
     await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => false, sendOne } });
     expect(sendOne).not.toHaveBeenCalled();
   });
+
+  test('FAILS CLOSED: never sends the owner copy when its address resolves to the rep', async () => {
+    process.env.PRICE_MATCH_NOTIFY_OWNER = 'true';
+    process.env.PRICE_MATCH_OWNER_EMAIL = 'MMRoczkowski@SiteOne.com'; // == Mark (default), case/space-insensitive
+    const db = makeFakeDb();
+    const sendOne = jest.fn(async () => ({ messageId: 'm' }));
+    const row = await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => true, sendOne } });
+    expect(row.status).toBe('pending'); // draft still staged
+    expect(sendOne).not.toHaveBeenCalled(); // but NOT auto-delivered to the rep
+  });
 });
