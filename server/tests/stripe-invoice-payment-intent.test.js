@@ -321,6 +321,45 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+  test('credit triage validates PI ownership before canceling (refuses another invoice’s PI)', async () => {
+    // Defense-in-depth: if an invoice row ever points at a PI whose metadata
+    // belongs to a different invoice, the triage must NOT cancel it — it raises
+    // the same ownership error the main setup path does.
+    customerAccountCredits = '50.00';
+    invoiceRow.stripe_payment_intent_id = 'pi_other_invoice';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_other_invoice',
+      status: 'requires_action',
+      metadata: { waves_invoice_id: 'a_different_invoice' },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toThrow('PaymentIntent does not belong to this invoice');
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('credit triage fails closed (409) when a stale card PI cannot be cleared — never re-mints at gross', async () => {
+    // If the triage cancel fails transiently, credit can't apply; continuing would
+    // re-mint the replacement at the gross total. Refuse with a retryable 409
+    // instead of charging the customer the pre-credit amount.
+    customerAccountCredits = '50.00';
+    invoiceRow.stripe_payment_intent_id = 'pi_stale_card';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_stale_card',
+      status: 'requires_action',
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+    stripeClient.paymentIntents.cancel.mockRejectedValueOnce(new Error('network blip'));
+    stripeClient.paymentIntents.create = jest.fn();
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({ statusCode: 409 });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
   test('fails closed when a stuck requires_action PI cannot be canceled before replacement', async () => {
     // If the cancel fails the old PI may have just raced into processing/succeeded;
     // minting a replacement while its client secret can still collect would

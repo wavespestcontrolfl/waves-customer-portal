@@ -126,6 +126,38 @@ describe('StripeService.createStatementPaymentIntent', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+  test('a processing statement returns 409 with inProgress=true (calm bank notice, not red error)', async () => {
+    // Reopened right after an ACH confirm, before the webhook flips the row: the
+    // statement is already `processing`. assertPayable must carry inProgress so the
+    // page shows the calm bank-processing state, not the red setup error.
+    statementRow.status = 'processing';
+
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripePayerCustomer').mockResolvedValue('cus_test');
+
+    await expect(StripeService.createStatementPaymentIntent(statementRow.id))
+      .rejects.toMatchObject({ statusCode: 409, inProgress: true });
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+  });
+
+  test('an active processing PI returns 409 with inProgress=true', async () => {
+    // The statement row is still payable but its PI already moved to `processing`
+    // (ACH debit clearing). Non-replaceable, benign in-flight — inProgress=true.
+    statementRow.stripe_payment_intent_id = 'pi_processing';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_processing',
+      status: 'processing',
+      metadata: { waves_statement_id: statementRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripePayerCustomer').mockResolvedValue('cus_test');
+
+    await expect(StripeService.createStatementPaymentIntent(statementRow.id))
+      .rejects.toMatchObject({ statusCode: 409, inProgress: true });
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+  });
+
   test('recovers a card PI stuck in requires_action by canceling and minting a fresh one', async () => {
     // A card 3DS handoff abandoned mid-statement leaves a never-captured PI in
     // requires_action with NO verify_with_microdeposits next_action. Cancel it and
