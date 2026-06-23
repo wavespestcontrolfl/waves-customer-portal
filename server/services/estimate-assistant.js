@@ -541,7 +541,12 @@ function buildEstimateAssistantContext({
   const firstName = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0]
     || cleanText(estimate.customerFirstName);
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
-  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(isGermanRoachCleanoutContextRow);
+  // Expose separately-billed one-time add-ons that have their own Ask Waves chip
+  // (German-roach cleanout, Bora-Care) even on a recurring estimate, so the
+  // assistant context carries the row the chip's question is about.
+  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(
+    (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row),
+  );
   const exposeOneTimeContext = !quoteRequired
     && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
     && (hasOneTimeValue || oneTimeServices.length > 0);
@@ -611,7 +616,16 @@ function buildEstimateAssistantContext({
 }
 
 function listServices(context = {}) {
-  const rows = Array.isArray(context.services) ? context.services : [];
+  const serviceRows = Array.isArray(context.services) ? context.services : [];
+  const oneTimeRows = Array.isArray(context.oneTime?.items) ? context.oneTime.items : [];
+  // Append separately-billed one-time add-ons (e.g. Bora-Care) that aren't already
+  // in the service list, deduped, so "what's included?" lists them too. For a
+  // one-time estimate context.services already equals these rows, so the dedup
+  // keeps the list unchanged.
+  const keyOf = (row) => `${String(row?.service || '').toLowerCase()}|${String(row?.label || row?.name || '').toLowerCase()}`;
+  const seen = new Set(serviceRows.map(keyOf));
+  const extraOneTime = oneTimeRows.filter((row) => !seen.has(keyOf(row)));
+  const rows = [...serviceRows, ...extraOneTime];
   if (!rows.length) return 'I do not see a detailed service list on this estimate.';
   return rows.map((row) => row.summary || serviceLine(row)).filter(Boolean).join('\n');
 }
@@ -671,6 +685,17 @@ function isGermanRoachCleanoutContextRow(row = {}) {
   // `\bclean\s*out\b` matches "cleanout" and "clean out" in one pattern, so the
   // roach `&&` gate can't be bypassed by a non-roach cleanout row.
   return /\broach(?:es)?\b/.test(text) && /\bclean\s*out\b/.test(text);
+}
+
+function isBoraCareContextRow(row = {}) {
+  const service = cleanText(row.service || row.key).toLowerCase();
+  if (service === 'bora_care' || service === 'boracare') return true;
+  const text = cleanText([row.label, row.name, row.displayName, row.detail, row.summary].filter(Boolean).join(' '))
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  // Mirror isBoraCareOneTimeItem in estimate-public.js: a row is Bora-Care if it
+  // reads "bora care" OR mentions "borate", so borate-labeled rows are recognized.
+  return /bora\s*care/.test(text) || text.includes('borate');
 }
 
 // True when the estimate itself is a German Roach Cleanout (canonical service
@@ -740,6 +765,31 @@ function listFirstVisitFees(context = {}) {
     .join(' ');
 }
 
+// True when the estimate itself includes Bora-Care (recurring service row or
+// one-time item). The deterministic Bora-Care answer is gated on this so a
+// wood/beetle/borate question on a non-Bora estimate never implies the quote
+// includes borate wood treatment.
+function estimateContextHasBoraCare(context = {}) {
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.some(isBoraCareContextRow);
+}
+
+// A question is a Bora-Care intent only when it names Bora-Care/borate, or pairs
+// "wood" with a treatment/pest term. Bare "beetle"/"fungi" do NOT qualify, so on a
+// mixed estimate a lawn-fungus or shrub-beetle question still reaches the relevant
+// service branch instead of the wood-treatment answer.
+function isBoraCareIntent(question = '') {
+  const text = String(question).toLowerCase();
+  // Accept "bora care", "bora-care", "boracare", and "borate" (mirrors the row
+  // classifier); "wood" still needs a treatment/pest term to qualify.
+  return /bora[\s-]?care/.test(text)
+    || text.includes('borate')
+    || (/\bwood/.test(text) && /(treat|destroy|beetle|fungi|boring|decay)/.test(text));
+}
+
 function answerEstimateQuestionFallback(question, context = {}) {
   const q = cleanText(question).toLowerCase();
   const phone = context.company?.phone || COMPANY.phone;
@@ -747,6 +797,16 @@ function answerEstimateQuestionFallback(question, context = {}) {
   const billingText = context.billing?.amountText;
   const services = listServices(context);
   const oneTimeText = context.oneTime?.amountText;
+
+  // Bora-Care questions are answered first — above the include/coverage, safety,
+  // and product branches — so phrasings like "does Bora-Care cover beetles?" or
+  // "is Bora-Care safe?" reach the borate-specific answer instead of the generic
+  // service list or label-direction copy. Gated on the estimate actually including
+  // Bora-Care AND a qualified Bora-Care intent so a lawn-fungus / shrub-beetle
+  // question on a mixed estimate still reaches the relevant service branch.
+  if (estimateContextHasBoraCare(context) && isBoraCareIntent(q)) {
+    return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
+  }
 
   if (/\b(include|included|cover|coverage|what.*get|plan)\b/.test(q)) {
     return [
@@ -910,6 +970,17 @@ async function answerEstimateQuestion({
   }
 
   if (context.billing?.quoteRequired) {
+    return {
+      answer: answerEstimateQuestionFallback(cleanQuestion, context),
+      source: 'fallback',
+    };
+  }
+
+  // Bora-Care intents are answered deterministically (controlled borate copy), so
+  // route them to the fallback before the live models. The new Bora-Care chip and
+  // coverage phrasings don't match the generic force-fallback gate below, so they
+  // would otherwise reach the LLM and bypass the guaranteed borate answer.
+  if (estimateContextHasBoraCare(context) && isBoraCareIntent(cleanQuestion)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',

@@ -102,6 +102,21 @@ export const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for lawn care.",
     },
   },
+  bora_care: {
+    headline: "Hey {first}, here's your Bora-Care wood treatment quote.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your wood-treatment areas before pricing this estimate',
+    aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
+    askChips: [
+      'What does Bora-Care treat?',
+      'Is Bora-Care safe for pets & kids?',
+      'What product is used for Bora-Care?',
+      'When should this be done?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this quote.",
+    },
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',

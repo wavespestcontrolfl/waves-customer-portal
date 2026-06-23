@@ -15,6 +15,7 @@ const SERVICES = [
   { id: 'tree_shrub', label: 'Tree & Shrub', duration: 60, icon: 'tree', desc: 'Ornamental plant care' },
   { id: 'termite', label: 'Termite Inspection', duration: 90, icon: 'shield', desc: 'WDO inspection + treatment plan' },
   { id: 'rodent', label: 'Rodent Control', duration: 60, icon: 'mouse', desc: 'Exclusion + monitoring stations' },
+  { id: 'bora_care', label: 'Bora-Care Wood Treatment', duration: 90, icon: 'shield', desc: 'Borate treatment for termites, beetles & wood-decay fungi' },
 ];
 
 const ONE_TIME_BOOKING_SOURCES = new Set(['estimate-accept', 'quote-wizard-onetime']);

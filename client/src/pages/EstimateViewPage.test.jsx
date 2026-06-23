@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { EstimateAskBar, OneTimeBreakdownCard, ServiceSection, estimateAddServiceOffer, getServiceLabel } from './EstimateViewPage';
+import { EstimateAskBar, OneTimeBreakdownCard, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimePriceCopy } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -192,6 +192,53 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getByText('Flea Treatment Package')).toBeInTheDocument();
     expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
     expect(screen.getByText('Exterior yard area exceeds automatic quote threshold.')).toBeInTheDocument();
+  });
+});
+
+describe('oneTimePriceCopy', () => {
+  it('returns Bora-Care wood-treatment copy without the pest callback line', () => {
+    const copy = oneTimePriceCopy({ total: 1051, items: [{ service: 'bora_care', label: 'Bora-Care', amount: 1051 }] });
+    expect(copy).toMatch(/borate wood treatment/i);
+    expect(copy).toMatch(/wood-boring beetles|wood-decay fungi|termites/);
+    // The SSR Bora-Care path renders no pest callback/guarantee; the React path
+    // must match instead of falling through to the default pest copy.
+    expect(copy).not.toMatch(/30-day callback period if pests return/);
+  });
+
+  it('detects a Bora-Care row labeled only with the raw service key', () => {
+    const copy = oneTimePriceCopy({ total: 900, items: [{ service: 'bora_care', amount: 900 }] });
+    expect(copy).toMatch(/borate wood treatment/i);
+    expect(copy).not.toMatch(/30-day callback period if pests return/);
+  });
+
+  it('keeps the default pest callback copy for a generic one-time pest visit', () => {
+    const copy = oneTimePriceCopy({ total: 250, items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 250 }] });
+    expect(copy).toMatch(/30-day callback period if pests return/);
+  });
+
+  it('keeps Bora-Care-only copy when the only other row is a non-billable discount', () => {
+    const copy = oneTimePriceCopy({
+      total: 893.35,
+      items: [
+        { service: 'bora_care', label: 'Bora-Care', amount: 1051 },
+        { service: 'one_time_adjustment', label: 'WaveGuard Member Discount', amount: -157.65 },
+      ],
+    });
+    expect(copy).toMatch(/borate wood treatment/i);
+    expect(copy).not.toMatch(/30-day callback period if pests return/);
+  });
+
+  it('falls back to the default copy when Bora-Care is mixed with another positive billable row', () => {
+    // Mirrors the server hasOnlyBoraCareServiceMix: a positive unknown charge
+    // blocks the Bora-Care-only classification, so the callback copy stays.
+    const copy = oneTimePriceCopy({
+      total: 1251,
+      items: [
+        { service: 'bora_care', label: 'Bora-Care', amount: 1051 },
+        { service: 'one_time_adjustment', label: 'Additional treatment area', amount: 200 },
+      ],
+    });
+    expect(copy).toMatch(/30-day callback period if pests return/);
   });
 });
 

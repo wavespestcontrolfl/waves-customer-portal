@@ -8,12 +8,17 @@ const {
   buildAcceptSuccessPayload,
   acceptedOneTimeChoiceListForEstimate,
   acceptanceServiceLists,
+  attachPublicPricingContract,
+  bookingServiceFor,
+  buildEstimateAskPrompts,
+  serviceCategoryForOneTimeChoice,
   applySelectedLawnTierToEstimateData,
   applySelectedTreeShrubTierToEstimateData,
   assertExistingAppointmentUpdateApplied,
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
   buildEstimateInvoiceModeDraft,
+  buildOneTimeInvoiceServiceLabel,
   buildPricingBundle,
   buildStandardPayPerApplicationInvoiceCopy,
   buildWaveGuardIntelligencePayload,
@@ -2440,6 +2445,544 @@ describe('public estimate one-time breakdown', () => {
     expect(noteOccurrences).toBe(1);
     expect(warrantyOccurrences).toBe(1);
     expect(html).toContain('No extended warranty selected.');
+  });
+
+  test('server-rendered Bora-Care estimate uses Bora-Care copy + AI card + chips, not pest defaults', () => {
+    // Bora-Care comes in as service `bora_care`; classify it instead of letting
+    // it fall through to the pest_control default.
+    expect(deriveServiceCategory({}, [], [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }]))
+      .toBe('bora_care');
+
+    const html = renderPage('boracare-onetime-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1051,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1051,
+          items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    // Hero + Waves AI card are Bora-Care-specific, not the generic/pest fallback.
+    // (The hero apostrophe is HTML-escaped, so match without it.)
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
+    expect(html).toContain('the Bora-Care application rate to price this treatment.');
+    expect(html).not.toContain('choose your pest control option');
+    expect(html).not.toContain('to show the details behind your WaveGuard plan.');
+
+    // Description note + treatment-detail label replace the bare "One-time service".
+    expect(html).toContain('Bora-Care is a borate wood treatment applied to the measured attic and surface areas.');
+    expect(html).toContain('Bora-Care wood treatment');
+
+    // Ask Waves surfaces a Bora-Care service chip + a Bora-Care-worded safety chip
+    // (so clicking it routes to the borate answer); never the bait/pest chips it
+    // used to fall back to, and not the generic safety chip on a Bora-Care-only quote.
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+    expect(html).toContain('data-estimate-ask-prompt="Is Bora-Care safe for pets &amp; kids?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How do you handle ants?"');
+
+    // No guarantee/coverage line for Bora-Care — the wrong pest callback is gone
+    // and no mini-guarantee renders.
+    expect(html).not.toContain('30-day callback period if pests return');
+    expect(html).not.toContain('class="mini-guarantee"');
+  });
+
+  test('Bora-Care wins over the termite-install heuristic and shows no bait chip', () => {
+    // Canonical service key `bora_care` must classify ahead of the generic
+    // termite-install heuristic even with install/termite wording in the label.
+    const item = { service: 'bora_care', name: 'Termite Bora-Care Install', price: 900 };
+    expect(deriveServiceCategory({}, [], [item])).toBe('bora_care');
+
+    const html = renderPage('boracare-termite-label-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 900,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 900, items: [item], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+  });
+
+  test('mixed Bora-Care + pre-slab one-time quote keeps the pre-slab warranty line', () => {
+    // Suppressing the mini-guarantee for Bora-Care must not hide another billable
+    // row's warranty — only a Bora-Care-only mix omits the line.
+    const html = renderPage('boracare-preslab-mix-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1300,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1300,
+          items: [
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+            { service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 249, warrantyStatus: 'No extended warranty selected.' },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('class="mini-guarantee"');
+    expect(html).toContain('Warranty terms depend on the selected warranty option.');
+  });
+
+  test('Bora-Care-only quote with a member-discount row still renders Bora-Care copy and no pest callback', () => {
+    // The real estimate carries a "WaveGuard Member Discount" one-time row; that
+    // adjustment line must not knock the quote out of the Bora-Care-only path.
+    const html = renderPage('boracare-discount-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 893.35,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 893.35,
+          items: [
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+            { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -157.65 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('Waves AI reviewed your wood-treatment areas before pricing this estimate');
+    expect(html).not.toContain('30-day callback period if pests return');
+    expect(html).not.toContain('class="mini-guarantee"');
+  });
+
+  test('Bora-Care invoice label resolves to the category name, not the raw service key', () => {
+    // Engine-backed rows can arrive with only `service: 'bora_care'` and no name;
+    // the customer-facing label must not surface "bora_care".
+    const label = buildOneTimeInvoiceServiceLabel({
+      estimate: {},
+      estData: { result: { recurring: { services: [] }, oneTime: { total: 1051, items: [{ service: 'bora_care', price: 1051 }] } } },
+      oneTimeList: [{ service: 'bora_care', price: 1051 }],
+    });
+    expect(label).toBe('Bora-Care Wood Treatment');
+  });
+
+  const boraCareAssistantContext = {
+    company: { phone: '941-555-0100' },
+    oneTime: { items: [{ service: 'bora_care', name: 'Bora-Care' }] },
+  };
+
+  test('Ask Waves Bora-Care chip routes to a Bora-Care answer in the assistant fallback', () => {
+    const answer = answerEstimateQuestionFallback('What does Bora-Care treat?', boraCareAssistantContext);
+    expect(answer).toMatch(/Bora-Care/);
+    expect(answer).toMatch(/wood-boring beetles|wood-decay fungi|termites/);
+    expect(answer).not.toMatch(/^I can answer questions/);
+  });
+
+  test('engine/nested Bora-Care estimate still surfaces the Bora-Care chip from normalized rows', () => {
+    // The Bora-Care row only lives under result.results.oneTime (engine/nested
+    // shape); result.oneTime.items is empty, so the raw one-time list the SSR Ask
+    // Waves card used to read would miss it. The chips must come from the
+    // normalized rows so "What does Bora-Care treat?" still renders.
+    const html = renderPage('boracare-engine-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1051,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        // Engine/nested shape: the billable rows live only under results.oneTime —
+        // there is no top-level result.oneTime, so the raw oneTimeItems list is
+        // empty. Name-less engine row carries only the canonical service key.
+        results: {
+          oneTime: { total: 1051, items: [{ service: 'bora_care', price: 1051 }] },
+        },
+      },
+    });
+
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+    // Hero treatment name comes from the normalized rows too, so the nested shape
+    // shows the Bora-Care name instead of falling back to "WaveGuard Bronze" or the
+    // raw "bora_care" service key.
+    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
+    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
+    expect(html).not.toContain('>bora_care<');
+  });
+
+  test('top-level name-less Bora-Care row still resolves the friendly hero treatment name', () => {
+    // result.oneTime.items is present but the Bora-Care row carries only the raw
+    // service key (no name). The hero name must fall back to the normalized rows,
+    // not "WaveGuard {tier}", since the raw names list is empty.
+    const html = renderPage('boracare-nameless-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1051,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 1051, items: [{ service: 'bora_care', price: 1051 }], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
+    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
+    expect(html).not.toContain('>bora_care<');
+  });
+
+  test('Ask Waves Bora-Care safety/product question routes to the Bora-Care answer, not generic safety copy', () => {
+    // "safe" and "product" both match the generic safety/product branch; on a
+    // Bora-Care estimate the Bora-Care branch must be checked first.
+    const safeAnswer = answerEstimateQuestionFallback('Is Bora-Care safe?', boraCareAssistantContext);
+    expect(safeAnswer).toMatch(/borate treatment applied to bare wood/);
+    expect(safeAnswer).not.toMatch(/for every application/);
+
+    const productAnswer = answerEstimateQuestionFallback('What product is used for Bora-Care?', boraCareAssistantContext);
+    expect(productAnswer).toMatch(/borate treatment applied to bare wood/);
+  });
+
+  test('Bora-Care fallback is scoped to Bora-Care estimates — a wood question on a non-Bora estimate stays generic', () => {
+    // The deterministic Bora-Care answer must not fire on an estimate that has no
+    // Bora-Care row, or it would imply borate wood treatment is part of the quote.
+    const pestContext = {
+      company: { phone: '941-555-0100' },
+      services: [{ service: 'pest_control', name: 'Pest Control' }],
+    };
+    const answer = answerEstimateQuestionFallback('Does this cover wood-destroying beetles?', pestContext);
+    expect(answer).not.toMatch(/borate treatment applied to bare wood/);
+  });
+
+  test('context builder exposes a separately billed Bora-Care one-time row in recurring mode', () => {
+    // A recurring estimate that also carries a Bora-Care one-time add-on renders
+    // the Bora-Care chip; the assistant context must include the Bora-Care row so
+    // the chip's question routes to the Bora-Care answer (not generic copy).
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Hannah Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 100,
+        annual_total: 1200,
+        onetime_total: 1051,
+        show_one_time_option: false,
+      },
+      estData: {
+        result: {
+          recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 100 }] },
+        },
+      },
+      pricingBundle: {
+        anchorOneTimePrice: 1051,
+        oneTimeBreakdown: {
+          total: 1051,
+          items: [{ service: 'bora_care', label: 'Bora-Care', amount: 1051 }],
+        },
+        frequencies: [{ key: 'monthly', label: 'Monthly', monthly: 100, annual: 1200 }],
+      },
+      serviceMode: 'recurring',
+    });
+
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.oneTime?.items).toContainEqual(expect.objectContaining({ service: 'bora_care' }));
+
+    const answer = answerEstimateQuestionFallback('Is Bora-Care safe?', context);
+    expect(answer).toMatch(/borate treatment applied to bare wood/);
+    expect(answer).not.toMatch(/for every application/);
+  });
+
+  test('Bora-Care coverage question routes to the Bora-Care answer, not the generic include list', () => {
+    // "cover" matches the include/coverage branch; the Bora-Care branch sits above
+    // it so a Bora-Care coverage question gets the borate-specific answer.
+    const answer = answerEstimateQuestionFallback('Does Bora-Care cover wood-boring beetles?', boraCareAssistantContext);
+    expect(answer).toMatch(/borate treatment applied to bare wood/);
+    expect(answer).not.toMatch(/^This .* estimate includes:/);
+  });
+
+  test('Bora-Care safety chip text routes to the Bora-Care answer', () => {
+    const answer = answerEstimateQuestionFallback('Is Bora-Care safe for pets & kids?', boraCareAssistantContext);
+    expect(answer).toMatch(/borate treatment applied to bare wood/);
+    expect(answer).not.toMatch(/for every application/);
+  });
+
+  test('mixed recurring estimate with a Bora-Care add-on still surfaces the Bora-Care chip', () => {
+    // Pest + Lawn + a separately billed Bora-Care one-time row: the Bora-Care chip
+    // is prioritized so it survives the two-prompt slice instead of being dropped.
+    const html = renderPage('boracare-mixed-chip-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 200,
+      annualTotal: 2400,
+      onetimeTotal: 1051,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { service: 'pest_control', name: 'Pest Control', mo: 100 },
+            { service: 'lawn_care', name: 'Lawn Care', mo: 100 },
+          ],
+        },
+        oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+  });
+
+  test('mixed one-time quote with a name-less Bora-Care row names both services in the hero', () => {
+    // Name-less Bora-Care row + a named Pre-Slab row: the per-row name builder must
+    // represent Bora-Care instead of dropping it because the other row had a name.
+    const html = renderPage('boracare-mixed-name-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1300,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1300,
+          items: [
+            { service: 'bora_care', price: 1051 },
+            { service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 249 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toMatch(/Bora-Care Wood Treatment[^<]*\+[^<]*Pre-Slab Termiticide Treatment|Pre-Slab Termiticide Treatment[^<]*\+[^<]*Bora-Care Wood Treatment/);
+    expect(html).not.toContain('>bora_care<');
+    // The service-details table uses the same friendly name, not "One-time service".
+    expect(html).toContain('<td>Bora-Care Wood Treatment');
+    expect(html).not.toContain('<td>One-time service');
+  });
+
+  test('bookingServiceFor routes a Bora-Care label to the Bora-Care booking service, not pest control', () => {
+    expect(bookingServiceFor('Bora-Care Wood Treatment')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment' });
+    // Bora-Care is checked before termite, so a "Termite Bora-Care" label still routes to Bora-Care.
+    expect(bookingServiceFor('Termite Bora-Care Treatment')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment' });
+    expect(bookingServiceFor('One-Time Pest Control').id).toBe('pest_control');
+  });
+
+  test('buildEstimateAskPrompts uses the Bora-Care safety chip only for a Bora-Care-only quote', () => {
+    const boraOnly = buildEstimateAskPrompts([], [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }]);
+    expect(boraOnly).toContain('Is Bora-Care safe for pets & kids?');
+    expect(boraOnly).not.toContain('Are pets and kids safe?');
+
+    // A positive non-Bora billable row (one_time_adjustment) makes it not
+    // Bora-Care-only, so the generic safety chip is used instead.
+    const mixed = buildEstimateAskPrompts([], [
+      { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+      { service: 'one_time_adjustment', name: 'Additional treatment area', price: 200 },
+    ]);
+    expect(mixed).toContain('Are pets and kids safe?');
+    expect(mixed).not.toContain('Is Bora-Care safe for pets & kids?');
+
+    // A negative discount row does NOT block Bora-Care-only.
+    const withDiscount = buildEstimateAskPrompts([], [
+      { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+      { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -157.65 },
+    ]);
+    expect(withDiscount).toContain('Is Bora-Care safe for pets & kids?');
+  });
+
+  test('React pricing contract surfaces the Bora-Care chip and friendly label for a recurring estimate with a Bora-Care add-on', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 1051, items: [{ service: 'bora_care', label: 'bora_care', amount: 1051 }] } },
+      {},
+      {
+        result: {
+          recurring: {
+            services: [
+              { service: 'pest_control', name: 'Pest Control', mo: 100 },
+              { service: 'lawn_care', name: 'Lawn Care', mo: 100 },
+            ],
+          },
+        },
+      },
+    );
+
+    // #3: the Bora-Care chip is present even though the recurring sections are Pest + Lawn.
+    expect(contract.askChips).toContain('What does Bora-Care treat?');
+    // #5: the raw service-key label is normalized for the client payload.
+    expect(contract.oneTimeBreakdown.items[0].label).toBe('Bora-Care Wood Treatment');
+  });
+
+  test('on a mixed estimate, a lawn-fungus / shrub-beetle question is not answered with Bora-Care copy', () => {
+    const mixedContext = {
+      company: { phone: '941-555-0100' },
+      serviceMode: 'recurring',
+      services: [{ service: 'lawn_care', label: 'Lawn Care', summary: 'Lawn Care - quarterly' }],
+      oneTime: { items: [{ service: 'bora_care', label: 'Bora-Care' }] },
+    };
+    // Bare "fungus"/"beetle" without a wood/borate qualifier stays on the relevant
+    // service branch even though the estimate includes Bora-Care.
+    expect(answerEstimateQuestionFallback('Do you handle lawn fungus?', mixedContext))
+      .not.toMatch(/borate treatment applied to bare wood/);
+    // A qualified Bora-Care question still routes to the borate answer.
+    expect(answerEstimateQuestionFallback('Does Bora-Care cover wood-boring beetles?', mixedContext))
+      .toMatch(/borate treatment applied to bare wood/);
+  });
+
+  test('included-services answer lists a separately billed Bora-Care add-on', () => {
+    const context = {
+      serviceMode: 'recurring',
+      waveGuardTier: 'WaveGuard Silver',
+      services: [{ service: 'pest_control', label: 'Pest Control', summary: 'Pest Control - quarterly' }],
+      oneTime: { items: [{ service: 'bora_care', label: 'Bora-Care Wood Treatment', summary: 'Bora-Care Wood Treatment - one-time' }] },
+    };
+    const answer = answerEstimateQuestionFallback('What is included in this estimate?', context);
+    expect(answer).toMatch(/Pest Control/);
+    expect(answer).toMatch(/Bora-Care/);
+  });
+
+  test('one-word "Boracare" and borate-labeled questions both route to the Bora-Care answer', () => {
+    // Unhyphenated "Boracare" must qualify as a Bora-Care intent.
+    expect(answerEstimateQuestionFallback('Is Boracare safe?', boraCareAssistantContext))
+      .toMatch(/borate treatment applied to bare wood/);
+
+    // A row identified only by "borate" (no bora_care key, no "bora care" text) is
+    // recognized as Bora-Care in the context.
+    const borateContext = {
+      company: { phone: '941-555-0100' },
+      serviceMode: 'one_time',
+      services: [{ service: 'wood_treatment', label: 'Borate Wood Treatment', summary: 'Borate Wood Treatment - one-time' }],
+      oneTime: { items: [{ service: 'wood_treatment', label: 'Borate Wood Treatment' }] },
+    };
+    expect(answerEstimateQuestionFallback('Is this borate treatment safe?', borateContext))
+      .toMatch(/borate treatment applied to bare wood/);
+  });
+
+  test('a recurring pest estimate with a Bora-Care add-on still builds the One-Time Pest Control choice', () => {
+    // Bora-Care must not flip the one-time-choice classification to "bundle" and
+    // suppress the pest choice (which made the accept flow bill only the add-on).
+    const estimate = { show_one_time_option: true };
+    const estData = {
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50, perTreatment: 120 }] },
+        oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] },
+      },
+    };
+
+    expect(serviceCategoryForOneTimeChoice(estData)).toBe('pest_control');
+
+    const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, null, 199);
+    expect(list).not.toBeNull();
+    expect(list[0]).toEqual(expect.objectContaining({ service: 'one_time_pest', label: 'One-Time Pest Control' }));
+    // The accepted one-time choice is the pest visit, NOT the Bora-Care add-on.
+    expect(list.some((row) => row.service === 'bora_care')).toBe(false);
+  });
+
+  test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
+    // A positive one_time_adjustment (or any unrecognized positive charge) is a
+    // real billable line — unlike the negative member discount it must NOT switch
+    // the page to Bora-Care-only copy or suppress the mini-guarantee.
+    const html = renderPage('boracare-billable-adjust-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1251,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1251,
+          items: [
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+            { service: 'one_time_adjustment', name: 'Additional treatment area', price: 200 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).not.toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('class="mini-guarantee"');
+    // The one-time hero detail/note are gated on Bora-Care-only too, so a mixed
+    // billable estimate doesn't show the Bora-Care wood-treatment detail line.
+    expect(html).not.toContain('class="choice-treatment-detail">Bora-Care wood treatment');
+    // A one-time-only estimate never renders the recurring WaveGuard member perks
+    // card, so the generic member perks don't appear regardless.
+    expect(html).not.toContain('class="perks-list"');
+  });
+
+  test('Bora-Care labeled with termite-treatment wording keeps Bora-Care copy, not termite-trenching copy', () => {
+    // "Termite Bora-Care Treatment" matches the raw termite-trenching heuristic;
+    // excluding Bora-Care from that predicate keeps the page on Bora-Care copy.
+    const item = { service: 'bora_care', name: 'Termite Bora-Care Treatment', price: 1051 };
+    expect(deriveServiceCategory({}, [], [item])).toBe('bora_care');
+
+    const html = renderPage('boracare-termite-treatment-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1051,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 1051, items: [item], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).not.toContain('your termite trenching quote.');
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
   });
 
   test('server-rendered booking review buttons use explicit click listeners', () => {

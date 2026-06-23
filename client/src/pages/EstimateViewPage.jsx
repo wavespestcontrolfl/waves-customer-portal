@@ -1027,13 +1027,39 @@ function isGermanRoachCleanoutBreakdownItem(item = {}) {
   return raw.includes('german roach') || (raw.includes('roach') && raw.includes('cleanout'));
 }
 
+function isBoraCareBreakdownItem(item = {}) {
+  if (['bora_care', 'boracare'].includes(String(item.service || '').toLowerCase())) return true;
+  const raw = [item.label, item.name, item.displayName]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('bora care') || raw.includes('boracare');
+}
+
+// Mirrors the server isNonBillableOneTimeRow: inspections, the WaveGuard setup
+// fee, and any discount/credit/zero row (amount <= 0) carry no billable service
+// of their own. A positive unrecognized charge is intentionally treated as
+// billable so it blocks a "Bora-Care-only" classification.
+function isNonBillableBreakdownRow(item = {}) {
+  const raw = [item.service, item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  if (/(inspection|field review|office review)/.test(raw)) return true;
+  if (raw.includes('waveguard setup')) return true;
+  const amount = Number(item.amount ?? item.price ?? item.total);
+  return Number.isFinite(amount) && amount <= 0;
+}
+
 function germanRoachVisitPhrase(visits) {
   const n = Number(visits) || 0;
   const words = { 1: 'One visit', 2: 'Two visits', 3: 'Three visits', 4: 'Four visits' };
   return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
 }
 
-function oneTimePriceCopy(breakdown = {}) {
+export function oneTimePriceCopy(breakdown = {}) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const germanRoachItem = items.find(isGermanRoachCleanoutBreakdownItem);
   if (germanRoachItem) {
@@ -1057,6 +1083,15 @@ function oneTimePriceCopy(breakdown = {}) {
     });
     return 'Includes pre-slab soil treatment for the measured slab area. Certificate/termite-treatment documentation is provided when required. Warranty terms depend on the selected warranty option.'
       + (hasExtendedWarranty ? '' : ' No extended warranty selected.');
+  }
+  // Bora-Care is a borate wood treatment, not a pest visit — mirror the SSR copy
+  // and omit the 30-day pest callback/guarantee line. Gated on Bora-Care-ONLY (like
+  // the server hasOnlyBoraCareServiceMix) so a mixed quote with another positive
+  // billable row keeps the default callback copy instead of dropping it.
+  const boraCareOnly = items.some(isBoraCareBreakdownItem)
+    && items.every((it) => isBoraCareBreakdownItem(it) || isNonBillableBreakdownRow(it));
+  if (boraCareOnly) {
+    return 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi. Pay on the service day, no recurring schedule.';
   }
   return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }

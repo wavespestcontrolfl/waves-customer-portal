@@ -271,6 +271,10 @@ function buildEstimateAskQueryLog({ estimateId, question, result = {} }) {
 // Map a one-time service name to the booking page's service id (matches PublicBookingPage SERVICES)
 function bookingServiceFor(name) {
   const n = String(name || '').toLowerCase();
+  // Bora-Care is checked before termite/pest so a "Bora-Care Wood Treatment" (or
+  // "Termite Bora-Care") label routes the /book link + SMS to the Bora-Care visit
+  // instead of falling through to the Pest Control bucket.
+  if (n.includes('bora') || n.includes('borate')) return { id: 'bora_care', label: 'Bora-Care Wood Treatment' };
   if (n.includes('lawn') || n.includes('turf') || n.includes('aeration') || n.includes('seed') || n.includes('weed')) return { id: 'lawn_care', label: 'Lawn Care' };
   if (n.includes('mosquito')) return { id: 'mosquito', label: 'Mosquito Control' };
   if (n.includes('tree') || n.includes('shrub') || n.includes('palm') || n.includes('ornamental')) return { id: 'tree_shrub', label: 'Tree & Shrub Service' };
@@ -625,6 +629,7 @@ function oneTimeInvoiceLabelForCategory(category, fallback = 'One-time service')
     case 'mosquito': return 'One-Time Mosquito Control';
     case 'termite_bait': return 'Termite Bait Installation';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
+    case 'bora_care': return 'Bora-Care Wood Treatment';
     case 'termite_trenching': return 'Termite Treatment';
     case 'rodent': return 'Rodent Remediation';
     case 'bundle': return 'One-Time Service';
@@ -668,7 +673,12 @@ function buildOneTimeInvoiceServiceLabel({
   const rowLabel = row ? oneTimeInvoiceRowLabel(row) : '';
   const category = row ? serviceCategoryForOneTimeItem(row) : serviceCategoryForOneTimeChoice(estData, pricingBundle);
 
-  if (rowLabel) return rowLabel;
+  // A row whose only label is the raw engine service key (e.g. "bora_care",
+  // which normalizeOneTimeBreakdown falls back to when no name is stored) is not
+  // a customer-facing label — prefer the mapped category label.
+  const rowLabelIsRawServiceKey = !!rowLabel && !!row
+    && rowLabel.toLowerCase() === String(row.service || '').toLowerCase();
+  if (rowLabel && !rowLabelIsRawServiceKey) return rowLabel;
   return oneTimeInvoiceLabelForCategory(category);
 }
 
@@ -896,6 +906,21 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this quote.",
     },
   },
+  bora_care: {
+    headline: "Hey {first}, here's your Bora-Care wood treatment quote.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your wood-treatment areas before pricing this estimate',
+    aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
+    askChips: [
+      'What does Bora-Care treat?',
+      'Is Bora-Care safe for pets & kids?',
+      'What product is used for Bora-Care?',
+      'When should this be done?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this quote.",
+    },
+  },
   lawn_care: {
     headline: "Hey {first}, choose your lawn care option.",
     aiEyebrow: 'Waves AI',
@@ -1057,6 +1082,12 @@ const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat in
 // Safety quick-question shown for any chemical service. Shared so the React
 // data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
 const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+// Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
+// borate-specific answer instead of the generic label-direction safety copy.
+const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
+// Bora-Care service chip — shared between the SSR prompt builder and the React
+// pricing contract so a Bora-Care add-on surfaces it on both paths.
+const BORA_CARE_ASK_CHIP = 'What does Bora-Care treat?';
 
 // Service-aware "Ask Waves" quick-question chips: up to 2 estimate-specific
 // service prompts, a safety chip for any chemical service, then universal
@@ -1073,12 +1104,18 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   const hasLawn = recurringList.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
   const hasMosquito = recurringList.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''))
     || oneTimeList.some((item) => serviceCategoryForOneTimeItem(item) === 'mosquito');
+  // Bora-Care rows are excluded here even when their label contains "termite"
+  // so the bait/barrier branch never fires for them — they get their own prompt.
   const hasTermite = recurringList.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''))
-    || oneTimeList.some((item) => /termite/i.test(item?.service || item?.label || item?.name || '')
-      || ['termite_bait', 'termite_trenching', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(item)));
+    || oneTimeList.some((item) => !isBoraCareOneTimeItem(item)
+      && (/termite/i.test(item?.service || item?.label || item?.name || '')
+        || ['termite_bait', 'termite_trenching', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(item))));
   const hasTreeShrub = recurringList.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
   const hasRodent = recurringList.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
   const hasPalm = recurringList.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
+  // Bora-Care is a borate wood treatment, not a bait or barrier — keep it off
+  // the termite-method branch above and give it its own prompt.
+  const hasBoraCare = oneTimeList.some(isBoraCareOneTimeItem);
   const hasGermanRoach = oneTimeList.some(isGermanRoachCleanoutOneTimeItem)
     || recurringList.some(isGermanRoachCleanoutOneTimeItem);
   const hasPestAny = !!pestRecurring || hasPestOneTime || hasGermanRoach;
@@ -1106,10 +1143,24 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   if (hasTreeShrub) servicePrompts.push('Which trees get treated?');
   if (hasRodent) servicePrompts.push('Where do bait stations go?');
   if (hasPalm) servicePrompts.push('Why injections vs. spray?');
+  // Bora-Care is an unusual one-time add-on; prioritize its chip so a mixed
+  // estimate with two other service prompts still surfaces it before the slice.
+  if (hasBoraCare) servicePrompts.unshift(BORA_CARE_ASK_CHIP);
 
-  const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm;
+  const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm || hasBoraCare;
+  // A Bora-Care-only quote gets a Bora-Care-worded safety chip so clicking it
+  // reaches the borate-specific answer; mixed estimates keep the generic chip.
+  // "Only" mirrors hasOnlyBoraCareServiceMix: no other recurring service flag and
+  // no other billable one-time row. Use isNonBillableOneTimeRow (NOT
+  // isBillableOneTimeInvoiceItem, which exempts one_time_adjustment) so a *positive*
+  // adjustment counts as another billable charge and blocks the Bora-Care-only chip.
+  const hasOtherBillableOneTime = oneTimeList.some(
+    (it) => !isBoraCareOneTimeItem(it) && !isNonBillableOneTimeRow(it),
+  );
+  const boraCareOnly = hasBoraCare && !hasPestAny && !hasLawn && !hasMosquito
+    && !hasTermite && !hasTreeShrub && !hasRodent && !hasPalm && !hasOtherBillableOneTime;
   const prompts = servicePrompts.slice(0, 2);
-  if (hasChemicalService) prompts.push(SAFETY_ASK_CHIP);
+  if (hasChemicalService) prompts.push(boraCareOnly ? BORA_CARE_SAFETY_ASK_CHIP : SAFETY_ASK_CHIP);
   for (const prompt of ['When am I charged?', 'What happens after approval?']) {
     if (prompts.length >= 4) break;
     prompts.push(prompt);
@@ -1804,6 +1855,30 @@ function preSlabCustomerCopy(items = []) {
   };
 }
 
+// Bora-Care is a one-time borate wood treatment (service key `bora_care` from
+// the pricing engine). It is applied to bare wood — attic/raw framing and
+// surface areas like foundation and block. Detect it explicitly by service key
+// so it is never misclassified as the pest_control default.
+function isBoraCareOneTimeItem(item = {}) {
+  const service = String(item?.service || '').toLowerCase();
+  if (service === 'bora_care' || service === 'boracare') return true;
+  const raw = [item.service, item.name, item.label, item.displayName, item.detail, item.det]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return /\bbora\s*care\b/.test(raw) || raw.includes('borate');
+}
+
+// Customer-facing one-time note for a Bora-Care estimate. Description only —
+// the estimate intentionally carries no guarantee/coverage line for this
+// service, so the mini-guarantee slot is omitted at the render site.
+function boraCareCustomerCopy() {
+  return {
+    note: 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi.',
+  };
+}
+
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
@@ -1889,6 +1964,10 @@ function hasOnlyTermiteBaitServiceMix(recurring = [], oneTimeItems = []) {
 }
 
 function isTermiteTrenchingOneTimeItem(item = {}) {
+  // Bora-Care is a borate wood treatment, never a liquid trench/barrier. Exclude
+  // it up front so a label like "Termite Bora-Care Treatment" can't match the raw
+  // "termite … treatment" heuristic below and steal the trenching copy/branch.
+  if (isBoraCareOneTimeItem(item)) return false;
   const category = serviceCategoryForOneTimeItem(item);
   if (category === 'termite_trenching') return true;
   const raw = [item.service, item.name, item.label]
@@ -1915,6 +1994,33 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
     && oneTimeRows.length > 0
     && oneTimeRows.some(isTermiteTrenchingOneTimeItem)
     && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
+}
+
+// True for one-time rows that carry no billable service of their own, so they
+// must not change the detected service mix: inspection/field-review lines, the
+// WaveGuard setup/membership fee, and any discount/credit/zero row (amount <= 0).
+// A *positive* unrecognized charge (e.g. a billable `one_time_adjustment` row that
+// normalizeOneTimeBreakdown adds when oneTime.total exceeds the listed items) is a
+// real charge for something else and is intentionally NOT treated as ignorable.
+function isNonBillableOneTimeRow(item = {}) {
+  if (isInspectionReviewOneTimeItem(item)) return true;
+  const service = String(item?.service || '').toLowerCase();
+  if (service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(item)) return true;
+  const amount = Number(item?.amount ?? item?.price ?? item?.total);
+  return Number.isFinite(amount) && amount <= 0;
+}
+
+function hasOnlyBoraCareServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  // Ignore only non-billable rows (discounts like the WaveGuard member discount,
+  // the setup fee, inspections) so a Bora-Care-only quote with a discount line
+  // still counts as Bora-Care-only — while a positive unknown charge still blocks
+  // the "only" classification (it switches copy + suppresses the mini-guarantee).
+  return recurringRows.length === 0
+    && oneTimeRows.some(isBoraCareOneTimeItem)
+    && oneTimeRows.every((item) => isBoraCareOneTimeItem(item)
+      || isNonBillableOneTimeRow(item));
 }
 
 function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
@@ -2396,6 +2502,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const isTreeShrubOnly = hasTreeShrub
     && serviceKeys.length > 0
     && serviceKeys.every((key) => key === 'tree_shrub');
+  const isBoraCareOnly = oneTimeCategories.has('bora_care')
+    && hasOnlyBoraCareServiceMix(recurringServices, intelligenceOneTimeItems);
 
   const stories = firstPositiveNumber(inputs.stories, property.stories) || 1;
   const homeSqFt = firstPositiveNumber(
@@ -2532,7 +2640,9 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
         ? 'Waves AI reviewed your mosquito treatment zones before pricing this estimate'
         : (isTermiteBaitOnly
           ? 'Waves AI reviewed your termite perimeter before pricing this estimate'
-          : 'Waves AI reviewed your property before pricing this estimate')));
+          : (isBoraCareOnly
+            ? 'Waves AI reviewed your wood-treatment areas before pricing this estimate'
+            : 'Waves AI reviewed your property before pricing this estimate'))));
   const intelligenceBody = isLawnOnly
     ? (satelliteUrl || metrics.length
       ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
@@ -2549,9 +2659,11 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
           ? (satelliteUrl || metrics.length
             ? 'Waves AI reviews satellite imagery, property records, and termite perimeter details to shape your termite protection plan.'
             : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your termite protection plan.')
-          : (satelliteUrl || metrics.length
-            ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
-            : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.'))));
+          : (isBoraCareOnly
+            ? 'Waves AI reviews your selected wood-treatment areas and the Bora-Care application rate to price this treatment.'
+            : (satelliteUrl || metrics.length
+              ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
+              : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')))));
   return {
     eyebrow: 'Waves AI',
     title: intelligenceTitle,
@@ -2853,8 +2965,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   );
   const recurring = recurringServicesWithSupplements(estResult);
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+  // Bora-Care detection reads the normalized one-time rows — the same set the
+  // Waves AI card uses — so it stays consistent with the AI card and also covers
+  // nested-result / engine-backed estimates that don't populate
+  // result.oneTime.items directly.
+  const boraCareOneTimeRows = normalizeOneTimeBreakdown(estData).items;
   const hasPreSlabOneTime = oneTimeItems.some(isPreSlabOneTimeItem);
   const preSlabCopy = hasPreSlabOneTime ? preSlabCustomerCopy(oneTimeItems) : null;
+  const hasBoraCareOneTime = boraCareOneTimeRows.some(isBoraCareOneTimeItem);
+  const boraCareCopy = hasBoraCareOneTime ? boraCareCustomerCopy() : null;
   const germanRoachCleanoutItem = oneTimeItems.find(isGermanRoachCleanoutOneTimeItem);
   const germanRoachOneTimeCopy = germanRoachCleanoutItem
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
@@ -2878,6 +2997,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteBaitServices = hasOnlyTermiteBaitServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteTrenchingServices = hasOnlyTermiteTrenchingServiceMix(recurring, oneTimeItems);
+  const hasOnlyBoraCareServices = hasOnlyBoraCareServiceMix(recurring, boraCareOneTimeRows);
   const pageCopy = hasOnlyLawnCareServices
     ? {
         heroSuffix: "here's your lawn care estimate.",
@@ -3008,7 +3128,33 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               finalSubhead: "Let's finish the trenching review with Waves.",
               finalBody: 'No payment today. No surprise increases.',
             }
-          : {
+          : (hasOnlyBoraCareServices
+            ? {
+                heroSuffix: "here's your Bora-Care wood treatment quote.",
+                recurringAssurance: 'This quote is based on the measured attic and surface wood areas treated with Bora-Care.',
+                aggregateDayLabel: 'Bora-Care wood treatment',
+                billingHeading: 'Choose how you want to pay',
+                billingLede: null,
+                payAfterTitle: 'Pay per application',
+                payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
+                noPaymentCopy: 'No payment is charged on this page. Your Bora-Care treatment will be billed after completion.',
+                bookingTitle: 'Pick your Bora-Care treatment visit',
+                bookingSubhead: 'Choose a window to get your Bora-Care wood treatment scheduled.',
+                payPrefHeading: 'Choose how you want to pay',
+                payPrefCardTitle: 'Pay per application',
+                payPrefCardSub: 'Invoice is sent automatically after confirmation.',
+                prepayTitle: 'Pay in full',
+                prepayBody: 'We send the invoice automatically after confirmation.',
+                prepayButtonSub: 'Approve the Bora-Care wood treatment.',
+                cardConfirmTitle: 'Confirm invoice',
+                cardConfirmSub: 'next step creates your invoice and makes secure payment available.',
+                perksHeading: 'What your Bora-Care treatment includes',
+                perksBody: 'Bora-Care is applied to the measured bare wood and treats it for termites, wood-boring beetles, and wood-decay fungi.',
+                finalHeading: 'Ready to schedule your Bora-Care treatment?',
+                finalSubhead: "Let's get your Bora-Care wood treatment on the schedule.",
+                finalBody: 'No payment today.',
+              }
+            : {
               heroSuffix: "here's your custom quote.",
               recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
               aggregateDayLabel: 'complete home protection',
@@ -3032,7 +3178,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
               finalSubhead: '',
               finalBody: '',
-            }))));
+            })))));
 
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the
@@ -3187,7 +3333,23 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
     : null;
   const quotedServiceNames = recurring.map((s) => labelWithFreq(s.name)).filter(Boolean);
-  const quotedOneTimeNames = oneTimeItems.map((it) => it.displayName || it.name).filter(Boolean);
+  // Build the one-time hero names per row so every billable line is represented,
+  // even the name-less engine shape `{ service: 'bora_care', price }` mixed with a
+  // named row. A row whose only "name" is the raw service key maps to the friendly
+  // category label (mirrors buildOneTimeInvoiceServiceLabel). Source from the raw
+  // rows when present, else the normalized billable rows (nested-result shape).
+  const friendlyOneTimeRowName = (it) => {
+    const name = String(it.displayName || it.name || it.label || '').trim();
+    const isRawKey = !!name && name.toLowerCase() === String(it.service || '').toLowerCase();
+    return name && !isRawKey
+      ? name
+      : (oneTimeInvoiceLabelForCategory(serviceCategoryForOneTimeItem(it), name) || name);
+  };
+  const quotedOneTimeNames = (oneTimeItems.length
+    ? oneTimeItems
+    : boraCareOneTimeRows.filter(isBillableOneTimeInvoiceItem))
+    .map(friendlyOneTimeRowName)
+    .filter(Boolean);
   const quotedServicesLabel = pestChoiceLabel || (quotedServiceNames.length
     ? quotedServiceNames.join(' + ')
     : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`));
@@ -3508,13 +3670,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeOnlyHeroPriceHtml = `
       <div class="choice-treatment">
         <div class="choice-treatment-name">${escapeHtml(quotedOneTimeNames[0] || quotedServicesLabel || 'One-time service')}</div>
-        <div class="choice-treatment-detail">${escapeHtml(hasPreSlabOneTime ? 'Pre-slab soil treatment' : 'One-time service')}</div>
+        <div class="choice-treatment-detail">${escapeHtml(hasPreSlabOneTime ? 'Pre-slab soil treatment' : (hasOnlyBoraCareServices ? 'Bora-Care wood treatment' : 'One-time service'))}</div>
         <div class="big-price choice-treatment-price">
           <span class="num" id="onetime-display">${fmtMoney(onetimeTotal || oneTimeChoicePrice)}</span>
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.'))}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')))}
         </div>
       </div>
     `;
@@ -3556,7 +3718,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     if (price <= 0 && !includedByServiceCredit) return '';
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    return `<tr><td>${escapeHtml(it.name || it.label || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
+    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
   // Net the manual/custom one-time discount slice into the legacy (non-React)
@@ -3650,7 +3812,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>` : ''}
   </section>` : '';
   const membershipBlockHtml = renderMembershipBlockHtml(membership);
-  const askPrompts = buildEstimateAskPrompts(recurring, oneTimeItems, pestRecurring, hasPestOneTime);
+  // Ask Waves chips read the raw rows merged with the normalized one-time rows
+  // (the same superset the AI card + Bora-Care detection use), so engine-backed /
+  // nested-result estimates still surface service-specific chips like
+  // "What does Bora-Care treat?". Duplicates are harmless — every chip is added on
+  // a boolean, never per row.
+  const askPrompts = buildEstimateAskPrompts(
+    recurring,
+    [...oneTimeItems, ...boraCareOneTimeRows],
+    pestRecurring,
+    hasPestOneTime,
+  );
   const estimateAskEnabled = isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
@@ -4086,7 +4258,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
+    ${isOneTimeOnly && !hasOnlyBoraCareServices ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
@@ -7586,13 +7758,24 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
   return !isWaveGuardSetupOneTimeItem(item) && String(item.service || '').toLowerCase() !== 'one_time_adjustment';
 }
 
+// Bora-Care is a separately-billed add-on that rides alongside whichever cadence
+// the customer picks. It must not contribute to the one-time-choice classification,
+// or a recurring pest estimate with a Bora-Care add-on classifies as "bundle" and
+// the One-Time Pest Control choice is never built (the accept flow then falls back
+// to the add-on total instead of the selected pest visit).
+function oneTimeChoiceClassificationItems(items = []) {
+  return (Array.isArray(items) ? items : []).filter(
+    (item) => serviceCategoryForOneTimeItem(item) !== 'bora_care',
+  );
+}
+
 function serviceCategoryForOneTimeChoice(estData = {}, pricingBundle = null) {
   const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
   const result = estData?.result || estData?.engineResult || estData || {};
   return deriveServiceCategory(
     estData,
     recurringServicesWithSupplements(result),
-    breakdown.items || [],
+    oneTimeChoiceClassificationItems(breakdown.items || []),
   );
 }
 
@@ -7757,7 +7940,7 @@ function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBund
   if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return null;
   const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
   const recurring = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
-  const category = deriveServiceCategory(estData, recurring, breakdown.items);
+  const category = deriveServiceCategory(estData, recurring, oneTimeChoiceClassificationItems(breakdown.items));
   if (category === 'pest_control') {
     const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
     if (!pestChoiceAmount) return null;
@@ -7772,7 +7955,7 @@ function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, prici
   if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return null;
   const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
   const recurring = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
-  const category = deriveServiceCategory(estData, recurring, breakdown.items);
+  const category = deriveServiceCategory(estData, recurring, oneTimeChoiceClassificationItems(breakdown.items));
   if (category !== 'pest_control') return null;
   const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
   const amount = Number(pestChoiceAmount || choicePrice);
@@ -8774,6 +8957,7 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait Stations';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
+    case 'bora_care': return 'Bora-Care Wood Treatment';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
     case 'bundle': return 'Recurring services';
@@ -8787,6 +8971,10 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (!name && !service) return null;
   if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
+  // Bora-Care carries the canonical service key `bora_care`; classify it before
+  // the generic termite-install heuristic so an install-worded label
+  // (e.g. "Termite Bora-Care Install") never routes it down the bait path.
+  if (isBoraCareOneTimeItem(item)) return 'bora_care';
   if (isTermiteInstallItem(item)) return 'termite_bait';
   if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
@@ -8823,6 +9011,7 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
     services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab || inputs.svcPreslab ? 'pre_slab_termiticide' : null,
+    services.boraCare || services.bora_care || inputs.svcBoracare ? 'bora_care' : null,
     services.trenching || inputs.svcTrenching ? 'termite_trenching' : null,
     services.rodent || inputs.svcRodent ? 'rodent' : null,
   ].filter(Boolean);
@@ -10047,13 +10236,26 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // those generic pest service chips — keeping the billing chips and any other
   // category's chips — so the React path matches the server-rendered page
   // (deduped, capped at 6).
-  const askChips = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
+  const askChipsBase = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
     ? Array.from(new Set([
         ...GERMAN_ROACH_ASK_CHIPS,
         SAFETY_ASK_CHIP,
         ...baseAskChips.filter((chip) => !GENERIC_PEST_SERVICE_CHIPS.includes(chip)),
       ])).slice(0, 6)
     : baseAskChips;
+  // A separately-billed Bora-Care add-on classifies outside the recurring service
+  // sections, so its chip is missing from the section-derived list. Prepend it (so
+  // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
+  // Waves prompt builder now reads.
+  const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+    ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+    : askChipsBase;
+  // Engine-backed Bora-Care rows can arrive with the raw service key as their
+  // label; map those to the friendly category label so the React breakdown header
+  // and rows never show "bora_care" to customers (mirrors the SSR/invoice labels).
+  const normalizedOneTimeBreakdown = contractPayload.oneTimeBreakdown && Array.isArray(contractPayload.oneTimeBreakdown.items)
+    ? { ...contractPayload.oneTimeBreakdown, items: contractPayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel) }
+    : contractPayload.oneTimeBreakdown;
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
   return {
     ...contractPayload,
@@ -10061,8 +10263,21 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     combinedRecurring,
     renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring),
     askChips,
+    oneTimeBreakdown: normalizedOneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };
+}
+
+// A breakdown row whose only label is the raw engine service key (e.g. "bora_care")
+// is not customer-facing; map it to the friendly category label for the client
+// payload. Mirrors the raw-key guard in buildOneTimeInvoiceServiceLabel.
+function normalizeBreakdownItemLabel(item = {}) {
+  if (!item || typeof item !== 'object') return item;
+  const label = String(item.label || '').trim();
+  const isRawKey = !!label && label.toLowerCase() === String(item.service || '').toLowerCase();
+  if (!isRawKey) return item;
+  const mapped = oneTimeInvoiceLabelForCategory(serviceCategoryForOneTimeItem(item), label);
+  return mapped && mapped !== label ? { ...item, label: mapped } : item;
 }
 
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
@@ -10814,6 +11029,8 @@ module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
+module.exports.attachPublicPricingContract = attachPublicPricingContract;
+module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
