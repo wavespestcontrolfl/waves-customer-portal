@@ -2481,10 +2481,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Bora-Care is a borate wood treatment applied to the measured attic and surface areas.');
     expect(html).toContain('Bora-Care wood treatment');
 
-    // Ask Waves surfaces a Bora-Care service chip + the safety chip; never the
-    // bait/pest chips it used to fall back to.
+    // Ask Waves surfaces a Bora-Care service chip + a Bora-Care-worded safety chip
+    // (so clicking it routes to the borate answer); never the bait/pest chips it
+    // used to fall back to, and not the generic safety chip on a Bora-Care-only quote.
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
-    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).toContain('data-estimate-ask-prompt="Is Bora-Care safe for pets &amp; kids?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How do you handle ants?"');
 
@@ -2723,6 +2725,77 @@ describe('public estimate one-time breakdown', () => {
     const answer = answerEstimateQuestionFallback('Is Bora-Care safe?', context);
     expect(answer).toMatch(/borate treatment applied to bare wood/);
     expect(answer).not.toMatch(/for every application/);
+  });
+
+  test('Bora-Care coverage question routes to the Bora-Care answer, not the generic include list', () => {
+    // "cover" matches the include/coverage branch; the Bora-Care branch sits above
+    // it so a Bora-Care coverage question gets the borate-specific answer.
+    const answer = answerEstimateQuestionFallback('Does Bora-Care cover wood-boring beetles?', boraCareAssistantContext);
+    expect(answer).toMatch(/borate treatment applied to bare wood/);
+    expect(answer).not.toMatch(/^This .* estimate includes:/);
+  });
+
+  test('Bora-Care safety chip text routes to the Bora-Care answer', () => {
+    const answer = answerEstimateQuestionFallback('Is Bora-Care safe for pets & kids?', boraCareAssistantContext);
+    expect(answer).toMatch(/borate treatment applied to bare wood/);
+    expect(answer).not.toMatch(/for every application/);
+  });
+
+  test('mixed recurring estimate with a Bora-Care add-on still surfaces the Bora-Care chip', () => {
+    // Pest + Lawn + a separately billed Bora-Care one-time row: the Bora-Care chip
+    // is prioritized so it survives the two-prompt slice instead of being dropped.
+    const html = renderPage('boracare-mixed-chip-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 200,
+      annualTotal: 2400,
+      onetimeTotal: 1051,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { service: 'pest_control', name: 'Pest Control', mo: 100 },
+            { service: 'lawn_care', name: 'Lawn Care', mo: 100 },
+          ],
+        },
+        oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+  });
+
+  test('mixed one-time quote with a name-less Bora-Care row names both services in the hero', () => {
+    // Name-less Bora-Care row + a named Pre-Slab row: the per-row name builder must
+    // represent Bora-Care instead of dropping it because the other row had a name.
+    const html = renderPage('boracare-mixed-name-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1300,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1300,
+          items: [
+            { service: 'bora_care', price: 1051 },
+            { service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 249 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toMatch(/Bora-Care Wood Treatment[^<]*\+[^<]*Pre-Slab Termiticide Treatment|Pre-Slab Termiticide Treatment[^<]*\+[^<]*Bora-Care Wood Treatment/);
+    expect(html).not.toContain('>bora_care<');
   });
 
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {

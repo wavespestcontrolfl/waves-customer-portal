@@ -1078,6 +1078,9 @@ const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat in
 // Safety quick-question shown for any chemical service. Shared so the React
 // data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
 const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+// Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
+// borate-specific answer instead of the generic label-direction safety copy.
+const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
 
 // Service-aware "Ask Waves" quick-question chips: up to 2 estimate-specific
 // service prompts, a safety chip for any chemical service, then universal
@@ -1133,11 +1136,17 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   if (hasTreeShrub) servicePrompts.push('Which trees get treated?');
   if (hasRodent) servicePrompts.push('Where do bait stations go?');
   if (hasPalm) servicePrompts.push('Why injections vs. spray?');
-  if (hasBoraCare) servicePrompts.push('What does Bora-Care treat?');
+  // Bora-Care is an unusual one-time add-on; prioritize its chip so a mixed
+  // estimate with two other service prompts still surfaces it before the slice.
+  if (hasBoraCare) servicePrompts.unshift('What does Bora-Care treat?');
 
   const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm || hasBoraCare;
+  // A Bora-Care-only quote gets a Bora-Care-worded safety chip so clicking it
+  // reaches the borate-specific answer; mixed estimates keep the generic chip.
+  const boraCareOnly = hasBoraCare && !hasPestAny && !hasLawn && !hasMosquito
+    && !hasTermite && !hasTreeShrub && !hasRodent && !hasPalm;
   const prompts = servicePrompts.slice(0, 2);
-  if (hasChemicalService) prompts.push(SAFETY_ASK_CHIP);
+  if (hasChemicalService) prompts.push(boraCareOnly ? BORA_CARE_SAFETY_ASK_CHIP : SAFETY_ASK_CHIP);
   for (const prompt of ['When am I charged?', 'What happens after approval?']) {
     if (prompts.length >= 4) break;
     prompts.push(prompt);
@@ -3310,24 +3319,23 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
     : null;
   const quotedServiceNames = recurring.map((s) => labelWithFreq(s.name)).filter(Boolean);
-  // Raw one-time rows can be present but carry no display name (the name-less
-  // engine shape `{ service: 'bora_care', price }`), or be empty entirely for a
-  // nested result. In either case fall back to the normalized billable rows so the
-  // hero treatment name isn't "WaveGuard {tier}". A name-less row carries the raw
-  // service key as its label, so map it to the friendly category label.
-  const rawOneTimeNames = oneTimeItems.map((it) => it.displayName || it.name).filter(Boolean);
-  const quotedOneTimeNames = rawOneTimeNames.length
-    ? rawOneTimeNames
-    : boraCareOneTimeRows
-        .filter(isBillableOneTimeInvoiceItem)
-        .map((it) => {
-          const label = String(it.displayName || it.name || it.label || '').trim();
-          // A name-less engine row carries the raw service key as its label; map it
-          // to the friendly category label (mirrors buildOneTimeInvoiceServiceLabel).
-          const isRawKey = !!label && label.toLowerCase() === String(it.service || '').toLowerCase();
-          return label && !isRawKey ? label : oneTimeInvoiceLabelForCategory(serviceCategoryForOneTimeItem(it), label);
-        })
-        .filter(Boolean);
+  // Build the one-time hero names per row so every billable line is represented,
+  // even the name-less engine shape `{ service: 'bora_care', price }` mixed with a
+  // named row. A row whose only "name" is the raw service key maps to the friendly
+  // category label (mirrors buildOneTimeInvoiceServiceLabel). Source from the raw
+  // rows when present, else the normalized billable rows (nested-result shape).
+  const friendlyOneTimeRowName = (it) => {
+    const name = String(it.displayName || it.name || it.label || '').trim();
+    const isRawKey = !!name && name.toLowerCase() === String(it.service || '').toLowerCase();
+    return name && !isRawKey
+      ? name
+      : (oneTimeInvoiceLabelForCategory(serviceCategoryForOneTimeItem(it), name) || name);
+  };
+  const quotedOneTimeNames = (oneTimeItems.length
+    ? oneTimeItems
+    : boraCareOneTimeRows.filter(isBillableOneTimeInvoiceItem))
+    .map(friendlyOneTimeRowName)
+    .filter(Boolean);
   const quotedServicesLabel = pestChoiceLabel || (quotedServiceNames.length
     ? quotedServiceNames.join(' + ')
     : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`));

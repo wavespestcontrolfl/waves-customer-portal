@@ -774,6 +774,15 @@ function answerEstimateQuestionFallback(question, context = {}) {
   const services = listServices(context);
   const oneTimeText = context.oneTime?.amountText;
 
+  // Bora-Care questions are answered first — above the include/coverage, safety,
+  // and product branches — so phrasings like "does Bora-Care cover beetles?" or
+  // "is Bora-Care safe?" reach the borate-specific answer instead of the generic
+  // service list or label-direction copy. Gated on the estimate actually including
+  // Bora-Care so it never fires on a non-Bora estimate.
+  if (estimateContextHasBoraCare(context) && /\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/.test(q)) {
+    return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
+  }
+
   if (/\b(include|included|cover|coverage|what.*get|plan)\b/.test(q)) {
     return [
       `This ${tier} estimate includes:`,
@@ -811,14 +820,6 @@ function answerEstimateQuestionFallback(question, context = {}) {
       context.billing?.annualText ? `The 12-month plan total shown is ${context.billing.annualText}.` : '',
       firstVisitFees,
     ].filter(Boolean).join(' ');
-  }
-
-  // Bora-Care questions — including "Is Bora-Care safe?" / "What product is used
-  // for Bora-Care?" — are matched before the generic safety/product branch so they
-  // get the borate-specific answer instead of generic label-direction copy, but
-  // only when the estimate actually includes Bora-Care.
-  if (estimateContextHasBoraCare(context) && /\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/.test(q)) {
-    return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
   }
 
   if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application)\b/.test(q)) {
