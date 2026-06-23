@@ -100,7 +100,8 @@ async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
     // recipient would otherwise auto-deliver the draft to Mark before any admin approval,
     // breaking the never-auto-send invariant. Skip rather than leak.
     if (sameAddress(to, row.recipient) || sameAddress(to, markEmail())) {
-      logger.warn(`[price-scan] owner draft-notify SKIPPED — owner-copy address resolves to the rep (${to}); set a distinct PRICE_MATCH_OWNER_EMAIL`);
+      // Don't log the address itself — email addresses in logs are PII (repo rule).
+      logger.warn(`[price-scan] owner draft-notify SKIPPED (draft ${row && row.id}) — owner-copy address resolves to the rep; set a distinct PRICE_MATCH_OWNER_EMAIL`);
       return;
     }
     const reviewUrl = `${adminPortalUrl()}/admin/price-match`;
