@@ -97,11 +97,12 @@ async function fetchCandidate(page, vendor, product) {
   let firstBuyable = null;
   let firstUnbuyable = null;
   let fallback = null;
+  let candidateError = null; // a per-candidate fetch failure, surfaced only if nothing verifies
   for (const link of links) {
     const handle = handleOf(link);
     if (!handle) continue;
     let data;
-    try { data = await fetchProductJs(page, origin, handle, timeout); } catch (e) { continue; }
+    try { data = await fetchProductJs(page, origin, handle, timeout); } catch (e) { candidateError = e; continue; }
     if (!data) continue;
     const offer = targetOz ? pickVariantOffer(variantsFromShopify(data), { targetOz }) : null;
     const productUrl = `${origin}/products/${handle}`;
@@ -135,7 +136,14 @@ async function fetchCandidate(page, vendor, product) {
     }
     if (!fallback) fallback = cand; // priced + size-matched, unverified -> precise 'unverified' skip
   }
-  return firstBuyable || firstUnbuyable || fallback;
+  // If NOTHING verified and a candidate's .js fetch threw, surface that error as a
+  // precise 'fetch_error': the scan was INCOMPLETE (the candidate that errored might
+  // have been the real match), so a priced-but-unverified fallback must not report a
+  // clean 'unverified' (which reads as "found it, no match here, don't retry") when the
+  // truth is "a fetch failed, retry". Only a verified match suppresses the error.
+  const verified = firstBuyable || firstUnbuyable;
+  if (!verified && candidateError) throw candidateError;
+  return verified || fallback;
 }
 
 module.exports = {
