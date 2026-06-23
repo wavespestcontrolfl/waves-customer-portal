@@ -8,6 +8,7 @@ const {
   matchKey,
   runWeeklyScan,
   attachLoginCredentials,
+  scrapableVendors,
 } = require('../services/price-scan/weekly-scan');
 
 const baselineRow = (over = {}) => ({
@@ -31,8 +32,8 @@ describe('toScanSpec', () => {
       baseline: { vendor: 'SiteOne', price: 95, quantity: '78 oz' },
     });
     expect(vendors).toEqual([
-      { vendor_id: 'dmo', name: 'DoMyOwn', url: 'https://www.domyown.com/p-1817.html' },
-      { vendor_id: 'sol', name: 'Solutions Pest & Lawn', url: null }, // no URL -> search-by-name
+      { vendor_id: 'dmo', name: 'DoMyOwn', website: 'https://www.domyown.com', url: 'https://www.domyown.com/p-1817.html' },
+      { vendor_id: 'sol', name: 'Solutions Pest & Lawn', website: 'https://www.solutionsstores.com', url: null }, // no URL -> search-by-name
     ]);
     expect(spend).toBe(120);
   });
@@ -258,5 +259,22 @@ describe('attachLoginCredentials (login adapters get decrypted creds)', () => {
     const specs = [veserisSpec()];
     await attachLoginCredentials({}, specs, { getVendorLoginCredentials });
     expect(specs[0].vendors[0].credentials).toBeUndefined();
+  });
+});
+
+describe('scrapableVendors (adapter allowlist incl. shopify)', () => {
+  const fakeDb = (rows) => {
+    const chain = { where: () => chain, andWhere: () => chain, select: async () => rows };
+    return () => chain;
+  };
+  test('keeps vendors that resolve to a bespoke adapter (incl. Shopify), drops generic', async () => {
+    const rows = [
+      { id: 'cw', name: 'Chemical Warehouse', website: 'https://chemicalwarehouse.com' }, // shopify
+      { id: 'dmo', name: 'DoMyOwn', website: 'https://www.domyown.com' }, // domyown
+      { id: 'ves', name: 'Veseris', website: 'https://www.veseris.com' }, // veseris
+      { id: 'rng', name: 'Random Co', website: 'https://example.com' }, // generic -> dropped
+    ];
+    const kept = await scrapableVendors(fakeDb(rows));
+    expect(kept.map((v) => v.name).sort()).toEqual(['Chemical Warehouse', 'DoMyOwn', 'Veseris']);
   });
 });
