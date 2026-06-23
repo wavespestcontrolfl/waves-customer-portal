@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
+import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
+import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -75,7 +78,6 @@ const REVIEW_LOCATIONS = [
     match: ['lakewood ranch', 'bradenton', '34202', '34203', '34205', '34208', '34209', '34210', '34211', '34212'],
   },
 ];
-const TREATMENT_OVERLAY_COLORS = ['#0f766e', '#b45309', '#2563eb', '#be123c', '#4d7c0f', '#7c2d12', '#4338ca', '#047857'];
 
 function calendarDateFromDateOnlyValue(value) {
   if (!value) return null;
@@ -821,60 +823,17 @@ export function lawnWateringGuidance(app = {}) {
   return { headline: 'Watering note for this product', detail: note };
 }
 
-function isRenderableTreatmentApplication(app = {}) {
-  return String(app.method || '').toLowerCase() !== 'station_check';
-}
-
-function buildTreatmentOverlayRows(data = {}) {
-  const applications = Array.isArray(data.applications) ? data.applications : [];
-  const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
-  return applications.map((app, originalIndex) => {
-    const id = String(app.id || `application-${originalIndex + 1}`);
-    const zoneIds = applicationZoneIds(app);
-    const zones = zoneIds.map((zoneId) => zoneById.get(String(zoneId))).filter(Boolean);
-    return { app, id, zoneIds, zones };
-  }).filter(({ app, zones }) => isRenderableTreatmentApplication(app) && zones.length).map(({ app, id, zoneIds, zones }, index) => {
-    const zoneLetters = zones.map((zone) => zone.letter).filter(Boolean);
-    const zoneLabels = zones.map((zone) => zone.label).filter(Boolean);
-    const targets = Array.isArray(app.targets) ? app.targets.map(formatEnumLabel).filter(Boolean) : [];
-    const technicalDetails = applicationTechnicalExplanation(app, data.serviceLine);
-    const customerDetail = technicalDetails.find((detail) => (
-      !/^EPA registration number recorded:/i.test(detail)
-      && !/^Active ingredient recorded:/i.test(detail)
-    )) || applicationPurposeCopy(app, data.serviceLine);
-    const rateDetails = [
-      app.rate && app.rateUnit ? `Rate ${app.rate} ${app.rateUnit}` : null,
-      app.totalAmount && app.amountUnit ? `Total ${app.totalAmount} ${app.amountUnit}` : null,
-    ].filter(Boolean);
-
-    return {
-      id,
-      mapNumber: String(index + 1),
-      color: TREATMENT_OVERLAY_COLORS[index % TREATMENT_OVERLAY_COLORS.length],
-      productName: applicationProductName(app),
-      purpose: applicationPurpose(app, data.serviceLine),
-      methodLabel: app.methodLabel || formatEnumLabel(app.method) || 'Application',
-      zoneIds,
-      zones,
-      zoneText: zoneLetters.length
-        ? `Zones ${zoneLetters.join(', ')}${zoneLabels.length ? `: ${zoneLabels.join(', ')}` : ''}`
-        : (app.applicationArea || 'Treated area recorded'),
-      targetText: targets.length ? targets.join(', ') : '',
-      epaReg: applicationEpaReg(app),
-      activeIngredient: applicationActiveIngredient(app),
-      rateDetails,
-      customerDetail,
-    };
-  });
-}
-
 function applicationZoneText(app = {}, zoneById = new Map()) {
   const zones = applicationZoneIds(app).map((id) => zoneById.get(String(id))).filter(Boolean);
-  const letters = zones.map((zone) => zone.letter).filter(Boolean);
+  if (!zones.length) return app.applicationArea || 'Treated area recorded';
+  // Applied to every zone → "your whole lawn" reads far better than listing each one
+  // (and the internal A/B/C/D zone letters mean nothing to a homeowner).
+  const totalZones = zoneById.size;
+  if (totalZones > 1 && zones.length >= totalZones) return 'Your whole lawn';
+  // Otherwise name the AREAS the customer recognizes — never the internal letters.
   const labels = zones.map((zone) => zone.label).filter(Boolean);
-  if (letters.length) return `Zones ${letters.join(', ')}`;
   if (labels.length) return labels.join(', ');
-  return app.applicationArea || 'Treated zones recorded';
+  return app.applicationArea || 'Treated area recorded';
 }
 
 function applicationGroupPurposeCopy(purpose, serviceLine = 'pest') {
@@ -1638,7 +1597,7 @@ function useReadinessNow(context, mode) {
   return nowMs;
 }
 
-function ServiceStatusCard({ data, mode }) {
+function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
   const completionTime = getReportCompletionTime(data);
   const completionDisplayTime = formatTimelineTime(completionTime);
@@ -1657,12 +1616,15 @@ function ServiceStatusCard({ data, mode }) {
         <div className="section-eyebrow">Service report{serviceLabel ? ` · ${serviceLabel}` : ''}</div>
         <h1 className="sr-title">Hey {firstName}, {smartStatus.heading}</h1>
         {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
+        {(data.customerPhone || data.customerEmail) && (
+          <div className="service-meta-contact">{[data.customerPhone, data.customerEmail].filter(Boolean).join(' · ')}</div>
+        )}
       </div>
       <div className="service-status-card">
         <div className="service-status-main">
           <div>
             <div className="section-eyebrow">Today&apos;s result</div>
-            <div className="smart-status-result">{smartStatus.result}</div>
+            <div className="smart-status-result">{resultOverride || smartStatus.result}</div>
             <div className="sr-meta">{[serviceLabel, serviceDateTime].filter(Boolean).join(' | ')}</div>
           </div>
           {(smartStatus.status || readinessBadge) && (
@@ -1829,6 +1791,25 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
     && data.pestPressure.showOnCustomerReport !== false
     && data.pestPressure.enabled !== false;
   const hasInaccessible = hasCoverage && coverage.items.some((item) => isInaccessibleCoverageStatus(item.status));
+
+  // Lead with questions tied to THIS visit's actual findings (from reportV2), so the
+  // prompts read specific instead of generic. The deterministic generic set fills the
+  // rest up to the cap.
+  const v2 = data.reportV2;
+  if (v2 && Array.isArray(v2.insights)) {
+    const QUESTION_BY_CATEGORY = {
+      water: 'Am I watering the right amount?',
+      weeds: 'How do I keep the weeds from spreading?',
+      damage: 'What are the stress areas you flagged?',
+      coverage: 'How can I thicken up the thin areas?',
+      color: 'How do I get more even color?',
+      mowing: 'What mowing height is best for my lawn?',
+      customer_concern: 'Can you follow up on what I flagged?',
+    };
+    v2.insights
+      .filter((i) => i.status === 'needs_attention' || i.status === 'watch')
+      .forEach((i) => { if (QUESTION_BY_CATEGORY[i.category]) add(QUESTION_BY_CATEGORY[i.category]); });
+  }
 
   if (hasReentry) add('Is it safe to re-enter now?');
   if (hasCoverage) add('What areas were treated?');
@@ -2436,58 +2417,6 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
     );
   }
   return actions.slice(0, 3);
-}
-
-function WhatHappenedWhere({ data, token, mode = 'live' }) {
-  const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
-  const rows = [];
-  for (const finding of data.findings || []) {
-    if (!finding.zoneId) continue;
-    const zone = zoneById.get(String(finding.zoneId));
-    rows.push({
-      key: `finding-${finding.id}`,
-      place: zone ? `${zone.letter} · ${zone.label}` : 'Observed area',
-      detail: [finding.title, finding.detail].filter(Boolean).join('. '),
-    });
-  }
-  for (const app of data.applications || []) {
-    const zones = (app.zone_ids || []).map((id) => zoneById.get(String(id))).filter(Boolean);
-    if (!zones.length) continue;
-    rows.push({
-      key: `app-${app.id}`,
-      place: zones.map((zone) => zone.letter).join(', '),
-      detail: `${applicationPurpose(app, data.serviceLine)}. ${applicationPurposeCopy(app, data.serviceLine)}`,
-    });
-  }
-  const deduped = rows.filter((row, index, all) => (
-    all.findIndex((candidate) => candidate.place === row.place && candidate.detail === row.detail) === index
-  )).slice(0, 6);
-  if (!deduped.length) return null;
-  return (
-    <section className="sr-section what-happened-where">
-      <h2>What happened where</h2>
-      <div className="where-accordion-list">
-        {deduped.map((row) => (
-          <details
-            className="where-row report-accordion"
-            key={row.key}
-            open={mode !== 'live'}
-            onToggle={(event) => {
-              if (event.currentTarget.open) {
-                trackReportEvent(token, 'map_interacted', { source: 'what_happened_where', row: row.key });
-              }
-            }}
-          >
-            <summary>
-              <span className="where-place">{row.place}</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="where-detail accordion-body">{row.detail}</div>
-          </details>
-        ))}
-      </div>
-    </section>
-  );
 }
 
 function AppliedProductsSection({ data, mode = 'live' }) {
@@ -4230,11 +4159,13 @@ function ServiceReportCoverageAndWorkflow({
   mapAttribution,
   applications = [],
   serviceLine = null,
+  hideCoverageMap = false,
 }) {
   // Lawn and tree & shrub reports don't show the per-area Coverage map — the
-  // lawn-intelligence/assessment surfaces tell that story instead. Keep the
-  // Visit Timeline for every service line.
-  const hideCoverage = serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || ''));
+  // lawn-intelligence/assessment surfaces tell that story instead. Pest V2 hides
+  // it too (the "Where we protected" Waves diagram up top replaces the legacy
+  // lettered map). Keep the Visit Timeline for every service line.
+  const hideCoverage = serviceLine === 'lawn' || /tree|shrub/.test(String(serviceLine || '')) || hideCoverageMap;
   return (
     <>
       <ServiceTimelineSection
@@ -4304,277 +4235,6 @@ function OverlayShape({ geometry, className = '', fill, children }) {
   }
   const box = overlayBox(geometry);
   return <rect x={box.x} y={box.y} width={box.w} height={box.h} className={className} fill={fill}>{children}</rect>;
-}
-
-function SatelliteTreatmentOverlay({ satellite, applicationRows = [], selectedApplicationId, onSelectApplication }) {
-  const overlay = satellite?.overlay || {};
-  const zones = overlay.zones || [];
-  const zonesById = new Map(zones.map((zone) => [String(zone.id), zone]));
-  const applications = overlay.applications || [];
-  const rowById = new Map(applicationRows.map((row) => [String(row.id), row]));
-  const zoneApplicationIds = new Map();
-  applications.forEach((app) => {
-    const appId = String(app.id);
-    (app.zoneIds || []).forEach((zoneId) => {
-      const key = String(zoneId);
-      const ids = zoneApplicationIds.get(key) || [];
-      ids.push(appId);
-      zoneApplicationIds.set(key, ids);
-    });
-  });
-  const flags = overlay.flags || [];
-  let baitSequence = 1;
-
-  const fillForMethod = (method, color) => {
-    if (method === 'bait_placement') return 'none';
-    return color || '#0f766e';
-  };
-
-  const handleSelect = (appId, event) => {
-    event.stopPropagation();
-    if (appId) onSelectApplication?.(String(appId), 'satellite');
-  };
-
-  const handleKeySelect = (appId, event) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    handleSelect(appId, event);
-  };
-
-  return (
-    <svg
-      className="satellite-treatment-overlay"
-      viewBox={`0 0 ${overlay.width || 640} ${overlay.height || 340}`}
-      role="img"
-      aria-label="Waves treatment overlays"
-    >
-      <defs>
-        <pattern id="sat-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-          <line x1="0" y1="0" x2="0" y2="8" className="sat-pattern-line" />
-        </pattern>
-        <pattern id="sat-wide-hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-          <line x1="0" y1="0" x2="0" y2="12" className="sat-pattern-line" />
-        </pattern>
-        <pattern id="sat-crosshatch" width="8" height="8" patternUnits="userSpaceOnUse">
-          <path d="M0 8L8 0M0 0L8 8" className="sat-pattern-path" />
-        </pattern>
-        <pattern id="sat-dots" width="6" height="6" patternUnits="userSpaceOnUse">
-          <circle cx="1.5" cy="1.5" r="0.8" className="sat-pattern-dot" />
-        </pattern>
-      </defs>
-      <g className="satellite-zone-outlines">
-        {zones.map((zone) => (
-          <g key={zone.id}>
-            <OverlayShape geometry={zone.geometry} className="satellite-zone-outline" />
-            <text x={overlayBox(zone.geometry).x + 6} y={overlayBox(zone.geometry).y + 16} className="satellite-zone-label">
-              {zone.letter}
-            </text>
-          </g>
-        ))}
-      </g>
-      <g className="satellite-applications">
-        {applications.map((app, fallbackIndex) => {
-          const appId = String(app.id);
-          const row = rowById.get(appId);
-          const color = row?.color || TREATMENT_OVERLAY_COLORS[fallbackIndex % TREATMENT_OVERLAY_COLORS.length];
-          const mapNumber = row?.mapNumber || String(fallbackIndex + 1);
-          const appLabel = [
-            row?.productName || app.productName || 'Product application',
-            row?.methodLabel || app.methodLabel || formatEnumLabel(app.method),
-            row?.zoneText,
-          ].filter(Boolean).join(', ');
-          const selected = String(selectedApplicationId || '') === appId;
-          return (
-            <g
-              key={app.id}
-              className={`app-layer satellite-application-hit${selected ? ' is-selected' : ''}`}
-              data-application-id={app.id}
-              data-product-name={app.productName}
-              data-epa-reg={app.epaReg}
-              role="button"
-              tabIndex={0}
-              aria-label={`Show ${appLabel}`}
-              style={{ '--app-color': color }}
-              onClick={(event) => handleSelect(appId, event)}
-              onKeyDown={(event) => handleKeySelect(appId, event)}
-            >
-              <title>{appLabel}</title>
-              {(app.zoneIds || []).map((zoneId) => {
-              const zone = zonesById.get(String(zoneId));
-              if (!zone) return null;
-              const center = overlayCenter(zone.geometry);
-              const zoneAppIds = zoneApplicationIds.get(String(zoneId)) || [];
-              const zoneAppIndex = Math.max(0, zoneAppIds.indexOf(appId));
-              const badgeY = center.y + (zoneAppIndex - ((zoneAppIds.length || 1) - 1) / 2) * 20;
-              const badgeWidth = Math.max(22, 14 + mapNumber.length * 7);
-              if (app.method === 'bait_placement') {
-                const sequence = baitSequence++;
-                return (
-                  <g key={`${app.id}-${zoneId}`} className="satellite-bait-marker" data-marker-sequence={sequence}>
-                    <circle cx={center.x} cy={badgeY} r="10" className="satellite-bait-circle" />
-                    <text x={center.x} y={badgeY + 4} textAnchor="middle" className="satellite-bait-label">{mapNumber}</text>
-                  </g>
-                );
-              }
-              return (
-                <g key={`${app.id}-${zoneId}`} data-zone-id={zoneId}>
-                  <OverlayShape
-                    geometry={zone.geometry}
-                    className="satellite-application-overlay"
-                    fill={fillForMethod(app.method, color)}
-                  />
-                  <g className="satellite-application-badge" transform={`translate(${center.x} ${badgeY})`}>
-                    <rect x={-badgeWidth / 2} y="-10" width={badgeWidth} height="20" rx="10" />
-                    <text x="0" y="4" textAnchor="middle">{mapNumber}</text>
-                  </g>
-                </g>
-              );
-              })}
-            </g>
-          );
-        })}
-      </g>
-      <g className="satellite-flag-markers">
-        {flags.map((flag) => {
-          const zone = zonesById.get(String(flag.zoneId));
-          if (!zone) return null;
-          const center = overlayCenter(zone.geometry);
-          return (
-            <g key={`${flag.zoneId}-${flag.label}`} className="satellite-flag-marker">
-              <circle cx={center.x} cy={center.y} r="9" className="satellite-flag-circle" />
-              <text x={center.x} y={center.y + 4} textAnchor="middle" className="satellite-flag-mark">!</text>
-              <text x={center.x + 13} y={center.y + 4} className="satellite-flag-label">{flag.label}</text>
-            </g>
-          );
-        })}
-      </g>
-    </svg>
-  );
-}
-
-function TreatmentOverlayKey({ rows = [], selectedRow, onSelect }) {
-  if (!rows.length || !selectedRow) return null;
-  const identifiers = [
-    selectedRow.epaReg ? `EPA reg. ${selectedRow.epaReg}` : null,
-    selectedRow.activeIngredient ? `Active ingredient: ${selectedRow.activeIngredient}` : null,
-    ...(selectedRow.rateDetails || []),
-  ].filter(Boolean);
-  return (
-    <div className="treatment-overlay-key">
-      <div className="treatment-overlay-list" aria-label="Treatment overlay key">
-        {rows.map((row) => (
-          <button
-            type="button"
-            key={row.id}
-            className={`treatment-overlay-row${row.id === selectedRow.id ? ' is-active' : ''}`}
-            style={{ '--app-color': row.color }}
-            aria-pressed={row.id === selectedRow.id}
-            onClick={() => onSelect?.(row.id, 'overlay_key')}
-          >
-            <span className="treatment-overlay-number">{row.mapNumber}</span>
-            <span className="treatment-overlay-row-copy">
-              <strong>{row.productName}</strong>
-              <span>{row.methodLabel} · {row.zoneText}</span>
-            </span>
-          </button>
-        ))}
-      </div>
-      <div className="treatment-overlay-detail" aria-live="polite">
-        <div className="sr-cell-label">Selected treatment</div>
-        <h3>{selectedRow.productName}</h3>
-        <p>{selectedRow.customerDetail}</p>
-        <div className="treatment-overlay-meta">
-          <span>{selectedRow.purpose}</span>
-          <span>{selectedRow.methodLabel}</span>
-          <span>{selectedRow.zoneText}</span>
-          {selectedRow.targetText && <span>Targets: {selectedRow.targetText}</span>}
-          {identifiers.map((detail) => <span key={detail}>{detail}</span>)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TreatmentMapSection({ data, mode, token, showTapPrompt = false }) {
-  const satellite = data.treatmentMap?.satellite;
-  const canShowSatellite = mode === 'live' && satellite?.available && satellite.live?.url;
-  const [view, setView] = useState(canShowSatellite ? 'satellite' : 'schematic');
-  const overlayRows = useMemo(() => buildTreatmentOverlayRows(data), [data]);
-  const [selectedAppId, setSelectedAppId] = useState('');
-
-  useEffect(() => {
-    if (!canShowSatellite && view !== 'schematic') setView('schematic');
-  }, [canShowSatellite, view]);
-
-  useEffect(() => {
-    if (!overlayRows.length) {
-      if (selectedAppId) setSelectedAppId('');
-      return;
-    }
-    if (!overlayRows.some((row) => row.id === selectedAppId)) {
-      setSelectedAppId(overlayRows[0].id);
-    }
-  }, [overlayRows, selectedAppId]);
-
-  if (!data.mapSvg) return null;
-  const activeView = canShowSatellite && view === 'satellite' ? 'satellite' : 'schematic';
-  const selectedRow = overlayRows.find((row) => row.id === selectedAppId) || overlayRows[0] || null;
-  const description = activeView === 'satellite'
-    ? 'Aerial view with product overlays. Service zones are approximate.'
-    : 'Schematic view of product overlays and treated zones. Service zones are approximate.';
-  const selectApplication = (applicationId, source) => {
-    if (!applicationId) return;
-    const id = String(applicationId);
-    setSelectedAppId(id);
-    trackReportEvent(token, 'map_interacted', { view: source, application_id: id });
-  };
-  const handleSchematicClick = (event) => {
-    const appLayer = event.target?.closest?.('.app-layer');
-    if (appLayer?.dataset?.applicationId) {
-      selectApplication(appLayer.dataset.applicationId, 'schematic');
-      return;
-    }
-    trackReportEvent(token, 'map_interacted', { view: 'schematic' });
-  };
-
-  return (
-    <section className="sr-section treatment-map-section">
-      <div className="treatment-map-header">
-        <div>
-          <h2>Where we treated today</h2>
-          <p className="map-context-copy">{description}</p>
-          {showTapPrompt && overlayRows.length > 0 && <p className="map-tap-prompt">Product numbers on the map match the treatment key below.</p>}
-        </div>
-        {canShowSatellite && (
-          <div className="map-toggle" aria-label="Treatment map view">
-            <button type="button" className={activeView === 'satellite' ? 'is-active' : ''} onClick={() => setView('satellite')}>Satellite</button>
-            <button type="button" className={activeView === 'schematic' ? 'is-active' : ''} onClick={() => setView('schematic')}>Schematic</button>
-          </div>
-        )}
-      </div>
-
-      {activeView === 'satellite' ? (
-        <div className="satellite-treatment-map" onClick={() => trackReportEvent(token, 'map_interacted', { view: 'satellite' })}>
-          <img src={satellite.live.url} alt="" className="satellite-basemap-image" />
-          <SatelliteTreatmentOverlay
-            satellite={satellite}
-            applicationRows={overlayRows}
-            selectedApplicationId={selectedRow?.id}
-            onSelectApplication={selectApplication}
-          />
-          {satellite.attributionText && <div className="map-attribution">{satellite.attributionText}</div>}
-        </div>
-      ) : (
-        <div
-          className="sr-map"
-          onClick={handleSchematicClick}
-          dangerouslySetInnerHTML={{ __html: data.mapSvg }}
-        />
-      )}
-      <TreatmentOverlayKey rows={overlayRows} selectedRow={selectedRow} onSelect={selectApplication} />
-      <p className="map-footnote">{data.treatmentMap?.footer || 'Treatment areas are technician-reported service zones, not survey boundaries.'}</p>
-    </section>
-  );
 }
 
 function SmsReportPreview({ data }) {
@@ -5053,10 +4713,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .service-meta-address {
           margin-top: 16px;
-          color: ${ESTIMATE_BODY};
-          font-size: 20px;
-          line-height: 1.35;
-          font-weight: 400;
+          color: var(--muted);
+          font-family: ${FONT_BODY};
+          font-size: 12px;
+          line-height: 1.5;
+          font-weight: 700;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+        .service-meta-contact {
+          margin-top: 4px;
+          color: var(--muted);
+          font-family: ${FONT_BODY};
+          font-size: 12px;
+          line-height: 1.5;
+          font-weight: 500;
         }
         .tech-visit-line {
           display: flex;
@@ -7545,27 +7216,73 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           ? <InternalReviewBar />
           : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
 
-        <ServiceStatusCard data={data} mode={mode} />
+        <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
+
+        {/* V2: a review ask up top, location-synced to the closest GBP (ReviewRequestCard
+            picks the office review URL). Self-gates on eligibility / already-reviewed. */}
+        {data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
         <TodaysResultCard typedReport={data.typedReport} />
 
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 
-        <section className="sr-section visit-summary-section" id="visit-summary">
-          <h2>Visit Summary</h2>
-          <p>{visitSummaryCopy(data)}</p>
-          {isLawnReport && (
-            <LawnAssessmentCard
-              assessment={data.lawnAssessment}
+        {/* Pest Report V2 — protection-first dashboard, right under Re-entry so it
+            leads the pest report. Surfaces the premium-experience intelligence
+            (protection status, next step, bug files, receipt) + the seasonal
+            forecast. Flag-gated: the payload only exists for pest visits with
+            PEST_REPORT_V2 on, so this is a no-op everywhere else. The legacy
+            pest-pressure chart + products + photos stay below as supporting detail. */}
+        {data.pestReportV2 && (
+          <div id="visit-summary">
+            <PestReportV2Section data={data.pestReportV2} print={mode === 'pdf' || mode === 'static'} />
+          </div>
+        )}
+
+        {/* V2: Visit Timeline + Ask Waves render directly under Re-entry. */}
+        {isLawnReport && data.reportV2 && (
+          <>
+            <div id="service-timeline">
+              <LawnVisitTimeline timeline={data.visitTimeline || normalizedVisitTimeline} />
+            </div>
+            <QuickNavigationAndAsk
               mode={mode}
               token={token}
-              embedded
+              serviceLine={data.serviceLine}
+              data={data}
+              hasProducts={hasApplications}
+              hasVisitTimeline={normalizedVisitTimeline.enabled}
+              hasPestPressure={hasPestPressure}
+              hasReentry={hasReentry}
+              hasActivity={Boolean(data.activity)}
             />
-          )}
-          {data.serviceLine === 'lawn' && data.mowingHeight && (
-            <LawnMowingHeight mowing={data.mowingHeight} />
-          )}
-        </section>
+          </>
+        )}
+
+        {/* Pest V2 owns the summary slot (the protection-first dashboard above
+            carries the id="visit-summary" anchor), so the legacy Visit Summary
+            paragraph is suppressed for pest V2 to avoid showing the report twice. */}
+        {!data.pestReportV2 && (
+          <section className="sr-section visit-summary-section" id="visit-summary">
+            <h2>Visit Summary</h2>
+            <p>{visitSummaryCopy(data)}</p>
+            {/* Lawn Report V2 visual dashboard slots in here (right after Re-entry),
+                REPLACING the legacy Lawn Intelligence card + mowing block it supersedes.
+                Falls back to the legacy card when reportV2 is absent (flag off). */}
+            {isLawnReport && (
+              data.reportV2
+                ? <LawnReportV2Section data={data.reportV2} print={mode === 'pdf' || mode === 'static'} />
+                : <LawnAssessmentCard
+                    assessment={data.lawnAssessment}
+                    mode={mode}
+                    token={token}
+                    embedded
+                  />
+            )}
+            {data.serviceLine === 'lawn' && data.mowingHeight && !data.reportV2 && (
+              <LawnMowingHeight mowing={data.mowingHeight} />
+            )}
+          </section>
+        )}
 
         {/* Lawn reports lead with the factual record — products applied + the
             visit timeline — right after the assessment. Other service lines
@@ -7574,22 +7291,25 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {isLawnReport && (
           <>
             <AppliedProductsSection data={data} mode={mode} />
-            <div id="map">
-              <ServiceReportCoverageAndWorkflow
-                serviceType={visitTimelineServiceType}
-                serviceCoverage={serviceCoverage}
-                visitTimeline={normalizedVisitTimeline}
-                workflowEvents={data.workflowEvents}
-                customerInteraction={data.customerInteraction}
-                visitTiming={data.visitTiming}
-                timingSource={data}
-                evidenceLevel={data.evidenceLevel}
-                mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
-                mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-                applications={data.applications || []}
-                serviceLine={data.serviceLine}
-              />
-            </div>
+            {/* V2 renders the timeline up top (under Re-entry); legacy keeps it here. */}
+            {!data.reportV2 && (
+              <div id="map">
+                <ServiceReportCoverageAndWorkflow
+                  serviceType={visitTimelineServiceType}
+                  serviceCoverage={serviceCoverage}
+                  visitTimeline={normalizedVisitTimeline}
+                  workflowEvents={data.workflowEvents}
+                  customerInteraction={data.customerInteraction}
+                  visitTiming={data.visitTiming}
+                  timingSource={data}
+                  evidenceLevel={data.evidenceLevel}
+                  mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+                  mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+                  applications={data.applications || []}
+                  serviceLine={data.serviceLine}
+                />
+              </div>
+            )}
           </>
         )}
 
@@ -7612,9 +7332,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /
             'static') where the controls would be non-functional anyway. */}
-        {data.activity
+        {/* Pest V2 surfaces the pressure/activity reading in the dashboard hero,
+            so the standalone meter is suppressed for pest V2 (no double report). */}
+        {!data.pestReportV2 && (data.activity
           ? <ActivityCard data={data.activity} />
-          : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />}
+          : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
 
         {/* Companion typed sections (combined services): primary content
             first, then one block per companion — heading, Today's Result,
@@ -7648,22 +7370,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         ))}
 
         {/* Lawn: program explainer drops below the factual record, just above
-            Ask-Waves. */}
-        {data.serviceLine === 'lawn' && (
+            Ask-Waves. Removed from the V2 report (the visit-specific dashboard
+            covers what was done; the generic program explainer added noise). */}
+        {data.serviceLine === 'lawn' && !data.reportV2 && (
           <LawnProgramOverviewCard context={data.lawnProgramOverview} />
         )}
 
-        <QuickNavigationAndAsk
-          mode={mode}
-          token={token}
-          serviceLine={data.serviceLine}
-          data={data}
-          hasProducts={hasApplications}
-          hasVisitTimeline={normalizedVisitTimeline.enabled}
-          hasPestPressure={hasPestPressure}
-          hasReentry={hasReentry}
-          hasActivity={Boolean(data.activity)}
-        />
+        {/* V2 (lawn) renders Ask Waves up top (under Re-entry); otherwise keep it here. */}
+        {!(isLawnReport && data.reportV2) && (
+          <QuickNavigationAndAsk
+            mode={mode}
+            token={token}
+            serviceLine={data.serviceLine}
+            data={data}
+            hasProducts={hasApplications}
+            hasVisitTimeline={normalizedVisitTimeline.enabled}
+            hasPestPressure={hasPestPressure && !data.pestReportV2}
+            hasReentry={hasReentry}
+            hasActivity={Boolean(data.activity) && !data.pestReportV2}
+          />
+        )}
 
         {/* Non-lawn lines keep Timeline + Coverage and Products here; lawn
             already rendered them up top. */}
@@ -7682,6 +7408,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               applications={data.applications || []}
               serviceLine={data.serviceLine}
+              hideCoverageMap={Boolean(data.pestReportV2)}
             />
           </div>
         )}
@@ -7732,7 +7459,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {(data.photos || []).length > 0 && (
+        {/* Legacy field photos render each photo with its per-photo vision caption
+            (which can over-diagnose). When reportV2 is present, the V2 photo strip
+            above replaces this with a horizontal gallery + ONE consolidated analysis. */}
+        {(data.photos || []).length > 0 && !data.reportV2 && (
           <section className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (

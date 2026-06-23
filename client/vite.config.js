@@ -3,8 +3,23 @@ import react from '@vitejs/plugin-react';
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:3001';
 
+// Opt-in DEV-ONLY shim (CAP_SHIM=1): alias the native Capacitor plugins to tiny
+// web stubs so the full app boots in a checkout that lacks the native deps. Never
+// affects `vite build` / the native iOS bundle (which uses the real, installed
+// plugins) — this only activates when the env flag is set for the dev server.
+const capShim = process.env.CAP_SHIM === '1';
+const shim = (p) => new URL(`./src/native/_capWebShim/${p}`, import.meta.url).pathname;
+const capShimAlias = capShim ? {
+  '@capacitor/core': shim('core.js'),
+  '@capacitor/app': shim('app.js'),
+  '@capacitor/camera': shim('camera.js'),
+  '@capacitor/push-notifications': shim('push.js'),
+  '@aparajita/capacitor-biometric-auth': shim('biometric.js'),
+} : {};
+
 export default defineConfig({
   plugins: [react()],
+  resolve: { alias: { ...capShimAlias } },
   server: {
     port: 5173,
     proxy: {

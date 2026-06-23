@@ -16,6 +16,8 @@ const LawnIntel = require('../services/lawn-intelligence');
 const LawnSnapshot = require('../services/lawn-snapshot');
 const RecommendationEngine = require('../services/lawn-recommendation-engine');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
+const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
+const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -725,11 +727,22 @@ router.post('/assess', async (req, res, next) => {
     // Convert to display scores
     const displayScores = lawnAssessment.mapToDisplayScores(mergedComposite);
 
-    // Determine season and apply adjustment
+    // Determine season and apply adjustment. Prefer a WEATHER-driven normalization —
+    // St. Augustine slows by actual cold, not the calendar — using the customer's
+    // recent overnight lows. Falls back to the legacy month bucket on any miss.
     const now = new Date();
     const month = now.getMonth() + 1;
     const season = lawnAssessment.getSeason(month);
-    const adjustedScores = lawnAssessment.applySeasonalAdjustment(displayScores, month);
+    let recentMinTempF = null;
+    try {
+      const cust = await db('customers').where({ id: customerId }).select('latitude', 'longitude').first();
+      if (cust && Number.isFinite(Number(cust.latitude)) && Number.isFinite(Number(cust.longitude))) {
+        recentMinTempF = await fetchRecentMinTempF({ latitude: Number(cust.latitude), longitude: Number(cust.longitude) });
+      }
+    } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
+    const adjustedScores = Number.isFinite(recentMinTempF)
+      ? seasonAwareAdjustment(displayScores, { month, recentMinTempF })
+      : lawnAssessment.applySeasonalAdjustment(displayScores, month);
 
     // Check if this is the first assessment (baseline)
     const existingCount = await db('lawn_assessments')

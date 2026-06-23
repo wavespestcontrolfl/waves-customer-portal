@@ -38,6 +38,7 @@ import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
+import FastCloseoutSummary from "../../components/tech/FastCloseoutSummary";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -6473,6 +6474,246 @@ function TurfHeightCapture({ service, value, onChange, disabled }) {
   );
 }
 
+// Recap chips — action tags (top 8 + more). role is sent to the server, which
+// derives the friendly customer caption (recap-media.js ROLE_MAP). Mirrors the
+// tech-capture-preview, but here the native camera records and uploads for real.
+const RECAP_CHIPS_TOP = [
+  { role: "perimeter", label: "Spray — perimeter" },
+  { role: "eaves", label: "Spray — eaves/soffits" },
+  { role: "entry", label: "Spray — entry points" },
+  { role: "deweb", label: "De-web — eaves/corners" },
+  { role: "sweep", label: "Sweep — lanai/pool cage" },
+  { role: "bait", label: "Bait placement" },
+  { role: "granule", label: "Granule spread" },
+  { role: "pest", label: "Live pest (found)" },
+];
+const RECAP_CHIPS_MORE = [
+  { role: "inside", label: "Spray — inside" },
+  { role: "foundation", label: "Spray — foundation/weep holes" },
+  { role: "garage", label: "Spray — garage" },
+  { role: "shrubs", label: "Spray — shrubs/beds" },
+  { role: "dust", label: "Dust — crack & crevice" },
+  { role: "wasp", label: "Wasp nest removal" },
+  { role: "acpad", label: "Treat AC pad" },
+  { role: "before", label: "Before" },
+  { role: "after", label: "After" },
+];
+
+function readVideoDurationMs(file) {
+  return new Promise((resolve) => {
+    try {
+      const url = URL.createObjectURL(file);
+      const v = document.createElement("video");
+      v.preload = "metadata";
+      v.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(Number.isFinite(v.duration) ? Math.round(v.duration * 1000) : null); };
+      v.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      v.src = url;
+    } catch { resolve(null); }
+  });
+}
+
+// Tech capture — record a clip (native camera) → tag the action → upload direct to
+// S3 (presigned PUT) → it lands in the recap. All optional; flag-gated, pest only.
+function RecapCapture({ serviceId }) {
+  const [items, setItems] = useState([]);
+  const [pendingFile, setPendingFile] = useState(null);
+  const [showMore, setShowMore] = useState(false);
+  const [uploading, setUploading] = useState(0);
+  const fileRef = useRef(null);
+
+  const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-media`)
+    .then((d) => setItems(d?.items || [])).catch(() => {});
+  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [serviceId]);
+
+  const onPick = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (fileRef.current) fileRef.current.value = "";
+    if (file) setPendingFile(file);
+  };
+
+  const tag = async (role) => {
+    const file = pendingFile;
+    setPendingFile(null);
+    setShowMore(false);
+    if (!file) return;
+    setUploading((n) => n + 1);
+    try {
+      const mediaType = file.type.startsWith("image/") ? "image" : "video";
+      const durationMs = mediaType === "video" ? await readVideoDurationMs(file) : null;
+      const { mediaId, uploadUrl } = await adminFetch(`/admin/dispatch/${serviceId}/recap-media/presign`, {
+        method: "POST", body: JSON.stringify({ role, mediaType, contentType: file.type || (mediaType === "image" ? "image/jpeg" : "video/mp4") }),
+      });
+      const put = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": file.type || "video/mp4" }, body: file });
+      if (!put.ok) throw new Error(`upload failed (${put.status})`);
+      await adminFetch(`/admin/dispatch/${serviceId}/recap-media/${mediaId}/confirm`, {
+        method: "POST", body: JSON.stringify({ bytes: file.size, durationMs }),
+      });
+      await refresh();
+    } catch { /* surfaced via the strip not updating; keep closeout unblocked */ }
+    finally { setUploading((n) => Math.max(0, n - 1)); }
+  };
+
+  const remove = async (id) => {
+    try { await adminFetch(`/admin/dispatch/${serviceId}/recap-media/${id}`, { method: "DELETE" }); await refresh(); } catch { /* ignore */ }
+  };
+
+  const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
+  const chip = { display: "flex", alignItems: "center", gap: 7, padding: "12px 10px", borderRadius: 11, background: D.bg, border: `1px solid ${D.border}`, color: D.text, fontSize: 12.5, fontWeight: 700, cursor: "pointer", textAlign: "left" };
+
+  return (
+    <div style={wrap}>
+      <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: D.teal }} /> Recap clips</span>
+        <span style={{ fontSize: 12, color: D.muted }}>{items.length ? `${items.length} captured` : "optional"}</span>
+      </div>
+      <div style={{ fontSize: 12.5, color: D.muted, margin: "6px 0 10px", lineHeight: 1.45 }}>Grab a few 5-sec clips of the work — they play in the customer’s recap. Skip it and the recap still generates.</div>
+
+      <input ref={fileRef} type="file" accept="video/*,image/*" capture="environment" onChange={onPick} style={{ display: "none" }} />
+
+      {items.length > 0 && (
+        <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
+          {items.map((m) => (
+            <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
+              <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#0ea5e9,#0b1220)", flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
+                <div style={{ fontSize: 11.5, color: D.teal }}>“{m.caption}”</div>
+              </div>
+              <span style={{ fontSize: 10.5, color: m.status === "ready" ? D.green : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
+              <button onClick={() => remove(m.id)} style={{ background: "none", border: "none", color: D.muted, fontSize: 18, cursor: "pointer" }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: D.teal, color: "#04240f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+        {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
+      </button>
+
+      {pendingFile && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
+            <div style={{ width: 40, height: 4, background: D.border, borderRadius: 3, margin: "0 auto 12px" }} />
+            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 800, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
+            <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
+                <button key={c.role} onClick={() => tag(c.role)} style={chip}><span style={{ width: 9, height: 9, borderRadius: "50%", background: D.teal, flexShrink: 0 }} />{c.label}</button>
+              ))}
+            </div>
+            {!showMore && <button onClick={() => setShowMore(true)} style={{ marginTop: 9, width: "100%", padding: 10, borderRadius: 9, background: "none", border: `1px solid ${D.border}`, color: D.muted, fontSize: 12.5, cursor: "pointer" }}>More actions…</button>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// "Your Visit, in Motion" recap — preview & approve card for the closeout.
+// Polls the recap render status, plays the MP4 (fetched as an authed blob so the
+// <video> tag doesn't need to carry a JWT), and gates sending on tech approval.
+// Flag-gated (pest-recap-v1) + pest visits only; renders next to FastCloseout.
+function PestRecapCard({ serviceId }) {
+  const [state, setState] = useState({ status: "loading" });
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const blobRef = useRef(null);
+
+  const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
+    .then((d) => { setState(d || { status: "none" }); return d; })
+    .catch(() => { setState({ status: "error" }); return null; });
+
+  useEffect(() => {
+    let alive = true;
+    const fetchStatus = () => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
+      .then((d) => { if (alive) setState(d || { status: "none" }); })
+      .catch(() => { if (alive) setState({ status: "error" }); });
+    fetchStatus();
+    const id = setInterval(fetchStatus, 4000);
+    return () => { alive = false; clearInterval(id); if (blobRef.current) URL.revokeObjectURL(blobRef.current); };
+  }, [serviceId]);
+
+  useEffect(() => {
+    if (!(state.status === "ready" || state.status === "approved") || videoUrl) return undefined;
+    let alive = true;
+    (async () => {
+      try {
+        const token = localStorage.getItem("waves_admin_token");
+        const res = await fetch(`${API_BASE}/admin/dispatch/${serviceId}/recap-video/file`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+        if (!res.ok || !alive) return;
+        const blob = await res.blob();
+        if (!alive) return;
+        const url = URL.createObjectURL(blob);
+        blobRef.current = url;
+        setVideoUrl(url);
+      } catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, [state.status, videoUrl, serviceId]);
+
+  const act = async (path, body) => {
+    setBusy(true);
+    try { await adminFetch(`/admin/dispatch/${serviceId}/recap-video/${path}`, { method: "POST", body: JSON.stringify(body || {}) }); await refresh(); }
+    catch (e) { setState((s) => ({ ...s, error: e.message })); }
+    finally { setBusy(false); }
+  };
+  const regenerate = () => {
+    if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null; }
+    setVideoUrl(null);
+    return act("generate", { force: true });
+  };
+
+  const s = state.status;
+  const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
+  const head = { fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
+  const btn = (bg, color) => ({ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: bg, color, fontWeight: 700, fontSize: 13, cursor: busy ? "wait" : "pointer", fontFamily: "'Montserrat', sans-serif" });
+
+  return (
+    <div style={wrap}>
+      <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+      <div style={head}><span style={{ width: 8, height: 8, borderRadius: "50%", background: D.teal }} /> Visit recap video</div>
+      {s === "loading" && <div style={{ fontSize: 13, color: D.muted }}>Checking recap…</div>}
+      {(s === "none") && (
+        <>
+          <div style={{ fontSize: 12.5, color: D.muted, marginBottom: 10 }}>Generate a ~30-sec recap from this visit. You’ll preview & approve before it sends.</div>
+          <button style={btn(D.teal, "#04240f")} disabled={busy} onClick={() => act("generate")}>Generate recap</button>
+        </>
+      )}
+      {(s === "pending" || s === "rendering") && (
+        <div style={{ fontSize: 13, color: D.muted, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ width: 16, height: 16, border: `2px solid ${D.border}`, borderTopColor: D.teal, borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+          Rendering the recap… this takes about a minute.
+        </div>
+      )}
+      {(s === "ready" || s === "approved") && (
+        <>
+          {videoUrl
+            ? <video src={videoUrl} controls playsInline style={{ width: "100%", maxWidth: 240, display: "block", margin: "0 auto 10px", borderRadius: 10, background: "#000" }} />
+            : <div style={{ fontSize: 13, color: D.muted, marginBottom: 10 }}>Loading preview…</div>}
+          {s === "approved" ? (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ flex: 1, fontSize: 12.5, color: D.green, fontWeight: 700 }}>✓ Approved — sends with this visit</span>
+              <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={btn(D.green, "#04240f")} disabled={busy} onClick={() => act("approve")}>Approve &amp; send</button>
+              <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
+            </div>
+          )}
+        </>
+      )}
+      {s === "failed" && (
+        <>
+          <div style={{ fontSize: 12.5, color: D.amber, marginBottom: 10 }}>Recap render didn’t complete.{state.error ? ` (${state.error})` : ""}</div>
+          <button style={btn(D.teal, "#04240f")} disabled={busy} onClick={regenerate}>Try again</button>
+        </>
+      )}
+      {s === "error" && <div style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</div>}
+    </div>
+  );
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -6527,6 +6768,9 @@ export function CompletionPanel({
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
   const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
+  // Phase 3 fast closeout — flag-gated (default off). Existing completion flow is unchanged when off.
+  const { enabled: fastCloseoutFlag, ready: fastCloseoutReady } = useFeatureFlagReady("fast-closeout-v2");
+  const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null, overrideReason: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
@@ -8956,6 +9200,47 @@ export function CompletionPanel({
     const Field = CPField;
     const Chip = CPChip;
 
+    // ── Phase 3 fast closeout (flag-gated, additive) ──────────────────────────
+    // A one-tap summary at the top of the panel for lawn visits: confirms defaults,
+    // surfaces the AI insight, and lets the tech attach an exception via chips that
+    // map to the EXISTING observation-chip handler (so they feed the report exactly
+    // as today). "Complete + Send" calls the real submit; the full form stays below.
+    const fastCloseoutOn = fastCloseoutReady && fastCloseoutFlag && serviceLineForCloseout === "lawn";
+    const EXCEPTION_TO_CHIP = {
+      dry_stress: "Lawn stress/dry patches", coverage: "Irrigation issue", weeds: "Weeds spreading",
+      fungus: "Fungus visible", pest: "Pest activity noted", concern: "Customer concern discussed",
+    };
+    const fastCloseoutExceptions = [
+      { key: "none", label: "No issues found", status: "ready" },
+      { key: "dry_stress", label: "Dry stress", status: "watch" },
+      { key: "coverage", label: "Irrigation coverage", status: "watch" },
+      { key: "weeds", label: "Weed pressure", status: "watch" },
+      { key: "pest", label: "Pest monitoring", status: "watch" },
+      { key: "fungus", label: "Fungus watch", status: "attention" },
+      { key: "concern", label: "Customer concern", status: "attention" },
+    ].map((e) => ({
+      ...e,
+      active: EXCEPTION_TO_CHIP[e.key]
+        ? selectedObservationLabels.includes(EXCEPTION_TO_CHIP[e.key])
+        : (e.key === "none" ? selectedObservationLabels.length === 0 : false),
+    }));
+    const fastCloseoutSummary = {
+      productsReady: selectedProducts.length > 0,
+      protocolReady: true,
+      photosReady: servicePhotos.length > 0 || !!lawnAssessmentId,
+      smsEnabled: true,
+      aiAnalysisStatus: lawnAssessmentId ? "complete" : "pending",
+      aiInsights: [],
+      suggestedCustomerAction: "",
+      exceptions: fastCloseoutExceptions,
+      canComplete: !submitting,
+    };
+    function handleFastException(key) {
+      if (!key) return; // "Advanced" / no-op — the full form is already below
+      const chip = EXCEPTION_TO_CHIP[key];
+      if (chip && typeof handleObservationSelect === "function") handleObservationSelect(chip);
+    }
+
     return createPortal(
       <>
         {" "}
@@ -8984,6 +9269,22 @@ export function CompletionPanel({
             animation: "slideIn 0.25s ease",
           }}
         >
+          {fastCloseoutOn && (
+            <div style={{ padding: "12px 16px 0" }}>
+              <FastCloseoutSummary
+                summary={fastCloseoutSummary}
+                completing={submitting}
+                onAddIssue={handleFastException}
+                onComplete={handleSubmit}
+              />
+            </div>
+          )}
+          {pestRecapFlag && pestRecapReady && String(service?.service_line || "").toLowerCase() === "pest" && (
+            <div style={{ padding: "12px 16px 0" }}>
+              <RecapCapture serviceId={service.id} />
+              <PestRecapCard serviceId={service.id} />
+            </div>
+          )}
           {success && (
             <div
               style={{

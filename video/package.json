@@ -1,0 +1,19 @@
+{
+  "name": "waves-recap-video",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Remotion composition + programmatic renderer for the per-visit 'Your Visit, in Motion' recap. Consumed by the server render pipeline (server/services/service-report/recap-*). Render is driven by the pestReportV2 payload (the script) + optional tech media clips (b-roll).",
+  "scripts": {
+    "render:sample": "node render.mjs",
+    "studio": "remotion studio src/index.jsx"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.350",
+    "@remotion/cli": "4.0.350",
+    "@remotion/renderer": "4.0.350",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "remotion": "4.0.350"
+  }
+}

@@ -111,6 +111,7 @@ import AdminCustomersPage from './pages/admin/CustomersPageV2';
 import AdminReferralsPage from './pages/admin/ReferralsPageV2';
 import ReportViewPage from './pages/ReportViewPage';
 import ProjectReportViewPage from './pages/ProjectReportViewPage';
+import RecapViewPage from './pages/RecapViewPage';
 import { lazy, Suspense } from 'react';
 
 function showReloadToast() {
@@ -153,6 +154,7 @@ const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
+const LawnReportV2Preview = lazyWithRetry(() => import('./pages/LawnReportV2Preview'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
@@ -285,6 +287,8 @@ export default function App() {
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/project/:token" element={<ProjectReportViewPage />} />
           <Route path="/report/:token" element={<ReportViewPage />} />
+          <Route path="/recap/:token" element={<RecapViewPage />} />
+          <Route path="/report-v2-preview" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportV2Preview /></Suspense>} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />

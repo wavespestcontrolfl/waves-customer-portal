@@ -235,6 +235,60 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // /data fetch does), so the staff signal can't be re-derived server-side
   // and the analytics gate has to ride the payload. Flag only when true —
   // customer payloads stay byte-identical.
+  // Lawn Report V2 — consistency pass: reconcile cross-section contradictions now
+  // that dynamicContext (re-entry) is available. Attaches reconciled values to
+  // reportV2 (todaysResult / followUp / reentry / warnings) and rewrites the legacy
+  // re-entry pet advisory in place so "Ready now" never sits next to "until dry".
+  if (data.reportV2) {
+    try {
+      const { reconcileLawnReport } = require('../services/service-report/report-consistency');
+      const fix = reconcileLawnReport({ data: { ...data, dynamicContext }, reportV2: data.reportV2 });
+      if (fix) {
+        data.reportV2 = {
+          ...data.reportV2,
+          todaysResult: fix.todaysResult || data.reportV2.todaysResult || null,
+          followUp: fix.followUp || data.reportV2.followUp || null,
+          consistencyWarnings: fix.warnings || [],
+        };
+        if (fix.reentry && dynamicContext && dynamicContext.reentry) {
+          dynamicContext.reentry = { ...dynamicContext.reentry, petAdvisory: fix.reentry.petAdvisory };
+        }
+      }
+    } catch { /* reconciliation is best-effort — never block the report */ }
+  }
+
+  // Pest Report V2 — protection-first dashboard (flag-gated). Surfaces the
+  // already-built premium-experience intelligence (defense status, primary move,
+  // bug files, pressure receipt, AI summary) that was computed but never rendered,
+  // plus a seasonal "what to expect" forecast resolved from the property zip.
+  // Pest service line only; best-effort so a forecast/network hiccup never blocks
+  // the report. Flows to the client via the `...data` spread below.
+  if (
+    process.env.PEST_REPORT_V2 === 'true'
+    && data.serviceLine === 'pest'
+    && dynamicContext.premiumExperience
+  ) {
+    try {
+      const { buildPestReportV2 } = require('../services/service-report/pest-report-v2');
+      let forecast = null;
+      try {
+        const { getForecast } = require('../services/pest-forecast/forecast');
+        const timer = new Promise((resolve) => {
+          const t = setTimeout(() => resolve(null), 4000);
+          if (t.unref) t.unref();
+        });
+        forecast = await Promise.race([getForecast({ zip: service.zip }), timer]);
+      } catch { forecast = null; }
+      const pestReportV2 = buildPestReportV2({
+        premiumExperience: dynamicContext.premiumExperience,
+        pestPressure: data.pestPressure,
+        activity: data.activity,
+        forecast,
+      });
+      if (pestReportV2) data.pestReportV2 = pestReportV2;
+    } catch { /* best-effort — never block the report */ }
+  }
+
   if (suppressedTypedReport(service)) {
     return { ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) };
   }
@@ -475,6 +529,39 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/reports/:token/recap — customer-facing recap status. Only exposes a
+// recap the tech has APPROVED (ready-but-unapproved stays private).
+router.get('/:token/recap', async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
+  try {
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id').first();
+    if (!service) return res.status(404).json({ error: 'Not found' });
+    const { getRecap } = require('../services/service-report/recap-pipeline');
+    const recap = await getRecap(service.id);
+    const ready = Boolean(recap && recap.status === 'approved' && recap.s3_key);
+    return res.json({ ready, durationMs: ready ? recap.duration_ms : null });
+  } catch (err) { return next(err); }
+});
+
+// GET /api/reports/:token/recap/video — streams the approved recap MP4 (token-gated).
+router.get('/:token/recap/video', async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).end();
+  try {
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id').first();
+    if (!service) return res.status(404).end();
+    const { getRecap } = require('../services/service-report/recap-pipeline');
+    const recap = await getRecap(service.id);
+    if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();
+    const { getRecapStream } = require('../services/service-report/recap-storage');
+    const obj = await getRecapStream(recap.s3_key);
+    if (!obj) return res.status(404).end();
+    res.setHeader('Content-Type', obj.contentType || 'video/mp4');
+    if (obj.size) res.setHeader('Content-Length', obj.size);
+    res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    return obj.body.pipe(res);
+  } catch (err) { return next(err); }
+});
+
 // POST /api/reports/:token/pest-pressure/client-rating — customer-facing,
 // token-scoped capture of the "how much pest activity have you noticed?"
 // rating. Updates service_records.client_pest_rating (source='customer'),
@@ -635,7 +722,7 @@ router.post('/:token/ask', async (req, res, next) => {
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'customers.first_name', 'customers.last_name',
+      .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
         'customers.address_line1', 'customers.address_line2',
         'customers.city', 'customers.state', 'customers.zip',
         'customers.has_left_google_review',
@@ -734,7 +821,7 @@ router.get('/:token', async (req, res, next) => {
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'customers.first_name', 'customers.last_name',
+      .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
         'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
         'customers.has_left_google_review',
         'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
@@ -857,7 +944,7 @@ router.get('/:token/map.svg', async (req, res, next) => {
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'customers.first_name', 'customers.last_name',
+      .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
         'customers.address_line1', 'customers.address_line2',
         'customers.city', 'customers.state', 'customers.zip',
         'customers.has_left_google_review',
@@ -895,7 +982,7 @@ router.get('/:token/data', async (req, res, next) => {
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'customers.first_name', 'customers.last_name',
+      .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
         'customers.address_line1', 'customers.address_line2',
         'customers.city', 'customers.state', 'customers.zip',
         'customers.has_left_google_review',

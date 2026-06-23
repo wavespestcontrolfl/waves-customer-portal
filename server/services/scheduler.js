@@ -1531,6 +1531,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN — Render queued "Your Visit, in Motion" recap videos (PEST_RECAP)
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    if (process.env.PEST_RECAP !== 'true') return;
+    try {
+      const { processDueRecaps } = require('./service-report/recap-pipeline');
+      const result = await processDueRecaps();
+      if (result.claimed || result.ready || result.failed || result.requeued) {
+        logger.info(`Visit recap renders: ${result.ready} ready, ${result.requeued} retry, ${result.failed} failed, ${result.skipped} skipped`);
+      }
+    } catch (err) {
+      logger.error(`Visit recap render cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 2:45AM — Build anonymized service report neighborhood pressure rolls
   // =========================================================================
   cron.schedule('45 2 * * *', async () => {

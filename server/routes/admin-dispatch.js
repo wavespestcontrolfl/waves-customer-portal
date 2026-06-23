@@ -3986,6 +3986,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.warn(`[dispatch] service report PDF render queue failed for ${record.id}: ${err.message}`);
       });
     }
+    // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
+    // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
+    // failure here never blocks completion; the tech approves before it ever sends.
+    if (process.env.PEST_RECAP === 'true' && String(record.service_line || '').toLowerCase() === 'pest') {
+      try {
+        const { enqueueRecap } = require('../services/service-report/recap-pipeline');
+        await enqueueRecap(record.id);
+      } catch (err) {
+        logger.warn(`[dispatch] recap render queue failed for ${record.id}: ${err.message}`);
+      }
+    }
     let reportSmsUrl = reportUrl;
     if (serviceReportV1Delivery && reportUrl && reportUrl !== portalUrl) {
       reportSmsUrl = await shortenOrPassthrough(reportUrl, {
@@ -4337,6 +4348,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           || prepaidCovered
           || autopayCoversVisit
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase());
+        // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
+        // source of truth) and run the consistency check, so the SMS below leads with
+        // the same line as the report. Best-effort; never blocks completion.
+        let lawnReportSmsSummary = null;
+        if (serviceReportV1Delivery && process.env.LAWN_REPORT_V2 === 'true') {
+          try {
+            const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
+            const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
+            lawnReportSmsSummary = gate.smsSummary || null;
+          } catch { /* best-effort — render-time reconciliation still applies */ }
+        }
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -4344,6 +4366,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             reportUrl,
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
+            summaryLine: lawnReportSmsSummary,
           })
           : null;
         if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
@@ -6511,6 +6534,107 @@ function shouldAutoInvoiceCompletion({
   return !!autoInvoicePricedVisits && !!hasVisitPrice
     && !isCallback && !isAlwaysFreeServiceType(serviceType);
 }
+
+// ── "Your Visit, in Motion" recap video (Pest Report V2 lane) ──────────────────
+// Gated behind PEST_RECAP (server) + pest-recap-v1 (client). Tech/admin auth is
+// already applied by router.use(adminAuthenticate, requireTechOrAdmin) above. Named
+// `recap-video` to avoid colliding with the existing SMS `recap-preview` route.
+const recapPipeline = require('../services/service-report/recap-pipeline');
+const recapStorage = require('../services/service-report/recap-storage');
+
+router.get('/:serviceId/recap-video', async (req, res, next) => {
+  try {
+    const recap = await recapPipeline.getRecap(Number(req.params.serviceId));
+    if (!recap) return res.json({ exists: false, status: 'none' });
+    return res.json({
+      exists: true,
+      status: recap.status,
+      ready: recap.status === 'ready' || recap.status === 'approved',
+      approved: recap.status === 'approved',
+      durationMs: recap.duration_ms || null,
+      error: recap.last_error || null,
+    });
+  } catch (err) { return next(err); }
+});
+
+router.post('/:serviceId/recap-video/generate', async (req, res, next) => {
+  try {
+    if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap rendering is disabled' });
+    const result = await recapPipeline.enqueueRecap(Number(req.params.serviceId), { force: Boolean(req.body?.force) });
+    if (!result.ok) return res.status(503).json({ error: 'recap queue unavailable' });
+    return res.json({ ok: true, status: result.recap?.status || 'pending' });
+  } catch (err) { return next(err); }
+});
+
+router.post('/:serviceId/recap-video/approve', async (req, res, next) => {
+  try {
+    const approvedBy = req.user?.email || req.user?.name || req.user?.id || null;
+    const result = await recapPipeline.approveRecap(Number(req.params.serviceId), { approvedBy });
+    if (!result.ok) return res.status(409).json({ error: result.error });
+    // Approval sends the customer the watch-recap link (best-effort, idempotent).
+    let sent = false;
+    try {
+      const { sendRecap } = require('../services/service-report/recap-delivery');
+      const send = await sendRecap(Number(req.params.serviceId));
+      sent = Boolean(send?.ok);
+    } catch (err) {
+      logger.warn(`[dispatch] recap send failed for ${req.params.serviceId}: ${err.message}`);
+    }
+    return res.json({ ok: true, status: 'approved', sent });
+  } catch (err) { return next(err); }
+});
+
+// Streams the rendered MP4 through this authed route (never a public S3 URL).
+router.get('/:serviceId/recap-video/file', async (req, res, next) => {
+  try {
+    const recap = await recapPipeline.getRecap(Number(req.params.serviceId));
+    if (!recap?.s3_key) return res.status(404).end();
+    const obj = await recapStorage.getRecapStream(recap.s3_key);
+    if (!obj) return res.status(404).end();
+    res.setHeader('Content-Type', obj.contentType || 'video/mp4');
+    if (obj.size) res.setHeader('Content-Length', obj.size);
+    res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    return obj.body.pipe(res);
+  } catch (err) { return next(err); }
+});
+
+// Tech-captured recap media — direct browser→S3 (presigned PUT). Same auth + gate.
+const recapMedia = require('../services/service-report/recap-media');
+
+router.post('/:serviceId/recap-media/presign', async (req, res, next) => {
+  try {
+    if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap capture is disabled' });
+    const { role, mediaType, contentType } = req.body || {};
+    const capturedBy = req.user?.email || req.user?.name || req.user?.id || null;
+    const result = await recapMedia.presignUpload({ serviceRecordId: Number(req.params.serviceId), role, mediaType, contentType, capturedBy });
+    return res.json(result);
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    return next(err);
+  }
+});
+
+router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) => {
+  try {
+    const row = await recapMedia.confirmUpload(Number(req.params.mediaId), { bytes: req.body?.bytes, durationMs: req.body?.durationMs });
+    if (!row) return res.status(404).json({ error: 'media not found' });
+    return res.json({ ok: true, id: row.id, status: row.status });
+  } catch (err) { return next(err); }
+});
+
+router.get('/:serviceId/recap-media', async (req, res, next) => {
+  try {
+    const items = await recapMedia.listMedia(Number(req.params.serviceId));
+    return res.json({ items });
+  } catch (err) { return next(err); }
+});
+
+router.delete('/:serviceId/recap-media/:mediaId', async (req, res, next) => {
+  try {
+    const ok = await recapMedia.deleteMedia(Number(req.params.mediaId));
+    return res.json({ ok });
+  } catch (err) { return next(err); }
+});
 
 module.exports = router;
 module.exports._test = {
