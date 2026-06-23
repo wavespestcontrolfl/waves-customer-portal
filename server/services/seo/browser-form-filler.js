@@ -208,19 +208,21 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
   //    / confirmation) → positive evidence something landed at the directory.
   //  - submitAborted: a submit/navigation request went OFF the pinned host and was
   //    aborted → that attempt reached nothing.
-  //  - submitBodyOffHost: a BODY-BEARING submit (POST/PUT/PATCH — the form data itself)
-  //    went off the pinned host and was aborted. This distinguishes the form ACTION
-  //    leaving the host (the real submission was blocked → submit_blocked) from a mere
-  //    post-submit GET/redirect to an off-host confirmation page (the submission already
-  //    landed on-host → keep it placed). Without this split, an on-host POST followed by
-  //    an off-host confirmation redirect was misread as submit_blocked and parked.
+  //  - submitNavOffHost: a body-bearing NAVIGATION (the form actually submitting/posting
+  //    its data and navigating) went off the pinned host and was aborted → the real
+  //    submission left the host (blocked). Deliberately NAVIGATION-scoped: an incidental
+  //    off-host analytics/sendBeacon POST during the submit phase is body-bearing but NOT
+  //    a navigation, so it must NOT count as the form leaving the host (else a real on-host
+  //    submission gets parked just because the page pinged analytics). Conversely a mere
+  //    off-host GET redirect to a confirmation page is a navigation but NOT body-bearing,
+  //    so it doesn't count either — the submission already landed on-host.
   // We only take the no-retry placed path on verification OR submitDispatched; with
   // neither we treat it as "nothing submitted" (retryable / parked), so a no-op or
   // off-host submit never strands a row as placed.
   let submitPhase = false;
   let submitAborted = false;
   let submitDispatched = false;
-  let submitBodyOffHost = false;
+  let submitNavOffHost = false;
 
   let browser;
   try {
@@ -249,17 +251,19 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
         // ORDER below: an off-host (aborted) submit is preferred over loose dispatch, so an
         // analytics POST can't mark an actually-off-host submission as placed.
         let isSubmitReq = false;
-        let isBodyReq = false;
+        let isFormNav = false;
         try {
           const method = String(req.method() || 'GET').toUpperCase();
-          isBodyReq = submitPhase && !['GET', 'HEAD', 'OPTIONS'].includes(method); // body-bearing = the form data itself
-          isSubmitReq = submitPhase && (isBodyReq || req.isNavigationRequest());
-        } catch { isSubmitReq = false; isBodyReq = false; }
+          const isBody = !['GET', 'HEAD', 'OPTIONS'].includes(method); // body-bearing = carries form data
+          const isNav = req.isNavigationRequest();
+          isFormNav = submitPhase && isBody && isNav;     // body-bearing NAVIGATION = the form itself submitting+navigating
+          isSubmitReq = submitPhase && (isBody || isNav); // any submit-ish request (incl. analytics POST / GET redirect)
+        } catch { isSubmitReq = false; isFormNav = false; }
         let ok = false;
         try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
         if (!ok) {
           if (isSubmitReq) submitAborted = true;       // a submit/nav request went off-host → reached nothing
-          if (isBodyReq) submitBodyOffHost = true;     // the FORM DATA itself left the host → real submit blocked
+          if (isFormNav) submitNavOffHost = true;      // the form NAVIGATED off-host with its data → real submit blocked
           return route.abort();
         }
         if (isSubmitReq) submitDispatched = true;  // the submit request reached the pinned host → evidence
@@ -382,23 +386,24 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     const placed = (msg) => ({ outcome: 'placed', pending: true, liveUrl: null, screenshot: shot2 || shot1, notes: [(verify && verify.notes) || msg, onHostClaim ? `claimed:${onHostClaim}` : ''].filter(Boolean).join(' ').slice(0, 200) });
 
     // EVIDENCE-based outcome (not "a click happened"), ordered so the SAFE verdict wins on
-    // ambiguity: a clear rejection, then a confirmation, then a body-bearing submit that
-    // went OFF-host (the form data was blocked → nothing reached the directory) PREFERRED
-    // over loose dispatch evidence, then on-host dispatch, then a non-body off-host abort,
-    // then no-evidence. So a row is only marked placed (no-retry → no dup) when confirmed,
-    // or a real submit reached the pinned host and the FORM DATA never left it.
+    // ambiguity: a clear rejection, then a confirmation, then a form that NAVIGATED off-host
+    // (its data was blocked → nothing reached the directory) PREFERRED over loose dispatch
+    // evidence, then on-host dispatch, then a bare off-host abort, then no-evidence. So a row
+    // is only marked placed (no-retry → no dup) when confirmed, or a real submit reached the
+    // pinned host and the form never navigated its data off-host.
     if (rejected) return { outcome: 'failed', errorCode: 'submit_rejected', screenshot: shot2 || shot1, notes: (verify && verify.notes) || 'directory rejected the submission' };
     if (confirmed) return placed('submitted');
-    // The form POST itself went off-host → blocked by the egress lock, directory never got
-    // it. Stays submit_blocked even if an on-host request also dispatched (e.g. analytics),
-    // so a genuinely off-host submission is never falsely marked placed.
-    if (submitBodyOffHost) return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot2 || shot1, notes: 'submit POST went off the pinned host (aborted) — nothing submitted' };
-    // A submit reached the pinned host and the form data never left it. A later off-host
-    // abort here is a post-submit redirect (confirmation/login/tracking nav), NOT the
-    // submission leaving — it already landed at the directory, so preserve it as placed.
+    // The form NAVIGATED off-host with its data → blocked by the egress lock, directory never
+    // got it. Stays submit_blocked even if an on-host request also dispatched, so a genuinely
+    // off-host submission is never falsely marked placed.
+    if (submitNavOffHost) return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot2 || shot1, notes: 'form navigated off the pinned host (aborted) — nothing submitted' };
+    // A submit reached the pinned host and the form never navigated its data off-host. A
+    // later off-host abort here is an incidental analytics/sendBeacon POST or a post-submit
+    // confirmation/login/tracking redirect — NOT the submission leaving — so the row already
+    // landed at the directory: preserve it as placed.
     if (submitDispatched) return placed('submitted; unconfirmed (request reached host)');
-    // A submit/nav request went off-host but nothing on-host dispatched and no body left
-    // the host either (e.g. a GET-form submit navigating off-host) → nothing reached it.
+    // A submit/nav request went off-host but nothing on-host dispatched either (e.g. a
+    // GET-form submit navigating off-host) → nothing reached the directory.
     if (submitAborted) return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot2 || shot1, notes: 'submit request went off the pinned host (aborted) — nothing submitted' };
     return { outcome: 'failed', errorCode: 'no_submit_evidence', screenshot: shot2 || shot1, notes: 'submit clicked but no submission request observed and unconfirmed' };
   } catch (err) {

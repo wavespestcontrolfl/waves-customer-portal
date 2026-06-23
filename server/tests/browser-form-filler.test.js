@@ -158,14 +158,14 @@ describe('fillCitationForm', () => {
     expect(r.pending).toBe(true);
   });
 
-  test('P2: a body-bearing submit going OFF-host stays submit_blocked even if an on-host request also dispatched', async () => {
-    // Protection preserved: the REAL form POST leaves the host (blocked) while an on-host
-    // analytics POST also fires. The form data never reached the directory → submit_blocked,
-    // never falsely placed off the on-host dispatch.
+  test('P2: a form that NAVIGATES off-host stays submit_blocked even if an on-host request also dispatched', async () => {
+    // Protection preserved: the REAL form submit navigates off-host (its data leaves the host
+    // → blocked) while an on-host analytics POST also fires. Never falsely placed off the
+    // on-host dispatch — a body-bearing NAVIGATION off-host is the form itself leaving.
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
       launchBrowser: async () => fakeBrowser([], { submitReqs: [
-        { method: 'POST', url: 'https://x.com/track' },         // on-host analytics POST (dispatch)
-        { method: 'POST', url: 'https://evil.example/submit' }, // the real form POST goes off-host → aborted
+        { method: 'POST', url: 'https://x.com/track' },                      // on-host analytics POST (dispatch)
+        { method: 'POST', url: 'https://evil.example/submit', nav: true },   // the real form NAVIGATES off-host → aborted
       ] }),
       anthropic: fakeAnthropic(
         { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
@@ -174,6 +174,24 @@ describe('fillCitationForm', () => {
     }));
     expect(r.outcome).toBe('failed');
     expect(r.errorCode).toBe('submit_blocked');
+  });
+
+  test('P2: an off-host analytics/sendBeacon POST does NOT park a real on-host submit (non-nav → not the form)', async () => {
+    // The form POST lands on-host (dispatch); the page also fires an off-host analytics
+    // POST (body-bearing but NOT a navigation). The beacon must not be mistaken for the
+    // form leaving the host → still placed+pending, not submit_blocked.
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReqs: [
+        { method: 'POST', url: 'https://x.com/submit' },                       // form data reaches the pinned host
+        { method: 'POST', url: 'https://www.google-analytics.com/collect' },   // off-host analytics beacon (non-nav) → aborted
+      ] }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null }, // unconfirmed by the page
+      ),
+    }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
   });
 
   test('P2: a STRING "true" from the verifier is NOT treated as confirmed (strict booleans only)', async () => {
