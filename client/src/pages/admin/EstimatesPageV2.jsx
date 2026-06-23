@@ -12,7 +12,7 @@
 //   PR #5c → FollowUpModalV2 + DeclineModalV2 replace V1 modals (Dialog
 //            primitive, danger variant on Mark-as-Lost)
 // Leads / Pricing Logic tabs still render V1 panels.
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
@@ -1508,6 +1508,51 @@ const SOURCE_ICON = {
   call_recording: { Icon: Phone, title: "Phone call recording draft" },
 };
 
+// Deep-link from a notification: /admin/estimates?estimateId=<id> scrolls the
+// matching estimate into view and briefly highlights it (estimate_expired and
+// bundle_quote_requested notifications). The pipeline has no per-estimate detail
+// view, so the highlight is the "you're here" cue. Shared by the desktop and
+// mobile estimate lists. Returns the id to highlight while the cue is active,
+// else null. `rows` is the currently rendered (post-filter) estimate list.
+function useEstimateDeepLinkHighlight({ loading, rows, filter, setFilter }) {
+  const targetId = useMemo(
+    () => new URLSearchParams(window.location.search).get("estimateId") || null,
+    [],
+  );
+  const [scrolled, setScrolled] = useState(false);
+  const [faded, setFaded] = useState(false);
+  const settledRef = useRef(false);
+
+  // Locate + scroll to the target once it appears in the rendered list.
+  useEffect(() => {
+    if (!targetId || faded || settledRef.current || loading) return;
+    const present = rows.some((e) => String(e.id) === String(targetId));
+    if (!present) {
+      // Not in the current filter — widen to All (where every non-archived
+      // estimate lives) once, then re-check on the next load. If it's still
+      // absent under All it's archived/deleted; give up quietly.
+      if (filter !== "all") setFilter("all");
+      else settledRef.current = true;
+      return;
+    }
+    settledRef.current = true;
+    const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
+    const node = document.querySelector(`[data-estimate-id="${sel}"]`);
+    node?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setScrolled(true);
+  }, [targetId, faded, loading, rows, filter, setFilter]);
+
+  // Fade the highlight a few seconds after landing on it. Keyed on `scrolled`
+  // (flips once) so the timer is set up exactly once.
+  useEffect(() => {
+    if (!scrolled) return undefined;
+    const t = setTimeout(() => setFaded(true), 2600);
+    return () => clearTimeout(t);
+  }, [scrolled]);
+
+  return targetId && scrolled && !faded ? targetId : null;
+}
+
 function EstimatePipelineViewV2() {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
@@ -1808,6 +1853,13 @@ function EstimatePipelineViewV2() {
       );
     });
 
+  const highlightId = useEstimateDeepLinkHighlight({
+    loading,
+    rows: filtered,
+    filter,
+    setFilter,
+  });
+
   return (
     <div style={{ fontFamily: ROBOTO }}>
       {followUpTarget && (
@@ -1958,9 +2010,12 @@ function EstimatePipelineViewV2() {
                 return (
                   <Card
                     key={e.id}
+                    data-estimate-id={e.id}
                     className={cn(
                       "p-4 flex flex-wrap items-center gap-3 relative",
                       e.isPriority && "border-alert-fg",
+                      String(e.id) === String(highlightId) &&
+                        "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white transition-shadow",
                     )}
                   >
                     {e.isPriority && (
@@ -2838,6 +2893,7 @@ function MobileEstimateRow({
   onExtend,
   onLawnOutline,
   v3Flag = false,
+  highlighted = false,
 }) {
   const navigate = useNavigate();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
@@ -2851,6 +2907,7 @@ function MobileEstimateRow({
   };
   return (
     <div
+      data-estimate-id={estimate.id}
       // Row-level click only activates when the estimate is linked to a
       // customer. Showing cursor-pointer + hover shade on an unlinked
       // estimate reads as "this should open a panel" and then silently
@@ -2872,6 +2929,8 @@ function MobileEstimateRow({
           ? "cursor-pointer hover:bg-zinc-50 active:bg-zinc-100"
           : "cursor-default",
         isDraftMuted && "opacity-60",
+        highlighted &&
+          "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white transition-shadow",
       )}
       style={{ height: 64 }}
     >
@@ -3473,6 +3532,13 @@ function EstimatesMobileListView({ onCreateFromAddress }) {
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
   const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
 
+  const highlightId = useEstimateDeepLinkHighlight({
+    loading,
+    rows: flat,
+    filter,
+    setFilter,
+  });
+
   return (
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
     // edge-to-edge overrides, list rows are cards (not hairlined rows).
@@ -3580,6 +3646,7 @@ function EstimatesMobileListView({ onCreateFromAddress }) {
             <MobileEstimateRow
               key={e.id}
               estimate={e}
+              highlighted={String(e.id) === String(highlightId)}
               onCreateFromAddress={onCreateFromAddress}
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
@@ -3672,7 +3739,11 @@ export default function EstimatesPageV2() {
   );
   const initialTab = TABS.some((t) => t.key === searchParams.get("tab"))
     ? searchParams.get("tab")
-    : null;
+    : // A notification deep-link (?estimateId=<id>) carries no tab but must land
+      // on the Estimates list so the row can be scrolled to + highlighted.
+      searchParams.get("estimateId")
+      ? "estimates"
+      : null;
 
   const [activeTab, setActiveTab] = useState(
     initialTab || (hasPrefill ? "new" : "leads"),
