@@ -385,3 +385,62 @@ describe('price-match-draft service', () => {
     expect(await listDrafts(db, { status: 'sent' })).toHaveLength(0);
   });
 });
+
+describe('createDraft owner-copy notification (PRICE_MATCH_NOTIFY_OWNER)', () => {
+  const saved = { ...process.env };
+  beforeEach(() => {
+    delete process.env.PRICE_MATCH_NOTIFY_OWNER;
+    delete process.env.PRICE_MATCH_OWNER_EMAIL;
+    delete process.env.MARK_EMAIL;
+  });
+  afterAll(() => { process.env = saved; });
+
+  test('does NOT email the owner when the flag is off (default)', async () => {
+    const db = makeFakeDb();
+    const sendOne = jest.fn(async () => ({ messageId: 'm' }));
+    const row = await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => true, sendOne } });
+    expect(row.status).toBe('pending');
+    expect(sendOne).not.toHaveBeenCalled();
+  });
+
+  test('emails the OWNER (not Mark) a copy of the staged draft when enabled', async () => {
+    process.env.PRICE_MATCH_NOTIFY_OWNER = 'true';
+    const db = makeFakeDb();
+    const sendOne = jest.fn(async () => ({ messageId: 'm' }));
+    const row = await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => true, sendOne } });
+    expect(sendOne).toHaveBeenCalledTimes(1);
+    const arg = sendOne.mock.calls[0][0];
+    expect(arg.to).toBe('contact@wavespestcontrol.com'); // owner default, NOT the SiteOne rep
+    expect(arg.to).not.toBe(row.recipient);
+    expect(arg.subject).toMatch(/Price-match draft ready/);
+    expect(arg.html).toContain('/admin/price-match'); // review link
+    expect(arg.html).toContain(row.recipient); // shows who it will go to (Mark)
+    expect(arg.categories).toContain('price-match-owner-copy');
+  });
+
+  test('PRICE_MATCH_OWNER_EMAIL overrides the owner recipient', async () => {
+    process.env.PRICE_MATCH_NOTIFY_OWNER = 'true';
+    process.env.PRICE_MATCH_OWNER_EMAIL = 'boss@example.com';
+    const db = makeFakeDb();
+    const sendOne = jest.fn(async () => ({ messageId: 'm' }));
+    await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => true, sendOne } });
+    expect(sendOne.mock.calls[0][0].to).toBe('boss@example.com');
+  });
+
+  test('a notify-email failure never loses the draft (best-effort)', async () => {
+    process.env.PRICE_MATCH_NOTIFY_OWNER = 'true';
+    const db = makeFakeDb();
+    const sendOne = jest.fn(async () => { throw new Error('sendgrid down'); });
+    const row = await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => true, sendOne } });
+    expect(row.status).toBe('pending'); // draft persisted despite the email throwing
+    expect(db._rows).toHaveLength(1);
+  });
+
+  test('skips the owner email when SendGrid is not configured', async () => {
+    process.env.PRICE_MATCH_NOTIFY_OWNER = 'true';
+    const db = makeFakeDb();
+    const sendOne = jest.fn();
+    await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => false, sendOne } });
+    expect(sendOne).not.toHaveBeenCalled();
+  });
+});

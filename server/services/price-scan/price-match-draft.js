@@ -5,6 +5,7 @@
 
 const { randomUUID } = require('crypto');
 const sendgrid = require('../sendgrid-mail');
+const logger = require('../logger');
 const { composeMarkEmail } = require('./mark-email');
 
 // Mark Roczkowski, SiteOne rep. Overridable via env; defaults to the known
@@ -12,6 +13,14 @@ const { composeMarkEmail } = require('./mark-email');
 const markEmail = () => process.env.MARK_EMAIL || 'mmroczkowski@siteone.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
+
+// Owner-copy notification: when a draft is STAGED (not sent), email the owner the
+// exact composed draft plus a review link, so a staged draft never sits unseen.
+// Opt-in (PRICE_MATCH_NOTIFY_OWNER=true) so it stays inert in dev/tests and is a
+// flag-flip in prod. Recipient defaults to the owner address (the SendGrid from).
+const ownerNotifyEnabled = () => process.env.PRICE_MATCH_NOTIFY_OWNER === 'true';
+const ownerNotifyEmail = () => process.env.PRICE_MATCH_OWNER_EMAIL || fromEmail();
+const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
 
 // A 'sending' claim older than this is considered stuck (crash between claim and
 // finalize) and is safe to reclaim — comfortably longer than any real send, so we
@@ -56,7 +65,38 @@ async function createDraft(db, matches, opts = {}) {
       included_count: composed.includedCount,
     })
     .returning('*');
+  // Best-effort owner copy AFTER the draft is persisted — never let a notify
+  // failure lose the draft (the draft is the source of truth; the email is a
+  // convenience). notifyOwnerOfStagedDraft swallows its own errors.
+  await notifyOwnerOfStagedDraft(row, composed, opts);
   return row;
+}
+
+// Email the owner a copy of a freshly STAGED draft (the exact email that would go
+// to Mark) plus a review link. Goes ONLY to the owner — never to Mark — and never
+// throws: a mailer outage must not fail draft creation. No-op unless opted in.
+// `opts.sendgrid` is injectable for tests.
+async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
+  if (!ownerNotifyEnabled()) return;
+  const mailer = opts.sendgrid || sendgrid;
+  try {
+    if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) return;
+    const reviewUrl = `${adminPortalUrl()}/admin/price-match`;
+    const n = row.included_count;
+    const subject = `[Review] Price-match draft ready — ${n} ${n === 1 ? 'opportunity' : 'opportunities'} for Mark`;
+    const banner = `A price-match draft was just staged. It has NOT been sent — review and send it from ${reviewUrl}. Below is the exact email that will go to Mark (${row.recipient}) once you approve it.`;
+    await mailer.sendOne({
+      to: ownerNotifyEmail(),
+      fromEmail: fromEmail(),
+      fromName: FROM_NAME,
+      subject,
+      html: `<p>${banner}</p><hr/>${composed.html}`,
+      text: `${banner}\n\n----\n\n${composed.text}`,
+      categories: ['price-match', 'price-match-owner-copy'],
+    });
+  } catch (err) {
+    logger.warn(`[price-scan] owner draft-notify email failed (draft ${row && row.id}): ${err && err.message}`);
+  }
 }
 
 // status may be a single value or an array (e.g. the 'active' view shows pending
