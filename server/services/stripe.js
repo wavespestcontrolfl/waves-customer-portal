@@ -70,6 +70,17 @@ const REPLACEABLE_PI_STATUSES = new Set([
   'requires_capture',
 ]);
 
+// Statuses safe to cancel + re-mint when a customer RETURNS to the pay page with
+// a stale, never-captured PI. A strict subset of REPLACEABLE_PI_STATUSES that
+// excludes `requires_capture`: an intent in requires_capture has an authorized
+// card hold (money is effectively in flight — see PI_MONEY_IN_FLIGHT_STATUSES in
+// invoice.js), so canceling it on a pay-page reload would void a live
+// authorization. It must follow the non-replaceable 409 path instead. The
+// tender-switch and offline-reconcile flows keep using REPLACEABLE_PI_STATUSES.
+const SETUP_RECOVERABLE_PI_STATUSES = new Set(
+  [...REPLACEABLE_PI_STATUSES].filter(status => status !== 'requires_capture')
+);
+
 const StripeService = {
   // =========================================================================
   // AVAILABILITY
@@ -1465,8 +1476,20 @@ const StripeService = {
             const hasLivePayment = existingPayment && !terminalPayStatuses.includes(existingPayment.status);
             if (!hasLivePayment) {
               const existingPi = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
-              const liveStatuses = ['processing', 'succeeded', 'requires_capture', 'requires_action'];
-              if (!liveStatuses.includes(existingPi.status)) {
+              // `requires_action` is NOT uniformly live. An ACH micro-deposit
+              // verification (next_action `verify_with_microdeposits`) is genuine
+              // in-flight bank money and must stay attached — never cancel it. But
+              // a CARD intent merely stuck in requires_action after an abandoned
+              // 3DS moved no money: if left attached here it fail-closes the credit
+              // apply, and the recovery path below then re-mints the replacement at
+              // the GROSS amount — charging a customer with available credit the
+              // full total. So treat that case as non-live: cancel + clear it now
+              // so credit applies and the fresh PI is priced at amount due.
+              const isAchMicrodeposit = existingPi.status === 'requires_action'
+                && existingPi.next_action?.type === 'verify_with_microdeposits';
+              const liveStatuses = ['processing', 'succeeded', 'requires_capture'];
+              const isLive = liveStatuses.includes(existingPi.status) || isAchMicrodeposit;
+              if (!isLive) {
                 if (existingPi.status !== 'canceled') await stripe.paymentIntents.cancel(existingPi.id);
                 await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
                 lockedInvoice.stripe_payment_intent_id = null;
@@ -1587,17 +1610,24 @@ const StripeService = {
               const err = new Error('Invoice payment is already in progress');
               err.statusCode = 409;
               err.inProgress = true;
+              // Distinct from a `processing` ACH debit: the customer still has to
+              // verify the two micro-deposits before this can settle, so the pay
+              // page must NOT tell them "nothing more to do". Surface a specific
+              // flag so it can show verification guidance instead.
+              err.microdepositPending = true;
               throw err;
             }
 
-            if (REPLACEABLE_PI_STATUSES.has(activeIntent.status)) {
+            if (SETUP_RECOVERABLE_PI_STATUSES.has(activeIntent.status)) {
               // The customer is back on the pay page with a stale, never-captured
               // card PI — most often stuck in `requires_action` after an abandoned
               // 3DS handoff, or left in requires_confirmation. (ACH micro-deposit
-              // verification is handled above and never reaches here.) No money
-              // has moved, so recover in place instead of hard-blocking the
-              // customer and re-raising an admin alert on every reload: cancel the
-              // dead intent and fall through to mint a fresh one they can pay.
+              // verification is handled above; `requires_capture` is excluded from
+              // the recoverable set so an authorized hold is never voided here —
+              // both take the non-replaceable 409 path below.) No money has moved,
+              // so recover in place instead of hard-blocking the customer and
+              // re-raising an admin alert on every reload: cancel the dead intent
+              // and fall through to mint a fresh one they can pay.
               //
               // FAIL CLOSED: if the cancel fails, the old PI may have just raced
               // into processing/succeeded — minting a replacement while its
@@ -2197,15 +2227,17 @@ const StripeService = {
               const err = new Error('A payment is already in progress for this statement');
               err.statusCode = 409;
               err.inProgress = true;
+              err.microdepositPending = true;
               throw err;
             }
 
-            if (REPLACEABLE_PI_STATUSES.has(activeIntent.status)) {
+            if (SETUP_RECOVERABLE_PI_STATUSES.has(activeIntent.status)) {
               // FAIL CLOSED: if the cancel fails, the old PI may have raced into
               // processing/succeeded — minting a replacement while its client
               // secret can still collect would double-charge. Refuse instead of
               // repointing the statement at a new PI. (ACH micro-deposit
-              // verification is handled above and never reaches here.)
+              // verification is handled above; `requires_capture` is excluded from
+              // the recoverable set so an authorized hold is never voided here.)
               try {
                 await stripe.paymentIntents.cancel(activeIntent.id);
               } catch (e) {

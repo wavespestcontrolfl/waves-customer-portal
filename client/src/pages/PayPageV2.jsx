@@ -113,11 +113,12 @@ function paymentErrorPayload(err, extra = {}) {
   };
 }
 
-function serverReportedError(message, { status = null, inProgress = false } = {}) {
+function serverReportedError(message, { status = null, inProgress = false, microdepositPending = false } = {}) {
   const err = new Error(message || 'Payment error');
   err.serverReported = true;
   if (status != null) err.status = status;
   err.inProgress = !!inProgress;
+  err.microdepositPending = !!microdepositPending;
   return err;
 }
 
@@ -1112,6 +1113,11 @@ export default function PayPageV2() {
   // receipt). This flag comes from the server's live PI read, so it's accurate
   // even before the local rows catch up.
   const [bankProcessing, setBankProcessing] = useState(false);
+  // A bank payment is in flight (above), but specifically an ACH micro-deposit
+  // verification the customer has NOT finished — so the "processing" copy would
+  // wrongly imply there's nothing left to do. When set, the same in-flight panel
+  // shows verification guidance instead.
+  const [microdepositVerifying, setMicrodepositVerifying] = useState(false);
   // Guards POST /setup to once per (token, saveCard): the partial-credit display
   // sync below mutates `data`, which would otherwise re-run the setup effect and
   // re-POST /setup — churning the just-minted PaymentIntent (the second call sees
@@ -1197,6 +1203,7 @@ export default function PayPageV2() {
           throw serverReportedError(setup.error || 'Failed to initialize payment', {
             status: r.status,
             inProgress: setup.inProgress,
+            microdepositPending: setup.microdepositPending,
           });
         }
         return setup;
@@ -1256,6 +1263,9 @@ export default function PayPageV2() {
         // in requires_action after an abandoned 3DS) — fall through to show the
         // error so the customer can retry.
         if (err.status === 409 && err.inProgress) {
+          // Micro-deposit verification is in flight but NOT done — the same panel
+          // renders verification guidance instead of "nothing more to do".
+          if (err.microdepositPending) setMicrodepositVerifying(true);
           setBankProcessing(true);
           setPaymentState('idle');
           return;
@@ -1418,17 +1428,32 @@ export default function PayPageV2() {
   // instead of the pay form or a scary "already in progress" error — the debit
   // clears over a few business days and the receipt is emailed when it settles.
   if (bankProcessing) {
+    const invoiceLabel = data.invoice?.invoiceNumber || data.invoice?.invoice_number || '';
     return (
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            <SerifHeading style={{ marginBottom: 12 }}>Your bank payment is processing</SerifHeading>
-            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
-              We’ve got a bank (ACH) payment in progress for invoice{' '}
-              {data.invoice?.invoiceNumber || data.invoice?.invoice_number || ''}. Bank transfers
-              take a few business days to clear — there’s nothing more you need to do, and we’ll
-              email your receipt once it settles. Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
-            </p>
+            {microdepositVerifying ? (
+              <>
+                <SerifHeading style={{ marginBottom: 12 }}>Verify your bank to finish paying</SerifHeading>
+                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                  You started a bank (ACH) payment for invoice {invoiceLabel}. In the next 1–2
+                  business days your bank will show two small deposits from Stripe — enter those
+                  amounts using the link in the email Stripe sent you to confirm and complete the
+                  payment. Until then there’s nothing to re-enter here. Questions? Give us a call
+                  — <HelpPhoneLink tone="dark" inline />.
+                </p>
+              </>
+            ) : (
+              <>
+                <SerifHeading style={{ marginBottom: 12 }}>Your bank payment is processing</SerifHeading>
+                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                  We’ve got a bank (ACH) payment in progress for invoice {invoiceLabel}. Bank transfers
+                  take a few business days to clear — there’s nothing more you need to do, and we’ll
+                  email your receipt once it settles. Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+                </p>
+              </>
+            )}
           </BrandCard>
         </div>
       </WavesShell>

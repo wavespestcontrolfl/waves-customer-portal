@@ -97,10 +97,33 @@ describe('StripeService.createStatementPaymentIntent', () => {
         message: 'A payment is already in progress for this statement',
         statusCode: 409,
         inProgress: true,
+        microdepositPending: true,
       });
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(updateStatement).not.toHaveBeenCalled();
+  });
+
+  test('does NOT cancel-and-replace a requires_capture statement PI (authorized hold must not be voided)', async () => {
+    // requires_capture is excluded from SETUP_RECOVERABLE_PI_STATUSES — an
+    // authorized hold takes the non-replaceable 409 path, never a cancel.
+    statementRow.stripe_payment_intent_id = 'pi_requires_capture';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_requires_capture',
+      status: 'requires_capture',
+      metadata: { waves_statement_id: statementRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    jest.spyOn(StripeService, 'ensureStripePayerCustomer').mockResolvedValue('cus_test');
+
+    await expect(StripeService.createStatementPaymentIntent(statementRow.id))
+      .rejects.toMatchObject({
+        message: 'A payment is already in progress for this statement',
+        statusCode: 409,
+      });
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('recovers a card PI stuck in requires_action by canceling and minting a fresh one', async () => {

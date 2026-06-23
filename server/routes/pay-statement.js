@@ -129,7 +129,15 @@ router.post('/:token/setup', async (req, res, next) => {
       publishableKey: stripeConfig.publishableKey,
     });
   } catch (err) {
-    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    // An ACH micro-deposit verification (or a `processing` debit) is benign
+    // in-flight money, not a failure — carry inProgress so the statement pay page
+    // can show a calm state instead of a red setup error, and microdepositPending
+    // so it can tell the payer to finish verifying their two micro-deposits.
+    if (err.statusCode === 409) return res.status(409).json({
+      error: err.message,
+      inProgress: !!err.inProgress,
+      microdepositPending: !!err.microdepositPending,
+    });
     if (err.statusCode === 400) return res.status(400).json({ error: err.message });
     logger.error(`[pay-statement] setup error: ${err.message}`);
     next(err);

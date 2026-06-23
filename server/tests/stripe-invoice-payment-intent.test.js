@@ -4,9 +4,16 @@ describe('StripeService.createInvoicePaymentIntent', () => {
   let stripeClient;
   let dbMock;
   let trxMock;
+  // Configurable per test: the customer's account-credit balance and what
+  // applyAccountCreditToInvoice does to the invoice row when the gated auto-apply
+  // path runs. Default to no credit so existing cases keep the original lifecycle.
+  let customerAccountCredits;
+  let applyCreditSideEffect;
 
   beforeEach(() => {
     jest.resetModules();
+    customerAccountCredits = '0.00';
+    applyCreditSideEffect = null;
 
     invoiceRow = {
       id: 'inv_123',
@@ -65,7 +72,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     // cases have no credit, so the original PI lifecycle must run untouched.
     const customersQuery = {
       where: jest.fn(() => customersQuery),
-      first: jest.fn().mockResolvedValue({ account_credits: '0.00' }),
+      first: jest.fn(async () => ({ account_credits: customerAccountCredits })),
     };
 
     trxMock = jest.fn(table => {
@@ -92,6 +99,11 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       error: jest.fn(),
     }));
     jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/customer-credit', () => ({
+      applyAccountCreditToInvoice: jest.fn(async () => {
+        if (applyCreditSideEffect) applyCreditSideEffect();
+      }),
+    }));
   });
 
   test('does not return a canceled idempotency replay when replacing an invoice PaymentIntent', async () => {
@@ -230,10 +242,83 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         message: 'Invoice payment is already in progress',
         statusCode: 409,
         inProgress: true,
+        microdepositPending: true,
       });
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(updateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('does NOT cancel-and-replace a requires_capture invoice PI (authorized hold must not be voided)', async () => {
+    // requires_capture = a card authorization is already held (money in flight per
+    // invoice.js). It is excluded from SETUP_RECOVERABLE_PI_STATUSES, so a pay-page
+    // reload must take the non-replaceable 409 path, never cancel the auth.
+    invoiceRow.stripe_payment_intent_id = 'pi_requires_capture';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_requires_capture',
+      status: 'requires_capture',
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        message: 'Invoice payment is already in progress',
+        statusCode: 409,
+        inProgress: false,
+      });
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('applies account credit before replacing a stale card requires_action PI (no gross overcharge)', async () => {
+    // Customer with account credit returns from an abandoned 3DS. The stale-PI
+    // triage must clear the dead card intent so credit applies, and the
+    // replacement must be priced at amount due ($75 − $50 = $25), not the gross.
+    customerAccountCredits = '50.00';
+    applyCreditSideEffect = () => { invoiceRow.credit_applied = '50.00'; };
+    invoiceRow.stripe_payment_intent_id = 'pi_stale_card';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_stale_card',
+      status: 'requires_action', // no verify_with_microdeposits → a card 3DS, cancelable
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+    stripeClient.paymentIntents.cancel.mockResolvedValue({ id: 'pi_stale_card', status: 'canceled' });
+    stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+      id: 'pi_fresh_credit',
+      status: 'requires_payment_method',
+      client_secret: 'pi_fresh_credit_secret',
+    });
+
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+    // Triage canceled + cleared the stale card PI so credit could apply.
+    expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_stale_card');
+    expect(updateInvoice).toHaveBeenCalledWith({ stripe_payment_intent_id: null });
+    // Replacement is minted at AMOUNT DUE ($25 = 2500 cents), not the $75 gross.
+    expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(2500);
+    expect(result.paymentIntentId).toBe('pi_fresh_credit');
+  });
+
+  test('does NOT cancel an ACH micro-deposit PI in the credit triage even with credit available', async () => {
+    // The triage must keep its micro-deposit carve-out: a verifying ACH intent is
+    // in-flight bank money and stays attached (credit fail-closes), never canceled.
+    customerAccountCredits = '50.00';
+    invoiceRow.stripe_payment_intent_id = 'pi_ach_microdeposit';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_ach_microdeposit',
+      status: 'requires_action',
+      next_action: { type: 'verify_with_microdeposits' },
+      payment_method_types: ['us_bank_account'],
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({ statusCode: 409, inProgress: true, microdepositPending: true });
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('fails closed when a stuck requires_action PI cannot be canceled before replacement', async () => {

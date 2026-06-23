@@ -274,6 +274,10 @@ export default function StatementPayPage() {
   const [error, setError] = useState(false);
   const [setup, setSetup] = useState(null);
   const [setupError, setSetupError] = useState(null);
+  // A benign in-flight state (ACH debit processing, or a micro-deposit
+  // verification the payer hasn't finished) — shown as calm guidance, NOT the
+  // red setup-error path which tells them to refresh/call.
+  const [setupNotice, setSetupNotice] = useState(null);
   const [paid, setPaid] = useState(false);
   const [payNotice, setPayNotice] = useState(null); // recovery message across a PI reset
   // Stripe redirect return (3DS / ACH bank-redirect). Stripe appends
@@ -344,7 +348,7 @@ export default function StatementPayPage() {
 
   // Create the PaymentIntent once we know the statement is payable.
   useEffect(() => {
-    if (!data || paid || setup || setupError) return;
+    if (!data || paid || setup || setupError || setupNotice) return;
     // Wait out a redirect verification; only mint a PI if the redirect didn't
     // actually submit (redirectCheck === 'retry'), or there's no redirect at all.
     if (hasRedirect && redirectCheck !== "retry") return;
@@ -364,6 +368,22 @@ export default function StatementPayPage() {
       .then(({ ok, d }) => {
         if (!alive) return;
         if (!ok) {
+          // Benign in-flight states are NOT failures — show calm guidance.
+          if (d?.microdepositPending) {
+            setSetupNotice(
+              "You started a bank (ACH) payment. In 1–2 business days your bank will show two " +
+              "small deposits from Stripe — enter those amounts using the link in the email " +
+              "Stripe sent you to confirm and finish paying this statement."
+            );
+            return;
+          }
+          if (d?.inProgress) {
+            setSetupNotice(
+              "Your bank (ACH) payment is processing. Bank transfers take a few business days to " +
+              "clear, and we'll email your receipt once it settles — there's nothing more you need to do."
+            );
+            return;
+          }
           // A 409 on the retry path means the statement is still processing (the
           // webhook hasn't reverted the failed attempt yet) — say so plainly.
           const stale = retryAfterRedirect && /in progress/i.test(d?.error || "");
@@ -376,7 +396,7 @@ export default function StatementPayPage() {
       })
       .catch(() => { if (alive) setSetupError("Could not start the payment."); });
     return () => { alive = false; };
-  }, [data, token, paid, setup, setupError, hasRedirect, redirectCheck]);
+  }, [data, token, paid, setup, setupError, setupNotice, hasRedirect, redirectCheck]);
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
@@ -501,7 +521,11 @@ export default function StatementPayPage() {
       {payNotice && (
         <p style={{ fontSize: 14, color: COLORS.red, marginBottom: 12, lineHeight: 1.5 }}>{payNotice}</p>
       )}
-      {setupError ? (
+      {setupNotice ? (
+        <p style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55 }}>
+          {setupNotice} Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+        </p>
+      ) : setupError ? (
         <p style={{ fontSize: 15, color: COLORS.red, lineHeight: 1.55 }}>
           {setupError} Please refresh, or call us — <HelpPhoneLink tone="dark" inline />.
         </p>

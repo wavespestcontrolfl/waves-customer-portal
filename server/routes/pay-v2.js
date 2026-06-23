@@ -314,7 +314,11 @@ router.post('/:token/setup', async (req, res, next) => {
           metadata: { save_card: !!req.body?.saveCard, recoverable_conflict: true },
         });
       }
-      return res.status(409).json({ error: err.message, inProgress: !!err.inProgress });
+      return res.status(409).json({
+        error: err.message,
+        inProgress: !!err.inProgress,
+        microdepositPending: !!err.microdepositPending,
+      });
     }
     logger.error(`[pay-v2] Setup error: ${err.message}`);
     reportBillPaymentError(req, {
