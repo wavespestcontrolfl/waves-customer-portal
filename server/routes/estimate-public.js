@@ -909,8 +909,8 @@ const SERVICE_COPY = {
     aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is it safe for my home?',
-      'What product is used?',
+      'Is Bora-Care safe for pets & kids?',
+      'What product is used for Bora-Care?',
       'When should this be done?',
     ],
     priceWording: {
@@ -3310,7 +3310,22 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
     : null;
   const quotedServiceNames = recurring.map((s) => labelWithFreq(s.name)).filter(Boolean);
-  const quotedOneTimeNames = oneTimeItems.map((it) => it.displayName || it.name).filter(Boolean);
+  // For engine-backed / nested estimates, result.oneTime.items can be empty while
+  // the billable rows live only in the normalized breakdown. Fall back to those so
+  // the hero treatment name isn't "WaveGuard {tier}". A name-less engine row carries
+  // the raw service key as its label, so map it to the friendly category label.
+  const quotedOneTimeNames = oneTimeItems.length
+    ? oneTimeItems.map((it) => it.displayName || it.name).filter(Boolean)
+    : boraCareOneTimeRows
+        .filter(isBillableOneTimeInvoiceItem)
+        .map((it) => {
+          const label = String(it.displayName || it.name || it.label || '').trim();
+          // A name-less engine row carries the raw service key as its label; map it
+          // to the friendly category label (mirrors buildOneTimeInvoiceServiceLabel).
+          const isRawKey = !!label && label.toLowerCase() === String(it.service || '').toLowerCase();
+          return label && !isRawKey ? label : oneTimeInvoiceLabelForCategory(serviceCategoryForOneTimeItem(it), label);
+        })
+        .filter(Boolean);
   const quotedServicesLabel = pestChoiceLabel || (quotedServiceNames.length
     ? quotedServiceNames.join(' + ')
     : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`));
@@ -3631,13 +3646,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeOnlyHeroPriceHtml = `
       <div class="choice-treatment">
         <div class="choice-treatment-name">${escapeHtml(quotedOneTimeNames[0] || quotedServicesLabel || 'One-time service')}</div>
-        <div class="choice-treatment-detail">${escapeHtml(hasPreSlabOneTime ? 'Pre-slab soil treatment' : (hasBoraCareOneTime ? 'Bora-Care wood treatment' : 'One-time service'))}</div>
+        <div class="choice-treatment-detail">${escapeHtml(hasPreSlabOneTime ? 'Pre-slab soil treatment' : (hasOnlyBoraCareServices ? 'Bora-Care wood treatment' : 'One-time service'))}</div>
         <div class="big-price choice-treatment-price">
           <span class="num" id="onetime-display">${fmtMoney(onetimeTotal || oneTimeChoicePrice)}</span>
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasBoraCareOneTime ? boraCareCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')))}
+          ${escapeHtml(hasPreSlabOneTime ? preSlabCopy.note : (hasOnlyBoraCareServices ? boraCareCopy.note : (germanRoachCleanoutItem ? germanRoachOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')))}
         </div>
       </div>
     `;

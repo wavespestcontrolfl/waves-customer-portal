@@ -740,6 +740,22 @@ function listFirstVisitFees(context = {}) {
     .join(' ');
 }
 
+// True when the estimate itself includes Bora-Care (recurring service row or
+// one-time item). The deterministic Bora-Care answer is gated on this so a
+// wood/beetle/borate question on a non-Bora estimate never implies the quote
+// includes borate wood treatment.
+function estimateContextHasBoraCare(context = {}) {
+  const rows = [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+  ];
+  return rows.some((row) => {
+    const service = String(row?.service || row?.key || '').toLowerCase();
+    if (service === 'bora_care' || service === 'boracare') return true;
+    return /bora[\s-]?care/.test(String(row?.name || row?.label || row?.summary || '').toLowerCase());
+  });
+}
+
 function answerEstimateQuestionFallback(question, context = {}) {
   const q = cleanText(question).toLowerCase();
   const phone = context.company?.phone || COMPANY.phone;
@@ -789,8 +805,9 @@ function answerEstimateQuestionFallback(question, context = {}) {
 
   // Bora-Care questions — including "Is Bora-Care safe?" / "What product is used
   // for Bora-Care?" — are matched before the generic safety/product branch so they
-  // get the borate-specific answer instead of generic label-direction copy.
-  if (/\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/.test(q)) {
+  // get the borate-specific answer instead of generic label-direction copy, but
+  // only when the estimate actually includes Bora-Care.
+  if (estimateContextHasBoraCare(context) && /\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/.test(q)) {
     return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
   }
 
