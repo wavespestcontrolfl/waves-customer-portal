@@ -53,7 +53,16 @@ describe('registry resolves Shopify stores to the shopify adapter', () => {
     expect(selectAdapterKey({ name: 'Seed World USA', website: 'https://www.seedworldusa.com' })).toBe('shopify');
     expect(getAdapter('shopify').key).toBe('shopify');
   });
+  test('by url host (subdomain ok)', () => {
+    expect(selectAdapterKey({ url: 'https://www.seedbarn.com/products/x' })).toBe('shopify');
+  });
   test('unknown store still falls back to generic', () => {
     expect(selectAdapterKey({ name: 'Some Co', website: 'https://example.com' })).toBe('generic');
+  });
+  test('spoofed/non-allowlisted hosts route to generic, NOT shopify (SSRF first layer)', () => {
+    // raw substring would have matched the old regex; parsed host must not
+    expect(selectAdapterKey({ website: 'https://chemicalwarehouse.com.evil.com' })).toBe('generic'); // suffix spoof
+    expect(selectAdapterKey({ url: 'https://chemicalwarehouse.com@127.0.0.1/' })).toBe('generic'); // userinfo spoof
+    expect(selectAdapterKey({ name: 'chemicalwarehouse.com deals' })).toBe('generic'); // name must never select a scraper
   });
 });
