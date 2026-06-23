@@ -103,3 +103,36 @@ describe('link prospect verifier — domain + quality helpers', () => {
     expect(src).toEqual({ a: 1 });
   });
 });
+
+describe('reconcileByDomain temporal guard (homepage-cited false-promote fix)', () => {
+  test('comparableFirstSeen normalizes a Date (date column) to its stored calendar day, no tz shift', () => {
+    // pg returns a `date` column as a Date at UTC midnight → the stored calendar day
+    expect(_test.comparableFirstSeen({ first_seen: new Date('2026-06-22T00:00:00.000Z') })).toBe('2026-06-22');
+  });
+  test('comparableFirstSeen normalizes a string (text column) by taking the date head', () => {
+    expect(_test.comparableFirstSeen({ first_seen: '2026-06-22' })).toBe('2026-06-22');
+    expect(_test.comparableFirstSeen({ first_seen: '2026-06-22T13:00:00Z' })).toBe('2026-06-22');
+  });
+  test('comparableFirstSeen returns null for missing / invalid', () => {
+    expect(_test.comparableFirstSeen({})).toBeNull();
+    expect(_test.comparableFirstSeen({ first_seen: new Date('nope') })).toBeNull();
+  });
+  test('placementFloorEt = ET calendar date of (submitted_at − 1 day)', () => {
+    // 2026-06-22T23:42:57Z → −1d → 2026-06-21T23:42:57Z → 19:42 EDT → 2026-06-21
+    expect(_test.placementFloorEt('2026-06-22T23:42:57.000Z')).toBe('2026-06-21');
+    expect(_test.placementFloorEt('garbage')).toBeNull();
+    expect(_test.placementFloorEt(undefined)).toBeNull();
+  });
+  test('firstSeenOnOrAfter excludes a pre-existing (older) link, includes a post-submission one', () => {
+    const floor = '2026-06-21';
+    expect(_test.firstSeenOnOrAfter({ first_seen: '2026-05-01' }, floor)).toBe(false); // old listing → NOT our placement
+    expect(_test.firstSeenOnOrAfter({ first_seen: '2026-08-15' }, floor)).toBe(true);  // discovered weeks later → ours
+    expect(_test.firstSeenOnOrAfter({ first_seen: '2026-06-21' }, floor)).toBe(true);  // exactly at the floor → included
+  });
+  test('firstSeenOnOrAfter excludes an unknown first_seen (cannot prove it post-dates submission)', () => {
+    expect(_test.firstSeenOnOrAfter({ first_seen: null }, '2026-06-21')).toBe(false);
+  });
+  test('firstSeenOnOrAfter does not tighten when there is no floor (no usable submitted_at)', () => {
+    expect(_test.firstSeenOnOrAfter({ first_seen: '2000-01-01' }, null)).toBe(true);
+  });
+});
