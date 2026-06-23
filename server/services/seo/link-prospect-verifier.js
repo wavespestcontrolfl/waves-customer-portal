@@ -109,15 +109,16 @@ function comparableFirstSeen(row) {
 }
 
 // Inclusive lower bound (ET calendar date) for a backlink that could plausibly be OUR
-// just-approved placement: the submission date minus a 1-day margin. The margin absorbs
-// any ET/UTC boundary or rounding skew between first_seen (written as an ET date) and
-// submitted_at (a UTC timestamp) so the guard can never falsely EXCLUDE a legitimate
-// post-submission discovery — slow-moderation approvals land days/weeks out, so the
-// margin costs us nothing while still excluding links seen before we ever submitted.
+// just-approved placement: the submission day itself. backlink-monitor writes first_seen
+// as an ET date and we convert submitted_at via etDateString here too, so both sides are
+// ET calendar dates — no skew to absorb, and NO backoff margin (a one-day margin would
+// re-admit a directory→homepage link first seen the day BEFORE we submitted, i.e. one
+// that pre-existed our citation, reopening the exact false-promotion this guard closes).
+// Our link can only be discovered on/after we submit, so the submission day is the floor.
 function placementFloorEt(submittedAt) {
   const t = Date.parse(submittedAt || '');
   if (Number.isNaN(t)) return null;
-  return etDateString(new Date(t - 24 * 60 * 60 * 1000));
+  return etDateString(new Date(t));
 }
 
 // True if this backlink was first seen on/after the placement floor. No floor (no usable
@@ -181,7 +182,7 @@ async function reconcileByDomain(prospect) {
   // so ANY pre-existing directory→homepage backlink (a prior free listing, an unrelated
   // link DataForSEO already indexed) satisfies backlinkTargetsProspect and would falsely
   // promote this still-pending, unapproved submission to live with that OLD source_url.
-  // Only count links FIRST SEEN on/after we submitted (submitted_at, set on pending
+  // Only count links FIRST SEEN on/after our submission day (submitted_at, set on pending
   // placements) as evidence OUR listing went live. Scoped to homepage-cited rows WITH a
   // submission timestamp, so money-page rows and the moved-profile/fresh-URL reconciles
   // are unchanged.

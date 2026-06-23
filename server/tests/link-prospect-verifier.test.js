@@ -117,17 +117,20 @@ describe('reconcileByDomain temporal guard (homepage-cited false-promote fix)', 
     expect(_test.comparableFirstSeen({})).toBeNull();
     expect(_test.comparableFirstSeen({ first_seen: new Date('nope') })).toBeNull();
   });
-  test('placementFloorEt = ET calendar date of (submitted_at − 1 day)', () => {
-    // 2026-06-22T23:42:57Z → −1d → 2026-06-21T23:42:57Z → 19:42 EDT → 2026-06-21
-    expect(_test.placementFloorEt('2026-06-22T23:42:57.000Z')).toBe('2026-06-21');
+  test('placementFloorEt = ET calendar date of submitted_at (no backoff margin)', () => {
+    // 2026-06-22T23:42:57Z → 19:42 EDT → 2026-06-22 (the submission day itself)
+    expect(_test.placementFloorEt('2026-06-22T23:42:57.000Z')).toBe('2026-06-22');
+    // a near-midnight UTC submission resolves to the correct ET day, not the UTC day
+    expect(_test.placementFloorEt('2026-06-22T02:00:00.000Z')).toBe('2026-06-21'); // 22:00 EDT prior day
     expect(_test.placementFloorEt('garbage')).toBeNull();
     expect(_test.placementFloorEt(undefined)).toBeNull();
   });
-  test('firstSeenOnOrAfter excludes a pre-existing (older) link, includes a post-submission one', () => {
-    const floor = '2026-06-21';
+  test('firstSeenOnOrAfter excludes a link first seen BEFORE the submission day, includes on/after', () => {
+    const floor = '2026-06-22'; // submission day
     expect(_test.firstSeenOnOrAfter({ first_seen: '2026-05-01' }, floor)).toBe(false); // old listing → NOT our placement
+    expect(_test.firstSeenOnOrAfter({ first_seen: '2026-06-21' }, floor)).toBe(false); // day BEFORE submit → pre-existing
     expect(_test.firstSeenOnOrAfter({ first_seen: '2026-08-15' }, floor)).toBe(true);  // discovered weeks later → ours
-    expect(_test.firstSeenOnOrAfter({ first_seen: '2026-06-21' }, floor)).toBe(true);  // exactly at the floor → included
+    expect(_test.firstSeenOnOrAfter({ first_seen: '2026-06-22' }, floor)).toBe(true);  // exactly the submission day → included
   });
   test('firstSeenOnOrAfter excludes an unknown first_seen (cannot prove it post-dates submission)', () => {
     expect(_test.firstSeenOnOrAfter({ first_seen: null }, '2026-06-21')).toBe(false);
