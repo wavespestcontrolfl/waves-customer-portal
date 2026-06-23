@@ -288,17 +288,20 @@ router.post('/:token/setup', async (req, res, next) => {
       status: result.status,
     });
   } catch (err) {
-    // A 409 means the invoice already has a live PaymentIntent. Two cases,
-    // distinguished by `inProgress` (set by createInvoicePaymentIntent only when
-    // money is genuinely in flight — a live payment row or a
-    // processing/succeeded PI):
-    //   • inProgress  → an ACH bank debit still `processing`, or a reload /
-    //     bank-redirect return. NOT a failure: no admin alert, and the pay page
-    //     shows the customer the "bank payment processing" state.
-    //   • !inProgress → a recoverable conflict (e.g. a card PI stuck in
-    //     requires_action after an abandoned 3DS). The customer is stuck —
-    //     the same PI keeps 409ing on reload — so STILL raise the admin alert
-    //     so an operator can intervene, even though we return the 409 cleanly.
+    // A 409 means the invoice already has a live PaymentIntent that setup could
+    // neither reuse nor replace. Two cases, distinguished by `inProgress` (set by
+    // createInvoicePaymentIntent only when money is genuinely in flight — a live
+    // payment row or a `processing` PI):
+    //   • inProgress  → an ACH bank debit still `processing`, an ACH micro-deposit
+    //     verification still in `requires_action` (the customer is mid bank-verify,
+    //     not stuck), or a reload / bank-redirect return. NOT a failure: no admin
+    //     alert, and the pay page shows the customer the benign bank state.
+    //   • !inProgress → an alert-worthy mismatch an operator must see: a PI
+    //     reporting `succeeded` while the invoice is still unpaid (a lost/failed
+    //     reconciliation webhook), or a stale unconfirmed PI that could not be
+    //     canceled for replacement because it just raced into a live state. A
+    //     card PI merely stuck in requires_action is no longer a 409 — setup now
+    //     cancels and re-mints it so the customer can pay (no operator needed).
     if (err.statusCode === 409) {
       if (!err.inProgress) {
         logger.warn(`[pay-v2] Setup 409 (recoverable conflict) for invoice ${invoice?.id || req.params.token}: ${err.message}`);
