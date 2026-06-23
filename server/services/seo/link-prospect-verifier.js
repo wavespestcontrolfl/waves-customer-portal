@@ -108,17 +108,20 @@ function comparableFirstSeen(row) {
   return String(v).slice(0, 10);
 }
 
-// Inclusive lower bound (ET calendar date) for a backlink that could plausibly be OUR
-// just-approved placement: the submission day itself. backlink-monitor writes first_seen
-// as an ET date and we convert submitted_at via etDateString here too, so both sides are
-// ET calendar dates — no skew to absorb, and NO backoff margin (a one-day margin would
-// re-admit a directory→homepage link first seen the day BEFORE we submitted, i.e. one
-// that pre-existed our citation, reopening the exact false-promotion this guard closes).
-// Our link can only be discovered on/after we submit, so the submission day is the floor.
+// Inclusive lower bound (ET calendar date) for a backlink that could only be OUR
+// just-approved placement: the day AFTER submission. seo_backlinks.first_seen is DATE-only
+// (no time component), and the weekly backlink scan and the citation runner are BOTH
+// scheduled Sunday 03:30 ET — so a directory→homepage link that pre-existed our citation
+// but was (re)discovered the SAME ET day we submit shares our submission date and can't be
+// told apart by date alone. Treat same-day as ambiguous → require first_seen STRICTLY after
+// the submission day. A slow-moderation citation is never discovered the same day anyway,
+// so the day-after floor loses nothing real while closing the same-day false-promotion.
+// (backlink-monitor writes first_seen as an ET date and we derive the floor via etDateString
+// too, so both sides are ET calendar dates — no UTC/ET skew.)
 function placementFloorEt(submittedAt) {
   const t = Date.parse(submittedAt || '');
   if (Number.isNaN(t)) return null;
-  return etDateString(new Date(t));
+  return etDateString(new Date(t + 24 * 60 * 60 * 1000));
 }
 
 // True if this backlink was first seen on/after the placement floor. No floor (no usable
@@ -182,10 +185,10 @@ async function reconcileByDomain(prospect) {
   // so ANY pre-existing directory→homepage backlink (a prior free listing, an unrelated
   // link DataForSEO already indexed) satisfies backlinkTargetsProspect and would falsely
   // promote this still-pending, unapproved submission to live with that OLD source_url.
-  // Only count links FIRST SEEN on/after our submission day (submitted_at, set on pending
-  // placements) as evidence OUR listing went live. Scoped to homepage-cited rows WITH a
-  // submission timestamp, so money-page rows and the moved-profile/fresh-URL reconciles
-  // are unchanged.
+  // Only count links FIRST SEEN strictly AFTER our submission day (submitted_at, set on
+  // pending placements) as evidence OUR listing went live — same-day is ambiguous given a
+  // date-only first_seen. Scoped to homepage-cited rows WITH a submission timestamp, so
+  // money-page rows and the moved-profile/fresh-URL reconciles are unchanged.
   if (q.cited_homepage && q.submitted_at) {
     const floor = placementFloorEt(q.submitted_at);
     return rows.find((row) => firstSeenOnOrAfter(row, floor) && backlinkTargetsProspect(row, prospect)) || null;
