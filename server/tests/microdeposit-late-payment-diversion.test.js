@@ -22,12 +22,16 @@ jest.mock('../services/workflows/balance-reminder', () => ({
 jest.mock('../services/stripe', () => ({
   isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false),
 }));
+jest.mock('../services/microdeposit-verification-email', () => ({
+  sendMicrodepositVerificationEmail: jest.fn(async () => ({ ok: true })),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const BalanceReminder = require('../services/workflows/balance-reminder');
 const StripeService = require('../services/stripe');
+const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
 const LatePaymentChecker = require('../services/late-payment-checker');
 
 function chain({ result = [], first } = {}) {
@@ -101,7 +105,12 @@ describe('late-payment micro-deposit diversion', () => {
       body: 'sms body for bank_verification_incomplete',
       entryPoint: 'late_payment_checker_microdeposit',
     }));
-    // No "overdue" email sidecar for a verification re-nudge.
+    // Branded verification EMAIL sidecar fires (keyed to the tier), and the
+    // generic "overdue" email never does.
+    expect(sendMicrodepositVerificationEmail).toHaveBeenCalledWith(expect.objectContaining({
+      invoice: expect.objectContaining({ id: 'inv-1' }),
+      touchKey: '14d',
+    }));
     expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
     expect(result.notified).toBe(1);
   });

@@ -16,6 +16,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { gates } = require('../config/feature-gates');
 const StripeService = require('./stripe');
+const { sendMicrodepositVerificationEmail } = require('./microdeposit-verification-email');
 const config = require('../config/invoice-followups');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -440,7 +441,11 @@ async function fireStep(row) {
     });
 
   const emailResult = mdPending
-    ? { ok: false, skipped: true, reason: 'microdeposit_verification' }
+    ? await sendMicrodepositVerificationEmail({
+        invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied },
+        customer,
+        touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
+      })
     : await sendFollowupEmail({ row, customer, step, ctx });
 
   let smsSent = false;

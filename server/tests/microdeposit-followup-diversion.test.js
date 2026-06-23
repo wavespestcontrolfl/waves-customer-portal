@@ -30,6 +30,9 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({ getInvoiceEmailRecipients: jest.fn(() => []) }));
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(async () => false) }));
 jest.mock('../services/email-template', () => ({ currency: jest.fn((v) => `$${v}`) }));
+jest.mock('../services/microdeposit-verification-email', () => ({
+  sendMicrodepositVerificationEmail: jest.fn(async () => ({ ok: true })),
+}));
 
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
@@ -37,6 +40,7 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const EmailTemplateLibrary = require('../services/email-template-library');
+const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
 const InvoiceFollowUps = require('../services/invoice-followups');
 
 function chain({ result = [], first, updateResult = 1 } = {}) {
@@ -112,7 +116,12 @@ describe('invoice-followups micro-deposit diversion', () => {
       to: '+19415550101',
       body: 'sms body for bank_verification_incomplete',
     }));
-    // SMS-only — the generic "amount due" follow-up email is skipped.
+    // Branded verification email replaces the generic "amount due" follow-up email,
+    // keyed to this step so it re-nudges on the same cadence.
+    expect(sendMicrodepositVerificationEmail).toHaveBeenCalledWith(expect.objectContaining({
+      invoice: expect.objectContaining({ id: 'inv-1' }),
+      touchKey: 'd3_friendly',
+    }));
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     // The touch still counted (cadence advanced), so the re-nudge repeats on schedule.
     expect(result.sent).toBe(1);
