@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
   Bot,
   CheckCircle2,
   ExternalLink,
@@ -15,23 +16,9 @@ import {
   UploadCloud,
   XCircle,
 } from "lucide-react";
-import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { CardBody, Textarea, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  accent: "#18181B",
-};
-const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
   const body = options.body === undefined ? undefined : JSON.stringify(options.body);
@@ -72,48 +59,25 @@ function formatDate(value) {
   }
 }
 
-function Chip({ children, tone = "neutral" }) {
-  const colors = {
-    green: { bg: "#DCFCE7", fg: D.green },
-    amber: { bg: "#FEF3C7", fg: D.amber },
-    red: { bg: "#FEE2E2", fg: D.red },
-    neutral: { bg: D.bg, fg: D.text },
-  }[tone];
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        minHeight: 24,
-        padding: "0 8px",
-        borderRadius: 6,
-        background: colors.bg,
-        color: colors.fg,
-        fontSize: 12,
-        fontWeight: 700,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </span>
-  );
+function gateTag(summary) {
+  if (!summary) return { tone: "neutral", label: "—" };
+  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false) {
+    return { tone: "alert", label: "Needs fix" };
+  }
+  if ((summary.soft_failures || []).length > 0) return { tone: "neutral", label: "Soft flags" };
+  if (summary.quality_ok === true && summary.uniqueness_ok !== false) return { tone: "green", label: "Gate passed" };
+  return { tone: "neutral", label: "In review" };
 }
 
-function Kpi({ label, value, tone }) {
-  const color = tone === "red" ? D.red : tone === "amber" ? D.amber : tone === "green" ? D.green : D.heading;
-  return (
-    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 16 }}>
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 600 }}>{label}</div>
-      <div style={{ fontSize: 24, color, fontWeight: 800, fontFamily: MONO, marginTop: 4 }}>{value}</div>
-    </div>
-  );
+function linkTagTone(status) {
+  if (status === "failed" || status === "dismissed") return "alert";
+  if (["patch_candidate", "pr_open", "merged", "deployed"].includes(status)) return "forest";
+  if (status === "verified" || status === "applied") return "green";
+  return "neutral";
 }
 
-function gateTone(summary) {
-  if (!summary) return "neutral";
-  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false) return "red";
-  if ((summary.soft_failures || []).length > 0) return "amber";
-  return "green";
+function isNamedCompetitor(item) {
+  return item?.skip_reason === "named_competitor_review";
 }
 
 export default function AutonomousContentReviewPage({ embedded = false } = {}) {
@@ -136,6 +100,9 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [ideaData, setIdeaData] = useState(null);
   const [ideaLoading, setIdeaLoading] = useState(true);
   const [ideaActionPending, setIdeaActionPending] = useState("");
+  // On phones the list and the detail can't share the screen — tapping a row
+  // opens the detail; "Back" returns to the list. Desktop shows both columns.
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -302,561 +269,558 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const reviewActions = selected?.review_actions || {};
   const ideaPosts = ideaData?.posts || [];
   const ideaCounts = ideaData?.counts || {};
+  const busy = loading || linkLoading || ideaLoading;
+
+  const refreshAll = () => { load(); loadLinks(); loadIdeas(); };
+  const changeView = (next) => { setView(next); setMobileDetailOpen(false); };
+  const openContent = (id) => { setSelectedId(id); setMobileDetailOpen(true); };
+  const openLink = (id) => { setSelectedLinkId(id); setMobileDetailOpen(true); };
 
   return (
-    <div
-      style={{
-        minHeight: "100%",
-        background: embedded ? "transparent" : D.bg,
-        padding: embedded ? 0 : 24,
-      }}
-    >
-      {!embedded && (
-        <AdminCommandHeader
-          title="Autonomous Content Review"
-          icon={Bot}
-          actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: () => { load(); loadLinks(); loadIdeas(); }, disabled: loading || linkLoading || ideaLoading, variant: "secondary" }]}
-        />
-      )}
+    <div className={cn("min-h-full", embedded ? "" : "bg-[#FAF7EF] p-4 sm:p-6")}>
+      {/* TruGreen-style forest-green hero with the Waves app in an iPhone */}
+      <div className="relative overflow-hidden rounded-2xl bg-[#143D2A] text-white lg:min-h-[250px]">
+        <div className="pointer-events-none absolute -right-10 -top-24 h-64 w-64 rounded-full bg-[#43B02A]/25 blur-3xl" />
+        <div className="relative flex items-stretch justify-between gap-4">
+          <div className="min-w-0 flex-1 px-4 py-4 sm:px-6 sm:py-6">
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-11 font-medium uppercase tracking-label text-white/80">
+                <Bot size={13} strokeWidth={2} className="text-[#7BD66A]" /> Autonomous content
+              </span>
+              <button
+                type="button"
+                onClick={refreshAll}
+                disabled={busy}
+                className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-white/10 px-3.5 text-12 font-medium text-white transition-colors hover:bg-white/20 disabled:opacity-50 u-focus-ring"
+              >
+                <RefreshCw size={14} strokeWidth={2} className={busy ? "animate-spin" : ""} />
+                <span className="hidden sm:inline">Refresh</span>
+              </button>
+            </div>
+            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Content Review</h1>
+            <p className="mt-1.5 max-w-md text-13 text-white/65 sm:text-14">
+              The engine drafts the posts — you approve what goes live. Every named-competitor comparison lands here first.
+            </p>
+            <div className="mt-4 flex gap-1.5 overflow-x-auto">
+              <PillTab active={view === "content"} onClick={() => changeView("content")}>Content</PillTab>
+              <PillTab active={view === "links"} onClick={() => changeView("links")}>Links</PillTab>
+              <PillTab active={view === "ideas"} onClick={() => changeView("ideas")}>Ideas</PillTab>
+            </div>
+          </div>
+          {/* iPhone mockup — desktop only (decorative; hidden on phones where it'd waste the screen) */}
+          <div className="relative hidden w-[230px] shrink-0 lg:block">
+            <div className="absolute right-5 top-8 w-[198px]">
+              <PhoneFrame src="/waves-app-home.png" />
+            </div>
+          </div>
+        </div>
+      </div>
 
       {error && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
-          <AlertTriangle size={16} strokeWidth={2} />
-          <span style={{ fontSize: 13, fontWeight: 650 }}>{error}</span>
+        <div className="mt-4 flex items-center gap-2 rounded-xl bg-[#FEECEB] px-3 py-2.5 text-13 text-[#B42318]">
+          <AlertTriangle size={16} strokeWidth={2} className="shrink-0" />
+          <span>{error}</span>
         </div>
       )}
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-        <TabButton active={view === "content"} icon={Bot} label="Content Queue" onClick={() => setView("content")} />
-        <TabButton active={view === "links"} icon={Link2} label="Internal Links" onClick={() => setView("links")} />
-        <TabButton active={view === "ideas"} icon={Lightbulb} label="Blog Ideas" onClick={() => setView("ideas")} />
-        {embedded && (
-          <button
-            type="button"
-            onClick={() => { load(); loadLinks(); loadIdeas(); }}
-            disabled={loading || linkLoading || ideaLoading}
-            style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 12px", borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-          >
-            <RefreshCw size={14} strokeWidth={2} /> Refresh
-          </button>
-        )}
-      </div>
-
+      {/* ── Content Queue ── */}
       {view === "content" && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
-            <Kpi label="Pending Review" value={pendingCount} tone={pendingCount > 0 ? "amber" : "green"} />
-            <Kpi label="Shadow Rows" value={shadowCount} />
-            <Kpi label="Done" value={counts.done || 0} tone="green" />
+        <div className="pt-4">
+          <KpiRow>
+            <Kpi label="Pending review" value={pendingCount} emphasize={pendingCount > 0} />
+            <Kpi label="Shadow rows" value={shadowCount} />
+            <Kpi label="Done" value={counts.done || 0} />
             <Kpi label="Skipped" value={counts.skipped || 0} />
-          </div>
+          </KpiRow>
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(360px, 100%), 1fr))", gap: 16, alignItems: "start" }}>
-        <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-          <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
-            <Search size={16} strokeWidth={2} />
-            <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Queue</div>
-          </div>
-          {loading ? (
-            <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>Loading...</div>
-          ) : items.length === 0 ? (
-            <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>No pending review rows.</div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 780 }}>
-                <thead>
-                  <tr>
-                    {["Opportunity", "Action", "Score", "Gate", "Reason", "Updated"].map((h) => (
-                      <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 800, borderBottom: `1px solid ${D.border}` }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:items-start">
+            {/* List */}
+            <div className={cn(mobileDetailOpen ? "hidden" : "block", "lg:block")}>
+              <ListHeader icon={Search} title="Queue" count={items.length} />
+              {loading ? (
+                <Empty>Loading…</Empty>
+              ) : items.length === 0 ? (
+                <Empty>No pending review rows.</Empty>
+              ) : (
+                <div className="flex flex-col gap-2.5">
                   {items.map((item) => {
-                    const active = item.id === selectedId;
-                    const summary = item.run?.gate_summary;
+                    const gt = gateTag(item.run?.gate_summary);
+                    const named = isNamedCompetitor(item);
+                    const meta = [item.city, item.service, item.bucket].filter(Boolean).join(" · ");
                     return (
-                      <tr
-                        key={item.id}
-                        onClick={() => setSelectedId(item.id)}
-                        style={{ cursor: "pointer", background: active ? "#F8FAFC" : D.card }}
-                      >
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
-                          <div style={{ color: D.heading, fontWeight: 750, fontSize: 13 }}>{item.target_keyword || item.query || item.target_url || "Untitled"}</div>
-                          <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>{[item.city, item.service, item.bucket].filter(Boolean).join(" / ")}</div>
-                        </td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}><Chip>{item.action_type}</Chip></td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, fontFamily: MONO, fontSize: 13 }}>{item.final_score ?? item.score ?? "—"}</td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}` }}>
-                          <Chip tone={gateTone(summary)}>{summary?.quality_ok === true && summary?.uniqueness_ok !== false ? "Passed" : "Review"}</Chip>
-                        </td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.text, fontSize: 12 }}>{item.skip_reason || "—"}</td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12 }}>{formatDate(item.updated_at || item.completed_at)}</td>
-                      </tr>
+                      <RowCard key={item.id} active={item.id === selectedId} onClick={() => openContent(item.id)}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-14 font-medium text-zinc-900">
+                              {item.target_keyword || item.query || item.target_url || "Untitled"}
+                            </div>
+                            {meta && <div className="mt-0.5 truncate text-12 text-zinc-500">{meta}</div>}
+                          </div>
+                          {named && <Tag tone="forest" className="shrink-0">Named competitor</Tag>}
+                        </div>
+                        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                          <Tag>{item.action_type}</Tag>
+                          <Tag tone={gt.tone}>{gt.label}</Tag>
+                          <span className="text-12 tabular-nums text-zinc-500">Score {item.final_score ?? item.score ?? "—"}</span>
+                          <span className="ml-auto text-12 text-zinc-400">{formatDate(item.updated_at || item.completed_at)}</span>
+                        </div>
+                      </RowCard>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-
-        <aside style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-          <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
-            <FileText size={16} strokeWidth={2} />
-            <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Review Detail</div>
-          </div>
-          {!selected ? (
-            <div style={{ padding: 24, color: D.muted, textAlign: "center" }}>Select a row.</div>
-          ) : (
-            <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14, opacity: detailLoading ? 0.65 : 1 }}>
-              <div>
-                <div style={{ fontSize: 18, fontWeight: 850, color: D.heading, lineHeight: 1.25 }}>{selected.draft?.title || selected.target_keyword || "Untitled review"}</div>
-                <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  <Chip>{selected.status}</Chip>
-                  <Chip>{selected.action_type}</Chip>
-                  {selected.run?.shadow_mode && <Chip tone="amber">shadow</Chip>}
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
-                <Row label="Target" value={selected.target_url || "—"} />
-                <Row label="Keyword" value={selected.target_keyword || "—"} />
-                <Row label="Reason" value={selected.skip_reason || "—"} />
-                <Row label="Run" value={selected.run?.outcome || "—"} />
-              </div>
-
-              {selected.status === "pending_review" && (
-                <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, display: "grid", gap: 10 }}>
-                  <textarea
-                    value={reviewNote}
-                    onChange={(e) => setReviewNote(e.target.value)}
-                    placeholder="Reviewer note"
-                    rows={3}
-                    style={{
-                      width: "100%",
-                      resize: "vertical",
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 8,
-                      padding: 10,
-                      fontSize: 13,
-                      color: D.text,
-                      boxSizing: "border-box",
-                    }}
-                  />
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                    <ActionButton
-                      icon={RotateCcw}
-                      label="Requeue"
-                      disabled={!reviewActions.can_requeue || !!actionPending}
-                      pending={actionPending === "requeue"}
-                      onClick={() => submitDecision("requeue")}
-                    />
-                    {reviewActions.can_approve_trust_build && (
-                      <ActionButton
-                        icon={CheckCircle2}
-                        label="Approve"
-                        tone="green"
-                        disabled={!!actionPending}
-                        pending={actionPending === "approve_trust_build"}
-                        onClick={() => submitDecision("approve_trust_build")}
-                      />
-                    )}
-                    {reviewActions.can_approve_named_competitor && (
-                      <ActionButton
-                        icon={CheckCircle2}
-                        label="Approve & publish"
-                        tone="green"
-                        disabled={!!actionPending}
-                        pending={actionPending === "approve_named_competitor"}
-                        onClick={() => submitDecision("approve_named_competitor")}
-                      />
-                    )}
-                    <ActionButton
-                      icon={XCircle}
-                      label="Dismiss"
-                      tone="red"
-                      disabled={!reviewActions.can_dismiss || !!actionPending}
-                      pending={actionPending === "dismiss"}
-                      onClick={() => submitDecision("dismiss")}
-                    />
-                  </div>
                 </div>
               )}
+            </div>
 
-              <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
-                  {hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
-                  Gate Summary
-                </div>
-                <div style={{ fontSize: 12, color: D.text, lineHeight: 1.6 }}>
-                  Score: {gateSummary?.quality_score ?? "—"} / {gateSummary?.quality_min_score ?? "—"}
-                  <br />
-                  Hard: {hardFailures.length ? hardFailures.join(", ") : "none"}
-                  <br />
-                  Soft: {softFailures.length ? softFailures.join(", ") : "none"}
-                  <br />
-                  Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}
-                  <br />
-                  SEO completion: {seoCompletion?.available ? `P0 ${seoCompletion.p0} / P1 ${seoCompletion.p1} / P2 ${seoCompletion.p2}` : "not run"}
-                </div>
-              </div>
+            {/* Detail */}
+            <div className={cn(mobileDetailOpen ? "block" : "hidden", "lg:block lg:sticky lg:top-4")}>
+              <Panel>
+                <PanelHeader icon={FileText} title="Review detail" onBack={() => setMobileDetailOpen(false)} />
+                {!selected ? (
+                  <Empty>Select a row to review it.</Empty>
+                ) : (
+                  <CardBody className={cn("flex flex-col gap-4", detailLoading && "opacity-60")}>
+                    <div>
+                      <div className="text-16 font-medium leading-snug text-zinc-900">
+                        {selected.draft?.title || selected.target_keyword || "Untitled review"}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <Tag>{selected.status}</Tag>
+                        <Tag>{selected.action_type}</Tag>
+                        {selected.run?.shadow_mode && <Tag>shadow</Tag>}
+                        {isNamedCompetitor(selected) && <Tag tone="forest">Named competitor</Tag>}
+                      </div>
+                    </div>
 
-              {seoCompletion?.available && (
-                <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
-                    {seoCompletion.p0 === 0 ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
-                    SEO Completion
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-                    <Chip tone={seoCompletion.p0 > 0 ? "red" : "green"}>P0 {seoCompletion.p0}</Chip>
-                    <Chip tone={seoCompletion.p1 > 0 ? "amber" : "green"}>P1 {seoCompletion.p1}</Chip>
-                    <Chip tone={seoCompletion.p2 > 0 ? "amber" : "green"}>P2 {seoCompletion.p2}</Chip>
-                    <Chip>{seoCompletion.faq_count || 0} FAQs</Chip>
-                    <Chip>{recommendedLinks.length} links</Chip>
-                  </div>
-                  {seoFindings.length > 0 && (
-                    <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                      {seoFindings.slice(0, 6).map((finding) => (
-                        <div key={`${finding.severity}-${finding.code}`} style={{ fontSize: 12, lineHeight: 1.45, color: finding.severity === "P0" ? D.red : D.text }}>
-                          <strong>{finding.severity} {finding.code}</strong>: {finding.message}
+                    <div className="grid gap-2">
+                      <Field label="Target" value={selected.target_url || "—"} />
+                      <Field label="Keyword" value={selected.target_keyword || "—"} />
+                      <Field label="Reason" value={selected.skip_reason || "—"} />
+                      <Field label="Run" value={selected.run?.outcome || "—"} />
+                    </div>
+
+                    {selected.status === "pending_review" && (
+                      <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
+                        <Textarea
+                          value={reviewNote}
+                          onChange={(e) => setReviewNote(e.target.value)}
+                          placeholder="Reviewer note (optional)"
+                          rows={3}
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <ActionBtn variant="secondary" disabled={!reviewActions.can_requeue || !!actionPending} onClick={() => submitDecision("requeue")}>
+                            <RotateCcw size={15} strokeWidth={2} />
+                            {actionPending === "requeue" ? "Working…" : "Requeue"}
+                          </ActionBtn>
+                          {reviewActions.can_approve_trust_build && (
+                            <ActionBtn disabled={!!actionPending} onClick={() => submitDecision("approve_trust_build")}>
+                              <CheckCircle2 size={15} strokeWidth={2} />
+                              {actionPending === "approve_trust_build" ? "Working…" : "Approve"}
+                            </ActionBtn>
+                          )}
+                          {reviewActions.can_approve_named_competitor && (
+                            <ActionBtn disabled={!!actionPending} onClick={() => submitDecision("approve_named_competitor")}>
+                              <CheckCircle2 size={15} strokeWidth={2} />
+                              {actionPending === "approve_named_competitor" ? "Working…" : "Approve & publish"}
+                            </ActionBtn>
+                          )}
+                          <ActionBtn variant="danger" disabled={!reviewActions.can_dismiss || !!actionPending} onClick={() => submitDecision("dismiss")}>
+                            <XCircle size={15} strokeWidth={2} />
+                            {actionPending === "dismiss" ? "Working…" : "Dismiss"}
+                          </ActionBtn>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                  {recommendedLinks.length > 0 && (
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Recommended links</div>
-                      {recommendedLinks.slice(0, 6).map((link) => (
-                        <div key={`${link.reason}-${link.url}`} style={{ fontSize: 12, color: D.text, lineHeight: 1.45 }}>
-                          <strong>{link.url}</strong>
-                          <br />
-                          Anchor: {link.anchorText || "—"} · Reason: {link.reason || "—"}
+                      </div>
+                    )}
+
+                    <Section
+                      icon={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false ? CheckCircle2 : AlertTriangle}
+                      ok={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false}
+                      title="Gate summary"
+                    >
+                      <div className="grid gap-1 text-13 text-zinc-600">
+                        <div>Score: <span className="tabular-nums text-zinc-900">{gateSummary?.quality_score ?? "—"} / {gateSummary?.quality_min_score ?? "—"}</span></div>
+                        <div>Hard: {hardFailures.length ? hardFailures.join(", ") : "none"}</div>
+                        <div>Soft: {softFailures.length ? softFailures.join(", ") : "none"}</div>
+                        <div>Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}</div>
+                        <div>SEO completion: {seoCompletion?.available ? `P0 ${seoCompletion.p0} / P1 ${seoCompletion.p1} / P2 ${seoCompletion.p2}` : "not run"}</div>
+                      </div>
+                    </Section>
+
+                    {seoCompletion?.available && (
+                      <Section icon={seoCompletion.p0 === 0 ? CheckCircle2 : AlertTriangle} ok={seoCompletion.p0 === 0} title="SEO completion">
+                        <div className="mb-2.5 flex flex-wrap gap-1.5">
+                          <Tag tone={seoCompletion.p0 > 0 ? "alert" : "green"}>P0 {seoCompletion.p0}</Tag>
+                          <Tag>P1 {seoCompletion.p1}</Tag>
+                          <Tag>P2 {seoCompletion.p2}</Tag>
+                          <Tag>{seoCompletion.faq_count || 0} FAQs</Tag>
+                          <Tag>{recommendedLinks.length} links</Tag>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {selected.draft?.meta_description && (
-                <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, marginBottom: 4 }}>Meta</div>
-                  <div style={{ fontSize: 13, color: D.text, lineHeight: 1.45 }}>{selected.draft.meta_description}</div>
-                </div>
-              )}
-
-              {selected.draft?.body_preview && (
-                <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, marginBottom: 4 }}>Draft Preview</div>
-                  <div style={{ fontSize: 13, color: D.text, lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 360, overflowY: "auto" }}>
-                    {selected.draft.body || selected.draft.body_preview}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </aside>
-      </div>
-        </>
-      )}
-
-      {view === "links" && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
-            <Kpi label="Candidates" value={linkCounts.patch_candidate || 0} tone={(linkCounts.patch_candidate || 0) > 0 ? "amber" : "green"} />
-            <Kpi label="PR Open" value={linkCounts.pr_open || 0} tone={(linkCounts.pr_open || 0) > 0 ? "amber" : "green"} />
-            <Kpi label="Merged/Deployed" value={(linkCounts.merged || 0) + (linkCounts.deployed || 0)} tone={(linkCounts.merged || 0) + (linkCounts.deployed || 0) > 0 ? "amber" : "green"} />
-            <Kpi label="Verified" value={linkCounts.verified || 0} tone="green" />
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(min(700px, 100%), 1.4fr) minmax(min(420px, 100%), 0.9fr)", gap: 16, alignItems: "start" }}>
-            <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
-                <Link2 size={16} strokeWidth={2} />
-                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Internal-Link Tasks</div>
-              </div>
-              {linkLoading ? (
-                <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>Loading...</div>
-              ) : linkItems.length === 0 ? (
-                <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>No internal-link tasks.</div>
-              ) : (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
-                    <thead>
-                      <tr>
-                        {["Status", "Anchor", "Source", "Target", "PR", "Updated"].map((h) => (
-                          <th key={h} style={{ textAlign: "left", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 800, borderBottom: `1px solid ${D.border}` }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {linkItems.map((item) => {
-                        const active = item.id === selectedLinkId;
-                        return (
-                          <tr
-                            key={item.id}
-                            onClick={() => setSelectedLinkId(item.id)}
-                            style={{ cursor: "pointer", background: active ? "#F8FAFC" : D.card }}
-                          >
-                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
-                              <Chip tone={linkStatusTone(item.status)}>{item.status}</Chip>
-                            </td>
-                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
-                              <div style={{ color: D.heading, fontWeight: 800, fontSize: 13 }}>{item.anchor_text || "—"}</div>
-                              <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>{[item.anchor_type, scorePercent(item.topical_relevance_score)].filter(Boolean).join(" / ")}</div>
-                            </td>
-                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.text, fontSize: 12, verticalAlign: "top" }}>{item.source_url || item.source_file || "—"}</td>
-                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.text, fontSize: 12, verticalAlign: "top" }}>{item.target_url || "—"}</td>
-                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
-                              {item.astro_pr_url ? <ExternalAnchor href={item.astro_pr_url} label="PR" /> : <span style={{ color: D.muted }}>—</span>}
-                            </td>
-                            <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12, verticalAlign: "top" }}>{formatDate(item.updated_at || item.planned_at)}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-
-            <aside style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-              <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
-                <GitPullRequest size={16} strokeWidth={2} />
-                <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Link Detail</div>
-              </div>
-              {!selectedLink ? (
-                <div style={{ padding: 24, color: D.muted, textAlign: "center" }}>Select a task.</div>
-              ) : (
-                <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14, opacity: linkDetailLoading ? 0.65 : 1 }}>
-                  <div>
-                    <div style={{ fontSize: 17, fontWeight: 850, color: D.heading, lineHeight: 1.25 }}>{selectedLink.anchor_text || "Untitled link"}</div>
-                    <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
-                      <Chip tone={linkStatusTone(selectedLink.status)}>{selectedLink.status}</Chip>
-                      {selectedLink.anchor_type && <Chip>{selectedLink.anchor_type}</Chip>}
-                      {selectedLink.topic_cluster && <Chip>{selectedLink.topic_cluster}</Chip>}
-                    </div>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
-                    <Row label="Source" value={selectedLink.source_url || selectedLink.source_file || "—"} />
-                    <Row label="Target" value={selectedLink.target_url || "—"} />
-                    <Row label="Source file" value={selectedLink.source_file || "—"} />
-                    <Row label="Target file" value={selectedLink.target_file || "—"} />
-                    <Row label="Reason" value={selectedLink.failure_reason || selectedLink.skip_reason || selectedLink.dismissed_reason || "—"} />
-                    <Row label="Verified" value={formatDate(selectedLink.verified_at)} />
-                  </div>
-
-                  {selectedLink.astro_pr_url && (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                      <ExternalAnchor href={selectedLink.astro_pr_url} label="Open Astro PR" />
-                    </div>
-                  )}
-
-                  <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, display: "grid", gap: 10 }}>
-                    <textarea
-                      value={linkReviewNote}
-                      onChange={(e) => setLinkReviewNote(e.target.value)}
-                      placeholder="Reviewer note"
-                      rows={3}
-                      style={{
-                        width: "100%",
-                        resize: "vertical",
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 8,
-                        padding: 10,
-                        fontSize: 13,
-                        color: D.text,
-                        boxSizing: "border-box",
-                      }}
-                    />
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                      <ActionButton
-                        icon={RotateCcw}
-                        label="Requeue"
-                        disabled={!selectedLink.review_actions?.can_requeue || !!linkActionPending}
-                        pending={linkActionPending === "requeue"}
-                        onClick={() => submitLinkDecision("requeue")}
-                      />
-                      <ActionButton
-                        icon={CheckCircle2}
-                        label="Verify"
-                        tone="green"
-                        disabled={!selectedLink.review_actions?.can_verify_now || !!linkActionPending}
-                        pending={linkActionPending === "verify_now"}
-                        onClick={() => submitLinkDecision("verify_now")}
-                      />
-                      <ActionButton
-                        icon={XCircle}
-                        label="Dismiss"
-                        tone="red"
-                        disabled={!selectedLink.review_actions?.can_dismiss || !!linkActionPending}
-                        pending={linkActionPending === "dismiss"}
-                        onClick={() => submitLinkDecision("dismiss")}
-                      />
-                    </div>
-                  </div>
-
-                  <LinkContext title="Before" value={selectedLink.link_context_before || selectedLink.context_snippet} />
-                  <LinkContext title="After" value={selectedLink.link_context_after} />
-
-                  <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, display: "grid", gap: 8, fontSize: 12, color: D.text }}>
-                    <div style={{ color: D.muted, fontWeight: 800 }}>Validation</div>
-                    <div>Target: HTTP {selectedLink.target_http_status ?? "—"} · indexable {yesNo(selectedLink.target_indexable)} · canonical {yesNo(selectedLink.target_canonical_matches)}</div>
-                    <div>Source: HTTP {selectedLink.source_http_status ?? "—"} · indexable {yesNo(selectedLink.source_indexable)} · canonical {yesNo(selectedLink.source_canonical_matches)}</div>
-                    <div>Links: source {selectedLink.source_existing_internal_links_count ?? "—"} · target inlinks {selectedLink.target_existing_inlinks_count ?? "—"}</div>
-                  </div>
-
-                  {selectedLink.reviewer_notes && (
-                    <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-                      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, marginBottom: 4 }}>Reviewer Notes</div>
-                      <div style={{ fontSize: 12, color: D.text, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{selectedLink.reviewer_notes}</div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </aside>
-          </div>
-        </>
-      )}
-
-      {view === "ideas" && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
-            <Kpi label="Ideas" value={ideaCounts.idea || 0} tone={(ideaCounts.idea || 0) > 0 ? "amber" : "green"} />
-            <Kpi label="Drafts (ready to publish)" value={ideaCounts.draft || 0} tone={(ideaCounts.draft || 0) > 0 ? "amber" : undefined} />
-            <Kpi label="Published" value={ideaCounts.published || 0} tone="green" />
-          </div>
-
-          <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-            <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}`, display: "flex", alignItems: "center", gap: 8 }}>
-              <Lightbulb size={16} strokeWidth={2} />
-              <div style={{ fontSize: 14, fontWeight: 800, color: D.heading }}>Blog Ideas &amp; Drafts</div>
-            </div>
-            {ideaLoading ? (
-              <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>Loading...</div>
-            ) : ideaPosts.length === 0 ? (
-              <div style={{ padding: 32, color: D.muted, textAlign: "center" }}>No blog ideas or drafts in the backlog.</div>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
-                  <thead>
-                    <tr>
-                      {["Title", "Topic", "City", "Status", ""].map((h) => (
-                        <th key={h || "actions"} style={{ textAlign: h ? "left" : "right", padding: "10px 12px", color: D.muted, fontSize: 12, fontWeight: 800, borderBottom: `1px solid ${D.border}` }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ideaPosts.map((p) => (
-                      <tr key={p.id} style={{ background: D.card }}>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top", maxWidth: 440 }}>
-                          <div style={{ color: D.heading, fontWeight: 750, fontSize: 13, lineHeight: 1.3 }}>{p.title || "Untitled"}</div>
-                          {p.keyword && <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>kw: {p.keyword}</div>}
-                        </td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>{p.tag ? <Chip>{p.tag}</Chip> : "—"}</td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top", fontSize: 12, color: D.text }}>{p.city || "—"}</td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}><Chip tone={p.status === "draft" ? "amber" : undefined}>{p.status}</Chip></td>
-                        <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}>
-                          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                            {p.status === "idea" && (
-                              <ActionButton
-                                icon={Sparkles}
-                                label="Generate"
-                                tone="green"
-                                disabled={!!ideaActionPending}
-                                pending={ideaActionPending === `generate:${p.id}`}
-                                onClick={() => runIdeaAction(p.id, "generate")}
-                              />
-                            )}
-                            {p.status === "draft" && (
-                              <ActionButton
-                                icon={UploadCloud}
-                                label="Publish PR"
-                                tone="green"
-                                disabled={!!ideaActionPending}
-                                pending={ideaActionPending === `publish:${p.id}`}
-                                onClick={() => runIdeaAction(p.id, "publish")}
-                              />
-                            )}
+                        {seoFindings.length > 0 && (
+                          <div className="mb-2.5 grid gap-1.5">
+                            {seoFindings.slice(0, 6).map((finding) => (
+                              <div key={`${finding.severity}-${finding.code}`} className={cn("text-13 leading-snug", finding.severity === "P0" ? "text-[#B42318]" : "text-zinc-600")}>
+                                <span className="font-medium">{finding.severity} {finding.code}</span>: {finding.message}
+                              </div>
+                            ))}
                           </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-          <div style={{ marginTop: 12, fontSize: 12, color: D.muted, lineHeight: 1.5 }}>
-            Generate writes a full draft (content + meta) via the blog writer; Publish PR opens a review-only Astro PR (Codex + content guardrails run before merge). Ideas come from the blog idea generator, independent of GSC demand.
+                        )}
+                        {recommendedLinks.length > 0 && (
+                          <div className="grid gap-1.5">
+                            <div className="text-12 uppercase tracking-label text-zinc-400">Recommended links</div>
+                            {recommendedLinks.slice(0, 6).map((link) => (
+                              <div key={`${link.reason}-${link.url}`} className="text-13 leading-snug text-zinc-600">
+                                <span className="font-medium text-zinc-900">{link.url}</span>
+                                <br />
+                                Anchor: {link.anchorText || "—"} · Reason: {link.reason || "—"}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </Section>
+                    )}
+
+                    {selected.draft?.meta_description && (
+                      <Section title="Meta">
+                        <div className="text-14 leading-snug text-zinc-600">{selected.draft.meta_description}</div>
+                      </Section>
+                    )}
+
+                    {selected.draft?.body_preview && (
+                      <Section title="Draft preview">
+                        <div className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#FAF7EF] p-3 text-14 leading-relaxed text-zinc-800">
+                          {selected.draft.body || selected.draft.body_preview}
+                        </div>
+                      </Section>
+                    )}
+                  </CardBody>
+                )}
+              </Panel>
+            </div>
           </div>
-        </>
+        </div>
+      )}
+
+      {/* ── Internal Links ── */}
+      {view === "links" && (
+        <div className="pt-4">
+          <KpiRow>
+            <Kpi label="Candidates" value={linkCounts.patch_candidate || 0} emphasize={(linkCounts.patch_candidate || 0) > 0} />
+            <Kpi label="PR open" value={linkCounts.pr_open || 0} emphasize={(linkCounts.pr_open || 0) > 0} />
+            <Kpi label="Merged / deployed" value={(linkCounts.merged || 0) + (linkCounts.deployed || 0)} />
+            <Kpi label="Verified" value={linkCounts.verified || 0} />
+          </KpiRow>
+
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)] lg:items-start">
+            {/* List */}
+            <div className={cn(mobileDetailOpen ? "hidden" : "block", "lg:block")}>
+              <ListHeader icon={Link2} title="Internal-link tasks" count={linkItems.length} />
+              {linkLoading ? (
+                <Empty>Loading…</Empty>
+              ) : linkItems.length === 0 ? (
+                <Empty>No internal-link tasks.</Empty>
+              ) : (
+                <div className="flex flex-col gap-2.5">
+                  {linkItems.map((item) => (
+                    <RowCard key={item.id} active={item.id === selectedLinkId} onClick={() => openLink(item.id)}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate text-14 font-medium text-zinc-900">{item.anchor_text || "—"}</div>
+                          <div className="mt-0.5 truncate text-12 text-zinc-500">{[item.anchor_type, scorePercent(item.topical_relevance_score)].filter(Boolean).join(" · ")}</div>
+                        </div>
+                        <Tag tone={linkTagTone(item.status)} className="shrink-0">{item.status}</Tag>
+                      </div>
+                      <div className="mt-2 grid gap-0.5 text-12 text-zinc-500">
+                        <div className="truncate"><span className="text-zinc-400">→</span> {item.target_url || "—"}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="truncate">{item.source_url || item.source_file || "—"}</span>
+                          <span className="ml-auto shrink-0 text-zinc-400">{formatDate(item.updated_at || item.planned_at)}</span>
+                        </div>
+                      </div>
+                    </RowCard>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Detail */}
+            <div className={cn(mobileDetailOpen ? "block" : "hidden", "lg:block lg:sticky lg:top-4")}>
+              <Panel>
+                <PanelHeader icon={GitPullRequest} title="Link detail" onBack={() => setMobileDetailOpen(false)} />
+                {!selectedLink ? (
+                  <Empty>Select a task.</Empty>
+                ) : (
+                  <CardBody className={cn("flex flex-col gap-4", linkDetailLoading && "opacity-60")}>
+                    <div>
+                      <div className="text-16 font-medium leading-snug text-zinc-900">{selectedLink.anchor_text || "Untitled link"}</div>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <Tag tone={linkTagTone(selectedLink.status)}>{selectedLink.status}</Tag>
+                        {selectedLink.anchor_type && <Tag>{selectedLink.anchor_type}</Tag>}
+                        {selectedLink.topic_cluster && <Tag>{selectedLink.topic_cluster}</Tag>}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Field label="Source" value={selectedLink.source_url || selectedLink.source_file || "—"} />
+                      <Field label="Target" value={selectedLink.target_url || "—"} />
+                      <Field label="Source file" value={selectedLink.source_file || "—"} />
+                      <Field label="Target file" value={selectedLink.target_file || "—"} />
+                      <Field label="Reason" value={selectedLink.failure_reason || selectedLink.skip_reason || selectedLink.dismissed_reason || "—"} />
+                      <Field label="Verified" value={formatDate(selectedLink.verified_at)} />
+                    </div>
+
+                    {selectedLink.astro_pr_url && <ExternalAnchor href={selectedLink.astro_pr_url} label="Open Astro PR" />}
+
+                    <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
+                      <Textarea
+                        value={linkReviewNote}
+                        onChange={(e) => setLinkReviewNote(e.target.value)}
+                        placeholder="Reviewer note (optional)"
+                        rows={3}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <ActionBtn variant="secondary" disabled={!selectedLink.review_actions?.can_requeue || !!linkActionPending} onClick={() => submitLinkDecision("requeue")}>
+                          <RotateCcw size={15} strokeWidth={2} />
+                          {linkActionPending === "requeue" ? "Working…" : "Requeue"}
+                        </ActionBtn>
+                        <ActionBtn disabled={!selectedLink.review_actions?.can_verify_now || !!linkActionPending} onClick={() => submitLinkDecision("verify_now")}>
+                          <CheckCircle2 size={15} strokeWidth={2} />
+                          {linkActionPending === "verify_now" ? "Working…" : "Verify"}
+                        </ActionBtn>
+                        <ActionBtn variant="danger" disabled={!selectedLink.review_actions?.can_dismiss || !!linkActionPending} onClick={() => submitLinkDecision("dismiss")}>
+                          <XCircle size={15} strokeWidth={2} />
+                          {linkActionPending === "dismiss" ? "Working…" : "Dismiss"}
+                        </ActionBtn>
+                      </div>
+                    </div>
+
+                    <LinkContext title="Before" value={selectedLink.link_context_before || selectedLink.context_snippet} />
+                    <LinkContext title="After" value={selectedLink.link_context_after} />
+
+                    <Section title="Validation">
+                      <div className="grid gap-1 text-13 text-zinc-600">
+                        <div>Target: HTTP {selectedLink.target_http_status ?? "—"} · indexable {yesNo(selectedLink.target_indexable)} · canonical {yesNo(selectedLink.target_canonical_matches)}</div>
+                        <div>Source: HTTP {selectedLink.source_http_status ?? "—"} · indexable {yesNo(selectedLink.source_indexable)} · canonical {yesNo(selectedLink.source_canonical_matches)}</div>
+                        <div>Links: source {selectedLink.source_existing_internal_links_count ?? "—"} · target inlinks {selectedLink.target_existing_inlinks_count ?? "—"}</div>
+                      </div>
+                    </Section>
+
+                    {selectedLink.reviewer_notes && (
+                      <Section title="Reviewer notes">
+                        <div className="whitespace-pre-wrap text-13 leading-relaxed text-zinc-600">{selectedLink.reviewer_notes}</div>
+                      </Section>
+                    )}
+                  </CardBody>
+                )}
+              </Panel>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Blog Ideas ── */}
+      {view === "ideas" && (
+        <div className="pt-4">
+          <KpiRow cols={3}>
+            <Kpi label="Ideas" value={ideaCounts.idea || 0} emphasize={(ideaCounts.idea || 0) > 0} />
+            <Kpi label="Drafts (ready)" value={ideaCounts.draft || 0} emphasize={(ideaCounts.draft || 0) > 0} />
+            <Kpi label="Published" value={ideaCounts.published || 0} />
+          </KpiRow>
+
+          <ListHeader icon={Lightbulb} title="Blog ideas & drafts" count={ideaPosts.length} />
+          {ideaLoading ? (
+            <Empty>Loading…</Empty>
+          ) : ideaPosts.length === 0 ? (
+            <Empty>No blog ideas or drafts in the backlog.</Empty>
+          ) : (
+            <div className="grid gap-2.5 sm:grid-cols-2">
+              {ideaPosts.map((p) => (
+                <div key={p.id} className="flex flex-col gap-2.5 rounded-2xl border border-zinc-200 bg-white p-3 sm:p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-14 font-medium leading-snug text-zinc-900">{p.title || "Untitled"}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-12 text-zinc-500">
+                        {p.tag && <Tag>{p.tag}</Tag>}
+                        {p.city && <span>{p.city}</span>}
+                        {p.keyword && <span className="truncate">kw: {p.keyword}</span>}
+                      </div>
+                    </div>
+                    <Tag tone={p.status === "draft" ? "forest" : "neutral"} className="shrink-0">{p.status}</Tag>
+                  </div>
+                  <div className="flex justify-end">
+                    {p.status === "idea" && (
+                      <ActionBtn size="sm" disabled={!!ideaActionPending} onClick={() => runIdeaAction(p.id, "generate")}>
+                        <Sparkles size={14} strokeWidth={2} />
+                        {ideaActionPending === `generate:${p.id}` ? "Working…" : "Generate"}
+                      </ActionBtn>
+                    )}
+                    {p.status === "draft" && (
+                      <ActionBtn size="sm" disabled={!!ideaActionPending} onClick={() => runIdeaAction(p.id, "publish")}>
+                        <UploadCloud size={14} strokeWidth={2} />
+                        {ideaActionPending === `publish:${p.id}` ? "Working…" : "Publish PR"}
+                      </ActionBtn>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-12 leading-relaxed text-zinc-500">
+            Generate writes a full draft (content + meta) via the blog writer; Publish PR opens a review-only Astro PR (Codex + content guardrails run before merge). Ideas come from the blog idea generator, independent of GSC demand.
+          </p>
+        </div>
       )}
     </div>
   );
 }
 
-function TabButton({ active, icon: Icon, label, onClick }) {
+// ── Presentational helpers (TruGreen-inspired: forest header, kelly-green accents) ──
+
+function PhoneFrame({ src }) {
+  // The App Store capture already includes the app's own top bar, so no hardware
+  // notch is drawn over it — just a rounded bezel + screen for a clean mockup.
+  return (
+    <div className="relative rounded-[2rem] border-[5px] border-zinc-900 bg-zinc-900 shadow-2xl ring-1 ring-white/10">
+      <img src={src} alt="Waves customer app" className="block w-full rounded-[1.6rem]" loading="lazy" />
+    </div>
+  );
+}
+
+function PillTab({ active, onClick, children }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        minHeight: 38,
-        border: `1px solid ${active ? D.accent : D.border}`,
-        borderRadius: 8,
-        background: active ? D.accent : D.card,
-        color: active ? "#FFFFFF" : D.text,
-        padding: "0 12px",
-        fontSize: 13,
-        fontWeight: 800,
-        cursor: "pointer",
-      }}
+      className={cn(
+        "h-9 shrink-0 rounded-full px-4 text-13 font-medium transition-colors u-focus-ring",
+        active ? "bg-[#43B02A] text-white" : "bg-white/10 text-white/80 hover:bg-white/20",
+      )}
     >
-      <Icon size={15} strokeWidth={2} />
-      {label}
+      {children}
     </button>
   );
 }
 
-function ActionButton({ icon: Icon, label, tone = "neutral", disabled, pending, onClick }) {
-  const color = tone === "green" ? D.green : tone === "red" ? D.red : D.text;
+function KpiRow({ children, cols = 4 }) {
+  return (
+    <div className={cn("mb-4 grid grid-cols-2 gap-2.5 sm:gap-3", cols === 3 ? "sm:grid-cols-3" : "sm:grid-cols-4")}>
+      {children}
+    </div>
+  );
+}
+
+function Kpi({ label, value, emphasize }) {
+  return (
+    <div className="rounded-2xl border border-zinc-200 bg-white p-3 sm:p-4">
+      <div className="text-11 uppercase tracking-label text-zinc-400 sm:text-12">{label}</div>
+      <div className={cn("mt-1 text-22 leading-none tabular-nums sm:text-28", emphasize ? "font-medium text-[#43B02A]" : "text-zinc-900")}>{value}</div>
+    </div>
+  );
+}
+
+function ListHeader({ icon: Icon, title, count }) {
+  return (
+    <div className="mb-2.5 flex items-center gap-2">
+      <Icon size={15} strokeWidth={2} className="text-[#2E7D20]" />
+      <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
+      {typeof count === "number" && (
+        <span className="rounded-full bg-zinc-100 px-2 text-11 tabular-nums text-zinc-500">{count}</span>
+      )}
+    </div>
+  );
+}
+
+function RowCard({ active, onClick, children }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      className={cn(
+        "w-full rounded-2xl border p-3 text-left transition-colors sm:p-4 u-focus-ring",
+        active ? "border-[#43B02A] bg-[#F1F9EE]" : "border-zinc-200 bg-white hover:border-[#43B02A] hover:bg-[#F8FCF6]",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Panel({ children }) {
+  return <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">{children}</div>;
+}
+
+function PanelHeader({ icon: Icon, title, onBack }) {
+  return (
+    <div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3">
+      <button
+        type="button"
+        onClick={onBack}
+        className="-ml-1 inline-flex h-7 items-center gap-1 rounded-full px-1.5 text-12 text-zinc-600 hover:bg-zinc-100 lg:hidden u-focus-ring"
+      >
+        <ArrowLeft size={15} strokeWidth={2} /> Back
+      </button>
+      <Icon size={15} strokeWidth={2} className="text-[#2E7D20]" />
+      <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
+    </div>
+  );
+}
+
+function Empty({ children }) {
+  return <div className="rounded-2xl border border-zinc-200 bg-white p-8 text-center text-14 text-zinc-400">{children}</div>;
+}
+
+function Tag({ tone = "neutral", className, children }) {
+  const cls = {
+    neutral: "bg-zinc-100 text-zinc-600",
+    green: "bg-[#EAF5E4] text-[#2E7D20]",
+    forest: "bg-[#143D2A] text-white",
+    alert: "bg-[#FEECEB] text-[#B42318]",
+  }[tone];
+  return (
+    <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-11 font-medium", cls, className)}>
+      {children}
+    </span>
+  );
+}
+
+function ActionBtn({ variant = "green", size = "md", disabled, onClick, children }) {
+  const tone = {
+    green: "bg-[#43B02A] text-white hover:bg-[#3A9A24] border-transparent",
+    secondary: "bg-white text-zinc-800 border-zinc-300 hover:bg-zinc-50",
+    danger: "bg-white text-[#B42318] border-[#F1C7C2] hover:bg-[#FEF3F2]",
+  }[variant];
+  const sizing = size === "sm" ? "h-9 px-3.5 text-12" : "h-11 px-4 text-13 sm:h-10";
+  return (
+    <button
+      type="button"
       disabled={disabled}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        minHeight: 36,
-        border: `1px solid ${D.border}`,
-        borderRadius: 8,
-        background: disabled ? "#FAFAFA" : D.card,
-        color: disabled ? D.muted : color,
-        padding: "0 10px",
-        fontSize: 13,
-        fontWeight: 750,
-        cursor: disabled ? "not-allowed" : "pointer",
-      }}
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center justify-center gap-1.5 rounded-full border font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 u-focus-ring",
+        sizing,
+        tone,
+      )}
     >
-      <Icon size={15} strokeWidth={2} />
-      {pending ? "Working..." : label}
+      {children}
     </button>
   );
 }
 
-function Row({ label, value }) {
+function Field({ label, value }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "92px minmax(0, 1fr)", gap: 8 }}>
-      <div style={{ color: D.muted, fontWeight: 750 }}>{label}</div>
-      <div style={{ color: D.text, wordBreak: "break-word" }}>{value}</div>
+    <div className="grid grid-cols-[84px_minmax(0,1fr)] gap-2 text-14">
+      <span className="text-zinc-400">{label}</span>
+      <span className="break-words text-zinc-900">{value}</span>
+    </div>
+  );
+}
+
+function Section({ icon: Icon, ok, title, children }) {
+  return (
+    <div className="border-t border-zinc-200 pt-4">
+      <div className="mb-2 flex items-center gap-2">
+        {Icon && <Icon size={15} strokeWidth={2} className={ok ? "text-[#2E7D20]" : "text-[#B42318]"} />}
+        <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
+      </div>
+      {children}
     </div>
   );
 }
@@ -868,9 +832,9 @@ function ExternalAnchor({ href, label }) {
       target="_blank"
       rel="noreferrer"
       onClick={(event) => event.stopPropagation()}
-      style={{ display: "inline-flex", alignItems: "center", gap: 5, color: D.accent, fontSize: 12, fontWeight: 800, textDecoration: "none" }}
+      className="inline-flex w-fit items-center gap-1.5 text-13 font-medium text-[#2E7D20] hover:underline"
     >
-      <ExternalLink size={13} strokeWidth={2} />
+      <ExternalLink size={14} strokeWidth={2} />
       {label}
     </a>
   );
@@ -879,20 +843,12 @@ function ExternalAnchor({ href, label }) {
 function LinkContext({ title, value }) {
   if (!value) return null;
   return (
-    <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, marginBottom: 4 }}>{title}</div>
-      <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: "#FAFAFA" }}>
+    <Section title={title}>
+      <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#FAF7EF] p-3 text-13 leading-relaxed text-zinc-600">
         {value}
       </div>
-    </div>
+    </Section>
   );
-}
-
-function linkStatusTone(status) {
-  if (status === "verified" || status === "applied") return "green";
-  if (status === "failed" || status === "dismissed") return "red";
-  if (["patch_candidate", "pr_open", "merged", "deployed"].includes(status)) return "amber";
-  return "neutral";
 }
 
 function scorePercent(value) {
