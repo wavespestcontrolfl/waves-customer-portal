@@ -122,7 +122,17 @@ async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
     sendPromise.catch(() => {});
     await withTimeout(sendPromise, OWNER_NOTIFY_TIMEOUT_MS, 'owner draft-notify');
   } catch (err) {
-    logger.warn(`[price-scan] owner draft-notify email failed (draft ${row && row.id}): ${err && err.message}`);
+    // NEVER interpolate err.message: a SendGrid validation rejection echoes the
+    // offending address (`SendGrid 400: ... does not match a verified Sender
+    // Identity: <email>`), which would leak the owner/rep email into Railway logs
+    // on this best-effort path. Log the draft id plus a sanitized status/category.
+    const status = sendFailureStatus(err);
+    const reason = status != null
+      ? `SendGrid ${status}`
+      : (err && typeof err.message === 'string' && /timed out/.test(err.message))
+        ? 'timed out'
+        : 'send error';
+    logger.warn(`[price-scan] owner draft-notify email failed (draft ${row && row.id}): ${reason}`);
   }
 }
 

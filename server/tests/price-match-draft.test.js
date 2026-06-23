@@ -436,6 +436,30 @@ describe('createDraft owner-copy notification (PRICE_MATCH_NOTIFY_OWNER)', () =>
     expect(db._rows).toHaveLength(1);
   });
 
+  test('failure log is sanitized — never leaks the email address (PII)', async () => {
+    process.env.PRICE_MATCH_NOTIFY_OWNER = 'true';
+    process.env.PRICE_MATCH_OWNER_EMAIL = 'boss@example.com';
+    const logger = require('../services/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const db = makeFakeDb();
+      // SendGrid validation rejections echo the offending address in err.message.
+      const sendOne = jest.fn(async () => {
+        const e = new Error('SendGrid 400: does not match a verified Sender Identity: boss@example.com');
+        e.status = 400;
+        throw e;
+      });
+      const row = await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => true, sendOne } });
+      expect(row.status).toBe('pending'); // best-effort: draft still staged
+      const logged = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logged).toMatch(/owner draft-notify email failed/);
+      expect(logged).toContain('SendGrid 400');         // sanitized status kept
+      expect(logged).not.toContain('boss@example.com'); // raw address NOT logged
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   test('skips the owner email when SendGrid is not configured', async () => {
     process.env.PRICE_MATCH_NOTIFY_OWNER = 'true';
     const db = makeFakeDb();
