@@ -10,8 +10,13 @@ const STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
 const DELIVERY_CHANNELS = new Set(['email', 'sms', 'both']);
 const DEFAULT_REMINDER_SCHEDULE_DAYS = [1, 3, -1];
 const MAX_DOCUMENT_EXPIRE_DAYS = 14;
-const VIEW_ONLY_TEMPLATE_CATEGORY = 'marketing';
-const VIEW_ONLY_TEMPLATE_DOCUMENT_TYPE = 'customer_guide';
+// Document templates that may be delivered without an e-signature, keyed as
+// `${category}:${document_type}`: marketing customer guides and informational
+// treatment outlines (e.g. the Bora-Care attic-remediation outline).
+const VIEW_ONLY_TEMPLATE_TYPES = new Set([
+  'marketing:customer_guide',
+  'treatment_outline:treatment_outline',
+]);
 
 function parseJson(value, fallback) {
   if (value == null) return fallback;
@@ -94,13 +99,12 @@ function normalizeStatus(value, fallback = 'active') {
 }
 
 function canDisableTemplateSignature(template = {}) {
-  return template.category === VIEW_ONLY_TEMPLATE_CATEGORY
-    && template.document_type === VIEW_ONLY_TEMPLATE_DOCUMENT_TYPE;
+  return VIEW_ONLY_TEMPLATE_TYPES.has(`${template.category}:${template.document_type}`);
 }
 
 function assertTemplateSignatureMode(template = {}) {
   if (template.requires_signature !== false || canDisableTemplateSignature(template)) return;
-  const err = new Error('Only marketing customer-guide document templates can disable e-signature.');
+  const err = new Error('Only marketing customer-guide or treatment-outline document templates can disable e-signature.');
   err.status = 400;
   throw err;
 }

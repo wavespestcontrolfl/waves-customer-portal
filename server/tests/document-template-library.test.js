@@ -132,6 +132,19 @@ describe('document template library', () => {
       requires_signature: false,
       reminder_schedule_days: [],
     });
+    expect(validateTemplatePayload({
+      templateKey: 'treatment_outline.bora_care',
+      name: 'Bora-Care Treatment Outline',
+      category: 'treatment_outline',
+      documentType: 'treatment_outline',
+      requiresSignature: false,
+      reminderScheduleDays: [],
+    })).toMatchObject({
+      category: 'treatment_outline',
+      document_type: 'treatment_outline',
+      requires_signature: false,
+      reminder_schedule_days: [],
+    });
     expect(serializeTemplate({
       template_key: 'marketing.product_safety',
       name: 'Products & Safety',
