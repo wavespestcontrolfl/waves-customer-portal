@@ -511,6 +511,20 @@ function sharedTokenStats(scrapedName, expectedName) {
   return { inter, expectedSize: B.size };
 }
 
+// Count shared tokens that are DISTINCTIVE — i.e. NOT generic category/application or
+// marketing words (NAME_CATEGORY_WORDS / GENERIC_WORDS, declared below but initialized
+// at module load, before verifyMatch is ever called). A name match needs at least one
+// of these so two products that merely share a category phrase ("post emergent liquid
+// herbicide") can't verify each other.
+function sharedDistinctiveCount(scrapedName, expectedName) {
+  const B = nameTokens(expectedName);
+  let n = 0;
+  for (const t of nameTokens(scrapedName)) {
+    if (B.has(t) && !NAME_CATEGORY_WORDS.has(t) && !GENERIC_WORDS.has(t)) n += 1;
+  }
+  return n;
+}
+
 // Pesticide formulation codes (SC, CS, EC, WP, 2L, XTS, I/T, …) are the short
 // tokens nameTokens drops, yet they separate otherwise same-brand products
 // (Taurus SC vs Taurus CS, Bifen I/T vs Bifen XTS). Collect them so verifyMatch
@@ -524,6 +538,22 @@ const GENERIC_WORDS = new Set([
   // packaging descriptors — not a formulation ('cs' is intentionally NOT here;
   // it's the CS formulation code, e.g. Taurus CS)
   'jug', 'can', 'bag', 'box', 'pak', 'tub', 'jar', 'ea',
+]);
+// Category / application-type words that appear across MANY unrelated products, so they
+// DON'T identify one. A name match must share at least one token OUTSIDE this set (an
+// actual brand/active token) — otherwise "Post Emergent Liquid Herbicide" alone would
+// verify two different herbicides (e.g. Tenacity/mesotrione vs a 2,4-D Three-Way).
+const NAME_CATEGORY_WORDS = new Set([
+  // pesticide categories (singular + plural)
+  'herbicide', 'herbicides', 'insecticide', 'insecticides', 'fungicide', 'fungicides',
+  'termiticide', 'termiticides', 'miticide', 'miticides', 'pesticide', 'pesticides',
+  'rodenticide', 'rodenticides', 'nematicide', 'nematicides', 'fertilizer', 'fertilizers',
+  'algaecide', 'algaecides', 'fumigant', 'adjuvant', 'surfactant', 'pgr',
+  // application / formulation-type descriptors
+  'post', 'pre', 'emergent', 'emergence', 'selective', 'nonselective', 'systemic',
+  'liquid', 'granular', 'granules', 'granule', 'concentrate', 'concentrated', 'soluble',
+  'wettable', 'flowable', 'dust', 'bait', 'ready', 'spray', 'sprayable', 'broadleaf',
+  'professional', 'ornamental', 'weed', 'weeds', 'grass', 'control',
 ]);
 // Single-letter formulation suffixes that genuinely separate products:
 // G granular, D dust, F flowable, L liquid, W wettable (Demand CS vs Demand G).
@@ -598,6 +628,12 @@ function verifyMatch(scraped = {}, expected = {}, opts = {}) {
     // miss (no savings alert) is the safe direction vs. trusting a wrong price.
     const coverage = expectedSize ? inter / expectedSize : 0;
     signals.name = coverage >= nameThreshold && inter >= Math.min(2, expectedSize);
+    // Distinctiveness guard: the shared tokens must include at least one OUTSIDE the
+    // generic category/application vocabulary — an actual brand/active token. Without
+    // it, two unrelated products that only share "post emergent liquid herbicide" (or
+    // any category phrase) would verify each other on inflated generic overlap alone
+    // (Tenacity vs a 2,4-D Three-Way). Erring toward a miss is the safe direction.
+    if (signals.name && sharedDistinctiveCount(scraped.name, expName) < 1) signals.name = false;
     // Formulation guard: if the expected name carries a formulation code that the
     // scraped name doesn't, it's a different formulation of the same brand
     // (Taurus SC vs Taurus CS) — drop the name signal so it can only verify via

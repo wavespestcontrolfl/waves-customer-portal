@@ -517,6 +517,22 @@ describe('price-scan extract', () => {
       expect(r.signals.name).toBe(false);
       expect(r.matched).toBe(false);
     });
+    test('generic CATEGORY-phrase overlap without the brand -> not matched (Tenacity vs a 2,4-D Three-Way)', () => {
+      // The real false positive: a verbose generic catalog name shares 4 category words
+      // ("post emergent liquid herbicide") with a DIFFERENT product at the same size,
+      // inflating coverage past the threshold — but the brand "tenacity" never matched.
+      const tenacity = { vendorProductName: 'Tenacity Post Emergent Liquid Herbicide', packSizeValue: 1, packSizeUnit: 'gal' };
+      const r = verifyMatch({ name: 'LESCO Three-Way Selective Post Emergent Liquid Herbicide', quantity: '1 gal' }, tenacity);
+      expect(r.signals.packSize).toBe(true); // size lines up...
+      expect(r.signals.name).toBe(false); // ...but no distinctive (brand) token is shared
+      expect(r.matched).toBe(false);
+    });
+    test('the same verbose name DOES match when the brand token is present', () => {
+      const tenacity = { vendorProductName: 'Tenacity Post Emergent Liquid Herbicide', packSizeValue: 1, packSizeUnit: 'gal' };
+      const r = verifyMatch({ name: 'Syngenta Tenacity Post Emergent Liquid Herbicide 1 Gallon', quantity: '1 gal' }, tenacity);
+      expect(r.signals.name).toBe(true);
+      expect(r.matched).toBe(true);
+    });
     test('matches across a packaging descriptor in the scraped size', () => {
       const r = verifyMatch({ name: 'Taurus SC Termiticide 78 oz jug', quantity: '78 oz jug' }, expected);
       expect(r.signals.packSize).toBe(true);
