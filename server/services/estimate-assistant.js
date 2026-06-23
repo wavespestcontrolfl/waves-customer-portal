@@ -787,6 +787,13 @@ function answerEstimateQuestionFallback(question, context = {}) {
     ].filter(Boolean).join(' ');
   }
 
+  // Bora-Care questions — including "Is Bora-Care safe?" / "What product is used
+  // for Bora-Care?" — are matched before the generic safety/product branch so they
+  // get the borate-specific answer instead of generic label-direction copy.
+  if (/\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/.test(q)) {
+    return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
+  }
+
   if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application)\b/.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
@@ -836,10 +843,6 @@ function answerEstimateQuestionFallback(question, context = {}) {
 
   if (/\b(who|waves|company|local|license|insured|contact|phone|text|email)\b/.test(q)) {
     return `Waves Pest Control is a local ${COMPANY.serviceArea} pest control and lawn care company. You can call or text ${phone}, or email ${COMPANY.email}.`;
-  }
-
-  if (/\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/.test(q)) {
-    return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
   }
 
   return `I can answer questions about this estimate, pricing, included services, billing, scheduling, or Waves. For anything not shown here, call or text Waves at ${phone}.`;

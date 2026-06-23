@@ -1941,6 +1941,10 @@ function hasOnlyTermiteBaitServiceMix(recurring = [], oneTimeItems = []) {
 }
 
 function isTermiteTrenchingOneTimeItem(item = {}) {
+  // Bora-Care is a borate wood treatment, never a liquid trench/barrier. Exclude
+  // it up front so a label like "Termite Bora-Care Treatment" can't match the raw
+  // "termite … treatment" heuristic below and steal the trenching copy/branch.
+  if (isBoraCareOneTimeItem(item)) return false;
   const category = serviceCategoryForOneTimeItem(item);
   if (category === 'termite_trenching') return true;
   const raw = [item.service, item.name, item.label]
@@ -1969,17 +1973,31 @@ function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
     && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
 }
 
+// True for one-time rows that carry no billable service of their own, so they
+// must not change the detected service mix: inspection/field-review lines, the
+// WaveGuard setup/membership fee, and any discount/credit/zero row (amount <= 0).
+// A *positive* unrecognized charge (e.g. a billable `one_time_adjustment` row that
+// normalizeOneTimeBreakdown adds when oneTime.total exceeds the listed items) is a
+// real charge for something else and is intentionally NOT treated as ignorable.
+function isNonBillableOneTimeRow(item = {}) {
+  if (isInspectionReviewOneTimeItem(item)) return true;
+  const service = String(item?.service || '').toLowerCase();
+  if (service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(item)) return true;
+  const amount = Number(item?.amount ?? item?.price ?? item?.total);
+  return Number.isFinite(amount) && amount <= 0;
+}
+
 function hasOnlyBoraCareServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
-  // Adjustment/discount/setup rows (e.g. the WaveGuard member discount) carry no
-  // billable service category — ignore them so a Bora-Care-only quote with a
-  // discount line still counts as Bora-Care-only.
+  // Ignore only non-billable rows (discounts like the WaveGuard member discount,
+  // the setup fee, inspections) so a Bora-Care-only quote with a discount line
+  // still counts as Bora-Care-only — while a positive unknown charge still blocks
+  // the "only" classification (it switches copy + suppresses the mini-guarantee).
   return recurringRows.length === 0
     && oneTimeRows.some(isBoraCareOneTimeItem)
     && oneTimeRows.every((item) => isBoraCareOneTimeItem(item)
-      || isInspectionReviewOneTimeItem(item)
-      || serviceCategoryForOneTimeItem(item) === null);
+      || isNonBillableOneTimeRow(item));
 }
 
 function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
@@ -3755,7 +3773,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>` : ''}
   </section>` : '';
   const membershipBlockHtml = renderMembershipBlockHtml(membership);
-  const askPrompts = buildEstimateAskPrompts(recurring, oneTimeItems, pestRecurring, hasPestOneTime);
+  // Ask Waves chips read the raw rows merged with the normalized one-time rows
+  // (the same superset the AI card + Bora-Care detection use), so engine-backed /
+  // nested-result estimates still surface service-specific chips like
+  // "What does Bora-Care treat?". Duplicates are harmless — every chip is added on
+  // a boolean, never per row.
+  const askPrompts = buildEstimateAskPrompts(
+    recurring,
+    [...oneTimeItems, ...boraCareOneTimeRows],
+    pestRecurring,
+    hasPestOneTime,
+  );
   const estimateAskEnabled = isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,

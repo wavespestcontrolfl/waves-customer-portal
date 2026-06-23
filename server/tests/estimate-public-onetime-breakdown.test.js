@@ -2600,6 +2600,104 @@ describe('public estimate one-time breakdown', () => {
     expect(answer).not.toMatch(/^I can answer questions/);
   });
 
+  test('engine/nested Bora-Care estimate still surfaces the Bora-Care chip from normalized rows', () => {
+    // The Bora-Care row only lives under result.results.oneTime (engine/nested
+    // shape); result.oneTime.items is empty, so the raw one-time list the SSR Ask
+    // Waves card used to read would miss it. The chips must come from the
+    // normalized rows so "What does Bora-Care treat?" still renders.
+    const html = renderPage('boracare-engine-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1051,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 0, items: [], specItems: [] },
+        results: {
+          oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] },
+        },
+      },
+    });
+
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+  });
+
+  test('Ask Waves Bora-Care safety/product question routes to the Bora-Care answer, not generic safety copy', () => {
+    const ctx = { company: { phone: '941-555-0100' } };
+    // "safe" and "product" both match the generic safety/product branch; the
+    // Bora-Care branch must be checked first so these get the borate-specific copy.
+    const safeAnswer = answerEstimateQuestionFallback('Is Bora-Care safe?', ctx);
+    expect(safeAnswer).toMatch(/borate treatment applied to bare wood/);
+    expect(safeAnswer).not.toMatch(/for every application/);
+
+    const productAnswer = answerEstimateQuestionFallback('What product is used for Bora-Care?', ctx);
+    expect(productAnswer).toMatch(/borate treatment applied to bare wood/);
+  });
+
+  test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
+    // A positive one_time_adjustment (or any unrecognized positive charge) is a
+    // real billable line — unlike the negative member discount it must NOT switch
+    // the page to Bora-Care-only copy or suppress the mini-guarantee.
+    const html = renderPage('boracare-billable-adjust-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1251,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 1251,
+          items: [
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+            { service: 'one_time_adjustment', name: 'Additional treatment area', price: 200 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).not.toContain('your Bora-Care wood treatment quote.');
+    expect(html).toContain('class="mini-guarantee"');
+  });
+
+  test('Bora-Care labeled with termite-treatment wording keeps Bora-Care copy, not termite-trenching copy', () => {
+    // "Termite Bora-Care Treatment" matches the raw termite-trenching heuristic;
+    // excluding Bora-Care from that predicate keeps the page on Bora-Care copy.
+    const item = { service: 'bora_care', name: 'Termite Bora-Care Treatment', price: 1051 };
+    expect(deriveServiceCategory({}, [], [item])).toBe('bora_care');
+
+    const html = renderPage('boracare-termite-treatment-token', {
+      status: 'sent',
+      customerName: 'Hannah Customer',
+      address: '12 Builder Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 1051,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 1051, items: [item], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('your Bora-Care wood treatment quote.');
+    expect(html).not.toContain('your termite trenching quote.');
+    expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
+  });
+
   test('server-rendered booking review buttons use explicit click listeners', () => {
     const html = renderPage('booking-token', {
       status: 'sent',
