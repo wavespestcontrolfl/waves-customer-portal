@@ -30,7 +30,7 @@ describe('notification trigger push tags', () => {
 
     expect(built.title).toBe('Bank payment error');
     expect(built.body).toBe('Invoice WPC-2026-0100 - Virginia Demo - Bank account during Stripe confirmation: Bank account could not be verified');
-    expect(built.link).toBe('/admin/invoices/inv_123');
+    expect(built.link).toBe('/admin/invoices?invoice=inv_123');
   });
 
   test('new lead trigger can carry tracking number context', () => {
@@ -50,7 +50,7 @@ describe('notification trigger push tags', () => {
     expect(built.body).toContain('Message included on lead record');
     expect(built.body).not.toContain('+18182079399');
     expect(built.body).not.toContain('1000 Riverside Drive');
-    expect(built.link).toBe('/admin/leads/lead-123');
+    expect(built.link).toBe('/admin/leads?lead=lead-123');
   });
 
   test('SMS reply trigger masks fallback phone and redacts sensitive message text', () => {

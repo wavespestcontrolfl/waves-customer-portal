@@ -108,7 +108,7 @@ router.put('/', async (req, res, next) => {
           'service-prefs',
           `Service prefs changed: ${name}`,
           `${customer?.address_line1 || ''} — ${summary}`,
-          { icon: '\u{1F527}', link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, changed, next } },
+          { icon: '\u{1F527}', link: `/admin/customers?customerId=${req.customerId}`, metadata: { customerId: req.customerId, changed, next } },
         );
       } catch (e) {
         logger.warn(`[service-preferences] admin notification failed: ${e.message}`);

@@ -66,7 +66,7 @@ async function loadServiceContext(serviceRecordId, fallbackCustomerId, knex) {
 }
 
 function adminLink(customerId) {
-  return customerId ? `/admin/customers/${customerId}` : '/admin/dispatch';
+  return customerId ? `/admin/customers?customerId=${customerId}` : '/admin/dispatch';
 }
 
 async function alertServiceReportDeliveryFailed({ delivery, error } = {}, { knex = db, trigger = triggerNotification } = {}) {

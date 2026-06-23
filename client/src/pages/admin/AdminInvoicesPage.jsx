@@ -588,6 +588,23 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
     load();
   }, [load]);
 
+  // Deep-link from a notification: /admin/invoices?invoice=<invoiceId> expands
+  // that invoice's detail row (payment_succeeded / payment_failed / refund /
+  // bill_payment_error notifications). The row only renders once the invoice is
+  // in the loaded list, so wait for it to appear. Runs once.
+  const invoiceDeepLinkDone = useRef(false);
+  useEffect(() => {
+    if (invoiceDeepLinkDone.current) return;
+    const invoiceId = new URLSearchParams(window.location.search).get("invoice");
+    if (!invoiceId) {
+      invoiceDeepLinkDone.current = true;
+      return;
+    }
+    if (!invoices.some((inv) => String(inv.id) === String(invoiceId))) return;
+    invoiceDeepLinkDone.current = true;
+    setExpanded(invoiceId);
+  }, [invoices]);
+
   const handleSend = (invoice) => {
     setSendModalInvoice(invoice);
   };

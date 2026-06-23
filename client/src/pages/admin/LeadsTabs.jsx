@@ -771,6 +771,21 @@ export function LeadsSection() {
     return () => window.clearInterval(id);
   }, [tab, expandedLead, loadLeadActivities]);
 
+  // Deep-link from a notification: /admin/leads?lead=<leadId> opens the pipeline
+  // and expands that lead's detail row (new_lead notification). The expanded row
+  // only renders in the pipeline table view, so snap there first. Runs once.
+  const leadDeepLinkDone = useRef(false);
+  useEffect(() => {
+    if (leadDeepLinkDone.current) return;
+    leadDeepLinkDone.current = true;
+    const leadId = new URLSearchParams(window.location.search).get("lead");
+    if (!leadId) return;
+    setTab("pipeline");
+    setPipelineView("table");
+    setActiveLead(leadId);
+    loadLeadActivities(leadId);
+  }, [setActiveLead, loadLeadActivities]);
+
   const expandLead = async (lead) => {
     if (expandedLead === lead.id) {
       setActiveLead(null);
