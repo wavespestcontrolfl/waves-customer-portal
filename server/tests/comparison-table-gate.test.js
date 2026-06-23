@@ -423,9 +423,18 @@ describe('comparison-table-gate', () => {
       .findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /cell\/row/.test(f.message))).toBe(true);
   });
 
-  test('R9-B5: a business with a less-common suffix ("HomeTeam Pest Defense") is recognized', () => {
-    const r = gate.evaluate({ body: `Compared with HomeTeam Pest Defense in Venice.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
-    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /HomeTeam Pest Defense/.test(f.message))).toBe(true);
+  test('curation: the generic phrase "rodent solutions" (lower-case) is NOT treated as a named competitor', () => {
+    const r = gate.evaluate({ body: `Compare rodent solutions before choosing a plan.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => /COMPETITOR/.test(f.code))).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('R9-B5: an UNallowlisted business with a less-common suffix ("Pest Defense") is recognized', () => {
+    // Uses a name NOT on the curated allowlist so it still exercises the
+    // suffix recognizer → fail-closed (allowlisted ones now route via the
+    // competitor-in-prose / known-competitor paths instead).
+    const r = gate.evaluate({ body: `Compared with Coastline Pest Defense in Venice.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Coastline Pest Defense/.test(f.message))).toBe(true);
   });
 
   // ── Round-10 findings (Codex review of the round-9 commit) ──
@@ -495,5 +504,52 @@ describe('comparison-table-gate', () => {
       caption="Attributes as of June 2026, per each company public website." />`;
     const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /Orkin/.test(f.message))).toBe(true);
+  });
+
+  // ── Curation round: escaped-quote parsing + embedded-quote brand names ──
+  // A real allowlisted competitor — "All \"U\" Need Pest Control" — carries
+  // literal quotes around the "U" in its brand. The JSX a draft emits escapes
+  // them as \"U\", so the parser must read the quoted literal in full (not
+  // truncate at the inner quote) and name-detection must read it as one name
+  // rather than the fragment "Need Pest Control".
+
+  test('escaped-quote parsing: a JSX-escaped quote in a caption is read in full, not truncated', () => {
+    const block = `<ComparisonTable caption="All \\"U\\" Need is national; as of June 2026 per alluneedpest.com." />`;
+    expect(gate.extractCaption(block)).toBe('All "U" Need is national; as of June 2026 per alluneedpest.com.');
+  });
+
+  test('escaped-quote parsing: an escaped apostrophe in a single-quoted row label is read in full', () => {
+    const block = `rows={[{ label: 'Keller\\'s Pest Control', values: ["Yes","No"] }]}`;
+    expect(gate.extractRows(block)[0]).toEqual({ label: "Keller's Pest Control", values: ['Yes', 'No'] });
+  });
+
+  test('escaped-quote parsing: an embedded-quote brand stays ONE column value, not split in two', () => {
+    const block = `columns={["What to weigh","All \\"U\\" Need Pest Control","Local"]}`;
+    expect(gate.extractColumns(block)).toEqual(['What to weigh', 'All "U" Need Pest Control', 'Local']);
+  });
+
+  test('embedded-quote brand: All "U" Need Pest Control is recognized as the allowlisted competitor (one name, not the "Need Pest Control" fragment)', () => {
+    expect(gate.classifyOption('All "U" Need Pest Control')).toBe('known_competitor');
+    const t = `<ComparisonTable
+      columns={["What to weigh","All \\"U\\" Need Pest Control","Local SWFL company"]}
+      rows={[{ label: "Reach", values: ["Local","Local"] }]}
+      caption="Trade-offs as of June 2026, per public sources." />`;
+    const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /All U Need Pest Control/.test(f.message))).toBe(true);
+  });
+
+  test('embedded-quote brand: a negative prose claim about All "U" Need (escaped form) still trips the prose/proximity checks, not just name detection', () => {
+    // Round-5 (Codex): name detection runs on a quote-stripped copy, but the
+    // proximity + prose-only checks must too — else an escaped brand can make a
+    // negative claim OUTSIDE a sourced table and escape both findings.
+    const sourced = `<ComparisonTable
+      columns={["What to weigh","All \\"U\\" Need Pest Control","Local SWFL company"]}
+      rows={[{ label: "Recurring residential plans", values: ["Yes","Yes"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: `All \\"U\\" Need Pest Control never answers the phone when you call.\n\n${sourced}` }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
   });
 });

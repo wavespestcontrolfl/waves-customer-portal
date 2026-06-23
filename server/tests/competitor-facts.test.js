@@ -8,6 +8,51 @@ describe('competitor-facts', () => {
     expect(cf.findCompetitor('Truly Nolen')?.id).toBe('truly-nolen');
   });
 
+  test('owner-supplied local/FL competitors are allowlisted with reach + recurring', () => {
+    for (const [name, id] of [
+      ['Prodigy Pest Solutions', 'prodigy-pest'],
+      ["Keller's Pest Control", 'kellers-pest'],
+      ['All U Need Pest Control', 'all-u-need-pest'],
+      ['Arrow Environmental', 'arrow-environmental'],
+      ['Farrow Pest Services', 'farrow-pest'],
+      ['Rodent Solutions Inc', 'rodent-solutions'],
+      ['Turner Pest Control', 'turner-pest'],
+      ['Good News Pest Solutions', 'good-news-pest'],
+      ['HomeTeam Pest Defense', 'hometeam-pest-defense'],
+      ['EcoShield Pest Solutions', 'ecoshield-pest'],
+      ['Greenhouse Termite & Pest Control', 'greenhouse-pest'],
+      ['Hughes Exterminators', 'hughes-exterminators'],
+    ]) {
+      const rec = cf.findCompetitor(name);
+      expect(rec?.id).toBe(id);
+      expect(cf.attributeValues(name).length).toBeGreaterThanOrEqual(2); // reach + recurring
+    }
+    // alias resolution
+    expect(cf.findCompetitor('prodigy pest')?.id).toBe('prodigy-pest');
+    expect(cf.findCompetitor('hometeam pest')?.id).toBe('hometeam-pest-defense');
+  });
+
+  test('bare generic single-word aliases do NOT false-match; smart-quote spellings DO', () => {
+    // generic words are not competitor mentions
+    expect(cf.findBusinessMentions("you don't have to be a prodigy to spot ants").some((m) => /Prodigy/.test(m.name))).toBe(false);
+    expect(cf.findBusinessMentions('the Hughes family called today').some((m) => /Hughes/.test(m.name))).toBe(false);
+    // but the actual business name still matches
+    expect(cf.findBusinessMentions('we use Prodigy Pest for the office').some((m) => m.inAllowlist && /Prodigy/.test(m.name))).toBe(true);
+    // curly-quote stylized spelling matches the allowlisted entry
+    expect(cf.findBusinessMentions('compared with All “U” Need Pest Control').some((m) => m.inAllowlist && /All U Need/.test(m.name))).toBe(true);
+  });
+
+  test('case-sensitive aliasesCS: capitalized "Rodent Solutions" is a competitor; lower-case generic copy is not', () => {
+    // The brand is built from otherwise-generic words, so it is detected only
+    // when capitalized. Normalized lookups stay case-insensitive...
+    expect(cf.findCompetitor('Rodent Solutions')?.id).toBe('rodent-solutions');
+    expect(cf.isKnownCompetitor('Rodent Solutions')).toBe(true);
+    // ...but free-text detection requires the capitalized brand form.
+    expect(cf.findBusinessMentions('We compared with Rodent Solutions in Venice.')
+      .some((m) => m.inAllowlist && m.name === 'Rodent Solutions Inc')).toBe(true);
+    expect(cf.findBusinessMentions('compare rodent solutions before choosing a plan.')).toHaveLength(0);
+  });
+
   test('a non-allowlisted business is not known', () => {
     expect(cf.isKnownCompetitor('Hulett')).toBe(false); // detectable signal, not allowlisted
     expect(cf.isKnownCompetitor('Some Random LLC')).toBe(false);
