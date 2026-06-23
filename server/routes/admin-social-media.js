@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const SocialMediaService = require('../services/social-media');
 const { SOCIAL_FLAGS, isPausedByAdmin, normalizeUrl } = require('../services/social-media');
+const linkedin = require('../services/linkedin');
 const SocialContentStudio = require('../services/social-content-studio');
 const logger = require('../services/logger');
 
@@ -28,11 +29,12 @@ function requireStudioEnabled(req, res, next) {
 router.get('/status', async (req, res, next) => {
   try {
     const paused = await isPausedByAdmin();
+    const linkedinStatus = await linkedin.getStatus();
     res.json({
       platforms: {
         facebook: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, enabled: SOCIAL_FLAGS.facebookEnabled, pageId: process.env.FACEBOOK_PAGE_ID || '' },
         instagram: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, enabled: SOCIAL_FLAGS.instagramEnabled, accountId: process.env.INSTAGRAM_ACCOUNT_ID || '' },
-        linkedin: { configured: false, enabled: false, note: 'LinkedIn disabled — deliberate scope decision' },
+        linkedin: { configured: linkedinStatus.configured, connected: linkedinStatus.connected, enabled: SOCIAL_FLAGS.linkedinEnabled, companyId: linkedinStatus.companyId || '' },
         gbp: { configured: true, enabled: SOCIAL_FLAGS.gbpEnabled, locations: 4 },
         gemini: { configured: !!process.env.GEMINI_API_KEY },
         ai: { configured: !!process.env.ANTHROPIC_API_KEY },
@@ -369,7 +371,7 @@ router.get('/health', async (req, res, next) => {
     }
 
     const tokenHealth = require('../services/token-health');
-    const platforms = ['facebook', 'instagram', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
+    const platforms = ['facebook', 'instagram', 'linkedin', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
     const results = [];
     for (const p of platforms) {
       const r = await tokenHealth.checkSingle(p);

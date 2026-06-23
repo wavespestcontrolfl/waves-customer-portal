@@ -1307,6 +1307,134 @@ function GbpConnectSection() {
   );
 }
 
+// LinkedIn is a single owned company page (unlike GBP's four locations), so this
+// is one Connect button + status. Click fetches the consent URL with the admin
+// bearer token, then navigates the browser to LinkedIn.
+function LinkedInConnectSection() {
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const params = new URLSearchParams(window.location.search);
+  const justConnected = params.get("linkedinOAuth") === "success";
+  const oauthFailed = params.get("linkedinOAuth") === "error";
+
+  const load = () => {
+    setLoading(true);
+    adminFetch("/admin/settings/linkedin/status")
+      .then((d) => setStatus(d))
+      .catch(() => setStatus(null))
+      .finally(() => setLoading(false));
+  };
+  useEffect(load, []);
+
+  const connect = async () => {
+    setBusy(true);
+    try {
+      const d = await adminFetch("/admin/settings/linkedin/auth-url");
+      if (d.url) {
+        window.location.href = d.url; // off to LinkedIn's consent screen
+        return;
+      }
+      alert(d.error || "Could not start LinkedIn connection");
+    } catch (e) {
+      alert("Connect failed: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connected = !!status?.connected;
+  // OAuth succeeded but the authorizing member doesn't administer the configured
+  // company page — every company-page post will 403, so flag it instead of green.
+  const orgMismatch = connected && status?.orgVerified === false;
+  return (
+    <Card style={{ marginBottom: 20 }}>
+      <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+        LinkedIn — company page connection
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
+        Authorize the Waves LinkedIn Company Page to enable posting (blog shares,
+        updates) from the marketing tools. Sign in as an admin of the page.
+      </div>
+      {justConnected && (
+        <div
+          style={{
+            fontSize: 12,
+            color: D.green,
+            background: D.green + "18",
+            padding: "8px 12px",
+            borderRadius: 8,
+            marginBottom: 12,
+          }}
+        >
+          ✓ LinkedIn connected. Status below may take a moment to refresh.
+        </div>
+      )}
+      {oauthFailed && (
+        <div
+          style={{
+            fontSize: 12,
+            color: D.red,
+            background: D.red + "14",
+            padding: "8px 12px",
+            borderRadius: 8,
+            marginBottom: 12,
+          }}
+        >
+          ✕ LinkedIn connection didn't complete. Please try again — sign in as an
+          admin of the Waves company page.
+        </div>
+      )}
+      {loading ? (
+        <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+      ) : !status?.configured ? (
+        <div style={{ fontSize: 12, color: D.muted }}>
+          Not configured — set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET in Railway.
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0" }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+              Waves Pest Control
+            </div>
+            <div style={{ fontSize: 11, color: orgMismatch ? D.amber : connected ? D.green : D.muted }}>
+              {orgMismatch
+                ? "⚠ Connected, but this account doesn't administer the configured company page — Reconnect as a page admin"
+                : connected
+                ? "● Connected"
+                : "○ Not connected"}
+              {connected && !orgMismatch && status?.tokenExpiresAt
+                ? ` · token expires ${new Date(status.tokenExpiresAt).toLocaleDateString()}`
+                : ""}
+              {connected && !orgMismatch && !status?.hasRefreshToken
+                ? " · no refresh token (re-auth ~60 days)"
+                : ""}
+            </div>
+          </div>
+          <button
+            onClick={connect}
+            disabled={busy}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 8,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: busy ? "default" : "pointer",
+              border: `1px solid ${D.teal}`,
+              background: connected ? "transparent" : D.teal,
+              color: connected ? D.teal : D.white,
+              opacity: busy ? 0.5 : 1,
+            }}
+          >
+            {busy ? "Opening…" : connected ? "Reconnect" : "Connect"}
+          </button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function IntegrationsTab({ canAdmin }) {
   if (!canAdmin) {
     return (
@@ -1324,6 +1452,7 @@ function IntegrationsTab({ canAdmin }) {
   return (
     <>
       <GbpConnectSection />
+      <LinkedInConnectSection />
       <IntegrationHealthSection />
     </>
   );

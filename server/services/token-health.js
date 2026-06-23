@@ -268,28 +268,54 @@ async function checkInstagram() {
 
 async function checkLinkedIn() {
   const platform = 'linkedin';
-  const envVarName = 'LINKEDIN_ACCESS_TOKEN';
-  const token = process.env.LINKEDIN_ACCESS_TOKEN;
+  // OAuth model (services/linkedin.js): app creds in env, page token DB-stored.
+  // The legacy LINKEDIN_ACCESS_TOKEN env path is retired, so health derives from
+  // the stored connection + its real token expiry, not a static env token.
+  const envVarName = 'LINKEDIN_CLIENT_ID';
+  let linkedin;
+  try { linkedin = require('./linkedin'); } catch { linkedin = null; }
 
-  if (!token) {
-    const result = { platform, status: 'not_configured', lastError: 'LINKEDIN_ACCESS_TOKEN not set', expiresAt: null };
+  if (!linkedin || !linkedin.configured) {
+    const result = { platform, status: 'not_configured', lastError: 'LINKEDIN_CLIENT_ID/SECRET not set', expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   }
 
   try {
-    const res = await fetch('https://api.linkedin.com/v2/me', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (res.ok) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+    const status = await linkedin.getStatus();
+    if (!status.connected) {
+      const result = { platform, status: 'not_configured', lastError: 'Not connected — authorize via Admin Settings → Integrations', expiresAt: null };
       await upsertResult({ ...result, tokenType: 'oauth', envVarName });
       return result;
     }
 
-    const status = res.status === 401 ? 'expired' : 'error';
-    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
+    if (!status.companyId) {
+      // Creds + OAuth present but no org to post to — createPost() would throw
+      // ("LINKEDIN_COMPANY_ID not configured"), so don't show a green card the
+      // publish path can't honor.
+      const result = { platform, status: 'not_configured', lastError: 'LINKEDIN_COMPANY_ID not set', expiresAt: status.tokenExpiresAt || null };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+      return result;
+    }
+
+    const expiresAt = status.tokenExpiresAt || null;
+    const expired = expiresAt ? new Date(expiresAt).getTime() <= Date.now() : false;
+
+    if (expired) {
+      // Access token expired: don't trust stored metadata — actually run the
+      // refresh exchange (known token endpoint) so a revoked grant (invalid_grant)
+      // surfaces here instead of silently passing until the next publish 401s.
+      const refresh = await linkedin.tryRefresh();
+      const result = refresh.ok
+        ? { platform, status: 'healthy', lastError: null, expiresAt: refresh.expiresAt || expiresAt }
+        : { platform, status: 'expired', lastError: `Re-authorize — ${refresh.error}`, expiresAt: refresh.expiresAt || expiresAt };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+      return result;
+    }
+
+    // Access token still valid by stored expiry → healthy. (We refresh-validate
+    // only on expiry to avoid a network call on every healthy check.)
+    const result = { platform, status: 'healthy', lastError: null, expiresAt };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   } catch (err) {

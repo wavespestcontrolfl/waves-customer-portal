@@ -127,9 +127,12 @@ const ADMIN_INTEGRATIONS = [
     category: 'Social & Listings',
     name: 'LinkedIn',
     platform: 'LinkedIn',
-    description: 'Post scheduling',
-    env: { required: ['LINKEDIN_ACCESS_TOKEN'], supporting: [] },
-    health: { type: 'token-health', key: 'linkedin', primaryEnvKey: 'LINKEDIN_ACCESS_TOKEN' },
+    description: 'Company-page posting via OAuth (Posts API)',
+    // OAuth model: app creds in env, the page token is DB-stored (services/linkedin.js).
+    // COMPANY_ID is required to post (createPost targets urn:li:organization:<id>),
+    // so it's required config, not merely supporting.
+    env: { required: ['LINKEDIN_CLIENT_ID', 'LINKEDIN_CLIENT_SECRET', 'LINKEDIN_COMPANY_ID'], supporting: [] },
+    health: { type: 'token-health', key: 'linkedin', primaryEnvKey: 'LINKEDIN_CLIENT_ID' },
     gates: [],
   },
   {
