@@ -289,6 +289,15 @@ const gates = {
   // verified; the Stripe/Terminal charge paths bill total − credit_applied and
   // the void paths restore the credit, so partial application is safe.
   autoApplyAccountCredit: isProd ? process.env.GATE_AUTO_APPLY_ACCOUNT_CREDIT === 'true' : true,
+
+  // Divert Micro-deposit Dunning — when an unpaid invoice's only blocker is an
+  // unfinished ACH micro-deposit verification (its PaymentIntent is stuck in
+  // requires_action / verify_with_microdeposits), the customer isn't refusing to
+  // pay — they need to confirm two small bank deposits. Instead of the misleading
+  // "your invoice is overdue, pay now" dunning, the late-payment + per-invoice
+  // follow-up sweeps send a verification re-nudge on the same cadence. Changes
+  // customer-facing messaging, so off by default in prod until verified.
+  divertMicrodepositDunning: isProd ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true' : true,
 };
 
 function isEnabled(gate) {

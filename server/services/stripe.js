@@ -93,6 +93,33 @@ const StripeService = {
     return !!stripeConfig.secretKey;
   },
 
+  /**
+   * True when the invoice's only blocker is an unfinished ACH micro-deposit
+   * verification — its PaymentIntent is in `requires_action` with a
+   * `verify_with_microdeposits` next_action (Stripe sent two small deposits and
+   * is waiting for the customer to confirm them). Such an invoice is NOT a refusal
+   * to pay, so the dunning sweeps divert it to a verification re-nudge instead of
+   * an "overdue" notice.
+   *
+   * FAIL OPEN: returns false on a missing PI, no Stripe, or any retrieve error —
+   * uncertainty must never SUPPRESS legitimate dunning for a genuinely-overdue
+   * invoice. The caller only treats a positive result as "divert".
+   */
+  async isInvoiceAwaitingMicrodepositVerification(invoice) {
+    const piId = invoice?.stripe_payment_intent_id;
+    if (!piId) return false;
+    const stripe = getStripe();
+    if (!stripe) return false;
+    try {
+      const pi = await stripe.paymentIntents.retrieve(piId);
+      return pi.status === 'requires_action'
+        && pi.next_action?.type === 'verify_with_microdeposits';
+    } catch (e) {
+      logger.warn(`[stripe] micro-deposit-pending check failed for invoice ${invoice?.id || piId}: ${e.message}`);
+      return false;
+    }
+  },
+
   // =========================================================================
   // CUSTOMER MANAGEMENT
   // =========================================================================

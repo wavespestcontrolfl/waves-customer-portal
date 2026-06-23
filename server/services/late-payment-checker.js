@@ -13,6 +13,8 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { invoiceAmountDue } = require('./invoice-helpers');
+const { gates } = require('../config/feature-gates');
+const StripeService = require('./stripe');
 
 function tierDaysForOverdue(daysSince) {
   if (daysSince < 14) return 7;
@@ -20,6 +22,67 @@ function tierDaysForOverdue(daysSince) {
   if (daysSince < 60) return 30;
   if (daysSince < 90) return 60;
   return 90;
+}
+
+/**
+ * When an unpaid invoice's only blocker is an unfinished ACH micro-deposit
+ * verification, the customer isn't refusing to pay — they need to confirm two
+ * small bank deposits. Send a verification re-nudge instead of the misleading
+ * "X days overdue" notice, on the same tier cadence. Dedup is keyed on its own
+ * action so it neither blocks nor is blocked by the generic late-payment dedupe.
+ *
+ * Returns: 'sent' | 'deduped' | 'skip' | 'not_pending' (fall through to dunning).
+ */
+async function maybeDivertToMicrodepositReminder(inv, daysSince, domain) {
+  const pending = await StripeService.isInvoiceAwaitingMicrodepositVerification(inv);
+  if (!pending) return 'not_pending';
+
+  const invoiceRef = inv.invoice_number || inv.id;
+  const tierDays = tierDaysForOverdue(daysSince);
+  const dedupeKey = `${invoiceRef}|${tierDays} DAYS|microdeposit`;
+  try {
+    const already = await db('activity_log')
+      .where({ action: 'microdeposit_verification_reminder' })
+      .whereRaw('metadata::text LIKE ?', [`%${dedupeKey}%`])
+      .first();
+    if (already) return 'deduped';
+  } catch { /* proceed if the dedupe check fails */ }
+
+  const customer = await db('customers').where({ id: inv.customer_id }).first();
+  if (!customer?.phone || customer.deleted_at) return 'skip';
+
+  const body = await renderSmsTemplate('bank_verification_incomplete', {
+    first_name: customer.first_name || 'there',
+    billing_url: `${domain}/billing`,
+  }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: inv.id });
+  // No fallback to the generic late-payment notice — sending "you're overdue" to a
+  // customer mid-verification is exactly the message this diversion exists to stop.
+  if (!body) return 'skip';
+
+  try {
+    const sendResult = await sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_link',
+      customerId: customer.id,
+      invoiceId: inv.id,
+      entryPoint: 'late_payment_checker_microdeposit',
+      metadata: { original_message_type: 'bank_verification_incomplete' },
+    });
+    if (sendResult.blocked || sendResult.sent === false) return 'skip';
+    await db('activity_log').insert({
+      customer_id: customer.id,
+      action: 'microdeposit_verification_reminder',
+      description: `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
+      metadata: JSON.stringify({ dedupeKey, invoiceId: inv.id, daysOverdue: daysSince }),
+    }).catch(() => {});
+    return 'sent';
+  } catch (e) {
+    logger.error(`[late-payment] micro-deposit re-nudge failed for invoice ${inv.id}: ${e.message}`);
+    return 'skip';
+  }
 }
 
 function templateKeyForOverdue(daysSince) {
@@ -71,6 +134,16 @@ const LatePaymentService = {
         if (await InvoiceFollowUps.hasActiveSequence(inv.id)) { skipped++; continue; }
         if (await InvoiceFollowUps.isDunningStopped(inv.id)) { skipped++; continue; }
       } catch { /* fall through if module unavailable */ }
+
+      // Divert micro-deposit-blocked invoices to a verification re-nudge instead
+      // of the "overdue" dunning below. Gated to invoices that actually have a PI
+      // so the Stripe read only runs where a payment was started.
+      if (gates.divertMicrodepositDunning && inv.stripe_payment_intent_id) {
+        const outcome = await maybeDivertToMicrodepositReminder(inv, daysSince, domain);
+        if (outcome === 'sent') { notified++; continue; }
+        if (outcome === 'deduped' || outcome === 'skip') { skipped++; continue; }
+        // 'not_pending' → fall through to the normal late-payment dunning below.
+      }
 
       // Key the dedupe on the computed escalation tier (the same value that
       // selects the template) so each tier (7/14/30/60/90) fires exactly once
