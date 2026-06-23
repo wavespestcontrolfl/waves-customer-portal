@@ -95,6 +95,19 @@ router.get('/:token', async (req, res, next) => {
     }
 
     const latest = await loadByToken(req.params.token);
+
+    // Branded PDF "review copy" served from this already-approved public
+    // surface (/api/contracts/:token) via ?format=pdf — not a new route.
+    // Signing nulls the single-use token, so signed contracts hit the 410
+    // guard above; the executed copy is delivered by the post-sign email.
+    if (req.query.format === 'pdf') {
+      const customer = await db('customers')
+        .where({ id: latest.customer_id })
+        .first('first_name', 'last_name', 'company_name');
+      const { generateContractPDF } = require('../services/pdf/contract-pdf');
+      return generateContractPDF(latest, customer || {}, res, { signed: latest.status === 'signed' });
+    }
+
     res.json({ contract: serializeContract(latest, { includeAudit: false }) });
   } catch (err) { next(err); }
 });
