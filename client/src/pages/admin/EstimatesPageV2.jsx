@@ -1804,32 +1804,10 @@ function EstimatePipelineViewV2() {
     [refreshEstimates],
   );
 
-  if (loading) {
-    return (
-      <div className="p-10 text-center text-13 text-ink-secondary">
-        Loading estimates…
-      </div>
-    );
-  }
-
-  if (error && estimates.length === 0) {
-    return (
-      <div className="p-10 text-center">
-        {" "}
-        <div className="text-14 text-alert-fg mb-3">
-          Failed to load estimates
-        </div>{" "}
-        <div className="text-13 text-ink-tertiary mb-4">
-          {error.message || String(error)}
-        </div>{" "}
-        <Button variant="primary" onClick={() => refreshEstimates()}>
-          Retry
-        </Button>{" "}
-      </div>
-    );
-  }
-
   // Classify + sort newest-first so the most recent estimates stay at the top.
+  // Computed (with the deep-link hook) before the loading/error early returns
+  // so the hooks below always run in the same order — `estimates` is [] while
+  // loading, so this is cheap and the hook no-ops until rows arrive.
   const classified = estimates.map((e) => ({
     ...e,
     _class: classifyEstimateForPipeline(e),
@@ -1859,6 +1837,31 @@ function EstimatePipelineViewV2() {
     filter,
     setFilter,
   });
+
+  if (loading) {
+    return (
+      <div className="p-10 text-center text-13 text-ink-secondary">
+        Loading estimates…
+      </div>
+    );
+  }
+
+  if (error && estimates.length === 0) {
+    return (
+      <div className="p-10 text-center">
+        {" "}
+        <div className="text-14 text-alert-fg mb-3">
+          Failed to load estimates
+        </div>{" "}
+        <div className="text-13 text-ink-tertiary mb-4">
+          {error.message || String(error)}
+        </div>{" "}
+        <Button variant="primary" onClick={() => refreshEstimates()}>
+          Retry
+        </Button>{" "}
+      </div>
+    );
+  }
 
   return (
     <div style={{ fontFamily: ROBOTO }}>
