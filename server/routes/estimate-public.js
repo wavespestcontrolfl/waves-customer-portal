@@ -3718,7 +3718,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     if (price <= 0 && !includedByServiceCredit) return '';
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    return `<tr><td>${escapeHtml(it.name || it.label || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
+    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
   // Net the manual/custom one-time discount slice into the legacy (non-React)

@@ -2799,6 +2799,9 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toMatch(/Bora-Care Wood Treatment[^<]*\+[^<]*Pre-Slab Termiticide Treatment|Pre-Slab Termiticide Treatment[^<]*\+[^<]*Bora-Care Wood Treatment/);
     expect(html).not.toContain('>bora_care<');
+    // The service-details table uses the same friendly name, not "One-time service".
+    expect(html).toContain('<td>Bora-Care Wood Treatment');
+    expect(html).not.toContain('<td>One-time service');
   });
 
   test('bookingServiceFor routes a Bora-Care label to the Bora-Care booking service, not pest control', () => {
@@ -2850,6 +2853,34 @@ describe('public estimate one-time breakdown', () => {
     expect(contract.askChips).toContain('What does Bora-Care treat?');
     // #5: the raw service-key label is normalized for the client payload.
     expect(contract.oneTimeBreakdown.items[0].label).toBe('Bora-Care Wood Treatment');
+  });
+
+  test('on a mixed estimate, a lawn-fungus / shrub-beetle question is not answered with Bora-Care copy', () => {
+    const mixedContext = {
+      company: { phone: '941-555-0100' },
+      serviceMode: 'recurring',
+      services: [{ service: 'lawn_care', label: 'Lawn Care', summary: 'Lawn Care - quarterly' }],
+      oneTime: { items: [{ service: 'bora_care', label: 'Bora-Care' }] },
+    };
+    // Bare "fungus"/"beetle" without a wood/borate qualifier stays on the relevant
+    // service branch even though the estimate includes Bora-Care.
+    expect(answerEstimateQuestionFallback('Do you handle lawn fungus?', mixedContext))
+      .not.toMatch(/borate treatment applied to bare wood/);
+    // A qualified Bora-Care question still routes to the borate answer.
+    expect(answerEstimateQuestionFallback('Does Bora-Care cover wood-boring beetles?', mixedContext))
+      .toMatch(/borate treatment applied to bare wood/);
+  });
+
+  test('included-services answer lists a separately billed Bora-Care add-on', () => {
+    const context = {
+      serviceMode: 'recurring',
+      waveGuardTier: 'WaveGuard Silver',
+      services: [{ service: 'pest_control', label: 'Pest Control', summary: 'Pest Control - quarterly' }],
+      oneTime: { items: [{ service: 'bora_care', label: 'Bora-Care Wood Treatment', summary: 'Bora-Care Wood Treatment - one-time' }] },
+    };
+    const answer = answerEstimateQuestionFallback('What is included in this estimate?', context);
+    expect(answer).toMatch(/Pest Control/);
+    expect(answer).toMatch(/Bora-Care/);
   });
 
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
