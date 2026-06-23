@@ -106,6 +106,82 @@ function loadEligibleServices(lockBoundary, lookaheadEnd) {
     .limit(5000);
 }
 
+/**
+ * Score a single eligible service's current placement against its best valid
+ * candidate slot. PURE of side effects (DB reads only, no mutation, no audit) so
+ * it can run twice: once in the pass-1 scoring sweep, and again in pass-2 right
+ * before applying a move — re-scoring against the now-live schedule so an earlier
+ * apply this run that already captured the gain isn't double-counted.
+ *
+ * Returns a discriminated result:
+ *   { kind: 'no_change', reason_code, reason_description, audit }
+ *   { kind: 'move', improvement, best, threshold, audit }
+ * where `audit` carries the named fields audit.logDecision consumes.
+ */
+async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
+  const { current, candidates, drops } = await findValidCandidateSlots(service, prefs, ctx);
+  const prefsSnapshot = prefs.raw_snapshot;
+
+  if (!current || candidates.length === 0) {
+    // When an explicit portal preference is the reason nothing survived, say so —
+    // a HARD preferred-day/time filter dropping every feasible slot is the
+    // override working as designed, not a failure to optimize.
+    const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
+    return {
+      kind: 'no_change',
+      reason_code: prefDropped ? 'NO_SLOT_MATCHING_PREFERENCE' : 'NO_VALID_SLOT',
+      reason_description: prefDropped
+        ? 'No candidate slot honored the customer\'s explicit day/time preference'
+        : 'No valid candidate slot found',
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops } },
+    };
+  }
+
+  const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
+  const currentScore = scoreAppointmentPlacement(current, prefs, scoreCtx);
+  let best = null;
+  let bestScore = null;
+  for (const cand of candidates) {
+    const sc = scoreAppointmentPlacement(cand, prefs, scoreCtx);
+    if (!bestScore || sc.total_score > bestScore.total_score) { best = cand; bestScore = sc; }
+  }
+
+  const improvement = Math.round((bestScore.total_score - currentScore.total_score) * 100) / 100;
+  // Already-moved visits must clear a higher bar (defeats the stability penalty)
+  // so the job never thrashes the same customer day to day.
+  const threshold = (service.auto_dispatch_change_count || 0) > 0
+    ? Math.max(config.minScoreImprovement, config.removeStabilityFloor)
+    : config.minScoreImprovement;
+
+  const scores = { old: currentScore.total_score, new: bestScore.total_score, improvement };
+  const routeMetrics = {
+    current_detour_minutes: current.detour_minutes,
+    candidate_detour_minutes: best.detour_minutes,
+    candidate_total_drive_minutes: best.total_drive_minutes,
+    stops_that_day: best.stops_that_day,
+    current_score_breakdown: currentScore,
+    candidate_score_breakdown: bestScore,
+  };
+  // apply preserves pending (restores it after the rebooker), so the projected
+  // status must reflect that — don't claim a pending visit would be confirmed.
+  const projectedStatus = service.status === 'pending' ? 'pending' : 'confirmed';
+  const newPlacement = { date: best.date, window_start: best.start_time, window_end: best.end_time, technician_id: best.technician_id, status: projectedStatus };
+  const constraints = {
+    lock_boundary: lockBoundary,
+    blackout: prefs.blackout,
+    threshold,
+    capability_level: best.capability_level,
+    preferred_days: prefs.preferred_days,
+    effective_time_window: prefs.effective_time_window && prefs.effective_time_window.key,
+  };
+  const auditCtx = { newPlacement, scores, prefsSnapshot, routeMetrics, constraints };
+
+  if (improvement < threshold) {
+    return { kind: 'no_change', reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}`, audit: auditCtx };
+  }
+  return { kind: 'move', improvement, best, threshold, audit: auditCtx };
+}
+
 async function runAutoDispatch(opts = {}) {
   const config = getAutoDispatchConfig(opts);
   const triggeredBy = opts.triggeredBy || 'cron';
@@ -123,6 +199,9 @@ async function runAutoDispatch(opts = {}) {
   let geocodeAttempts = 0; // counts API attempts (success OR fail) — bounds the cap
   let geocoded = 0;        // successes only — for the run summary
   const geoCache = new Map(); // customer_id -> {lat,lng}|null, so repeat visits of one customer don't re-attempt
+  // Apply-mode only: qualifying moves found in the pass-1 sweep, applied
+  // best-improvement-first in pass 2 so the change cap funds the largest gains.
+  const plannedMoves = [];
 
   try {
     const capMap = await loadCapabilityMap();
@@ -193,105 +272,92 @@ async function runAutoDispatch(opts = {}) {
           capabilityFor,
           topN: 60,
         };
-        const { current, candidates, drops } = await findValidCandidateSlots(service, prefs, ctx);
+        const evalResult = await evaluatePlacement(service, prefs, ctx, config, lockBoundary);
         totals.evaluated++;
 
-        const prefsSnapshot = prefs.raw_snapshot;
-        if (!current || candidates.length === 0) {
-          // When an explicit portal preference is the reason nothing survived,
-          // say so — a HARD preferred-day/time filter dropping every feasible
-          // slot is the override working as designed, not a failure to optimize.
-          const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
-          const reasonCode = prefDropped ? 'NO_SLOT_MATCHING_PREFERENCE' : 'NO_VALID_SLOT';
-          const reasonDescription = prefDropped
-            ? 'No candidate slot honored the customer\'s explicit day/time preference'
-            : 'No valid candidate slot found';
-          await audit.logDecision(runId, { action: 'no_change', service, reason_code: reasonCode, reason_description: reasonDescription, prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops } });
+        if (evalResult.kind === 'no_change') {
+          await audit.logDecision(runId, { action: 'no_change', service, reason_code: evalResult.reason_code, reason_description: evalResult.reason_description, ...evalResult.audit });
           continue;
         }
 
-        const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
-        const currentScore = scoreAppointmentPlacement(current, prefs, scoreCtx);
-        let best = null;
-        let bestScore = null;
-        for (const cand of candidates) {
-          const sc = scoreAppointmentPlacement(cand, prefs, scoreCtx);
-          if (!bestScore || sc.total_score > bestScore.total_score) { best = cand; bestScore = sc; }
-        }
-
-        const improvement = Math.round((bestScore.total_score - currentScore.total_score) * 100) / 100;
-        // Already-moved visits must clear a higher bar (defeats the stability
-        // penalty) so the job never thrashes the same customer day to day.
-        const threshold = (service.auto_dispatch_change_count || 0) > 0
-          ? Math.max(config.minScoreImprovement, config.removeStabilityFloor)
-          : config.minScoreImprovement;
-
-        const scores = { old: currentScore.total_score, new: bestScore.total_score, improvement };
-        const routeMetrics = {
-          current_detour_minutes: current.detour_minutes,
-          candidate_detour_minutes: best.detour_minutes,
-          candidate_total_drive_minutes: best.total_drive_minutes,
-          stops_that_day: best.stops_that_day,
-          current_score_breakdown: currentScore,
-          candidate_score_breakdown: bestScore,
-        };
-        // apply preserves pending (restores it after the rebooker), so the
-        // projected status must reflect that — don't claim a pending visit
-        // would be confirmed in the dry-run/cap-held audit.
-        const projectedStatus = service.status === 'pending' ? 'pending' : 'confirmed';
-        const newPlacement = { date: best.date, window_start: best.start_time, window_end: best.end_time, technician_id: best.technician_id, status: projectedStatus };
-        const constraints = {
-          lock_boundary: lockBoundary,
-          blackout: prefs.blackout,
-          threshold,
-          capability_level: best.capability_level,
-          preferred_days: prefs.preferred_days,
-          effective_time_window: prefs.effective_time_window && prefs.effective_time_window.key,
-        };
-
-        if (improvement < threshold) {
-          await audit.logDecision(runId, { action: 'no_change', service, reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}`, newPlacement, scores, prefsSnapshot, routeMetrics, constraints });
-          continue;
-        }
-
+        // A qualifying move. In dry_run we recommend it immediately (order is
+        // irrelevant — nothing is applied). In apply mode we COLLECT it and
+        // decide what actually moves in a second best-improvement-first pass,
+        // so the per-run change cap spends its budget on the highest-value
+        // moves rather than whichever happened to come first by scheduled_date.
         if (config.mode === 'dry_run') {
           totals.recommended++;
-          await audit.logDecision(runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: `Would move (+${improvement})`, newPlacement, scores, prefsSnapshot, routeMetrics, constraints, appliedBy: 'auto_dispatch' });
+          await audit.logDecision(runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: `Would move (+${evalResult.improvement})`, ...evalResult.audit, appliedBy: 'auto_dispatch' });
           continue;
         }
-
-        // apply mode
-        if (totals.changed >= config.maxChangesPerRun) {
-          totals.recommended++; // cap-held but still a found move — count it in the summary
-          await audit.logDecision(runId, { action: 'recommended', service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached`, newPlacement, scores, prefsSnapshot, routeMetrics, constraints });
-          continue;
-        }
-        try {
-          const result = await applyAutoDispatchMove(service, best, runId, config);
-          totals.changed++;
-          await audit.logDecision(runId, {
-            action: 'changed',
-            service,
-            reason_code: 'CHANGE_APPLIED',
-            reason_description: `Moved (+${improvement})`,
-            oldPlacement: { date: toDateStr(service.scheduled_date), window_start: service.window_start, window_end: service.window_end, technician_id: service.technician_id, status: result.pre_status },
-            newPlacement: { ...newPlacement, status: result.post_status },
-            scores,
-            prefsSnapshot,
-            routeMetrics,
-            constraints,
-            appliedBy: 'auto_dispatch',
-          });
-        } catch (applyErr) {
-          totals.failed++;
-          await audit.logDecision(runId, { action: 'failed', service, reason_code: 'ERROR', reason_description: applyErr.message, newPlacement, scores, prefsSnapshot, routeMetrics, constraints, error: applyErr.message });
-        }
+        plannedMoves.push({ service, prefs, ctx, result: evalResult });
       } catch (perErr) {
         totals.failed++;
         logger.error(`[auto-dispatch] service ${service && service.id} failed: ${perErr.message}`);
         try {
           await audit.logDecision(runId, { action: 'failed', service, reason_code: 'ERROR', reason_description: perErr.message, error: perErr.message });
         } catch (_) { /* swallow */ }
+      }
+    }
+
+    // ── Pass 2 (apply mode): apply the collected moves BEST-IMPROVEMENT-FIRST ──
+    // The cap bounds how many moves a run applies, so it must fund the LARGEST
+    // route gains: apply in descending pass-1 improvement instead of first-by-
+    // scheduled_date. Each move is RE-EVALUATED ONCE against the now-live schedule
+    // right before the apply/cap decision, so a move whose gain an earlier apply
+    // already captured is dropped (no_change), the cap-held backlog reflects
+    // current value, and a failed apply logs the actually-attempted placement.
+    //
+    // Cost is O(pending) — one re-evaluation per qualifying move, the same per-
+    // service work the old inline loop did. We deliberately do NOT re-sort the
+    // remaining moves by fresh improvement after every apply (full greedy): that
+    // is O(pending × cap) slot-finder calls and can overrun the daily cron when
+    // many visits qualify. The fixed pass-1 order is near-optimal for the moves
+    // that actually apply under a binding cap — they are the top-ranked ones,
+    // applied earliest, where the pass-1 estimate has diverged least from live.
+    if (config.mode !== 'dry_run' && plannedMoves.length) {
+      plannedMoves.sort((a, b) => b.result.improvement - a.result.improvement);
+      for (const pm of plannedMoves) {
+        let fresh = null;
+        try {
+          fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
+          if (fresh.kind !== 'move') {
+            // Re-scoring against the live schedule no longer clears the bar (an
+            // earlier apply this run captured the gain, or the row changed).
+            await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: fresh.reason_code, reason_description: `No longer qualifies on live re-evaluation — ${fresh.reason_description}`, ...fresh.audit });
+            continue;
+          }
+
+          if (totals.changed >= config.maxChangesPerRun) {
+            totals.recommended++; // cap-held but still a valid move — count it in the summary
+            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement})`, ...fresh.audit });
+            continue;
+          }
+
+          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, config);
+          totals.changed++;
+          await audit.logDecision(runId, {
+            action: 'changed',
+            service: pm.service,
+            reason_code: 'CHANGE_APPLIED',
+            reason_description: `Moved (+${fresh.improvement})`,
+            oldPlacement: { date: toDateStr(pm.service.scheduled_date), window_start: pm.service.window_start, window_end: pm.service.window_end, technician_id: pm.service.technician_id, status: result.pre_status },
+            newPlacement: { ...fresh.audit.newPlacement, status: result.post_status },
+            scores: fresh.audit.scores,
+            prefsSnapshot: fresh.audit.prefsSnapshot,
+            routeMetrics: fresh.audit.routeMetrics,
+            constraints: fresh.audit.constraints,
+            appliedBy: 'auto_dispatch',
+          });
+        } catch (applyErr) {
+          totals.failed++;
+          logger.error(`[auto-dispatch] apply failed for ${pm.service && pm.service.id}: ${applyErr.message}`);
+          try {
+            // Prefer the fresh (actually-attempted) placement in the failure row;
+            // fall back to the pass-1 audit if the re-evaluation itself threw.
+            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...((fresh && fresh.audit) || pm.result.audit), error: applyErr.message });
+          } catch (_) { /* swallow */ }
+        }
       }
     }
 

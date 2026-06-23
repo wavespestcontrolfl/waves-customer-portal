@@ -215,6 +215,86 @@ test('no candidate slots → no_change NO_VALID_SLOT', async () => {
   expect(lastDecision('no_change').reason_code).toBe('NO_VALID_SLOT');
 });
 
+test('apply mode spends a tight cap on the BEST-improvement move, not the first by date', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    // Same current placement for all; candidates differ only by detour, so a
+    // smaller detour = strictly larger improvement. s1 (lowest gain) comes FIRST
+    // by scheduled_date; s2 has the biggest gain. With cap=1, date-order would
+    // move s1 — best-first must move s2.
+    const cand = (detour) => ({ is_current: false, detour_minutes: detour, stops_that_day: 3, technician_id: 't1', date: '2026-08-11', start_time: '08:00', capability_level: 'qualified', total_drive_minutes: 10 });
+    servicesResult = [
+      svc({ id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04' }),
+      svc({ id: 's2', customer_id: 'c2', scheduled_date: '2026-08-05' }),
+      svc({ id: 's3', customer_id: 'c3', scheduled_date: '2026-08-06' }),
+    ];
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+    const byId = { s1: cand(8), s2: cand(0), s3: cand(4) }; // improvement: s2 > s3 > s1
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({ current: CURRENT, candidates: [byId[service.id]] }));
+
+    const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
+
+    expect(res).toMatchObject({ evaluated: 3, changed: 1, recommended: 2 });
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('s2'); // the biggest gain, not s1
+    expect(lastDecision('changed').service.id).toBe('s2');
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
+test('a beyond-cap move that re-evaluation finds superseded is dropped (no_change), not counted as a cap-held recommendation', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    // cap=1: s1 (bigger gain) applies; s2 is beyond the cap AND, on the live
+    // re-evaluation, no longer has a valid slot. It must be no_change (superseded),
+    // not a MAX_CHANGES_REACHED recommendation — otherwise the reported backlog
+    // overcounts moves that aren't actually pending anymore.
+    servicesResult = [
+      svc({ id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04' }),
+      svc({ id: 's2', customer_id: 'c2', scheduled_date: '2026-08-05' }),
+    ];
+    db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+    let s2calls = 0;
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => {
+      if (service.id === 's1') return { current: CURRENT, candidates: [CAND_BIG] }; // biggest gain → applied
+      s2calls += 1; // s2: qualifies in pass 1, superseded on pass-2 re-eval
+      return s2calls === 1 ? { current: CURRENT, candidates: [CAND_MODERATE] } : { current: CURRENT, candidates: [] };
+    });
+
+    const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
+
+    expect(res).toMatchObject({ changed: 1, recommended: 0 }); // s2 NOT counted as cap-held
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('s1');
+    expect(lastDecision('no_change').reason_description).toMatch(/No longer qualifies on live re-evaluation/);
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
+test('apply mode re-evaluates before moving: a move superseded by the live schedule is dropped, not force-applied', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    // Pass-1 scoring sees a worthwhile move; the pass-2 re-evaluation (against the
+    // now-live schedule) finds no valid slot — so it must NOT apply.
+    candidateSlots.findValidCandidateSlots
+      .mockResolvedValueOnce({ current: CURRENT, candidates: [CAND_BIG] }) // pass 1: qualifies
+      .mockResolvedValueOnce({ current: CURRENT, candidates: [] });        // pass 2: superseded
+    const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 5 });
+
+    expect(res).toMatchObject({ evaluated: 1, changed: 0 });
+    expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(candidateSlots.findValidCandidateSlots).toHaveBeenCalledTimes(2); // scored, then re-scored
+    expect(lastDecision('no_change').reason_description).toMatch(/No longer qualifies on live re-evaluation/);
+  } finally {
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
 test('idempotency: an already-moved visit needs a much larger gain to move again', async () => {
   candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_MODERATE] });
 
