@@ -13,6 +13,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
+const { renderSmsTemplate } = require('./sms-template-renderer');
+const { gates } = require('../config/feature-gates');
+const StripeService = require('./stripe');
 const config = require('../config/invoice-followups');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -314,7 +317,7 @@ async function runPending() {
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
-      'i.payer_id as invoice_payer_id',
+      'i.payer_id as invoice_payer_id', 'i.stripe_payment_intent_id as invoice_stripe_pi',
       'i.service_date', 'i.due_date', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
       'i.created_at as invoice_created_at',
@@ -425,12 +428,30 @@ async function fireStep(row) {
     invoiceId: row.invoice_id,
   };
 
-  const emailResult = await sendFollowupEmail({ row, customer, step, ctx });
+  // Divert micro-deposit-blocked invoices to a verification re-nudge: the customer
+  // isn't ignoring the bill, they haven't confirmed their two ACH micro-deposits.
+  // Swap this touch's message to the verification copy (SMS-only, matching the
+  // webhook's one-time nudge) but keep the cadence so the re-nudge repeats on the
+  // normal schedule until the PI clears (then the terminal-status filter stops it).
+  const mdPending = gates.divertMicrodepositDunning
+    && await StripeService.isInvoiceAwaitingMicrodepositVerification({
+      id: row.invoice_id,
+      stripe_payment_intent_id: row.invoice_stripe_pi,
+    });
+
+  const emailResult = mdPending
+    ? { ok: false, skipped: true, reason: 'microdeposit_verification' }
+    : await sendFollowupEmail({ row, customer, step, ctx });
 
   let smsSent = false;
   let smsSkipReason = null;
   if (customer?.phone) {
-    const body = await resolveBody(step, ctx);
+    const body = mdPending
+      ? await renderSmsTemplate('bank_verification_incomplete', {
+          first_name: ctx.name,
+          billing_url: `${publicPortalUrl()}/billing`,
+        }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
+      : await resolveBody(step, ctx);
     if (!body) {
       smsSkipReason = 'missing_template';
       logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id}`);
@@ -668,6 +689,7 @@ async function sendNextTouchNow(invoiceId) {
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied',
+      'i.stripe_payment_intent_id as invoice_stripe_pi',
       'i.service_date', 'i.due_date', 'i.invoice_number',
     )
     .first();
