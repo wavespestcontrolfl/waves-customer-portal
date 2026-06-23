@@ -173,7 +173,13 @@ class LinkedInService {
       throw new Error(`LinkedIn token exchange ${res.status}: ${(await res.text()).slice(0, 500)}`);
     }
     const tokens = await res.json();
-    const result = await this.storeTokens(tokens, { merge: true });
+    // Fresh authorization-code grant: REPLACE, don't merge. If LinkedIn omits a
+    // refresh_token (common for non-approved apps), merging would retain the prior
+    // grant's refresh token + expiry — leaving health/UI reporting a refreshable
+    // connection that actually belongs to an old grant, and _getValidAccessToken()
+    // would later refresh with stale creds instead of prompting re-auth. (merge:true
+    // is correct only for the refresh-token exchange path in _getValidAccessToken.)
+    const result = await this.storeTokens(tokens, { merge: false });
     // Soft-verify the authorizing account actually administers LINKEDIN_COMPANY_ID.
     // Never block the connection on it (the org-ACL response shape isn't doc-verified
     // here, and a transient failure shouldn't strand a valid token) — record the
@@ -189,8 +195,11 @@ class LinkedInService {
     if (!this.companyId) return null;
     try {
       const { adminedOrganizations } = await this.verifyOrgAccess();
-      const target = String(this.companyId);
-      const verified = (adminedOrganizations || []).some((o) => String(o).includes(target));
+      // Compare the numeric org id for EQUALITY — a substring match would mark
+      // company 123 verified against urn:li:organization:1123 (a different org).
+      const target = String(this.companyId).trim();
+      const orgId = (o) => String(o).trim().replace(/^urn:li:organization:/, '');
+      const verified = (adminedOrganizations || []).some((o) => orgId(o) === target);
       const existing = await this._getStoredTokens();
       await db('system_settings')
         .where({ key: TOKEN_KEY })

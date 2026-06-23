@@ -1191,6 +1191,9 @@ const SocialMediaService = {
         const ls = await linkedinSvc.getStatus();
         if (!ls.connected) linkedinReason = 'LinkedIn not connected — authorize in Settings → Integrations';
         else if (!ls.companyId) linkedinReason = 'LINKEDIN_COMPANY_ID not set';
+        // orgVerified === false = authorized account doesn't admin the page → every
+        // post 403s; skip until reconnect. null (verify skipped) does NOT block.
+        else if (ls.orgVerified === false) linkedinReason = 'LinkedIn page admin mismatch — reconnect as a Waves page admin';
         else linkedinReady = true;
       }
     }
