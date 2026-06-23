@@ -300,18 +300,22 @@ async function checkLinkedIn() {
 
     const expiresAt = status.tokenExpiresAt || null;
     const expired = expiresAt ? new Date(expiresAt).getTime() <= Date.now() : false;
-    // An expired access token only refreshes at post time when a refresh token
-    // exists AND has not itself expired (approved apps). Once the grant can no
-    // longer refresh, report 'expired' so re-auth is prompted before the next post.
-    const refreshViable = status.hasRefreshToken
-      && (!status.refreshTokenExpiresAt || new Date(status.refreshTokenExpiresAt).getTime() > Date.now());
-    const healthy = !expired || refreshViable;
-    const result = {
-      platform,
-      status: healthy ? 'healthy' : 'expired',
-      lastError: healthy ? null : 'Access/refresh token expired — re-authorize in Settings → Integrations',
-      expiresAt,
-    };
+
+    if (expired) {
+      // Access token expired: don't trust stored metadata — actually run the
+      // refresh exchange (known token endpoint) so a revoked grant (invalid_grant)
+      // surfaces here instead of silently passing until the next publish 401s.
+      const refresh = await linkedin.tryRefresh();
+      const result = refresh.ok
+        ? { platform, status: 'healthy', lastError: null, expiresAt: refresh.expiresAt || expiresAt }
+        : { platform, status: 'expired', lastError: `Re-authorize — ${refresh.error}`, expiresAt: refresh.expiresAt || expiresAt };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+      return result;
+    }
+
+    // Access token still valid by stored expiry → healthy. (We refresh-validate
+    // only on expiry to avoid a network call on every healthy check.)
+    const result = { platform, status: 'healthy', lastError: null, expiresAt };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   } catch (err) {

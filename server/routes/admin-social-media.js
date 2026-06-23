@@ -371,7 +371,7 @@ router.get('/health', async (req, res, next) => {
     }
 
     const tokenHealth = require('../services/token-health');
-    const platforms = ['facebook', 'instagram', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
+    const platforms = ['facebook', 'instagram', 'linkedin', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
     const results = [];
     for (const p of platforms) {
       const r = await tokenHealth.checkSingle(p);

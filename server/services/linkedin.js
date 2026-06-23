@@ -124,6 +124,11 @@ class LinkedInService {
         ? new Date(now + Number(tokens.refresh_token_expires_in) * 1000).toISOString()
         : existing.refresh_token_expires_at || null,
       scope: tokens.scope || existing.scope || SCOPES.join(' '),
+      // Carry the org-verification result across a refresh (merge:true) so a known
+      // page-admin mismatch isn't silently reset to null (which the publish path
+      // treats as non-blocking). A fresh grant (merge:false) has existing={} → null,
+      // and _recordOrgVerification re-computes it.
+      org_verified: typeof existing.org_verified === 'boolean' ? existing.org_verified : null,
       updated_at: new Date().toISOString(),
     };
 
@@ -251,6 +256,39 @@ class LinkedInService {
     return stored.access_token;
   }
 
+  // ── Actively refresh + validate the grant (for token-health) ──────────────
+  // Performs the refresh-token exchange against the known token endpoint and
+  // surfaces the result, so a revoked grant (invalid_grant) is caught BEFORE the
+  // next publish rather than reported healthy off stored metadata. Returns
+  // { ok, error, expiresAt }. ok:false with no refresh token means "re-auth".
+  async tryRefresh() {
+    const stored = await this._getStoredTokens();
+    if (!stored.refresh_token || !this.clientId || !this.clientSecret) {
+      return { ok: false, error: 'No refresh token — re-authorize', expiresAt: stored.token_expires_at || null };
+    }
+    try {
+      const body = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: stored.refresh_token,
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+      });
+      const res = await fetch(TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      });
+      if (!res.ok) {
+        return { ok: false, error: `refresh ${res.status}: ${(await res.text()).slice(0, 200)}`, expiresAt: stored.token_expires_at || null };
+      }
+      await this.storeTokens(await res.json(), { merge: true });
+      const updated = await this._getStoredTokens();
+      return { ok: true, error: null, expiresAt: updated.token_expires_at || null };
+    } catch (err) {
+      return { ok: false, error: err.message, expiresAt: stored.token_expires_at || null };
+    }
+  }
+
   // ── Connection status (for the admin Integrations UI) ─────────────────────
   async getStatus() {
     const stored = await this._getStoredTokens();
@@ -271,7 +309,12 @@ class LinkedInService {
   // authorizing user administers it. Returns the list of admined org URNs.
   async verifyOrgAccess() {
     const token = await this._getValidAccessToken();
-    const url = `${ORG_ACLS_URL}?q=roleAssignee&role=ADMINISTRATOR&state=APPROVED`;
+    // Don't filter to role=ADMINISTRATOR: a Page Content Admin / sponsored-content
+    // poster can publish to the company page too, so a role filter would mark those
+    // valid accounts unverified and make the publish path wrongly skip LinkedIn.
+    // Fetch all APPROVED roles and let the org-id match decide; the Posts API still
+    // enforces the actual posting permission at publish time.
+    const url = `${ORG_ACLS_URL}?q=roleAssignee&state=APPROVED`;
     const res = await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -281,8 +324,10 @@ class LinkedInService {
     });
     if (!res.ok) throw new Error(`LinkedIn organizationAcls ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const data = await res.json();
+    // The org URN can arrive as organizationTarget, organization, or organization~.id
+    // depending on the response projection — read all three.
     const orgs = (data.elements || [])
-      .map((e) => e.organization || e['organization~']?.id || null)
+      .map((e) => e.organizationTarget || e.organization || e['organization~']?.id || null)
       .filter(Boolean);
     return { adminedOrganizations: orgs, raw: data.elements || [] };
   }
