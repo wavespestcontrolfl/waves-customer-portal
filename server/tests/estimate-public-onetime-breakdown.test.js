@@ -11,6 +11,7 @@ const {
   attachPublicPricingContract,
   bookingServiceFor,
   buildEstimateAskPrompts,
+  serviceCategoryForOneTimeChoice,
   applySelectedLawnTierToEstimateData,
   applySelectedTreeShrubTierToEstimateData,
   assertExistingAppointmentUpdateApplied,
@@ -2881,6 +2882,43 @@ describe('public estimate one-time breakdown', () => {
     const answer = answerEstimateQuestionFallback('What is included in this estimate?', context);
     expect(answer).toMatch(/Pest Control/);
     expect(answer).toMatch(/Bora-Care/);
+  });
+
+  test('one-word "Boracare" and borate-labeled questions both route to the Bora-Care answer', () => {
+    // Unhyphenated "Boracare" must qualify as a Bora-Care intent.
+    expect(answerEstimateQuestionFallback('Is Boracare safe?', boraCareAssistantContext))
+      .toMatch(/borate treatment applied to bare wood/);
+
+    // A row identified only by "borate" (no bora_care key, no "bora care" text) is
+    // recognized as Bora-Care in the context.
+    const borateContext = {
+      company: { phone: '941-555-0100' },
+      serviceMode: 'one_time',
+      services: [{ service: 'wood_treatment', label: 'Borate Wood Treatment', summary: 'Borate Wood Treatment - one-time' }],
+      oneTime: { items: [{ service: 'wood_treatment', label: 'Borate Wood Treatment' }] },
+    };
+    expect(answerEstimateQuestionFallback('Is this borate treatment safe?', borateContext))
+      .toMatch(/borate treatment applied to bare wood/);
+  });
+
+  test('a recurring pest estimate with a Bora-Care add-on still builds the One-Time Pest Control choice', () => {
+    // Bora-Care must not flip the one-time-choice classification to "bundle" and
+    // suppress the pest choice (which made the accept flow bill only the add-on).
+    const estimate = { show_one_time_option: true };
+    const estData = {
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50, perTreatment: 120 }] },
+        oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] },
+      },
+    };
+
+    expect(serviceCategoryForOneTimeChoice(estData)).toBe('pest_control');
+
+    const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, null, 199);
+    expect(list).not.toBeNull();
+    expect(list[0]).toEqual(expect.objectContaining({ service: 'one_time_pest', label: 'One-Time Pest Control' }));
+    // The accepted one-time choice is the pest visit, NOT the Bora-Care add-on.
+    expect(list.some((row) => row.service === 'bora_care')).toBe(false);
   });
 
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {

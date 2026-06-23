@@ -693,7 +693,9 @@ function isBoraCareContextRow(row = {}) {
   const text = cleanText([row.label, row.name, row.displayName, row.detail, row.summary].filter(Boolean).join(' '))
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
-  return /bora\s*care/.test(text);
+  // Mirror isBoraCareOneTimeItem in estimate-public.js: a row is Bora-Care if it
+  // reads "bora care" OR mentions "borate", so borate-labeled rows are recognized.
+  return /bora\s*care/.test(text) || text.includes('borate');
 }
 
 // True when the estimate itself is a German Roach Cleanout (canonical service
@@ -781,7 +783,10 @@ function estimateContextHasBoraCare(context = {}) {
 // service branch instead of the wood-treatment answer.
 function isBoraCareIntent(question = '') {
   const text = String(question).toLowerCase();
-  return /\b(bora|borate)\b/.test(text)
+  // Accept "bora care", "bora-care", "boracare", and "borate" (mirrors the row
+  // classifier); "wood" still needs a treatment/pest term to qualify.
+  return /bora[\s-]?care/.test(text)
+    || text.includes('borate')
     || (/\bwood/.test(text) && /(treat|destroy|beetle|fungi|boring|decay)/.test(text));
 }
 

@@ -7758,13 +7758,24 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
   return !isWaveGuardSetupOneTimeItem(item) && String(item.service || '').toLowerCase() !== 'one_time_adjustment';
 }
 
+// Bora-Care is a separately-billed add-on that rides alongside whichever cadence
+// the customer picks. It must not contribute to the one-time-choice classification,
+// or a recurring pest estimate with a Bora-Care add-on classifies as "bundle" and
+// the One-Time Pest Control choice is never built (the accept flow then falls back
+// to the add-on total instead of the selected pest visit).
+function oneTimeChoiceClassificationItems(items = []) {
+  return (Array.isArray(items) ? items : []).filter(
+    (item) => serviceCategoryForOneTimeItem(item) !== 'bora_care',
+  );
+}
+
 function serviceCategoryForOneTimeChoice(estData = {}, pricingBundle = null) {
   const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
   const result = estData?.result || estData?.engineResult || estData || {};
   return deriveServiceCategory(
     estData,
     recurringServicesWithSupplements(result),
-    breakdown.items || [],
+    oneTimeChoiceClassificationItems(breakdown.items || []),
   );
 }
 
@@ -7929,7 +7940,7 @@ function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBund
   if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return null;
   const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
   const recurring = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
-  const category = deriveServiceCategory(estData, recurring, breakdown.items);
+  const category = deriveServiceCategory(estData, recurring, oneTimeChoiceClassificationItems(breakdown.items));
   if (category === 'pest_control') {
     const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
     if (!pestChoiceAmount) return null;
@@ -7944,7 +7955,7 @@ function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, prici
   if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return null;
   const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
   const recurring = recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {});
-  const category = deriveServiceCategory(estData, recurring, breakdown.items);
+  const category = deriveServiceCategory(estData, recurring, oneTimeChoiceClassificationItems(breakdown.items));
   if (category !== 'pest_control') return null;
   const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
   const amount = Number(pestChoiceAmount || choicePrice);
@@ -11019,6 +11030,7 @@ module.exports.withSupplementedRecurringServices = withSupplementedRecurringServ
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.attachPublicPricingContract = attachPublicPricingContract;
+module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
