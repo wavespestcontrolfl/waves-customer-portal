@@ -321,6 +321,29 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       return { outcome: 'failed', errorCode: 'no_submit', screenshot: shot1, notes: 'plan must end with exactly one submit action' };
     }
 
+    // DETERMINISTIC off-host-action guard (before we fill or click): read the submit's form
+    // `action` up front. If the form posts to an off-pin host, the egress lock will abort the
+    // real submission no matter what incidental same-host/analytics traffic fires — so a
+    // body-bearing fetch/XHR or cross-domain form submit to an off-host endpoint can't be
+    // misread as placed. We classify submit_blocked NOW rather than guess from post-click
+    // network evidence. Reading the DECLARED action is the only thing that disambiguates an
+    // off-host XHR submit from an incidental off-host analytics beacon — they're identical on
+    // the wire. An empty / relative-on-host action (or a javascript:/# action that doesn't
+    // resolve to a host) falls through to the post-click heuristic.
+    let declaredActionHost = '';
+    try {
+      const rawAction = await page.$eval(last.selector, (el) => {
+        const form = el.form || (el.closest && el.closest('form'));
+        return form ? (form.getAttribute('action') || '') : '';
+      });
+      if (rawAction && String(rawAction).trim()) {
+        try { declaredActionHost = new URL(String(rawAction), page.url()).hostname.toLowerCase(); } catch { declaredActionHost = ''; }
+      }
+    } catch { declaredActionHost = ''; }
+    if (declaredActionHost && !pinned.has(declaredActionHost)) {
+      return { outcome: 'failed', errorCode: 'submit_blocked', screenshot: shot1, notes: `form action posts off the pinned host (${declaredActionHost}) — not submitted` };
+    }
+
     // FAIL-CLOSED: every pre-submit field action must succeed. A failed fill/select/
     // check (missing required NAP field, wrong selector) means an incomplete listing,
     // so we abort BEFORE clicking submit rather than submit a partial form. The single

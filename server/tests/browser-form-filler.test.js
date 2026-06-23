@@ -176,6 +176,44 @@ describe('fillCitationForm', () => {
     expect(r.errorCode).toBe('submit_blocked');
   });
 
+  test('P2: a form whose DECLARED action posts off-host → submit_blocked before clicking (off-host XHR/cross-domain submit)', async () => {
+    // The form's action targets an off-pin host (the real payload would be aborted by the
+    // egress lock). Reading the action up front classifies this deterministically — even an
+    // on-host beacon that also fires must NOT rescue it. We bail before the point of no return.
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log, {
+        formAction: 'https://api.offsite.example/submit',                 // form posts its data off the pinned host
+        submitReqs: [{ method: 'POST', url: 'https://x.com/track' }],     // on-host beacon also fires — must not rescue it
+      }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_blocked');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined(); // bailed BEFORE clicking (deterministic, pre-submit)
+  });
+
+  test('P2: an on-host (relative) declared action proceeds → placed; an off-host beacon is ignored', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], {
+        formAction: '/submit',                                                  // relative → resolves to x.com (on-host)
+        submitReqs: [
+          { method: 'POST', url: 'https://x.com/submit' },                      // form data reaches the pinned host
+          { method: 'POST', url: 'https://www.google-analytics.com/collect' },  // off-host analytics beacon (ignored)
+        ],
+      }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: false, live_url: null },
+      ),
+    }));
+    expect(r.outcome).toBe('placed');
+    expect(r.pending).toBe(true);
+  });
+
   test('P2: an off-host analytics/sendBeacon POST does NOT park a real on-host submit (non-nav → not the form)', async () => {
     // The form POST lands on-host (dispatch); the page also fires an off-host analytics
     // POST (body-bearing but NOT a navigation). The beacon must not be mistaken for the
