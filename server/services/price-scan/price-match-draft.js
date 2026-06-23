@@ -116,6 +116,9 @@ async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
       html: `<p>${banner}</p><hr/>${composed.html}`,
       text: `${banner}\n\n----\n\n${composed.text}`,
       categories: ['price-match', 'price-match-owner-copy'],
+      // PII: a SendGrid validation body echoes the address — suppress sendOne's raw-body
+      // log on this best-effort path; the catch below logs only a sanitized status.
+      suppressErrorLog: true,
     });
     // Swallow a LATE rejection (if the timeout already won the race) so it can't surface
     // as an unhandled rejection; the awaited race below still reports a prompt failure.

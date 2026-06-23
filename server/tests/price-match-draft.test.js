@@ -416,6 +416,7 @@ describe('createDraft owner-copy notification (PRICE_MATCH_NOTIFY_OWNER)', () =>
     expect(arg.html).toContain('/admin/price-match'); // review link
     expect(arg.html).toContain(row.recipient); // shows who it will go to (Mark)
     expect(arg.categories).toContain('price-match-owner-copy');
+    expect(arg.suppressErrorLog).toBe(true); // PII: sendOne must not log the raw error body for this path
   });
 
   test('PRICE_MATCH_OWNER_EMAIL overrides the owner recipient', async () => {
