@@ -275,8 +275,12 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   // For NAME detection only, drop double quotes AND backslashes (so an embedded-
   // quote brand like All "U" Need Pest Control — or its escaped \"U\" form — is
   // read as one name, not a "Need Pest Control" fragment). Apostrophes are kept
-  // (Keller's). Disparagement/ranking scans keep the original scanText.
-  const nameScanText = scanText.replace(/[\\"“”]/g, ' ');
+  // (Keller's). Disparagement/ranking scans keep the original scanText. Each
+  // stripped char becomes a space, so this is length-preserving (scanText and
+  // nameScanText share character indices) but can leave multiple spaces between
+  // words — name lookups must stay whitespace-tolerant.
+  const stripQuotesForNames = (s) => String(s).replace(/[\\"“”]/g, ' ');
+  const nameScanText = stripQuotesForNames(scanText);
 
   const known = new Set();
   const unknown = new Set();
@@ -320,10 +324,16 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   const competitorNames = [...known, ...unknown];
   if (competitorNames.length) {
     const nearCompetitor = (idx, len) => {
-      const window = scanText
+      // Slice the quote/backslash-stripped text (indices align with scanText) and
+      // collapse runs of whitespace so an escaped/embedded-quote brand — left as
+      // "All   U   Need" by the strip — still matches its canonical single-spaced
+      // name. NEG_ADJ/PROVIDER_NEGATIVE matches are quote-free, so their indices
+      // are identical in scanText and nameScanText.
+      const window = nameScanText
         .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
-        .toLowerCase();
-      return competitorNames.some((n) => window.includes(n.toLowerCase()));
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+      return competitorNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
     };
     // Disparaging adjective near a competitor name → P0.
     const adjRe = new RegExp(`\\b(?:${NEG_ADJ})\\b`, 'ig');
@@ -443,7 +453,10 @@ function evaluate(draft, { namedCompetitorEnabled = false } = {}) {
   for (const b of blocks) proseText = proseText.split(b).join(' ');
   if (metaText) proseText = `${proseText}\n${metaText}`;
   const competitorInProse = new Set();
-  for (const m of competitorFacts.findBusinessMentions(proseText)) {
+  // Strip quotes/backslashes here too so an escaped/embedded-quote brand named in
+  // prose ("All \"U\" Need Pest Control offers …") is detected, not just the
+  // straight/smart-quote spellings findBusinessMentions normalizes on its own.
+  for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(proseText))) {
     if (m.inAllowlist) competitorInProse.add(m.name);
   }
 

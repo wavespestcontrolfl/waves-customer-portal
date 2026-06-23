@@ -538,4 +538,18 @@ describe('comparison-table-gate', () => {
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT' && /All U Need Pest Control/.test(f.message))).toBe(true);
   });
+
+  test('embedded-quote brand: a negative prose claim about All "U" Need (escaped form) still trips the prose/proximity checks, not just name detection', () => {
+    // Round-5 (Codex): name detection runs on a quote-stripped copy, but the
+    // proximity + prose-only checks must too — else an escaped brand can make a
+    // negative claim OUTSIDE a sourced table and escape both findings.
+    const sourced = `<ComparisonTable
+      columns={["What to weigh","All \\"U\\" Need Pest Control","Local SWFL company"]}
+      rows={[{ label: "Recurring residential plans", values: ["Yes","Yes"] }]}
+      caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: `All \\"U\\" Need Pest Control never answers the phone when you call.\n\n${sourced}` }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
 });
