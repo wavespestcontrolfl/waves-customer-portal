@@ -1512,50 +1512,35 @@ const SOURCE_ICON = {
 // matching estimate into view and briefly highlights it (estimate_expired and
 // bundle_quote_requested notifications). The pipeline has no per-estimate detail
 // view, so the highlight is the "you're here" cue. Shared by the desktop and
-// mobile estimate lists. Returns the id to highlight while the cue is active,
-// else null. `rows` is the currently rendered (post-filter) estimate list.
+// mobile estimate lists.
 //
-// Tracks the live ?estimateId param (not a one-time snapshot) so a second
-// notification click re-triggers the cue while the list stays mounted, and only
-// settles after a clean load — a target that's missing mid-load or after a
-// failed fetch is retried, not given up on.
-function useEstimateDeepLinkHighlight({ loading, error, rows, filter, setFilter }) {
-  const [searchParams] = useSearchParams();
-  const targetId = searchParams.get("estimateId") || null;
+// `targetId` is the deep-link id (captured + one-shotted by the page, so it
+// never goes stale). `rows` is the currently rendered list — passed only so the
+// effect re-checks as the list loads/filters settle. `resetView` clears any
+// status/search/date filter that could be hiding the row. The hook never "gives
+// up": if the row isn't rendered yet it clears the obstructing filters and waits
+// for it to appear, so a target hidden behind Archived / a search term / an
+// in-flight (or retried) fetch still resolves. A genuinely absent id simply
+// never highlights, harmlessly. Returns the id to highlight while active.
+function useEstimateDeepLinkHighlight({ targetId, rows, resetView }) {
   const [activeId, setActiveId] = useState(null);
-  // The id we've already resolved (scrolled to, or confirmed absent). Lets a
-  // new target re-run while older ones stay settled.
   const settledRef = useRef(null);
 
   useEffect(() => {
-    // Target changed (new click, or param cleared) — reset so it resolves anew.
-    if (settledRef.current !== null && settledRef.current !== targetId) {
-      settledRef.current = null;
-      setActiveId(null);
-    }
     if (!targetId || settledRef.current === targetId) return;
-
-    const present = rows.some((e) => String(e.id) === String(targetId));
-    if (present) {
+    const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
+    const node = document.querySelector(`[data-estimate-id="${sel}"]`);
+    if (node) {
       settledRef.current = targetId;
-      const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
-      document
-        .querySelector(`[data-estimate-id="${sel}"]`)
-        ?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      node.scrollIntoView({ behavior: "smooth", block: "center" });
       setActiveId(targetId);
       return;
     }
-    // Not in the rendered list yet. While the load is in flight or has failed,
-    // wait — a Retry may still bring the target in; don't settle prematurely.
-    if (loading || error) return;
-    // Loaded cleanly but absent under the current filter — widen to All (where
-    // every non-archived estimate lives) once, then re-check on the next load.
-    if (filter !== "all") {
-      setFilter("all");
-      return;
-    }
-    settledRef.current = targetId; // genuinely absent (archived / deleted)
-  }, [targetId, loading, error, rows, filter, setFilter]);
+    // Not rendered yet — clear any filter/search/date that could be hiding it,
+    // then wait (a rows change re-runs this). resetView no-ops when already at
+    // defaults, so this can't loop.
+    resetView();
+  }, [targetId, rows, resetView]);
 
   // Fade the highlight a few seconds after it activates.
   useEffect(() => {
@@ -1567,7 +1552,7 @@ function useEstimateDeepLinkHighlight({ loading, error, rows, filter, setFilter 
   return activeId;
 }
 
-function EstimatePipelineViewV2() {
+function EstimatePipelineViewV2({ deepLinkEstimateId = null }) {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
@@ -1577,6 +1562,15 @@ function EstimatePipelineViewV2() {
   const [filter, setFilter] = useState("all");
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
+
+  // Clear any filter/search/date that could hide a deep-linked estimate. No-ops
+  // (no re-render) when already at defaults, so the highlight hook can call it
+  // every render without looping.
+  const resetDeepLinkView = useCallback(() => {
+    setFilter((f) => (f === "all" ? f : "all"));
+    setSearch((s) => (s ? "" : s));
+    setDateRange((d) => (d === "all" ? d : "all"));
+  }, []);
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -1846,11 +1840,9 @@ function EstimatePipelineViewV2() {
     });
 
   const highlightId = useEstimateDeepLinkHighlight({
-    loading,
-    error,
+    targetId: deepLinkEstimateId,
     rows: filtered,
-    filter,
-    setFilter,
+    resetView: resetDeepLinkView,
   });
 
   if (loading) {
@@ -3282,7 +3274,7 @@ function MobileEstimateRow({
 // 1:1 on data + endpoint (GET /admin/estimates). The Leads, Create Estimate,
 // and Pricing Logic tabs render their own sections under the shared
 // PipelineCommandHeader, which now drives all four tabs on mobile too.
-function EstimatesMobileListView({ onCreateFromAddress }) {
+function EstimatesMobileListView({ onCreateFromAddress, deepLinkEstimateId = null }) {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3290,6 +3282,14 @@ function EstimatesMobileListView({ onCreateFromAddress }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("all");
+
+  // Clear any filter/search/date that could hide a deep-linked estimate. No-ops
+  // when already at defaults, so the highlight hook can call it without looping.
+  const resetDeepLinkView = useCallback(() => {
+    setFilter((f) => (f === "all" ? f : "all"));
+    setSearch((s) => (s ? "" : s));
+    setDateFilter((d) => (d === "all" ? d : "all"));
+  }, []);
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
@@ -3551,11 +3551,9 @@ function EstimatesMobileListView({ onCreateFromAddress }) {
   const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
 
   const highlightId = useEstimateDeepLinkHighlight({
-    loading,
-    error,
+    targetId: deepLinkEstimateId,
     rows: flat,
-    filter,
-    setFilter,
+    resetView: resetDeepLinkView,
   });
 
   return (
@@ -3768,6 +3766,14 @@ export default function EstimatesPageV2() {
     initialTab || (hasPrefill ? "new" : "leads"),
   );
 
+  // The deep-link target for the Estimates list. Captured into state (and
+  // stripped from the URL by the effect below) so it's consumed exactly once —
+  // a stale ?estimateId left in the URL can't snap later tab changes back to
+  // Estimates, and the list highlights it regardless of current filter/search.
+  const [deepLinkEstimateId, setDeepLinkEstimateId] = useState(
+    () => searchParams.get("estimateId") || null,
+  );
+
   // Watch URL params for incoming prefill. Two cases this needs to handle:
   //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
   //      "+ Estimate" link). useState initializer already captured the values;
@@ -3791,21 +3797,27 @@ export default function EstimatesPageV2() {
     const hasTabParam = TABS.some((t) => t.key === tabParam);
     // A notification deep-link (?estimateId=) that arrives via client-side
     // navigation while this page is already mounted must still snap to the
-    // Estimates tab so the row can be scrolled to + highlighted.
-    const hasEstimateId = !!searchParams.get("estimateId");
-    if (!hasIncoming && !hasTabParam && !hasEstimateId) return;
+    // Estimates tab so the row can be scrolled to + highlighted. An explicit
+    // tab still wins (e.g. ?estimateId=…&tab=pricing honors pricing).
+    const estimateId = searchParams.get("estimateId");
+    if (!hasIncoming && !hasTabParam && !estimateId) return;
     if (hasIncoming) {
       setPrefill(incoming);
       setActiveTab("new");
     } else if (hasTabParam) {
       setActiveTab(tabParam);
-    } else if (hasEstimateId) {
+    } else if (estimateId) {
       setActiveTab("estimates");
     }
-    if (hasIncoming) {
+    if (estimateId) setDeepLinkEstimateId(estimateId);
+    // Strip one-shot params so a later tab change / refresh doesn't re-snap.
+    if (hasIncoming || estimateId) {
       const stripped = new URLSearchParams(searchParams);
-      PREFILL_PARAM_KEYS.forEach((k) => stripped.delete(k));
-      stripped.delete("tab");
+      if (hasIncoming) {
+        PREFILL_PARAM_KEYS.forEach((k) => stripped.delete(k));
+        stripped.delete("tab");
+      }
+      if (estimateId) stripped.delete("estimateId");
       setSearchParams(stripped, { replace: true });
     }
   }, [searchParams, setSearchParams, readLeadPrefill]);
@@ -3852,6 +3864,7 @@ export default function EstimatesPageV2() {
         // own filters/sort; desktop gets the full table/board pipeline view.
         (isMobile ? (
           <EstimatesMobileListView
+            deepLinkEstimateId={deepLinkEstimateId}
             onCreateFromAddress={(addr) => {
               setPrefill({
                 leadId: "",
@@ -3866,7 +3879,7 @@ export default function EstimatesPageV2() {
             }}
           />
         ) : (
-          <EstimatePipelineViewV2 />
+          <EstimatePipelineViewV2 deepLinkEstimateId={deepLinkEstimateId} />
         ))}
       {activeTab === "new" && (
         <EstimateToolViewV2
