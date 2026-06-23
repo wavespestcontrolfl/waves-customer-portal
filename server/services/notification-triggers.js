@@ -116,7 +116,7 @@ const TRIGGER_REGISTRY = {
       return {
         title: p.title || 'New lead',
         body: bodyParts.join(' - '),
-        link: p.leadId ? `/admin/leads/${p.leadId}` : '/admin/leads',
+        link: p.leadId ? `/admin/leads?lead=${p.leadId}` : '/admin/leads',
       };
     },
   },
@@ -128,6 +128,8 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
       body: redactSensitiveText(p.message || '').slice(0, 140),
+      // threadId is the customer id (see twilio-webhook). CommunicationsPageV2
+      // reads ?thread=<customerId> and opens that customer's SMS conversation.
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
@@ -197,7 +199,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Payment received',
       body: `$${Number(p.amount || 0).toFixed(2)} from ${p.customerName || 'customer'}`,
-      link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/revenue',
+      link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/revenue',
     }),
   },
   payment_failed: {
@@ -208,7 +210,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Payment failed',
       body: `$${Number(p.amount || 0).toFixed(2)} — ${p.customerName || 'customer'}${p.reason ? ' — ' + p.reason : ''}`,
-      link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/revenue',
+      link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/revenue',
     }),
   },
   bill_payment_error: {
@@ -223,7 +225,7 @@ const TRIGGER_REGISTRY = {
       return {
         title: method === 'Bank account' ? 'Bank payment error' : 'Bill payment error',
         body: `${invoiceLabel} - ${p.customerName || 'customer'} - ${method} during ${phase}${p.reason ? ': ' + p.reason : ''}`,
-        link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/invoices',
+        link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/invoices',
       };
     },
   },
@@ -235,7 +237,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: p.isFullRefund ? 'Full refund issued' : 'Partial refund issued',
       body: `$${Number(p.amount || 0).toFixed(2)} — ${p.customerName || 'customer'}`,
-      link: p.invoiceId ? `/admin/invoices/${p.invoiceId}` : '/admin/revenue',
+      link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/revenue',
     }),
   },
   appointment_cancelled: {
@@ -301,7 +303,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Churn risk detected',
       body: `${p.customerName || 'Customer'} — ${p.reason || 'risk score elevated'}`,
-      link: p.customerId ? `/admin/customers/${p.customerId}` : '/admin/health',
+      link: p.customerId ? `/admin/customers?customerId=${p.customerId}` : '/admin/customers?view=health',
     }),
   },
   estimate_expired: {
@@ -316,7 +318,7 @@ const TRIGGER_REGISTRY = {
       body: p.count && p.count > 1
         ? `${p.count} estimates aged out today. Review the pipeline for follow-up opportunities.`
         : `${p.customerName || 'Customer'}${p.monthlyTotal ? ' — $' + p.monthlyTotal + '/mo' : ''} expired without a decision.`,
-      link: p.estimateId ? `/admin/estimates/${p.estimateId}` : '/admin/estimates',
+      link: p.estimateId ? `/admin/estimates?estimateId=${p.estimateId}` : '/admin/estimates',
     }),
   },
   bundle_quote_requested: {

@@ -1293,6 +1293,42 @@ function SmsTab() {
     }
   }, [threads, activeThread?.contactPhone, activeThread?.messages?.length]);
 
+  // Deep-link from a notification: /admin/communications?thread=<customerId>
+  // opens that customer's SMS conversation. The sms_reply notification carries
+  // the customer id as its thread id (see notification-triggers.js); threads are
+  // keyed by phone but each carries its customerId, so we match on that and snap
+  // into the conversation view once the message log has loaded. Runs once.
+  const threadDeepLinkDone = useRef(false);
+  useEffect(() => {
+    if (threadDeepLinkDone.current) return;
+    const threadCustomerId = new URLSearchParams(window.location.search).get("thread");
+    if (!threadCustomerId) {
+      threadDeepLinkDone.current = true;
+      return;
+    }
+    if (!threads.length) return; // wait for the log to load
+    threadDeepLinkDone.current = true;
+    const match = threads.find(
+      (t) => t.customerId && String(t.customerId) === String(threadCustomerId),
+    );
+    if (!match) return; // no thread yet for this customer — stay on the list
+    const openedThread = { ...match };
+    setActiveThread(openedThread);
+    setSmsView("conversation");
+    setToNumber(match.contactPhone);
+    setToSearch("");
+    setSelectedCustomerId(match.customerId || null);
+    if (match.ourNumber) {
+      setFromNumber(match.ourNumber);
+      setThreadLock({
+        contactPhone: match.contactPhone,
+        ourNumber: match.ourNumber,
+        label: NUMBER_LABEL_MAP[match.ourNumber] || match.ourNumber,
+      });
+    }
+    markMessagesRead(openedThread);
+  }, [threads, markMessagesRead]);
+
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
     if (statusFilter !== "all") {

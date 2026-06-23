@@ -50,7 +50,7 @@ describe('service report failure alerts', () => {
       customerName: 'Van Lee',
       serviceLabel: 'Lawn Care · 2026-05-16',
       attempts: 5,
-      link: '/admin/customers/cust-1',
+      link: '/admin/customers?customerId=cust-1',
       dedupeKey: 'service_report_delivery_failed:del-1',
     }));
     const payload = trigger.mock.calls[0][1];
@@ -86,7 +86,7 @@ describe('service report failure alerts', () => {
 
     expect(trigger).toHaveBeenCalledWith('service_report_pdf_failed', expect.objectContaining({
       customerName: 'Ana Diaz',
-      link: '/admin/customers/cust-9',
+      link: '/admin/customers?customerId=cust-9',
       dedupeKey: 'service_report_pdf_failed:svc-9',
     }));
   });
