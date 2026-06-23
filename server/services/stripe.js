@@ -70,6 +70,17 @@ const REPLACEABLE_PI_STATUSES = new Set([
   'requires_capture',
 ]);
 
+// Statuses safe to cancel + re-mint when a customer RETURNS to the pay page with
+// a stale, never-captured PI. A strict subset of REPLACEABLE_PI_STATUSES that
+// excludes `requires_capture`: an intent in requires_capture has an authorized
+// card hold (money is effectively in flight — see PI_MONEY_IN_FLIGHT_STATUSES in
+// invoice.js), so canceling it on a pay-page reload would void a live
+// authorization. It must follow the non-replaceable 409 path instead. The
+// tender-switch and offline-reconcile flows keep using REPLACEABLE_PI_STATUSES.
+const SETUP_RECOVERABLE_PI_STATUSES = new Set(
+  [...REPLACEABLE_PI_STATUSES].filter(status => status !== 'requires_capture')
+);
+
 const StripeService = {
   // =========================================================================
   // AVAILABILITY
@@ -1446,17 +1457,23 @@ const StripeService = {
         }
 
         // Stale-PI triage BEFORE auto-apply: applyAccountCreditToInvoice
-        // fail-closes on any attached PI, and the reuse block below would
+        // fail-closes on any attached PI, and the recovery path below would
         // otherwise re-price a dead PI at the gross amount. If the existing PI is
         // non-live (no active payment row + a cancelable Stripe status), cancel it
         // and clear the column so credit applies and a fresh PI is minted for
         // amount due. Money actually in flight is left untouched (handled by the
         // reuse block / its 409). The invoice is forUpdate-locked for the whole
-        // transaction, so this can't race a new PI; on any error it falls back to
-        // the pre-credit behaviour (the lone PI path has no double-charge risk).
+        // transaction, so this can't race a new PI.
+        //
+        // FAIL CLOSED: a transient retrieve/cancel/clear failure must NOT fall
+        // through. Now that the recovery path below can cancel-and-re-mint a stale
+        // card intent, continuing here with the dead PI still attached would skip
+        // the credit apply and price the replacement at the GROSS total. So on any
+        // triage error refuse with a retryable 409 rather than risk an overcharge.
         if (require('../config/feature-gates').gates.autoApplyAccountCredit
           && availableCredit > 0
           && lockedInvoice.stripe_payment_intent_id) {
+          let triagedPi = null;
           try {
             const existingPayment = await trx('payments')
               .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
@@ -1464,16 +1481,45 @@ const StripeService = {
             const terminalPayStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
             const hasLivePayment = existingPayment && !terminalPayStatuses.includes(existingPayment.status);
             if (!hasLivePayment) {
-              const existingPi = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
-              const liveStatuses = ['processing', 'succeeded', 'requires_capture', 'requires_action'];
-              if (!liveStatuses.includes(existingPi.status)) {
-                if (existingPi.status !== 'canceled') await stripe.paymentIntents.cancel(existingPi.id);
-                await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
-                lockedInvoice.stripe_payment_intent_id = null;
-              }
+              triagedPi = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
             }
           } catch (e) {
-            logger.warn(`[stripe] pay-page stale-PI triage skipped for invoice ${invoiceId}: ${e.message}`);
+            logger.warn(`[stripe] pay-page stale-PI triage could not read PI for invoice ${invoiceId}: ${e.message}`);
+            const err = new Error('Could not prepare your payment — please try again in a moment');
+            err.statusCode = 409;
+            throw err;
+          }
+          if (triagedPi) {
+            // Ownership guard — never cancel a PI that belongs to a DIFFERENT
+            // invoice (mirrors the main setup path's check below). A permanent
+            // mismatch, not a transient blip: surface it as-is, do not fail-closed
+            // retry it.
+            const triagedInvoiceId = triagedPi.metadata?.waves_invoice_id || null;
+            if (triagedInvoiceId && String(triagedInvoiceId) !== String(invoiceId)) {
+              throw new Error('PaymentIntent does not belong to this invoice');
+            }
+            // `requires_action` is NOT uniformly live. An ACH micro-deposit
+            // verification (next_action `verify_with_microdeposits`) is genuine
+            // in-flight bank money and must stay attached — never cancel it. But a
+            // CARD intent merely stuck in requires_action after an abandoned 3DS
+            // moved no money: clear it so credit applies and the fresh PI is priced
+            // at amount due rather than the gross total.
+            const isAchMicrodeposit = triagedPi.status === 'requires_action'
+              && triagedPi.next_action?.type === 'verify_with_microdeposits';
+            const liveStatuses = ['processing', 'succeeded', 'requires_capture'];
+            const isLive = liveStatuses.includes(triagedPi.status) || isAchMicrodeposit;
+            if (!isLive) {
+              try {
+                if (triagedPi.status !== 'canceled') await stripe.paymentIntents.cancel(triagedPi.id);
+                await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
+                lockedInvoice.stripe_payment_intent_id = null;
+              } catch (e) {
+                logger.warn(`[stripe] pay-page stale-PI triage could not clear dead PI for invoice ${invoiceId}: ${e.message}`);
+                const err = new Error('Could not prepare your payment — please try again in a moment');
+                err.statusCode = 409;
+                throw err;
+              }
+            }
           }
         }
 
@@ -1572,21 +1618,68 @@ const StripeService = {
           }
 
           if (activeIntent.status !== 'canceled') {
-            // Distinguish a genuinely in-flight, reconciliation-pending debit
-            // from conflicts that need an operator. Only `processing` is benign
-            // here — an ACH bank debit clearing over several business days, with
-            // the receipt to follow when the webhook settles it (the customer
-            // sees the "bank payment processing" state, no alert). Everything
-            // else is alert-worthy: `requires_action` is a recoverable card PI
-            // stuck after an abandoned 3DS (the customer is stuck), and
-            // `succeeded` means money was already captured but our local
-            // invoice/payment reconciliation never happened (a lost/failed
-            // webhook) — surfacing the processing copy there would hide an
-            // unpaid-with-no-receipt invoice.
-            const err = new Error('Invoice payment is already in progress');
-            err.statusCode = 409;
-            err.inProgress = activeIntent.status === 'processing';
-            throw err;
+            // ACH micro-deposit verification also lives in `requires_action`, but
+            // it is the OPPOSITE of an abandoned card intent: the customer chose
+            // bank debit, Stripe has already sent two small deposits to their
+            // account, and it is waiting (1–2 business days) for them to confirm
+            // the amounts. Canceling it would throw away the verification and
+            // force the customer to restart ACH from scratch — and a returning
+            // customer reloads this exact pay page to do the verifying. Detect it
+            // by the next_action Stripe sets and treat it like an in-flight ACH
+            // debit: never cancel, no admin alert (inProgress=true → the pay page
+            // shows the benign bank state, not a red error). This is the
+            // real-world WPC-2026-0164 / -0190 / -0191 case.
+            if (activeIntent.next_action?.type === 'verify_with_microdeposits') {
+              const err = new Error('Invoice payment is already in progress');
+              err.statusCode = 409;
+              err.inProgress = true;
+              // Distinct from a `processing` ACH debit: the customer still has to
+              // verify the two micro-deposits before this can settle, so the pay
+              // page must NOT tell them "nothing more to do". Surface a specific
+              // flag so it can show verification guidance instead.
+              err.microdepositPending = true;
+              throw err;
+            }
+
+            if (SETUP_RECOVERABLE_PI_STATUSES.has(activeIntent.status)) {
+              // The customer is back on the pay page with a stale, never-captured
+              // card PI — most often stuck in `requires_action` after an abandoned
+              // 3DS handoff, or left in requires_confirmation. (ACH micro-deposit
+              // verification is handled above; `requires_capture` is excluded from
+              // the recoverable set so an authorized hold is never voided here —
+              // both take the non-replaceable 409 path below.) No money has moved,
+              // so recover in place instead of hard-blocking the customer and
+              // re-raising an admin alert on every reload: cancel the dead intent
+              // and fall through to mint a fresh one they can pay.
+              //
+              // FAIL CLOSED: if the cancel fails, the old PI may have just raced
+              // into processing/succeeded — minting a replacement while its
+              // client secret can still collect would double-charge. Refuse
+              // instead of repointing the invoice at a new PI. Mirrors the
+              // statement-payment path's replace-or-refuse handling below.
+              try {
+                await stripe.paymentIntents.cancel(activeIntent.id);
+              } catch (e) {
+                logger.warn(`[stripe] could not cancel replaceable invoice PI ${activeIntent.id} for ${lockedInvoice.invoice_number}: ${e.message}`);
+                const err = new Error('Could not replace the existing payment — please try again in a moment');
+                err.statusCode = 409;
+                throw err;
+              }
+            } else {
+              // Money is genuinely in flight or already captured — never cancel.
+              // `processing` is a benign ACH bank debit clearing over several
+              // business days, with the receipt to follow when the webhook settles
+              // it (inProgress=true → the pay page shows the "bank payment
+              // processing" state, no alert). `succeeded` means money was captured
+              // but our local invoice/payment reconciliation never happened (a
+              // lost/failed webhook): inProgress stays false so the route still
+              // raises an admin reconciliation alert instead of hiding an
+              // unpaid-with-no-receipt invoice behind the processing copy.
+              const err = new Error('Invoice payment is already in progress');
+              err.statusCode = 409;
+              err.inProgress = activeIntent.status === 'processing';
+              throw err;
+            }
           }
         }
 
@@ -2080,6 +2173,9 @@ const StripeService = {
           ? 'This statement is already paid'
           : 'This statement is not payable');
       err.statusCode = inFlightOrDone ? 409 : 400;
+      // A `processing` statement is a benign ACH debit clearing — carry inProgress
+      // so the pay page shows the calm bank-processing notice, not a red error.
+      if (status === 'processing') err.inProgress = true;
       throw err;
     };
 
@@ -2145,11 +2241,29 @@ const StripeService = {
             return;
           }
           if (activeIntent.status !== 'canceled') {
-            if (REPLACEABLE_PI_STATUSES.has(activeIntent.status)) {
+            // ACH micro-deposit verification lives in `requires_action` too, but
+            // it is NOT a stale card intent: the customer chose bank debit, Stripe
+            // sent two micro-deposits, and it is waiting (1–2 business days) for
+            // them to confirm the amounts — and a returning customer reloads this
+            // statement pay page to do the verifying. Canceling would throw away
+            // the verification and force them to restart ACH. Treat it as benign
+            // in-flight money: never cancel, no operator alert. (Mirrors the
+            // single-invoice path in createInvoicePaymentIntent.)
+            if (activeIntent.next_action?.type === 'verify_with_microdeposits') {
+              const err = new Error('A payment is already in progress for this statement');
+              err.statusCode = 409;
+              err.inProgress = true;
+              err.microdepositPending = true;
+              throw err;
+            }
+
+            if (SETUP_RECOVERABLE_PI_STATUSES.has(activeIntent.status)) {
               // FAIL CLOSED: if the cancel fails, the old PI may have raced into
               // processing/succeeded — minting a replacement while its client
               // secret can still collect would double-charge. Refuse instead of
-              // repointing the statement at a new PI.
+              // repointing the statement at a new PI. (ACH micro-deposit
+              // verification is handled above; `requires_capture` is excluded from
+              // the recoverable set so an authorized hold is never voided here.)
               try {
                 await stripe.paymentIntents.cancel(activeIntent.id);
               } catch (e) {
@@ -2159,8 +2273,13 @@ const StripeService = {
                 throw err;
               }
             } else {
+              // Money genuinely in flight or captured — never cancel. A
+              // `processing` ACH debit is benign (inProgress=true → calm bank
+              // notice); `succeeded` is an unreconciled-but-captured anomaly that
+              // should not be dressed up as benign (inProgress stays false).
               const err = new Error('A payment is already in progress for this statement');
               err.statusCode = 409;
+              err.inProgress = activeIntent.status === 'processing';
               throw err;
             }
           }
