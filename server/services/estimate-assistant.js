@@ -951,6 +951,18 @@ async function answerEstimateQuestion({
     };
   }
 
+  // Bora-Care intents are answered deterministically (controlled borate copy), so
+  // route them to the fallback before the live models. The new Bora-Care chip and
+  // coverage phrasings don't match the generic force-fallback gate below, so they
+  // would otherwise reach the LLM and bypass the guaranteed borate answer.
+  if (estimateContextHasBoraCare(context)
+      && /\b(bora|borate|wood\s*treat|wood-?destroying|beetle|fungi)\b/i.test(cleanQuestion)) {
+    return {
+      answer: answerEstimateQuestionFallback(cleanQuestion, context),
+      source: 'fallback',
+    };
+  }
+
   if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach(?:es)?|cockroach(?:es)?|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
       && supportRows(context).length) {
     return {

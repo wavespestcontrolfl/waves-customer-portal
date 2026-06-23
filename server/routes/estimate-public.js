@@ -271,6 +271,10 @@ function buildEstimateAskQueryLog({ estimateId, question, result = {} }) {
 // Map a one-time service name to the booking page's service id (matches PublicBookingPage SERVICES)
 function bookingServiceFor(name) {
   const n = String(name || '').toLowerCase();
+  // Bora-Care is checked before termite/pest so a "Bora-Care Wood Treatment" (or
+  // "Termite Bora-Care") label routes the /book link + SMS to the Bora-Care visit
+  // instead of falling through to the Pest Control bucket.
+  if (n.includes('bora') || n.includes('borate')) return { id: 'bora_care', label: 'Bora-Care Wood Treatment' };
   if (n.includes('lawn') || n.includes('turf') || n.includes('aeration') || n.includes('seed') || n.includes('weed')) return { id: 'lawn_care', label: 'Lawn Care' };
   if (n.includes('mosquito')) return { id: 'mosquito', label: 'Mosquito Control' };
   if (n.includes('tree') || n.includes('shrub') || n.includes('palm') || n.includes('ornamental')) return { id: 'tree_shrub', label: 'Tree & Shrub Service' };
@@ -1081,6 +1085,9 @@ const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
 // Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
 // borate-specific answer instead of the generic label-direction safety copy.
 const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
+// Bora-Care service chip — shared between the SSR prompt builder and the React
+// pricing contract so a Bora-Care add-on surfaces it on both paths.
+const BORA_CARE_ASK_CHIP = 'What does Bora-Care treat?';
 
 // Service-aware "Ask Waves" quick-question chips: up to 2 estimate-specific
 // service prompts, a safety chip for any chemical service, then universal
@@ -1138,13 +1145,20 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
   if (hasPalm) servicePrompts.push('Why injections vs. spray?');
   // Bora-Care is an unusual one-time add-on; prioritize its chip so a mixed
   // estimate with two other service prompts still surfaces it before the slice.
-  if (hasBoraCare) servicePrompts.unshift('What does Bora-Care treat?');
+  if (hasBoraCare) servicePrompts.unshift(BORA_CARE_ASK_CHIP);
 
   const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm || hasBoraCare;
   // A Bora-Care-only quote gets a Bora-Care-worded safety chip so clicking it
   // reaches the borate-specific answer; mixed estimates keep the generic chip.
+  // "Only" mirrors hasOnlyBoraCareServiceMix: no other recurring service flag and
+  // no other billable one-time row. Use isNonBillableOneTimeRow (NOT
+  // isBillableOneTimeInvoiceItem, which exempts one_time_adjustment) so a *positive*
+  // adjustment counts as another billable charge and blocks the Bora-Care-only chip.
+  const hasOtherBillableOneTime = oneTimeList.some(
+    (it) => !isBoraCareOneTimeItem(it) && !isNonBillableOneTimeRow(it),
+  );
   const boraCareOnly = hasBoraCare && !hasPestAny && !hasLawn && !hasMosquito
-    && !hasTermite && !hasTreeShrub && !hasRodent && !hasPalm;
+    && !hasTermite && !hasTreeShrub && !hasRodent && !hasPalm && !hasOtherBillableOneTime;
   const prompts = servicePrompts.slice(0, 2);
   if (hasChemicalService) prompts.push(boraCareOnly ? BORA_CARE_SAFETY_ASK_CHIP : SAFETY_ASK_CHIP);
   for (const prompt of ['When am I charged?', 'What happens after approval?']) {
@@ -10211,13 +10225,26 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // those generic pest service chips — keeping the billing chips and any other
   // category's chips — so the React path matches the server-rendered page
   // (deduped, capped at 6).
-  const askChips = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
+  const askChipsBase = oneTimeBreakdownItems.some(isGermanRoachCleanoutOneTimeItem)
     ? Array.from(new Set([
         ...GERMAN_ROACH_ASK_CHIPS,
         SAFETY_ASK_CHIP,
         ...baseAskChips.filter((chip) => !GENERIC_PEST_SERVICE_CHIPS.includes(chip)),
       ])).slice(0, 6)
     : baseAskChips;
+  // A separately-billed Bora-Care add-on classifies outside the recurring service
+  // sections, so its chip is missing from the section-derived list. Prepend it (so
+  // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
+  // Waves prompt builder now reads.
+  const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+    ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+    : askChipsBase;
+  // Engine-backed Bora-Care rows can arrive with the raw service key as their
+  // label; map those to the friendly category label so the React breakdown header
+  // and rows never show "bora_care" to customers (mirrors the SSR/invoice labels).
+  const normalizedOneTimeBreakdown = contractPayload.oneTimeBreakdown && Array.isArray(contractPayload.oneTimeBreakdown.items)
+    ? { ...contractPayload.oneTimeBreakdown, items: contractPayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel) }
+    : contractPayload.oneTimeBreakdown;
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
   return {
     ...contractPayload,
@@ -10225,8 +10252,21 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     combinedRecurring,
     renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring),
     askChips,
+    oneTimeBreakdown: normalizedOneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };
+}
+
+// A breakdown row whose only label is the raw engine service key (e.g. "bora_care")
+// is not customer-facing; map it to the friendly category label for the client
+// payload. Mirrors the raw-key guard in buildOneTimeInvoiceServiceLabel.
+function normalizeBreakdownItemLabel(item = {}) {
+  if (!item || typeof item !== 'object') return item;
+  const label = String(item.label || '').trim();
+  const isRawKey = !!label && label.toLowerCase() === String(item.service || '').toLowerCase();
+  if (!isRawKey) return item;
+  const mapped = oneTimeInvoiceLabelForCategory(serviceCategoryForOneTimeItem(item), label);
+  return mapped && mapped !== label ? { ...item, label: mapped } : item;
 }
 
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
@@ -10978,6 +11018,7 @@ module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
+module.exports.attachPublicPricingContract = attachPublicPricingContract;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;

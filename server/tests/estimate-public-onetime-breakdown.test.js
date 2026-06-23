@@ -8,6 +8,9 @@ const {
   buildAcceptSuccessPayload,
   acceptedOneTimeChoiceListForEstimate,
   acceptanceServiceLists,
+  attachPublicPricingContract,
+  bookingServiceFor,
+  buildEstimateAskPrompts,
   applySelectedLawnTierToEstimateData,
   applySelectedTreeShrubTierToEstimateData,
   assertExistingAppointmentUpdateApplied,
@@ -2796,6 +2799,57 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toMatch(/Bora-Care Wood Treatment[^<]*\+[^<]*Pre-Slab Termiticide Treatment|Pre-Slab Termiticide Treatment[^<]*\+[^<]*Bora-Care Wood Treatment/);
     expect(html).not.toContain('>bora_care<');
+  });
+
+  test('bookingServiceFor routes a Bora-Care label to the Bora-Care booking service, not pest control', () => {
+    expect(bookingServiceFor('Bora-Care Wood Treatment')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment' });
+    // Bora-Care is checked before termite, so a "Termite Bora-Care" label still routes to Bora-Care.
+    expect(bookingServiceFor('Termite Bora-Care Treatment')).toEqual({ id: 'bora_care', label: 'Bora-Care Wood Treatment' });
+    expect(bookingServiceFor('One-Time Pest Control').id).toBe('pest_control');
+  });
+
+  test('buildEstimateAskPrompts uses the Bora-Care safety chip only for a Bora-Care-only quote', () => {
+    const boraOnly = buildEstimateAskPrompts([], [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }]);
+    expect(boraOnly).toContain('Is Bora-Care safe for pets & kids?');
+    expect(boraOnly).not.toContain('Are pets and kids safe?');
+
+    // A positive non-Bora billable row (one_time_adjustment) makes it not
+    // Bora-Care-only, so the generic safety chip is used instead.
+    const mixed = buildEstimateAskPrompts([], [
+      { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+      { service: 'one_time_adjustment', name: 'Additional treatment area', price: 200 },
+    ]);
+    expect(mixed).toContain('Are pets and kids safe?');
+    expect(mixed).not.toContain('Is Bora-Care safe for pets & kids?');
+
+    // A negative discount row does NOT block Bora-Care-only.
+    const withDiscount = buildEstimateAskPrompts([], [
+      { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+      { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -157.65 },
+    ]);
+    expect(withDiscount).toContain('Is Bora-Care safe for pets & kids?');
+  });
+
+  test('React pricing contract surfaces the Bora-Care chip and friendly label for a recurring estimate with a Bora-Care add-on', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 1051, items: [{ service: 'bora_care', label: 'bora_care', amount: 1051 }] } },
+      {},
+      {
+        result: {
+          recurring: {
+            services: [
+              { service: 'pest_control', name: 'Pest Control', mo: 100 },
+              { service: 'lawn_care', name: 'Lawn Care', mo: 100 },
+            ],
+          },
+        },
+      },
+    );
+
+    // #3: the Bora-Care chip is present even though the recurring sections are Pest + Lawn.
+    expect(contract.askChips).toContain('What does Bora-Care treat?');
+    // #5: the raw service-key label is normalized for the client payload.
+    expect(contract.oneTimeBreakdown.items[0].label).toBe('Bora-Care Wood Treatment');
   });
 
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
