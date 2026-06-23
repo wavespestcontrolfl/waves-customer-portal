@@ -10,21 +10,13 @@ const { searchQuery, selectSearchCandidates } = require('./base');
 const { pickVariantOffer, extractSizeToken, quantityToOz, verifyMatch } = require('../extract');
 const { isUnavailable } = require('../compare');
 const { convertToOz } = require('../../product-costing');
+// Approved storefront hosts — the weekly scan navigates the server browser to this origin,
+// so the adapter MUST anchor the actual hostname to the allowlist before navigating. Shared
+// with the registry (the vendor-routing layer) so the two allowlists can't drift.
+const { isApprovedShopifyHost } = require('./shopify-hosts');
 
 const DEFAULT_TIMEOUT = 20000;
 const MAX_CANDIDATES = 4;
-
-// Approved Shopify storefront hosts. The weekly scan navigates the server browser to this
-// origin, and the registry selects Shopify by a loose substring match on operator-editable
-// vendor data — so the adapter MUST anchor the actual hostname to this allowlist before
-// navigating. (Blocks userinfo spoofs like https://chemicalwarehouse.com@attacker.example,
-// whose real host is attacker.example.) Add a host here when onboarding a new Shopify store.
-const SHOPIFY_HOSTS = ['chemicalwarehouse.com', 'seedworldusa.com', 'seedbarn.com', 'gciturfacademy.com', 'intermountainturf.com'];
-
-function isApprovedShopifyHost(hostname) {
-  const h = String(hostname || '').toLowerCase();
-  return SHOPIFY_HOSTS.some((base) => h === base || h.endsWith(`.${base}`));
-}
 
 // The storefront base origin for this vendor (e.g. https://chemicalwarehouse.com). Accepts a
 // bare host (operator-editable website may omit the scheme) by assuming https. Returns null —
@@ -81,9 +73,13 @@ async function fetchCandidate(page, vendor, product) {
   } else {
     const q = searchQuery(product);
     if (!q) return null;
+    // Shopify's /search?q= page is SERVER-RENDERED — the result links are in the HTML at
+    // domcontentloaded — so we must NOT waitForSelector here: a vendor that doesn't carry
+    // the product would otherwise burn the full timeout per product, and the serial weekly
+    // scan (25-product batches) turns that into minutes. Read links straight from the DOM;
+    // a real no-match returns [] instantly. (Mirrors base.js's no-block-for-server-rendered.)
     await page.goto(`${origin}/search?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout });
-    await page.waitForSelector('a[href*="/products/"]', { timeout: 8000 }).catch(() => {});
-    const found = await page.$$eval('a[href*="/products/"]', (els) => [...new Set(els.map((e) => e.getAttribute('href')).filter(Boolean))]);
+    const found = await page.$$eval('a[href*="/products/"]', (els) => [...new Set(els.map((e) => e.getAttribute('href')).filter(Boolean))]).catch(() => []);
     links = selectSearchCandidates(found, product, MAX_CANDIDATES);
   }
 
