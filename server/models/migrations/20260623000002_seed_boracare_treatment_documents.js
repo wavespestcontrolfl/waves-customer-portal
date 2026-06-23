@@ -15,6 +15,10 @@ const DEFAULT_TEMPLATES = [
     description: 'Informational outline of the Bora-Care borate wood treatment applied during attic remediation.',
     tags: ['treatment_outline', 'bora_care', 'attic', 'termite'],
     requires_signature: false,
+    // View-only informational outline: no reminder emails (mirrors existing
+    // view-only seeds like marketing.products_solutions). The signable
+    // agreement below keeps the default reminder schedule.
+    reminder_schedule_days: [],
     title: 'Bora-Care Wood Treatment — Treatment Outline',
     body: [
       'Bora-Care Wood Treatment — Treatment Outline',
@@ -70,11 +74,14 @@ const DEFAULT_TEMPLATES = [
 ];
 
 exports.up = async function up(knex) {
+  // reminder_schedule_days was added later (20260601000010_document_workflow_defaults);
+  // guard the write so this seed also applies on older schema snapshots.
+  const columns = await knex('document_templates').columnInfo().catch(() => ({}));
   for (const seed of DEFAULT_TEMPLATES) {
     const existing = await knex('document_templates').where({ template_key: seed.template_key }).first();
     let template = existing;
     if (!template) {
-      [template] = await knex('document_templates').insert({
+      const insertRow = {
         template_key: seed.template_key,
         name: seed.name,
         category: seed.category,
@@ -84,7 +91,11 @@ exports.up = async function up(knex) {
         requires_signature: seed.requires_signature,
         variables: JSON.stringify(seed.variables),
         tags: JSON.stringify(seed.tags),
-      }).returning('*');
+      };
+      if (columns.reminder_schedule_days && Array.isArray(seed.reminder_schedule_days)) {
+        insertRow.reminder_schedule_days = JSON.stringify(seed.reminder_schedule_days);
+      }
+      [template] = await knex('document_templates').insert(insertRow).returning('*');
     }
 
     const activeVersion = await knex('document_template_versions')
