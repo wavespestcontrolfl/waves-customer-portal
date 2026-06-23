@@ -3310,12 +3310,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
     : null;
   const quotedServiceNames = recurring.map((s) => labelWithFreq(s.name)).filter(Boolean);
-  // For engine-backed / nested estimates, result.oneTime.items can be empty while
-  // the billable rows live only in the normalized breakdown. Fall back to those so
-  // the hero treatment name isn't "WaveGuard {tier}". A name-less engine row carries
-  // the raw service key as its label, so map it to the friendly category label.
-  const quotedOneTimeNames = oneTimeItems.length
-    ? oneTimeItems.map((it) => it.displayName || it.name).filter(Boolean)
+  // Raw one-time rows can be present but carry no display name (the name-less
+  // engine shape `{ service: 'bora_care', price }`), or be empty entirely for a
+  // nested result. In either case fall back to the normalized billable rows so the
+  // hero treatment name isn't "WaveGuard {tier}". A name-less row carries the raw
+  // service key as its label, so map it to the friendly category label.
+  const rawOneTimeNames = oneTimeItems.map((it) => it.displayName || it.name).filter(Boolean);
+  const quotedOneTimeNames = rawOneTimeNames.length
+    ? rawOneTimeNames
     : boraCareOneTimeRows
         .filter(isBillableOneTimeInvoiceItem)
         .map((it) => {

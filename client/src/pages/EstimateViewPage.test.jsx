@@ -215,6 +215,31 @@ describe('oneTimePriceCopy', () => {
     const copy = oneTimePriceCopy({ total: 250, items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 250 }] });
     expect(copy).toMatch(/30-day callback period if pests return/);
   });
+
+  it('keeps Bora-Care-only copy when the only other row is a non-billable discount', () => {
+    const copy = oneTimePriceCopy({
+      total: 893.35,
+      items: [
+        { service: 'bora_care', label: 'Bora-Care', amount: 1051 },
+        { service: 'one_time_adjustment', label: 'WaveGuard Member Discount', amount: -157.65 },
+      ],
+    });
+    expect(copy).toMatch(/borate wood treatment/i);
+    expect(copy).not.toMatch(/30-day callback period if pests return/);
+  });
+
+  it('falls back to the default copy when Bora-Care is mixed with another positive billable row', () => {
+    // Mirrors the server hasOnlyBoraCareServiceMix: a positive unknown charge
+    // blocks the Bora-Care-only classification, so the callback copy stays.
+    const copy = oneTimePriceCopy({
+      total: 1251,
+      items: [
+        { service: 'bora_care', label: 'Bora-Care', amount: 1051 },
+        { service: 'one_time_adjustment', label: 'Additional treatment area', amount: 200 },
+      ],
+    });
+    expect(copy).toMatch(/30-day callback period if pests return/);
+  });
 });
 
 describe('estimateAddServiceOffer', () => {

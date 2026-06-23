@@ -541,7 +541,12 @@ function buildEstimateAssistantContext({
   const firstName = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0]
     || cleanText(estimate.customerFirstName);
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
-  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(isGermanRoachCleanoutContextRow);
+  // Expose separately-billed one-time add-ons that have their own Ask Waves chip
+  // (German-roach cleanout, Bora-Care) even on a recurring estimate, so the
+  // assistant context carries the row the chip's question is about.
+  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(
+    (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row),
+  );
   const exposeOneTimeContext = !quoteRequired
     && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
     && (hasOneTimeValue || oneTimeServices.length > 0);
@@ -673,6 +678,15 @@ function isGermanRoachCleanoutContextRow(row = {}) {
   return /\broach(?:es)?\b/.test(text) && /\bclean\s*out\b/.test(text);
 }
 
+function isBoraCareContextRow(row = {}) {
+  const service = cleanText(row.service || row.key).toLowerCase();
+  if (service === 'bora_care' || service === 'boracare') return true;
+  const text = cleanText([row.label, row.name, row.displayName, row.detail, row.summary].filter(Boolean).join(' '))
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return /bora\s*care/.test(text);
+}
+
 // True when the estimate itself is a German Roach Cleanout (canonical service
 // key or a cleanout-specific label). The question text alone can't distinguish
 // German Roach Cleanout from a native/palmetto cockroach or a recurring pest
@@ -749,11 +763,7 @@ function estimateContextHasBoraCare(context = {}) {
     ...(Array.isArray(context.services) ? context.services : []),
     ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
   ];
-  return rows.some((row) => {
-    const service = String(row?.service || row?.key || '').toLowerCase();
-    if (service === 'bora_care' || service === 'boracare') return true;
-    return /bora[\s-]?care/.test(String(row?.name || row?.label || row?.summary || '').toLowerCase());
-  });
+  return rows.some(isBoraCareContextRow);
 }
 
 function answerEstimateQuestionFallback(question, context = {}) {
