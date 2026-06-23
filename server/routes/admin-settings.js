@@ -219,19 +219,27 @@ router.get('/linkedin/auth-url', adminAuthenticate, requireAdmin, async (req, re
 });
 
 // GET /api/admin/settings/linkedin/callback — LinkedIn redirects here (public).
+// Never echo query params (error/error_description) into the response body:
+// reflecting attacker-controlled text on the portal origin is a reflected-XSS
+// vector (admin tokens live in localStorage). Log the detail server-side and
+// always bounce back to the SPA with a generic outcome flag.
 router.get('/linkedin/callback', async (req, res) => {
+  const settingsUrl = (outcome) =>
+    `${publicPortalUrl()}/admin/settings?tab=integrations&linkedinOAuth=${outcome}`;
   try {
     const { code, state, error, error_description } = req.query;
-    if (error) return res.status(400).send(`LinkedIn authorization failed: ${error_description || error}`);
-    if (!code) return res.status(400).send('Missing authorization code');
+    if (error) {
+      logger.warn(`[admin-settings] LinkedIn OAuth denied: ${String(error_description || error).slice(0, 200)}`);
+      return res.redirect(settingsUrl('error'));
+    }
+    if (!code) return res.redirect(settingsUrl('error'));
     await consumeLinkedInOAuthState(state);
     await linkedin.handleCallback(code);
     logger.info('[admin-settings] LinkedIn OAuth connected');
-    const clientUrl = publicPortalUrl();
-    res.redirect(`${clientUrl}/admin/settings?tab=integrations&linkedinOAuth=success`);
+    return res.redirect(settingsUrl('success'));
   } catch (err) {
     logger.error(`LinkedIn OAuth callback failed: ${err.message}`);
-    res.status(500).send(`OAuth failed: ${err.message}`);
+    return res.redirect(settingsUrl('error'));
   }
 });
 

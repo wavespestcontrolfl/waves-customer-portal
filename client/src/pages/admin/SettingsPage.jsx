@@ -1317,6 +1317,7 @@ function LinkedInConnectSection() {
 
   const params = new URLSearchParams(window.location.search);
   const justConnected = params.get("linkedinOAuth") === "success";
+  const oauthFailed = params.get("linkedinOAuth") === "error";
 
   const load = () => {
     setLoading(true);
@@ -1365,6 +1366,21 @@ function LinkedInConnectSection() {
           }}
         >
           ✓ LinkedIn connected. Status below may take a moment to refresh.
+        </div>
+      )}
+      {oauthFailed && (
+        <div
+          style={{
+            fontSize: 12,
+            color: D.red,
+            background: D.red + "14",
+            padding: "8px 12px",
+            borderRadius: 8,
+            marginBottom: 12,
+          }}
+        >
+          ✕ LinkedIn connection didn't complete. Please try again — sign in as an
+          admin of the Waves company page.
         </div>
       )}
       {loading ? (

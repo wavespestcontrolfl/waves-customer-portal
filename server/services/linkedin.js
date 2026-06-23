@@ -26,6 +26,7 @@
 
 const logger = require('./logger');
 const db = require('../models/db');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 const TOKEN_KEY = 'linkedin.oauth_tokens';
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2/authorization';
@@ -62,8 +63,14 @@ class LinkedInService {
     this.companyId = process.env.LINKEDIN_COMPANY_ID || null; // org URN numeric id
     this.configured = !!(this.clientId && this.clientSecret);
 
-    const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-    this.redirectUri = process.env.LINKEDIN_REDIRECT_URI || `https://${domain}/api/admin/settings/linkedin/callback`;
+    // LinkedIn requires an EXACT redirect_uri match against the app registration,
+    // which uses the canonical portal host. Derive it from publicPortalUrl()
+    // (PUBLIC_PORTAL_URL / PORTAL_URL / CLIENT_URL / PORTAL_DOMAIN → portal default),
+    // NOT RAILWAY_PUBLIC_DOMAIN — that resolves to the generated *.up.railway.app
+    // host and would break the exact-match. Override with LINKEDIN_REDIRECT_URI.
+    this.redirectUri =
+      process.env.LINKEDIN_REDIRECT_URI ||
+      `${publicPortalUrl()}/api/admin/settings/linkedin/callback`;
 
     if (!this.configured) {
       logger.warn('[linkedin] No LINKEDIN_CLIENT_ID/SECRET — LinkedIn integration disabled');
@@ -160,7 +167,36 @@ class LinkedInService {
       throw new Error(`LinkedIn token exchange ${res.status}: ${(await res.text()).slice(0, 500)}`);
     }
     const tokens = await res.json();
-    return this.storeTokens(tokens, { merge: true });
+    const result = await this.storeTokens(tokens, { merge: true });
+    // Soft-verify the authorizing account actually administers LINKEDIN_COMPANY_ID.
+    // Never block the connection on it (the org-ACL response shape isn't doc-verified
+    // here, and a transient failure shouldn't strand a valid token) — record the
+    // outcome so getStatus / the UI can warn instead of silently 403-ing at post time.
+    await this._recordOrgVerification();
+    return result;
+  }
+
+  // Best-effort: confirm the connected account admins the configured company id.
+  // Persists `org_verified` (true/false/null) into the stored token record and
+  // logs a warning on a mismatch. Returns the boolean (or null when unknown).
+  async _recordOrgVerification() {
+    if (!this.companyId) return null;
+    try {
+      const { adminedOrganizations } = await this.verifyOrgAccess();
+      const target = String(this.companyId);
+      const verified = (adminedOrganizations || []).some((o) => String(o).includes(target));
+      const existing = await this._getStoredTokens();
+      await db('system_settings')
+        .where({ key: TOKEN_KEY })
+        .update({ value: JSON.stringify({ ...existing, org_verified: verified }), updated_at: new Date() });
+      if (!verified) {
+        logger.warn(`[linkedin] Authorized account does not administer org ${target} — company-page posts will 403 until reconnected with the right page admin.`);
+      }
+      return verified;
+    } catch (err) {
+      logger.warn(`[linkedin] Org verification skipped: ${err.message}`);
+      return null;
+    }
   }
 
   // ── Valid access token (refresh when possible) ────────────────────────────
@@ -211,6 +247,7 @@ class LinkedInService {
       refreshTokenExpiresAt: stored.refresh_token_expires_at || null,
       hasRefreshToken: !!stored.refresh_token,
       scope: stored.scope || null,
+      orgVerified: typeof stored.org_verified === 'boolean' ? stored.org_verified : null,
     };
   }
 

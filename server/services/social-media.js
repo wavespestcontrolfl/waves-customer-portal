@@ -103,8 +103,8 @@ async function isPausedByAdmin() {
 // *attempts* all failed.
 const ALERT_THRESHOLD = 3;
 const ALERT_WINDOW = 20; // recent posts to scan — enough to find THRESHOLD attempts per platform
-const ALERTED_PLATFORMS = ['facebook', 'instagram', 'gbp'];
-const PLATFORM_LABELS = { facebook: 'Facebook', instagram: 'Instagram', gbp: 'Google Business' };
+const ALERTED_PLATFORMS = ['facebook', 'instagram', 'gbp', 'linkedin'];
+const PLATFORM_LABELS = { facebook: 'Facebook', instagram: 'Instagram', gbp: 'Google Business', linkedin: 'LinkedIn' };
 const SOCIAL_ALERT_KEY = 'social_consecutive_failures_alert';
 
 function parsePlatformResults(value) {

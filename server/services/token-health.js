@@ -268,28 +268,38 @@ async function checkInstagram() {
 
 async function checkLinkedIn() {
   const platform = 'linkedin';
-  const envVarName = 'LINKEDIN_ACCESS_TOKEN';
-  const token = process.env.LINKEDIN_ACCESS_TOKEN;
+  // OAuth model (services/linkedin.js): app creds in env, page token DB-stored.
+  // The legacy LINKEDIN_ACCESS_TOKEN env path is retired, so health derives from
+  // the stored connection + its real token expiry, not a static env token.
+  const envVarName = 'LINKEDIN_CLIENT_ID';
+  let linkedin;
+  try { linkedin = require('./linkedin'); } catch { linkedin = null; }
 
-  if (!token) {
-    const result = { platform, status: 'not_configured', lastError: 'LINKEDIN_ACCESS_TOKEN not set', expiresAt: null };
+  if (!linkedin || !linkedin.configured) {
+    const result = { platform, status: 'not_configured', lastError: 'LINKEDIN_CLIENT_ID/SECRET not set', expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   }
 
   try {
-    const res = await fetch('https://api.linkedin.com/v2/me', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (res.ok) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
+    const status = await linkedin.getStatus();
+    if (!status.connected) {
+      const result = { platform, status: 'not_configured', lastError: 'Not connected — authorize via Admin Settings → Integrations', expiresAt: null };
       await upsertResult({ ...result, tokenType: 'oauth', envVarName });
       return result;
     }
 
-    const status = res.status === 401 ? 'expired' : 'error';
-    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
+    const expiresAt = status.tokenExpiresAt || null;
+    const expired = expiresAt ? new Date(expiresAt).getTime() <= Date.now() : false;
+    // An expired access token still refreshes at post time when a refresh token
+    // exists (approved apps); only flag 'expired' when there's nothing to refresh.
+    const healthy = !expired || status.hasRefreshToken;
+    const result = {
+      platform,
+      status: healthy ? 'healthy' : 'expired',
+      lastError: healthy ? null : 'Access token expired — re-authorize (no refresh token)',
+      expiresAt,
+    };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   } catch (err) {
