@@ -1093,8 +1093,17 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
     let totalRevenue = null;
     try {
       const roiStart = parseETDateTime(`${win.from}T00:00`);
-      const roiEnd = parseETDateTime(`${win.to}T23:59:59.999`);
-      const roiRows = await leadAttribution.calculateAllSourceROI(roiStart, roiEnd, { includeInactive: true });
+      // parseETDateTime only parses through whole seconds, so a ".999" suffix
+      // would fall through to UTC and lop ~4h off the last ET day. Build the
+      // inclusive end as end-of-second ET + 999ms so it covers the full ET day,
+      // matching applyETTimestampWindow's "< next ET day" leads bound above.
+      const roiEnd = new Date(parseETDateTime(`${win.to}T23:59:59`).getTime() + 999);
+      const roiRows = await leadAttribution.calculateAllSourceROI(roiStart, roiEnd, {
+        includeInactive: true,
+        // Same internal/test-account exclusion as the lead counts, so revenue/ROI
+        // measure the same population (the excluded_internal_customers contract).
+        excludeCustomerNames: INTERNAL_TEST_CUSTOMERS,
+      });
       totalRevenue = roiRows.reduce((acc, r) => acc + (r.totalRevenue || 0), 0);
       for (const r of roiRows) {
         const ex = roiByName.get(r.source.name);

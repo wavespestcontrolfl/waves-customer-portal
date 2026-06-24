@@ -880,7 +880,15 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
                   {r.hasRevenue ? fmtMoneyCompact(r.revenue) : <span className="text-ink-disabled">—</span>}
                 </span>
                 <span className="relative text-right u-nums text-ink-tertiary">
-                  {r.roi != null ? `${Math.round(r.roi).toLocaleString()}%` : <span className="text-ink-disabled">—</span>}
+                  {r.roi == null ? (
+                    <span className="text-ink-disabled">—</span>
+                  ) : r.revenue > 0 && (r.cost == null || r.cost === 0) ? (
+                    // Revenue with no cost (e.g. a free GBP listing) → ROI is
+                    // infinite; "∞" reads cleaner than the 9999 sentinel.
+                    '∞'
+                  ) : (
+                    `${Math.round(r.roi).toLocaleString()}%`
+                  )}
                 </span>
               </div>
             );
