@@ -39,10 +39,10 @@ function money(n) {
 // Paid deposits are always surfaced (the ledger is authoritative). The
 // would-be / per-policy projection and any exemption label are shown ONLY when
 // deposits are actually enforced (ESTIMATE_DEPOSIT_REQUIRED on). While the flag
-// is dark the projection can't be resolved reliably — existing-plan / prepay
-// exemptions and customer-chosen one-time amounts aren't recoverable
-// post-accept — so we deliberately show nothing rather than a figure that
-// could send an operator chasing money that isn't owed.
+// is dark the projection can't be resolved reliably — existing-plan exemptions
+// and customer-chosen one-time amounts aren't recoverable post-accept — so we
+// deliberately show nothing rather than a figure that could send an operator
+// chasing money that isn't owed.
 function depositRow(deposit) {
   if (!deposit) return null;
   const paid = Number(deposit.paid) || 0;

@@ -222,9 +222,30 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   summary.oneTime = oneTime;
   summary.policyAmount = computeDepositAmount({ oneTime });
 
+  // Recover the customer's accept-time payment choice from the scoped/linked
+  // scheduled service (the accept flow persists payment_method_preference on
+  // commit) so the resolver can honor the prepay_annual exemption — otherwise
+  // the summary shows "Deposit due" once enforcement is live for a visit an
+  // annual prepay already covers. Pre-accept callers (recordable/nudge) keep
+  // passing null because no committed service exists yet, so this load lives
+  // here on the post-accept scheduling summary rather than inside the resolver.
+  // Fail-soft: a read miss leaves the preference null (the safe direction — a
+  // wrongly-charged deposit still credits forward).
+  let paymentMethodPreference = null;
+  try {
+    const ssId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
+    if (ssId) {
+      const ss = await db('scheduled_services').where({ id: ssId }).first('payment_method_preference');
+      paymentMethodPreference = ss?.payment_method_preference || null;
+    }
+  } catch (err) {
+    logger.warn('[estimate-deposits] schedule summary payment-preference read failed', { error: err.message });
+  }
+
   try {
     const policy = await resolveDepositPolicyForEstimate({
       estimate,
+      paymentMethodPreference,
       oneTime,
       oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
       // When the caller answers for a specific appointment (the estimate-source
