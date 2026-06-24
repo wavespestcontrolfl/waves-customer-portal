@@ -30,6 +30,7 @@ const dns = require('dns');
 const net = require('net');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
+const sharp = require('sharp');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname + isPrivateIp
 
 function hostOf(url) {
@@ -161,6 +162,25 @@ Return ONLY JSON (no markdown):
 Rules: robust selectors (input[name=...]/#id over classes); use ONLY fill/select/check then end with exactly one "submit" as the final action; do NOT emit "click" (the final submit is the only button press), file uploads, or any CAPTCHA step. If completing the listing needs a multi-step wizard, an account, or a button that isn't the final submit, set form_present:false.`;
 }
 
+// Anthropic rejects images whose longest edge exceeds 8000px; a full-page screenshot of a
+// long directory page is routinely 10k+px tall → 400 → llm_error. Downscale the long edge to
+// MAX_SHOT_EDGE (the resolution the vision API downsamples to internally anyway) so the
+// planning/verify calls always succeed. Small screenshots pass through untouched; on any
+// sharp failure, return the raw buffer (an oversized shot then fails closed via llm_error).
+const MAX_SHOT_EDGE = 1568;
+async function boundedShot(page) {
+  const buf = await page.screenshot({ fullPage: true, type: 'png' });
+  try {
+    const w = buf.readUInt32BE(16); // PNG IHDR width
+    const h = buf.readUInt32BE(20); // PNG IHDR height
+    if (w <= MAX_SHOT_EDGE && h <= MAX_SHOT_EDGE) return buf;
+    return await sharp(buf).resize({ width: MAX_SHOT_EDGE, height: MAX_SHOT_EDGE, fit: 'inside', withoutEnlargement: true }).png().toBuffer();
+  } catch (e) {
+    logger.warn(`[form-filler] screenshot downscale failed: ${e.message}`);
+    return buf;
+  }
+}
+
 async function callVision(anthropic, screenshotB64, text) {
   const resp = await anthropic.messages.create({
     model: MODEL, max_tokens: 2048,
@@ -286,7 +306,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     }
     await page.waitForTimeout(1500);
 
-    const shot1 = (await page.screenshot({ fullPage: true, type: 'png' }));
+    const shot1 = await boundedShot(page);
     let plan;
     try {
       plan = await callVision(client, shot1.toString('base64'), planPrompt(nap));
@@ -389,7 +409,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     let shot2 = null;
     try {
       await page.waitForTimeout(1500);
-      shot2 = await page.screenshot({ fullPage: true, type: 'png' });
+      shot2 = await boundedShot(page);
       verify = await callVision(client, shot2.toString('base64'),
         'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection OR a next-step gate that wasn\'t completed (validation error, "required field", a login/CAPTCHA/payment wall, a phone/SMS verification step, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}');
     } catch (e) {
@@ -438,4 +458,4 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
 }
 
 module.exports = { fillCitationForm };
-module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf, hostMatchesExpected, resolvePublicIps };
+module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf, hostMatchesExpected, resolvePublicIps, boundedShot, MAX_SHOT_EDGE };
