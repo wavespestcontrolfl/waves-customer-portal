@@ -489,9 +489,10 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   test('converts a customer-linked open lead on the customer FIRST close', async () => {
     const markConverted = jest.fn().mockResolvedValue();
     const database = makeConvertDb({
-      customer: { id: 'c1', phone: '+19412269100' },
-      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1' }],
-      customerWonLead: null, // no prior won lead → first close
+      // Originating: the lead was first contacted on/before the customer became one.
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-06-01' },
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', first_contact_at: '2026-05-20' }],
+      customerWonLead: null, // no prior won lead
     });
 
     const result = await convertLeadFromEvent({
@@ -503,6 +504,27 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
 
     expect(result).toMatchObject({ converted: true, leadIds: ['L9'] });
     expect(markConverted).toHaveBeenCalledTimes(1);
+  });
+
+  test('does NOT convert an add-on lead created AFTER the customer became a customer', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      // Established customer (member_since long ago); the open lead is a later
+      // add-on inquiry (first contacted well after) — must not be swept.
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2025-01-01' },
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', first_contact_at: '2026-06-15' }],
+      customerWonLead: null, // no won lead, yet still established by tenure
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'invoice_sent',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'customer_link_not_originating' });
+    expect(markConverted).not.toHaveBeenCalled();
   });
 
   test('does NOT convert when the customer already has a won lead (established → add-on not swept)', async () => {

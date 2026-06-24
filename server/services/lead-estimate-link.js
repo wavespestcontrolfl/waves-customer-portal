@@ -309,6 +309,29 @@ async function customerHasWonLead(database, customerId) {
   return !!won;
 }
 
+// Originating-lead test — the real first-close signal. A `status='won'` lead is
+// NOT a reliable "established customer" marker: customers can be active (booked,
+// invoiced, completed services) with no won lead at all, and add-on inquiry
+// leads are stamped with `customer_id`. So gate on TIMING instead: the open lead
+// is the originating deal only if it was first contacted on/before the customer
+// became a customer; a lead created AFTER that is a later add-on. `member_since`
+// (else the customer's created date) is the same "became a customer" date the
+// KPI conversion windows use (server/services/customer-stages.js). Fail-closed:
+// if either date is unknown, treat the lead as NOT originating (don't convert).
+async function isOriginatingLead(database, customerId, lead) {
+  const leadStart = lead.first_contact_at || lead.created_at;
+  if (!leadStart) return false;
+  const customer = await database('customers')
+    .where({ id: customerId })
+    .first('member_since', 'created_at');
+  const becameCustomer = customer && (customer.member_since || customer.created_at);
+  if (!becameCustomer) return false;
+  // Compare at day granularity — a same-day intake→conversion still originated
+  // the customer. (member_since is a DATE column; avoid sub-day/TZ false skips.)
+  const day = (d) => new Date(d).toISOString().slice(0, 10);
+  return day(leadStart) <= day(becameCustomer);
+}
+
 async function convertLeadFromEvent({
   source,
   estimateId = null,
@@ -365,19 +388,26 @@ async function convertLeadFromEvent({
 
       // Tier 2 — customer-link. Catches an originating lead that already carries
       // a `customer_id` (so the contact fallback can't see it). Convert ONLY the
-      // customer's first close, and only when they have exactly one open lead;
-      // otherwise skip rather than guess which add-on the event closed.
+      // customer's first close: exactly one open lead, no prior won lead, AND
+      // that lead is the originating deal (first contacted on/before they became
+      // a customer). Anything else is an add-on for an established customer —
+      // skip rather than guess which deal the event closed.
       if (resolvedCustomerId) {
         const linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
         if (linked.length) {
-          const established = await customerHasWonLead(database, resolvedCustomerId);
-          if (established || linked.length > 1) {
-            logger.warn(`[lead-trigger] ${source} customer-link skip (open=${linked.length}, established=${established})`, {
-              source,
-              customerId: resolvedCustomerId,
-              leadIds: linked.map((lead) => lead.id),
+          if (linked.length > 1) {
+            logger.warn(`[lead-trigger] ${source} customer-link skip — ${linked.length} open leads (ambiguous)`, {
+              source, customerId: resolvedCustomerId, leadIds: linked.map((l) => l.id),
             });
-            return { converted: false, reason: established ? 'customer_link_established' : 'ambiguous_customer_link' };
+            return { converted: false, reason: 'ambiguous_customer_link' };
+          }
+          const established = await customerHasWonLead(database, resolvedCustomerId);
+          const originating = await isOriginatingLead(database, resolvedCustomerId, linked[0]);
+          if (established || !originating) {
+            logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {
+              source, customerId: resolvedCustomerId, leadIds: linked.map((l) => l.id),
+            });
+            return { converted: false, reason: established ? 'customer_link_established' : 'customer_link_not_originating' };
           }
           candidates = linked;
           resolution = 'customer_link';
