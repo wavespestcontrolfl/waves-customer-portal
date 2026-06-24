@@ -126,7 +126,10 @@ router.get('/analytics/overview', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
     const start = start_date ? new Date(start_date) : startOfETMonth();
-    const end = end_date ? new Date(end_date) : new Date();
+    // parseInclusiveEnd → end-of-ET-day, so a date-only end_date matches the
+    // by-source / by-channel windows the ROI aggregation below reconciles with
+    // (raw new Date('2026-06-30') is midnight UTC = June 29 ET, dropping a day).
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     const leads = await db('leads')
       .where('first_contact_at', '>=', start)
@@ -165,26 +168,22 @@ router.get('/analytics/overview', async (req, res, next) => {
       : null;
     const openUnansweredCount = openLeads.length;
 
-    const totalCosts = await db('lead_source_costs')
-      .where('month', '>=', start)
-      .where('month', '<=', end)
-      .sum('cost_amount as total')
-      .first();
+    // Revenue + cost reuse the SAME real-invoice, conversion-bounded, de-duped
+    // attribution as the Sources / Channel breakdown (calculateAllSourceROI) so
+    // the top-line ROI reconciles with the per-source rows shown on the same tab
+    // — instead of diverging on lead captured-value (initial + monthly). Active
+    // sources only, matching that breakdown. This also inherits the helper's ET
+    // date-bounded cost query (lead_source_costs.month is a DATE), so the current
+    // month's logged costs are no longer dropped by a timestamp comparison.
+    const sourceRoi = await leadAttribution.calculateAllSourceROI(start, end);
+    const revenue = sourceRoi.reduce((s, r) => s + parseFloat(r.totalRevenue || 0), 0);
+    const costTotal = sourceRoi.reduce((s, r) => s + parseFloat(r.totalCost || 0), 0);
+    // CPA divides by the SAME attributed cohort as cost/revenue (sourced
+    // conversions), not the all-leads `won` count — otherwise active-source cost
+    // over all wins (incl. unattributed / inactive-source) understates CPA.
+    const attributedConversions = sourceRoi.reduce((s, r) => s + (r.conversions || 0), 0);
 
-    let costTotal = parseFloat(totalCosts?.total || 0);
-    if (costTotal === 0) {
-      const sources = await db('lead_sources').where('is_active', true);
-      const months = Math.max(1, Math.ceil((new Date(end) - new Date(start)) / (30 * 86400000)));
-      costTotal = sources.reduce((s, src) => s + parseFloat(src.monthly_cost || 0), 0) * months;
-    }
-
-    let revenue = 0;
-    const wonLeads = leads.filter(l => l.status === 'won');
-    for (const l of wonLeads) {
-      revenue += parseFloat(l.initial_service_value || 0) + parseFloat(l.monthly_value || 0);
-    }
-
-    const cpa = won > 0 ? Math.round(costTotal / won * 100) / 100 : 0;
+    const cpa = attributedConversions > 0 ? Math.round(costTotal / attributedConversions * 100) / 100 : 0;
     const roi = costTotal > 0 ? Math.round((revenue - costTotal) / costTotal * 1000) / 10 : 0;
 
     res.json({
@@ -321,7 +320,11 @@ router.get('/analytics/response', async (req, res, next) => {
       conversionRate: b.total > 0 ? Math.round(b.won / b.total * 1000) / 10 : 0,
     }));
 
-    res.json({ buckets: result });
+    // Return the window so the client can label this section — it defaults to
+    // year-to-date (more data → more reliable conversion-by-speed buckets),
+    // unlike the month-bounded overview/funnel/sources, and was previously
+    // unlabeled so it read as "this month".
+    res.json({ buckets: result, startDate: start, endDate: end });
   } catch (err) { next(err); }
 });
 
@@ -354,6 +357,10 @@ router.get('/analytics/lost', async (req, res, next) => {
     res.json({
       reasons: reasons.map(r => ({ reason: r.lost_reason || 'Not specified', count: parseInt(r.count, 10) })),
       competitors: competitors.map(c => ({ competitor: c.lost_to_competitor, count: parseInt(c.count, 10) })),
+      // Year-to-date window (see /analytics/response) — returned so the client
+      // labels it, since it differs from the month-bounded sections above.
+      startDate: start,
+      endDate: end,
     });
   } catch (err) { next(err); }
 });
