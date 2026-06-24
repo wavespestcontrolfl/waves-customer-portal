@@ -3989,10 +3989,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
     // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
     // failure here never blocks completion; the tech approves before it ever sends.
-    if (process.env.PEST_RECAP === 'true' && String(record.service_line || '').toLowerCase() === 'pest') {
+    if (process.env.PEST_RECAP === 'true' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
       try {
         const { enqueueRecap } = require('../services/service-report/recap-pipeline');
-        await enqueueRecap(record.id);
+        // Keyed on the scheduled-service id so pre-completion captures match the render.
+        await enqueueRecap(record.scheduled_service_id);
       } catch (err) {
         logger.warn(`[dispatch] recap render queue failed for ${record.id}: ${err.message}`);
       }
@@ -6541,10 +6542,24 @@ function shouldAutoInvoiceCompletion({
 // `recap-video` to avoid colliding with the existing SMS `recap-preview` route.
 const recapPipeline = require('../services/service-report/recap-pipeline');
 const recapStorage = require('../services/service-report/recap-storage');
+const recapMedia = require('../services/service-report/recap-media');
+
+// :serviceId is the SCHEDULED service id (uuid) — the key the whole recap lane uses.
+// Techs may only touch recaps for their OWN assigned visit; admins, any. Writes the
+// 403 itself and returns false so the caller bails.
+async function recapOwnerOk(req, res) {
+  if (req.techRole === 'admin') return true;
+  const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('technician_id');
+  if (svc && svc.technician_id === req.technicianId) return true;
+  res.status(403).json({ error: 'Not your visit' });
+  return false;
+}
+const recapVideoActor = (req) => req.technician?.name || req.technicianId || null;
 
 router.get('/:serviceId/recap-video', async (req, res, next) => {
   try {
-    const recap = await recapPipeline.getRecap(Number(req.params.serviceId));
+    if (!(await recapOwnerOk(req, res))) return undefined;
+    const recap = await recapPipeline.getRecap(req.params.serviceId);
     if (!recap) return res.json({ exists: false, status: 'none' });
     return res.json({
       exists: true,
@@ -6560,7 +6575,8 @@ router.get('/:serviceId/recap-video', async (req, res, next) => {
 router.post('/:serviceId/recap-video/generate', async (req, res, next) => {
   try {
     if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap rendering is disabled' });
-    const result = await recapPipeline.enqueueRecap(Number(req.params.serviceId), { force: Boolean(req.body?.force) });
+    if (!(await recapOwnerOk(req, res))) return undefined;
+    const result = await recapPipeline.enqueueRecap(req.params.serviceId, { force: Boolean(req.body?.force) });
     if (!result.ok) return res.status(503).json({ error: 'recap queue unavailable' });
     return res.json({ ok: true, status: result.recap?.status || 'pending' });
   } catch (err) { return next(err); }
@@ -6568,14 +6584,14 @@ router.post('/:serviceId/recap-video/generate', async (req, res, next) => {
 
 router.post('/:serviceId/recap-video/approve', async (req, res, next) => {
   try {
-    const approvedBy = req.user?.email || req.user?.name || req.user?.id || null;
-    const result = await recapPipeline.approveRecap(Number(req.params.serviceId), { approvedBy });
+    if (!(await recapOwnerOk(req, res))) return undefined;
+    const result = await recapPipeline.approveRecap(req.params.serviceId, { approvedBy: recapVideoActor(req) });
     if (!result.ok) return res.status(409).json({ error: result.error });
     // Approval sends the customer the watch-recap link (best-effort, idempotent).
     let sent = false;
     try {
       const { sendRecap } = require('../services/service-report/recap-delivery');
-      const send = await sendRecap(Number(req.params.serviceId));
+      const send = await sendRecap(req.params.serviceId);
       sent = Boolean(send?.ok);
     } catch (err) {
       logger.warn(`[dispatch] recap send failed for ${req.params.serviceId}: ${err.message}`);
@@ -6587,7 +6603,8 @@ router.post('/:serviceId/recap-video/approve', async (req, res, next) => {
 // Streams the rendered MP4 through this authed route (never a public S3 URL).
 router.get('/:serviceId/recap-video/file', async (req, res, next) => {
   try {
-    const recap = await recapPipeline.getRecap(Number(req.params.serviceId));
+    if (!(await recapOwnerOk(req, res))) return undefined;
+    const recap = await recapPipeline.getRecap(req.params.serviceId);
     if (!recap?.s3_key) return res.status(404).end();
     const obj = await recapStorage.getRecapStream(recap.s3_key);
     if (!obj) return res.status(404).end();
@@ -6599,14 +6616,12 @@ router.get('/:serviceId/recap-video/file', async (req, res, next) => {
 });
 
 // Tech-captured recap media — direct browser→S3 (presigned PUT). Same auth + gate.
-const recapMedia = require('../services/service-report/recap-media');
-
 router.post('/:serviceId/recap-media/presign', async (req, res, next) => {
   try {
     if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap capture is disabled' });
+    if (!(await recapOwnerOk(req, res))) return undefined;
     const { role, mediaType, contentType } = req.body || {};
-    const capturedBy = req.user?.email || req.user?.name || req.user?.id || null;
-    const result = await recapMedia.presignUpload({ serviceRecordId: Number(req.params.serviceId), role, mediaType, contentType, capturedBy });
+    const result = await recapMedia.presignUpload({ scheduledServiceId: req.params.serviceId, role, mediaType, contentType, capturedBy: recapVideoActor(req) });
     return res.json(result);
   } catch (err) {
     if (err.status === 400) return res.status(400).json({ error: err.message });
@@ -6616,7 +6631,8 @@ router.post('/:serviceId/recap-media/presign', async (req, res, next) => {
 
 router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) => {
   try {
-    const row = await recapMedia.confirmUpload(Number(req.params.mediaId), { bytes: req.body?.bytes, durationMs: req.body?.durationMs });
+    if (!(await recapOwnerOk(req, res))) return undefined;
+    const row = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.serviceId, bytes: req.body?.bytes, durationMs: req.body?.durationMs });
     if (!row) return res.status(404).json({ error: 'media not found' });
     return res.json({ ok: true, id: row.id, status: row.status });
   } catch (err) { return next(err); }
@@ -6624,14 +6640,16 @@ router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) =
 
 router.get('/:serviceId/recap-media', async (req, res, next) => {
   try {
-    const items = await recapMedia.listMedia(Number(req.params.serviceId));
+    if (!(await recapOwnerOk(req, res))) return undefined;
+    const items = await recapMedia.listMedia(req.params.serviceId);
     return res.json({ items });
   } catch (err) { return next(err); }
 });
 
 router.delete('/:serviceId/recap-media/:mediaId', async (req, res, next) => {
   try {
-    const ok = await recapMedia.deleteMedia(Number(req.params.mediaId));
+    if (!(await recapOwnerOk(req, res))) return undefined;
+    const ok = await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.serviceId });
     return res.json({ ok });
   } catch (err) { return next(err); }
 });

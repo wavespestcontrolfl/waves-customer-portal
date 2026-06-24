@@ -6,7 +6,8 @@
   "workspaces": [
     "server",
     "client",
-    "packages/*"
+    "packages/*",
+    "video"
   ],
   "scripts": {
     "predev": "npm run db:migrate",

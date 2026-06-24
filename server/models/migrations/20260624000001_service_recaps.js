@@ -14,7 +14,10 @@ exports.up = async function up(knex) {
   if (await knex.schema.hasTable('service_recaps')) return;
   await knex.schema.createTable('service_recaps', (t) => {
     t.bigIncrements('id').primary();
-    t.integer('service_record_id').notNullable().unique(); // 1:1 per visit
+    // Keyed on the SCHEDULED service id (uuid) — stable across capture (pre-
+    // completion) and the rendered report; service_records.id doesn't exist yet
+    // when the tech captures clips in the closeout.
+    t.uuid('scheduled_service_id').notNullable().unique(); // 1:1 per visit
     // pending -> rendering -> ready -> approved (or failed). Queue claims pending.
     t.string('status', 20).notNullable().defaultTo('pending');
     t.string('s3_key');

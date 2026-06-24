@@ -23,14 +23,22 @@ function isPestRecapEligible(service) {
   return String(service?.service_line || '').toLowerCase() === 'pest';
 }
 
-async function buildRecapPayload(serviceRecordId, { knex = db } = {}) {
-  const service = await loadServiceRecordForPdf(serviceRecordId, knex);
-  if (!service) throw new Error('Service record not found');
+async function buildRecapPayload(scheduledServiceId, { knex = db } = {}) {
+  // The recap keys on the scheduled-service id (stable across capture +
+  // completion); resolve the completed service_records row it produced for the
+  // report data + token. Media stays keyed on the scheduled id.
+  const rec = await knex('service_records')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'desc')
+    .first('id');
+  if (!rec) return null;
+  const service = await loadServiceRecordForPdf(rec.id, knex);
+  if (!service) return null;
   if (!isPestRecapEligible(service)) return null;
 
-  const token = await ensureReportToken(serviceRecordId, knex);
+  const token = await ensureReportToken(rec.id, knex);
   const data = await buildReportV1Data(service, token, knex);
-  const dynamicContext = await buildServiceReportDynamicContext({ recordId: serviceRecordId, mode: 'static', knex });
+  const dynamicContext = await buildServiceReportDynamicContext({ recordId: rec.id, mode: 'static', knex });
   if (!dynamicContext?.premiumExperience) return null;
 
   // Seasonal forecast, best-effort (never blocks the render).
@@ -54,7 +62,7 @@ async function buildRecapPayload(serviceRecordId, { knex = db } = {}) {
   const firstName = String(data.customerName || service.first_name || 'there').trim().split(/\s+/)[0] || 'there';
   // Tech-captured clips (presigned GET srcs) fill the composition's media slots;
   // empty = the data-only fallback tier. Best-effort — never blocks the render.
-  const media = await getMediaForRecap(serviceRecordId, knex).catch(() => []);
+  const media = await getMediaForRecap(scheduledServiceId, knex).catch(() => []);
   return {
     customerName: firstName,
     serviceDate: formatServiceDate(service.service_date),

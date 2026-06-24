@@ -10,7 +10,9 @@ exports.up = async function up(knex) {
   if (await knex.schema.hasTable('service_media')) return;
   await knex.schema.createTable('service_media', (t) => {
     t.bigIncrements('id').primary();
-    t.integer('service_record_id').notNullable();
+    // Keyed on the SCHEDULED service id (uuid) — same key as service_recaps, so
+    // clips captured before completion match the post-completion render.
+    t.uuid('scheduled_service_id').notNullable();
     t.string('media_type', 10).notNullable().defaultTo('video'); // video | image
     t.string('role', 40); // tech chip id (perimeter, eaves, pest, before, after, …)
     t.string('caption'); // friendly customer caption, derived from role server-side
@@ -22,7 +24,7 @@ exports.up = async function up(knex) {
     t.string('captured_by');
     t.integer('sort_order').notNullable().defaultTo(0);
     t.timestamps(true, true);
-    t.index(['service_record_id', 'status'], 'service_media_record_idx');
+    t.index(['scheduled_service_id', 'status'], 'service_media_record_idx');
   });
 };
 

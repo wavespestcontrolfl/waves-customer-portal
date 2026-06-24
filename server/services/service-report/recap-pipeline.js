@@ -17,9 +17,9 @@ const RECAP_DURATION_MS = 28000; // composition is fixed at 840f / 30fps
 const isMissingTable = (err) => err?.code === '42P01' || err?.code === '42703';
 const nextAttemptAt = (now, attempts) => new Date(now.getTime() + RETRY_DELAYS_MINUTES[Math.min(Math.max(attempts, 0), RETRY_DELAYS_MINUTES.length - 1)] * 60 * 1000);
 
-async function getRecap(serviceRecordId, knex = db) {
+async function getRecap(scheduledServiceId, knex = db) {
   try {
-    return await knex('service_recaps').where({ service_record_id: serviceRecordId }).first();
+    return await knex('service_recaps').where({ scheduled_service_id: scheduledServiceId }).first();
   } catch (err) {
     if (isMissingTable(err)) return null;
     throw err;
@@ -27,11 +27,11 @@ async function getRecap(serviceRecordId, knex = db) {
 }
 
 // Queue (or re-queue) a recap render. force=true regenerates a ready/failed one.
-async function enqueueRecap(serviceRecordId, { force = false, knex = db } = {}) {
-  if (!serviceRecordId) throw new Error('serviceRecordId is required');
+async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {}) {
+  if (!scheduledServiceId) throw new Error('scheduledServiceId is required');
   const now = new Date();
   try {
-    const existing = await knex('service_recaps').where({ service_record_id: serviceRecordId }).first();
+    const existing = await knex('service_recaps').where({ scheduled_service_id: scheduledServiceId }).first();
     if (existing) {
       if (['pending', 'rendering'].includes(existing.status)) return { ok: true, queued: false, recap: existing };
       if (!force) return { ok: true, queued: false, recap: existing };
@@ -42,22 +42,22 @@ async function enqueueRecap(serviceRecordId, { force = false, knex = db } = {}) 
       return { ok: true, queued: true, recap: updated };
     }
     const [inserted] = await knex('service_recaps').insert({
-      service_record_id: serviceRecordId, status: 'pending', attempts: 0,
+      scheduled_service_id: scheduledServiceId, status: 'pending', attempts: 0,
       max_attempts: DEFAULT_MAX_ATTEMPTS, next_attempt_at: now, created_at: now, updated_at: now,
     }).returning('*');
     return { ok: true, queued: true, recap: inserted };
   } catch (err) {
     if (err?.code === '23505') return { ok: true, queued: false }; // race: another insert won
     if (isMissingTable(err)) {
-      logger.warn(`[recap-pipeline] service_recaps table unavailable; recap not queued for ${serviceRecordId}`);
+      logger.warn(`[recap-pipeline] service_recaps table unavailable; recap not queued for ${scheduledServiceId}`);
       return { ok: false, skipped: true };
     }
     throw err;
   }
 }
 
-async function approveRecap(serviceRecordId, { approvedBy = null, knex = db } = {}) {
-  const recap = await getRecap(serviceRecordId, knex);
+async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db } = {}) {
+  const recap = await getRecap(scheduledServiceId, knex);
   if (!recap) return { ok: false, error: 'not_found' };
   if (recap.status !== 'ready') return { ok: false, error: `not_ready (${recap.status})` };
   const [updated] = await knex('service_recaps').where({ id: recap.id }).update({
@@ -105,7 +105,7 @@ async function claimDueRecaps(now = new Date(), limit = CLAIM_LIMIT, knex = db) 
 async function processRecap(recap, knex = db) {
   let outFile = null;
   try {
-    const payload = await buildRecapPayload(recap.service_record_id, { knex });
+    const payload = await buildRecapPayload(recap.scheduled_service_id, { knex });
     if (!payload) {
       // not eligible (e.g., not pest / no intelligence) — mark failed terminally, no retry
       await knex('service_recaps').where({ id: recap.id }).update({
@@ -114,7 +114,7 @@ async function processRecap(recap, knex = db) {
       return { status: 'skipped' };
     }
     outFile = await renderRecapToFile(payload);
-    const key = await putRecapFromFile(recap.service_record_id, outFile);
+    const key = await putRecapFromFile(recap.scheduled_service_id, outFile);
     await knex('service_recaps').where({ id: recap.id }).update({
       status: 'ready', s3_key: key, duration_ms: RECAP_DURATION_MS, media: JSON.stringify(payload.media || []),
       rendered_at: new Date(), locked_at: null, last_error: null, updated_at: new Date(),
@@ -129,7 +129,7 @@ async function processRecap(recap, knex = db) {
       next_attempt_at: exhausted ? recap.next_attempt_at : nextAttemptAt(now, attempts - 1),
       locked_at: null, last_error: String(err.message || err).slice(0, 500), updated_at: now,
     });
-    if (exhausted) logger.error(`[recap-pipeline] recap render failed permanently for service ${recap.service_record_id}: ${err.message}`);
+    if (exhausted) logger.error(`[recap-pipeline] recap render failed permanently for service ${recap.scheduled_service_id}: ${err.message}`);
     return { status: exhausted ? 'failed' : 'pending', error: err.message };
   } finally {
     if (outFile) cleanupRecapFile(outFile);

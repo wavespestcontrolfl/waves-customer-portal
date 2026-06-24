@@ -14,7 +14,9 @@ function isLawnReportPath(reqPath = '') {
 function isServiceReportPath(reqPath = '') {
   const value = String(reqPath || '');
   return /^\/report\/[a-f0-9]{32}\/?$/i.test(value)
-    || /^\/report\/project\/[a-z0-9-]+\/?$/i.test(value);
+    || /^\/report\/project\/[a-z0-9-]+\/?$/i.test(value)
+    // Recap player carries the same bearer report token in the URL.
+    || /^\/recap\/[a-f0-9]{32}\/?$/i.test(value);
 }
 
 function applySensitiveSpaHeaders(reqPath, res) {

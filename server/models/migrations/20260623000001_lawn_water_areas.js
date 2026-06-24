@@ -64,9 +64,9 @@ exports.up = async function up(knex) {
     await knex.schema.createTable('lawn_water_intake_snapshots', (t) => {
       t.bigIncrements('id').primary();
       // One snapshot per service record (the report's stable water picture).
-      t.bigInteger('service_record_id').references('id').inTable('service_records').onDelete('CASCADE');
-      t.integer('service_id');
-      t.integer('customer_id').references('id').inTable('customers').onDelete('CASCADE');
+      t.uuid('service_record_id').references('id').inTable('service_records').onDelete('CASCADE');
+      t.uuid('service_id');
+      t.uuid('customer_id').references('id').inTable('customers').onDelete('CASCADE');
       t.bigInteger('area_id').references('id').inTable('lawn_water_areas').onDelete('SET NULL');
       t.date('service_date');
       t.decimal('irrigation_inches_per_week', 6, 2);

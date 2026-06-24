@@ -534,10 +534,10 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
 router.get('/:token/recap', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id').first();
-    if (!service) return res.status(404).json({ error: 'Not found' });
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id').first();
+    if (!service || !service.scheduled_service_id) return res.status(404).json({ error: 'Not found' });
     const { getRecap } = require('../services/service-report/recap-pipeline');
-    const recap = await getRecap(service.id);
+    const recap = await getRecap(service.scheduled_service_id);
     const ready = Boolean(recap && recap.status === 'approved' && recap.s3_key);
     return res.json({ ready, durationMs: ready ? recap.duration_ms : null });
   } catch (err) { return next(err); }
@@ -547,10 +547,10 @@ router.get('/:token/recap', async (req, res, next) => {
 router.get('/:token/recap/video', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).end();
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id').first();
-    if (!service) return res.status(404).end();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id').first();
+    if (!service || !service.scheduled_service_id) return res.status(404).end();
     const { getRecap } = require('../services/service-report/recap-pipeline');
-    const recap = await getRecap(service.id);
+    const recap = await getRecap(service.scheduled_service_id);
     if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();
     const { getRecapStream } = require('../services/service-report/recap-storage');
     const obj = await getRecapStream(recap.s3_key);

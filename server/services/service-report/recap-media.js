@@ -60,9 +60,9 @@ function assertConfigured() {
 }
 
 // Create the row + a presigned PUT URL the browser uploads to directly.
-async function presignUpload({ serviceRecordId, role, mediaType = 'video', contentType, capturedBy = null, knex = db } = {}) {
+async function presignUpload({ scheduledServiceId, role, mediaType = 'video', contentType, capturedBy = null, knex = db } = {}) {
   assertConfigured();
-  if (!serviceRecordId) throw new Error('serviceRecordId is required');
+  if (!scheduledServiceId) throw new Error('scheduledServiceId is required');
   const type = mediaType === 'image' ? 'image' : 'video';
   if (!isAllowedContentType(contentType, type)) {
     const err = new Error(`unsupported content type for ${type}`);
@@ -71,9 +71,9 @@ async function presignUpload({ serviceRecordId, role, mediaType = 'video', conte
   }
   const safeRole = ROLE_MAP[role] ? role : 'other';
   const info = roleInfo(safeRole);
-  const key = `recap-media/${serviceRecordId}/${crypto.randomBytes(10).toString('hex')}.${extFor(contentType, type)}`;
+  const key = `recap-media/${scheduledServiceId}/${crypto.randomBytes(10).toString('hex')}.${extFor(contentType, type)}`;
   const [row] = await knex('service_media').insert({
-    service_record_id: serviceRecordId,
+    scheduled_service_id: scheduledServiceId,
     media_type: type,
     role: safeRole,
     caption: info.caption,
@@ -92,24 +92,28 @@ async function presignUpload({ serviceRecordId, role, mediaType = 'video', conte
   return { mediaId: row.id, key, uploadUrl };
 }
 
-async function confirmUpload(mediaId, { bytes = null, durationMs = null } = {}, knex = db) {
-  const [row] = await knex('service_media').where({ id: mediaId }).update({
+async function confirmUpload(mediaId, { scheduledServiceId = null, bytes = null, durationMs = null } = {}, knex = db) {
+  const q = knex('service_media').where({ id: mediaId });
+  if (scheduledServiceId) q.andWhere({ scheduled_service_id: scheduledServiceId });
+  const [row] = await q.update({
     status: 'ready', bytes, duration_ms: durationMs, updated_at: new Date(),
   }).returning('*');
   return row || null;
 }
 
-async function listMedia(serviceRecordId, knex = db) {
+async function listMedia(scheduledServiceId, knex = db) {
   return knex('service_media')
-    .where({ service_record_id: serviceRecordId })
+    .where({ scheduled_service_id: scheduledServiceId })
     .orderBy([{ column: 'sort_order', order: 'asc' }, { column: 'created_at', order: 'asc' }])
     .select('id', 'media_type', 'role', 'caption', 'status', 'duration_ms', 'created_at');
 }
 
-async function deleteMedia(mediaId, knex = db) {
-  const row = await knex('service_media').where({ id: mediaId }).first();
+async function deleteMedia(mediaId, { scheduledServiceId = null } = {}, knex = db) {
+  const lookup = knex('service_media').where({ id: mediaId });
+  if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
+  const row = await lookup.first();
   if (!row) return false;
-  await knex('service_media').where({ id: mediaId }).del();
+  await knex('service_media').where({ id: row.id }).del();
   if (config.s3?.bucket && row.s3_key) {
     try { await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: row.s3_key })); }
     catch (err) { logger.warn(`[recap-media] S3 delete failed for ${row.s3_key}: ${err.message}`); }
@@ -119,11 +123,11 @@ async function deleteMedia(mediaId, knex = db) {
 
 // Ready media → the composition's media[] (presigned GET srcs, beat role, caption).
 // Used by recap-payload at render time. Best-effort: returns [] on a missing table.
-async function getMediaForRecap(serviceRecordId, knex = db) {
+async function getMediaForRecap(scheduledServiceId, knex = db) {
   let rows;
   try {
     rows = await knex('service_media')
-      .where({ service_record_id: serviceRecordId, status: 'ready' })
+      .where({ scheduled_service_id: scheduledServiceId, status: 'ready' })
       .orderBy([{ column: 'sort_order', order: 'asc' }, { column: 'created_at', order: 'asc' }]);
   } catch (err) {
     if (err?.code === '42P01') return [];
