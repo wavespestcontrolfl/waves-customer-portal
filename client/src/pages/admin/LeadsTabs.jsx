@@ -964,6 +964,30 @@ export function LeadsSection() {
             color={C.purple}
           />{" "}
           <MetricCard
+            label="Avg Speed to Lead"
+            value={ov.avgSpeedToLead != null ? fmtTime(ov.avgSpeedToLead) : "--"}
+            sub={
+              ov.avgSpeedToLead == null
+                ? "None waiting"
+                : `${ov.openUnansweredCount} waiting · ${
+                    ov.avgSpeedToLead < 5
+                      ? "Great!"
+                      : ov.avgSpeedToLead < 15
+                        ? "Good"
+                        : "Needs work"
+                  }`
+            }
+            color={
+              ov.avgSpeedToLead == null
+                ? C.green
+                : ov.avgSpeedToLead < 5
+                  ? C.green
+                  : ov.avgSpeedToLead < 15
+                    ? C.amber
+                    : C.red
+            }
+          />{" "}
+          <MetricCard
             label="Monthly ROI"
             value={ov.roi != null ? fmtPct(ov.roi) : "--"}
             color={roiColor(ov.roi || 0)}

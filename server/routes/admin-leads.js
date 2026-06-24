@@ -128,6 +128,28 @@ router.get('/analytics/overview', async (req, res, next) => {
       ? Math.round(responded.reduce((s, l) => s + l.response_time_minutes, 0) / responded.length)
       : null;
 
+    // Speed to Lead: how long leads still awaiting their first response have
+    // been waiting, right now. Distinct from avgResponseTime (the historical
+    // first-contact -> first-response gap on leads we DID respond to).
+    //
+    // This is a live backlog gauge, so it is intentionally NOT bounded to the
+    // reporting window: a lead that first contacted us last month but is still
+    // unanswered is part of the backlog "right now". A lead is "still waiting"
+    // only while status is 'new' — the sole pre-first-response state; every
+    // other status ('contacted', 'estimate_sent', terminal, etc.) implies a
+    // first response has happened. response_time_minutes IS NULL is kept as a
+    // belt-and-suspenders guard against status/timestamp drift.
+    const openLeads = await db('leads')
+      .where('status', 'new')
+      .whereNull('response_time_minutes')
+      .whereNotNull('first_contact_at');
+    const nowMs = Date.now();
+    const avgSpeedToLead = openLeads.length > 0
+      ? Math.round(openLeads.reduce((s, l) =>
+          s + (nowMs - new Date(l.first_contact_at).getTime()) / 60000, 0) / openLeads.length)
+      : null;
+    const openUnansweredCount = openLeads.length;
+
     const totalCosts = await db('lead_source_costs')
       .where('month', '>=', start)
       .where('month', '<=', end)
@@ -152,7 +174,8 @@ router.get('/analytics/overview', async (req, res, next) => {
 
     res.json({
       total, won, lost, active, conversionRate,
-      avgResponseTime, costTotal: Math.round(costTotal * 100) / 100,
+      avgResponseTime, avgSpeedToLead, openUnansweredCount,
+      costTotal: Math.round(costTotal * 100) / 100,
       revenue: Math.round(revenue * 100) / 100, cpa, roi,
       startDate: start, endDate: end,
     });
