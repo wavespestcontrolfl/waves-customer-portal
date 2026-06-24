@@ -426,6 +426,8 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("57%")).toBeInTheDocument();
     expect(screen.getByText("4 accepted of 7 resolved")).toBeInTheDocument();
     expect(screen.getByText("$400")).toBeInTheDocument();
+    // "all" range has no comparable prior period → no trend line at all.
+    expect(screen.queryByText(/vs prior/)).not.toBeInTheDocument();
     // ROI table discloses per-line counting (bundles appear once per quoted
     // service, so its totals can exceed the estimate-level KPI counts).
     expect(
@@ -653,6 +655,22 @@ describe("PipelineAnalytics", () => {
     fireEvent.click(screen.getByRole("button", { name: /Going cold/i }));
 
     expect(onFilterChange).toHaveBeenCalledWith("going_cold");
+    // Subtitle reflects the disjoint (viewed-only) bucket — no stale "unopened 72h+".
+    expect(screen.queryByText(/unopened 72h/i)).not.toBeInTheDocument();
+  });
+
+  it("anchors the YTD avg-ticket trend to the ET year (prior window aligns)", () => {
+    renderAnalytics({
+      dateRange: "ytd",
+      estimates: [
+        // Current ET-year YTD.
+        estimate({ id: "cur", status: "accepted", monthlyTotal: 100, createdAt: daysAgo(5) }),
+        // Prior window (equal length, immediately before ET Jan 1).
+        estimate({ id: "prior", status: "accepted", monthlyTotal: 50, createdAt: daysAgo(150) }),
+      ],
+    });
+
+    expect(screen.getByText("↑ $50 vs prior period")).toBeInTheDocument();
   });
 
   it("fires dedicated pricing-risk subfilters", () => {

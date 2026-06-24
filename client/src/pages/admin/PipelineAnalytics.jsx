@@ -223,7 +223,10 @@ function priorPeriodWindow(range, nowMs) {
   if (range === "30d") return { start: nowMs - 60 * DAY, end: nowMs - 30 * DAY, label: "vs prior 30d" };
   if (range === "90d") return { start: nowMs - 180 * DAY, end: nowMs - 90 * DAY, label: "vs prior 90d" };
   if (range === "ytd") {
-    const jan1 = new Date(new Date(nowMs).getFullYear(), 0, 1).getTime();
+    // Anchor Jan 1 at ET midnight (same basis as withinDateRange's ET-year
+    // boundary) so the prior window lines up with the current YTD window in any
+    // browser timezone. January is always EST (UTC-5), so this is unambiguous.
+    const jan1 = Date.UTC(etParts(new Date(nowMs)).year, 0, 1, 5, 0, 0);
     const span = nowMs - jan1;
     return { start: jan1 - span, end: jan1, label: "vs prior period" };
   }
@@ -443,11 +446,13 @@ export default function PipelineAnalytics({
     const priorWin = priorPeriodWindow(selectedRange, nowMs);
     const priorAvg = avgTicketFor(estimatesInWindow(activeRows, priorWin));
     const avgDelta = Math.round(avgTicket - priorAvg);
-    const trendLabel = priorWin ? priorWin.label : "vs prior period";
-    const avgTrend =
-      priorAvg === 0
-        ? `→ ${trendLabel}`
-        : `${avgDelta > 0 ? "↑" : avgDelta < 0 ? "↓" : "→"} ${money(Math.abs(avgDelta))} ${trendLabel}`;
+    // "all" has no comparable prior window → no trend line (StatCard hides a
+    // null sub) rather than a meaningless "vs prior period".
+    const avgTrend = !priorWin
+      ? null
+      : priorAvg === 0
+        ? `→ ${priorWin.label}`
+        : `${avgDelta > 0 ? "↑" : avgDelta < 0 ? "↓" : "→"} ${money(Math.abs(avgDelta))} ${priorWin.label}`;
 
     const needsEstimate = classified.filter((e) => e._class === "needs_estimate").length;
     const readyToSend = classified.filter((e) => e._class === "ready_to_send").length;
@@ -732,7 +737,7 @@ export default function PipelineAnalytics({
         <AttentionCard
           label="Going cold"
           value={metrics.attention.goingCold}
-          sub="Idle 48h–7d · unopened 72h+"
+          sub="Viewed · idle 48h–7d"
           filterKey="going_cold"
           onFilterChange={onFilterChange}
         />
