@@ -290,7 +290,9 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
         // would drop services on the first ET day of the month.
         .where('service_date', '>=', etDateString(start))
         .where('service_date', '<=', etDateString(end))
-        .select('id', 'customer_id', 'price', 'service_date');
+        // Job revenue is service_records.revenue (migration 20260401000027); there
+        // is no `price` column — selecting it throws and silently voids this fallback.
+        .select('id', 'customer_id', 'revenue', 'service_date');
     } catch (e) {
       serviceRows = [];
     }
@@ -338,7 +340,7 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
           && !usedServiceIds.has(r.id));
         if (leadServices.length) {
           leadServices.forEach(r => usedServiceIds.add(r.id));
-          leadRevenue = leadServices.reduce((sum, r) => sum + parseFloat(r.price || 0), 0);
+          leadRevenue = leadServices.reduce((sum, r) => sum + parseFloat(r.revenue || 0), 0);
         }
       }
     }
