@@ -51,7 +51,7 @@ async function buildSignedCopyEmail(contract, customer = {}) {
   const pdf = await buildContractPDFBuffer(contract, customer, { signed: true });
 
   const html = wrapEmail({
-    preheader: `Your signed copy of ${title}`,
+    preheader: `Your signed copy of ${escapeHtml(title)}`,
     heading: 'Your signed copy',
     intro: `Hi ${escapeHtml(firstName(customer))}, thank you for signing <strong>${escapeHtml(title)}</strong>. A signed copy is attached to this email for your records.`,
     lines: [
@@ -107,19 +107,28 @@ async function sendSignedContractCopy(contractId) {
   if (!sendgrid.isConfigured()) return { ok: false, skipped: 'sendgrid_unconfigured' };
 
   const payload = await buildSignedCopyEmail(contract, customer || {});
-  const result = await sendgrid.sendOne({
-    to,
-    fromEmail: 'contact@wavespestcontrol.com',
-    fromName: 'Waves Pest Control',
-    replyTo: 'contact@wavespestcontrol.com',
-    subject: payload.subject,
-    html: payload.html,
-    text: payload.text,
-    categories: ['document_signed_copy'],
-    asmGroupId: sendgrid.serviceGroupId(),
-    attachments: payload.attachments,
-  });
-  return { ok: true, providerMessageId: result?.messageId || null };
+  try {
+    const result = await sendgrid.sendOne({
+      to,
+      fromEmail: 'contact@wavespestcontrol.com',
+      fromName: 'Waves Pest Control',
+      replyTo: 'contact@wavespestcontrol.com',
+      subject: payload.subject,
+      html: payload.html,
+      text: payload.text,
+      categories: ['document_signed_copy'],
+      asmGroupId: sendgrid.serviceGroupId(),
+      attachments: payload.attachments,
+      // A rejection for an invalid/suppressed recipient can echo the email
+      // address in the raw SendGrid body. Suppress that log and emit only a
+      // sanitized status + contract id below — never the recipient address.
+      suppressErrorLog: true,
+    });
+    return { ok: true, providerMessageId: result?.messageId || null };
+  } catch (err) {
+    logger.warn(`[contract-signed-email] SendGrid send failed for contract ${contractId} (status ${err.status || 'unknown'})`);
+    return { ok: false, error: 'send_failed', status: err.status || null };
+  }
 }
 
 module.exports = {

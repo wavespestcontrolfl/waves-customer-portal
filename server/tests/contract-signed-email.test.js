@@ -39,5 +39,8 @@ describe('contract-signed-email buildSignedCopyEmail', () => {
     expect(payload.subject).toBe('Your signed copy: Repair & <Retreatment> Bond');
     expect(payload.html).toContain('Repair &amp; &lt;Retreatment&gt; Bond');
     expect(payload.html).toContain('Hi there,');
+    // Preheader (hidden inbox preview) must be escaped, not verbatim.
+    expect(payload.html).toContain('Your signed copy of Repair &amp; &lt;Retreatment&gt; Bond');
+    expect(payload.html).not.toContain('Your signed copy of Repair & <Retreatment> Bond');
   });
 });

@@ -270,8 +270,11 @@ router.post('/:token/sign', async (req, res, next) => {
     // Fire-and-forget: never block or fail the sign response on email.
     if (response.body.contract?.id && response.body.contract.contractType === 'document_template') {
       const { sendSignedContractCopy } = require('../services/contract-signed-email');
-      sendSignedContractCopy(response.body.contract.id).catch((emailErr) => {
-        logger.warn(`[contracts-public] signed-copy email failed for contract ${response.body.contract.id}: ${emailErr.message}`);
+      // Send failures are handled (sanitized) inside the service; this catch
+      // is a backstop for unexpected errors. Log only the contract id — never
+      // the error body, which could echo the recipient email.
+      sendSignedContractCopy(response.body.contract.id).catch(() => {
+        logger.warn(`[contracts-public] signed-copy email errored for contract ${response.body.contract.id}`);
       });
     }
 
