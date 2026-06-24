@@ -481,4 +481,66 @@ router.get('/:id/photos', async (req, res, next) => {
   }
 });
 
+// ── Recap clip capture DURING the visit (pest-recap lane, P4b) ──────────────────
+// Mirrors the admin-dispatch recap-media endpoints but tech-portal-scoped to the
+// tech's OWN assigned job. Keyed on the scheduled-service id (:id), same as the rest
+// of the recap lane. Direct browser→S3 via presigned PUT (reuses recap-media service).
+const recapMedia = require('../services/service-report/recap-media');
+
+async function loadOwnedServiceOr403(req, res) {
+  const svc = await db('scheduled_services').where({ id: req.params.id }).first('id', 'technician_id');
+  if (!svc) { res.status(404).json({ error: 'Service not found' }); return null; }
+  if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+    res.status(403).json({ error: 'Not assigned to this service' });
+    return null;
+  }
+  return svc;
+}
+
+router.post('/:id/recap-media/presign', async (req, res, next) => {
+  try {
+    if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap capture is disabled' });
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    const { role, mediaType, contentType } = req.body || {};
+    const result = await recapMedia.presignUpload({
+      scheduledServiceId: req.params.id, role, mediaType, contentType,
+      capturedBy: req.technician?.name || req.technicianId || null,
+    });
+    return res.json(result);
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    return next(err);
+  }
+});
+
+router.post('/:id/recap-media/:mediaId/confirm', async (req, res, next) => {
+  try {
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    const result = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.id, durationMs: req.body?.durationMs });
+    if (!result.ok) {
+      if (result.reason === 'too_large') return res.status(413).json({ error: 'Clip too large — keep it under ~20 seconds.' });
+      if (result.reason === 'bad_duration') return res.status(422).json({ error: 'Couldn’t read the clip length — re-record a short clip and try again.' });
+      if (result.reason === 'not_uploaded') return res.status(409).json({ error: 'Upload not found — try again.' });
+      return res.status(404).json({ error: 'media not found' });
+    }
+    return res.json({ ok: true, id: result.row.id, status: result.row.status });
+  } catch (err) { return next(err); }
+});
+
+router.get('/:id/recap-media', async (req, res, next) => {
+  try {
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    const items = await recapMedia.listMedia(req.params.id);
+    return res.json({ items });
+  } catch (err) { return next(err); }
+});
+
+router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
+  try {
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.id });
+    return res.json({ ok: true });
+  } catch (err) { return next(err); }
+});
+
 module.exports = router;
