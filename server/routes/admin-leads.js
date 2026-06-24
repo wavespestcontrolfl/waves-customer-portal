@@ -4,7 +4,21 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const logger = require('../services/logger');
-const { startOfETMonth, etDateString } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
+
+// A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
+// inclusive `created_at <= end` bound drops that day's later rows. Treat a
+// date-only param as "through the end of that ET day". Full timestamps pass through.
+function parseInclusiveEnd(endDate) {
+  if (!endDate) return undefined;
+  // 23:59:59.999 ET (parseETDateTime resolves to .000, so add the fractional
+  // second) — with an inclusive `<= end` bound, .000 would still drop the final
+  // sub-second of the day.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    return new Date(parseETDateTime(`${endDate}T23:59:59`).getTime() + 999);
+  }
+  return new Date(endDate);
+}
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 
@@ -186,10 +200,13 @@ router.get('/analytics/overview', async (req, res, next) => {
 // GET /api/admin/leads/analytics/by-source — ROI per source
 router.get('/analytics/by-source', async (req, res, next) => {
   try {
-    const { start_date, end_date } = req.query;
+    const { start_date, end_date, include_inactive } = req.query;
+    // The Sources table requests inactive sources too (include_inactive=1); the
+    // Analytics-tab panels call without it and stay active-only.
     const results = await leadAttribution.calculateAllSourceROI(
       start_date ? new Date(start_date) : undefined,
-      end_date ? new Date(end_date) : undefined,
+      parseInclusiveEnd(end_date),
+      { includeInactive: include_inactive === '1' || include_inactive === 'true' },
     );
     res.json({ sources: results });
   } catch (err) { next(err); }
@@ -201,7 +218,7 @@ router.get('/analytics/by-channel', async (req, res, next) => {
     const { start_date, end_date } = req.query;
     const allROI = await leadAttribution.calculateAllSourceROI(
       start_date ? new Date(start_date) : undefined,
-      end_date ? new Date(end_date) : undefined,
+      parseInclusiveEnd(end_date),
     );
 
     const byChannel = {};
@@ -371,7 +388,7 @@ router.get('/sources/:id', async (req, res, next) => {
     const roi = await leadAttribution.calculateSourceROI(
       req.params.id,
       start_date ? new Date(start_date) : undefined,
-      end_date ? new Date(end_date) : undefined,
+      parseInclusiveEnd(end_date),
     );
     if (!roi) return res.status(404).json({ error: 'Source not found' });
 

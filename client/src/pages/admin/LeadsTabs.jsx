@@ -580,6 +580,10 @@ export function LeadsSection() {
   const [overview, setOverview] = useState(null);
   const [funnel, setFunnel] = useState([]);
   const [bySource, setBySource] = useState([]);
+  // Sources-table ROI is kept separate from `bySource`: it includes inactive
+  // sources and is fetched only on the Sources tab, so a late-resolving response
+  // can never overwrite the Analytics tab's active-only `bySource`.
+  const [sourcesRoi, setSourcesRoi] = useState([]);
   const [byChannel, setByChannel] = useState([]);
   const [responseBuckets, setResponseBuckets] = useState([]);
   const [lostReasons, setLostReasons] = useState([]);
@@ -634,6 +638,24 @@ export function LeadsSection() {
     } catch (e) {
       console.error("loadSources", e);
       if (!silent) setLoadError(e);
+    }
+  }, []);
+
+  // Real revenue-based ROI for the Sources table (same backend as Analytics).
+  // Loaded only on the Sources tab — the Pipeline/Analytics tabs already get
+  // `bySource` via loadAnalytics, so this avoids double-running the expensive
+  // calculateAllSourceROI on those tabs.
+  const loadSourceROI = useCallback(async () => {
+    try {
+      // include_inactive: the Sources table lists inactive sources too and needs
+      // their ROI. The Analytics tab (loadAnalytics) calls without it, so its
+      // ROI Matrix / Phone / Channel panels stay active-only and consistent.
+      const bs = await adminFetch(
+        "/admin/leads/analytics/by-source?include_inactive=1",
+      );
+      setSourcesRoi(bs.sources || []);
+    } catch (e) {
+      console.error("loadSourceROI", e);
     }
   }, []);
 
@@ -695,9 +717,12 @@ export function LeadsSection() {
       loadAnalytics();
       loadSources();
     }
-    if (tab === "sources") loadSources();
+    if (tab === "sources") {
+      loadSources();
+      loadSourceROI();
+    }
     if (tab === "analytics") loadAnalytics();
-  }, [tab, loadLeads, loadSources, loadAnalytics]);
+  }, [tab, loadLeads, loadSources, loadSourceROI, loadAnalytics]);
 
   useEffect(() => {
     if (tab !== "pipeline") return undefined;
@@ -835,7 +860,10 @@ export function LeadsSection() {
       loadAnalytics();
       loadSources();
     }
-    if (tab === "sources") loadSources();
+    if (tab === "sources") {
+      loadSources();
+      loadSourceROI();
+    }
     if (tab === "analytics") loadAnalytics();
   };
 
@@ -880,6 +908,10 @@ export function LeadsSection() {
           body: formData,
         });
         loadSources();
+        // Cost/ROI columns AND the expanded detail row both render from this
+        // attributed payload now, so refreshing it reflects the just-logged cost
+        // immediately (no tab reload, no separate /sources/:id refresh needed).
+        loadSourceROI();
       }
       setShowModal(null);
       setFormData({});
@@ -2607,6 +2639,9 @@ export function LeadsSection() {
   };
 
   const renderSources = () => {
+    // Real revenue-based ROI per source from /analytics/by-source (same backend
+    // as Channel Comparison / ROI Matrix / Phone Number ROI), keyed by id.
+    const roiBySourceId = new Map(sourcesRoi.map((b) => [b.source?.id, b]));
     return (
       <>
         {" "}
@@ -2692,15 +2727,29 @@ export function LeadsSection() {
                 const convRate =
                   monthLeads > 0 ? (monthConv / monthLeads) * 100 : 0;
                 const mc = parseFloat(src.monthly_cost || 0);
-                const cpl = monthLeads > 0 ? mc / monthLeads : 0;
-                const cpa = monthConv > 0 ? mc / monthConv : 0;
-                // Rough ROI: just show indicator based on conversion cost
-                const roi =
-                  mc > 0 && monthConv > 0
-                    ? ((monthConv * 150 - mc) / mc) * 100
-                    : monthConv > 0
-                      ? 9999
-                      : 0;
+                // Real revenue-based cost + ROI from the analytics backend when
+                // the source is active; fall back to the configured monthly cost
+                // for inactive sources that have no ROI row.
+                const r = roiBySourceId.get(src.id);
+                const cpl = r
+                  ? r.costPerLead
+                  : monthLeads > 0
+                    ? mc / monthLeads
+                    : 0;
+                const cpa = r
+                  ? r.costPerAcquisition
+                  : monthConv > 0
+                    ? mc / monthConv
+                    : 0;
+                const roi = r ? r.roi : null;
+                // Negative ROI (spend, no revenue) is meaningful — only blank it
+                // when the source had no cost AND no revenue in range.
+                const hasRoiSignal =
+                  !!r && (r.totalCost > 0 || r.totalRevenue > 0);
+                // Expanded-row totals come from the globally-attributed table row
+                // (r) so they agree with the row above; /sources/:id (sourceROI)
+                // has no winner map and would show un-attributed revenue.
+                const detail = r || sourceROI;
                 const isExp = expandedSource === src.id;
 
                 return (
@@ -2819,13 +2868,13 @@ export function LeadsSection() {
                           ...mono,
                           fontSize: 13,
                           fontWeight: 600,
-                          color: roiColor(roi),
+                          color: roiColor(roi || 0),
                         }}
                       >
-                        {roi > 0 ? fmtPct(roi) : "--"}
+                        {hasRoiSignal ? fmtPct(roi) : "--"}
                       </td>{" "}
                     </tr>
-                    {isExp && sourceROI && (
+                    {isExp && detail && (
                       <tr>
                         <td colSpan={10} style={{ padding: 0 }}>
                           {" "}
@@ -2851,7 +2900,7 @@ export function LeadsSection() {
                                   Total Leads:{" "}
                                 </span>
                                 <span style={{ color: C.heading, ...mono }}>
-                                  {sourceROI.totalLeads}
+                                  {detail.totalLeads}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2859,7 +2908,7 @@ export function LeadsSection() {
                                   Conversions:{" "}
                                 </span>
                                 <span style={{ color: C.green, ...mono }}>
-                                  {sourceROI.conversions}
+                                  {detail.conversions}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2867,7 +2916,7 @@ export function LeadsSection() {
                                   Total Cost:{" "}
                                 </span>
                                 <span style={{ color: C.text, ...mono }}>
-                                  {fmtMoney(sourceROI.totalCost)}
+                                  {fmtMoney(detail.totalCost)}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2875,7 +2924,7 @@ export function LeadsSection() {
                                   Total Revenue:{" "}
                                 </span>
                                 <span style={{ color: C.green, ...mono }}>
-                                  {fmtMoney(sourceROI.totalRevenue)}
+                                  {fmtMoney(detail.totalRevenue)}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2885,10 +2934,10 @@ export function LeadsSection() {
                                 <span
                                   style={{
                                     ...mono,
-                                    color: roiColor(sourceROI.roi),
+                                    color: roiColor(detail.roi),
                                   }}
                                 >
-                                  {fmtPct(sourceROI.roi)}
+                                  {fmtPct(detail.roi)}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2896,7 +2945,7 @@ export function LeadsSection() {
                                   Avg Response:{" "}
                                 </span>
                                 <span style={{ color: C.text, ...mono }}>
-                                  {fmtTime(sourceROI.avgResponseTime)}
+                                  {fmtTime(detail.avgResponseTime)}
                                 </span>
                               </div>{" "}
                             </div>{" "}
