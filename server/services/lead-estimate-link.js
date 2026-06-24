@@ -287,6 +287,7 @@ async function convertLeadFromEvent({
   customerId = null,
   phone = null,
   email = null,
+  requireAcceptedEstimate = false,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
@@ -299,6 +300,14 @@ async function convertLeadFromEvent({
 
     if (estimateId) {
       const estimate = await database('estimates').where({ id: estimateId }).first();
+      // requireAcceptedEstimate (deposit-paid trigger): a succeeded deposit PI is
+      // NOT proof the deal closed — the customer can pay then abandon the accept,
+      // and the estimate later declines/expires and the deposit is refunded. Only
+      // convert once the estimate is genuinely `accepted`; a missing estimate
+      // can't confirm acceptance, so it also does not convert.
+      if (requireAcceptedEstimate && estimate?.status !== 'accepted') {
+        return { converted: false, reason: 'estimate_not_accepted' };
+      }
       if (estimate) {
         resolvedCustomerId = resolvedCustomerId || estimate.customer_id || null;
         resolvedPhone = resolvedPhone || estimate.customer_phone || null;
@@ -314,8 +323,10 @@ async function convertLeadFromEvent({
     //     never linked. We do NOT match every open lead on the customer; see
     //     findUnconvertedLeadsByContact for why.
     let candidates = [];
+    let viaEstimateLink = false;
     if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
+      if (candidates.length) viaEstimateLink = true;
     }
     if (!candidates.length) {
       if (!resolvedPhone && !resolvedEmail && resolvedCustomerId) {
@@ -330,13 +341,19 @@ async function convertLeadFromEvent({
 
     const open = (candidates || []).filter((lead) => lead && !CLOSED_LEAD_STATUSES.has(lead.status));
     if (!open.length) return { converted: false, reason: 'no_open_lead' };
-    if (open.length > 1) {
-      logger.warn(`[lead-trigger] ${source} matched ${open.length} open leads; converting all`, {
+    // FK-linked leads are authoritatively tied to THIS estimate, so convert them
+    // all. Contact-fallback matches are fuzzy — 2+ open leads on one phone/email
+    // can be distinct deals, and an event-driven trigger only proves ONE closed.
+    // Skip the ambiguous case rather than mass-converting unrelated leads, exactly
+    // as markLinkedLeadEstimateAccepted's standalone-estimate path does.
+    if (!viaEstimateLink && open.length > 1) {
+      logger.warn(`[lead-trigger] ${source} ambiguous contact match (${open.length} open leads) — skipping`, {
         source,
         estimateId,
         customerId: resolvedCustomerId,
         leadIds: open.map((lead) => lead.id),
       });
+      return { converted: false, reason: 'ambiguous_contact' };
     }
 
     for (const lead of open) {

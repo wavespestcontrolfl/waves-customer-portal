@@ -395,4 +395,84 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(result).toEqual({ converted: false, reason: 'error' });
     expect(markConverted).not.toHaveBeenCalled();
   });
+
+  test('requireAcceptedEstimate skips when the estimate is not yet accepted', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      estimate: { id: 'e1', status: 'sent', customer_id: 'c1' },
+      leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'deposit_paid',
+      estimateId: 'e1',
+      requireAcceptedEstimate: true,
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'estimate_not_accepted' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('requireAcceptedEstimate converts once the estimate is accepted', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      estimate: { id: 'e1', status: 'accepted', customer_id: 'c1', monthly_total: 80 },
+      leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'deposit_paid',
+      estimateId: 'e1',
+      requireAcceptedEstimate: true,
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toMatchObject({ converted: true, leadIds: ['L1'] });
+    expect(markConverted).toHaveBeenCalledTimes(1);
+  });
+
+  test('skips an AMBIGUOUS contact-fallback match (2+ open leads) rather than mass-converting', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100' },
+      contactLeads: [
+        { id: 'L1', status: 'new', customer_id: null },
+        { id: 'L2', status: 'contacted', customer_id: null },
+      ],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'service_completed',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'ambiguous_contact' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('converts ALL leads FK-linked to the estimate (authoritative, not ambiguous)', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      estimate: { id: 'e1', customer_id: 'c1' },
+      leadsByEstimate: [
+        { id: 'L1', status: 'estimate_sent' },
+        { id: 'L2', status: 'new' },
+      ],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'backfill',
+      estimateId: 'e1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toMatchObject({ converted: true, count: 2, leadIds: ['L1', 'L2'] });
+    expect(markConverted).toHaveBeenCalledTimes(2);
+  });
 });

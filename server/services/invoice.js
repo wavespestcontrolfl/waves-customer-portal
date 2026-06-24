@@ -610,6 +610,28 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed) {
     );
 }
 
+// Statuses an invoice can move FROM into 'sent' on its first delivery. A send
+// from any other status (sent/viewed/overdue) is a RESEND — the CASE updates in
+// the send paths leave the status unchanged there.
+const FIRST_SEND_STATUSES = ["draft", "scheduled", "sending"];
+
+// Convert the originating lead to won when an invoice FIRST transitions to sent
+// on ANY channel (SMS, email, or a combined/project delivery). Gated on the
+// pre-send status so a RESEND of an already-sent invoice never converts an
+// unrelated new lead, and so email-only sends (which finalize in
+// sendViaSMSAndEmail / markDeliverySent, not sendViaSMS) are still covered.
+// Best-effort + idempotent; the resolver only matches open, never-converted
+// leads and never throws.
+async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus }) {
+  if (!customerId || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
+  try {
+    const { convertLeadFromEvent } = require("./lead-estimate-link");
+    await convertLeadFromEvent({ source: "invoice_sent", customerId });
+  } catch (leadErr) {
+    logger.warn(`[invoice] lead conversion on send failed (${invoiceId}): ${leadErr.message}`);
+  }
+}
+
 async function annualPrepayInvoiceTableExists() {
   if (!db.schema?.hasTable) return false;
   return db.schema
@@ -1869,17 +1891,12 @@ const InvoiceService = {
         `[invoice] SMS sent for ${invoice.invoice_number} (customerId=${customer.id})`,
       );
 
-      // Sending an invoice means the deal closed — convert the originating lead
-      // to won if it's still open. Best-effort + idempotent (no-op once the lead
-      // is won, and the contact fallback only matches never-converted leads, so
-      // an existing customer's recurring invoices never sweep unrelated leads).
-      // Uses the already-loaded invoice.customer_id — no extra query here.
-      // convertLeadFromEvent never throws; the wrap guards a require failure.
-      try {
-        const { convertLeadFromEvent } = require("./lead-estimate-link");
-        await convertLeadFromEvent({ source: "invoice_sent", customerId: invoice.customer_id });
-      } catch (leadErr) {
-        logger.warn(`[invoice] lead conversion on send failed (${invoiceId}): ${leadErr.message}`);
+      // First send means the deal closed — convert the originating lead. Only
+      // for DIRECT SMS-only sends: when sendViaSMSAndEmail drives this (allowClaimed),
+      // the wrapper owns the finalize + conversion, so skip here to avoid a double
+      // pass. Resend-safe via the priorStatus gate inside the helper.
+      if (!allowClaimed) {
+        await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus });
       }
 
       return { sent: true, payUrl };
@@ -2038,6 +2055,10 @@ const InvoiceService = {
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
         });
+      // First send finalized on SMS and/or email — convert the originating lead.
+      // Covers the email-only case the inner sendViaSMS hook can't (it skips when
+      // allowClaimed). Resend-safe via the priorStatus gate.
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus });
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
       // No channel delivered — reverse the credit this seam auto-applied before
@@ -2109,6 +2130,14 @@ const InvoiceService = {
       .update(updates)
       .returning("*");
     const finalInvoice = updated || invoice;
+
+    // First delivery via this path (combined project send / completion-with-
+    // invoice) closes the deal — convert the originating lead. `updated` confirms
+    // this call performed the write; the helper's priorStatus gate (read pre-
+    // update) keeps a resend of an already-sent invoice from converting.
+    if (updated) {
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status });
+    }
 
     // Queue the review request only when THIS call performed the finalization
     // (`updated` set) — a concurrent path that finalized first cleared the

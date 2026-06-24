@@ -635,7 +635,9 @@ describe('webhook + invoice credit', () => {
 
     const result = await handleDepositIntentSucceeded(succeededPi);
     expect(result.handled).toBe(true);
-    expect(mockConvertLeadFromEvent).toHaveBeenCalledWith({ source: 'deposit_paid', estimateId: 'est-1' });
+    // requireAcceptedEstimate: a paid deposit only converts once the estimate is
+    // actually accepted — the resolver enforces it (unit-tested in lead-estimate-link).
+    expect(mockConvertLeadFromEvent).toHaveBeenCalledWith({ source: 'deposit_paid', estimateId: 'est-1', requireAcceptedEstimate: true });
   });
 
   it('does NOT convert a lead when the deposit is refunded as stale (deal not accepted)', async () => {

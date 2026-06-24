@@ -748,14 +748,14 @@ async function handleDepositIntentSucceeded(paymentIntent) {
   logger.info('[estimate-deposits] deposit received', { estimateId });
 
   // A paid deposit is an acceptance signal — convert the originating lead to
-  // won if it's still open. Best-effort + idempotent (an already-won lead is a
-  // no-op); resolves the lead via the estimate link, then the customer's
-  // contact, and pulls value hints from the estimate. convertLeadFromEvent
-  // never throws; the wrap keeps a require/load failure from breaking the
-  // webhook ack.
+  // won if it's still open. Gated on requireAcceptedEstimate: a succeeded
+  // deposit alone isn't a closed deal (the customer can pay then abandon the
+  // accept, and the estimate later expires + the deposit is refunded), so
+  // convertLeadFromEvent only converts once the estimate is actually accepted.
+  // Best-effort + idempotent; never throws (the wrap guards a require failure).
   try {
     const { convertLeadFromEvent } = require('./lead-estimate-link');
-    await convertLeadFromEvent({ source: 'deposit_paid', estimateId });
+    await convertLeadFromEvent({ source: 'deposit_paid', estimateId, requireAcceptedEstimate: true });
   } catch (leadErr) {
     logger.warn(`[estimate-deposits] lead conversion on deposit failed (${estimateId}): ${leadErr.message}`);
   }
