@@ -371,12 +371,18 @@ router.get('/health', async (req, res, next) => {
     }
 
     const tokenHealth = require('../services/token-health');
-    const platforms = ['facebook', 'instagram', 'linkedin', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
+    // 'gemini' matches the /status gemini card directly (checkGemini → platform 'gemini').
+    const platforms = ['facebook', 'instagram', 'linkedin', 'gemini', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
     const results = [];
     for (const p of platforms) {
       const r = await tokenHealth.checkSingle(p);
       results.push({ ...r, lastCheckedAt: new Date().toISOString() });
     }
+    // The Social Media page's 'ai' card maps to Anthropic; checkAnthropic reports
+    // platform 'anthropic', so relabel it to 'ai' to match the card key (otherwise
+    // the card stays "Unknown" with no matching credential).
+    const aiRes = await tokenHealth.checkSingle('anthropic');
+    if (aiRes) results.push({ ...aiRes, platform: 'ai', lastCheckedAt: new Date().toISOString() });
 
     healthCache = { credentials: results, checkedAt: new Date().toISOString() };
     healthCacheAt = now;
