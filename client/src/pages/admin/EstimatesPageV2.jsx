@@ -12,7 +12,7 @@
 //   PR #5c → FollowUpModalV2 + DeclineModalV2 replace V1 modals (Dialog
 //            primitive, danger variant on Mark-as-Lost)
 // Leads / Pricing Logic tabs still render V1 panels.
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
@@ -1508,7 +1508,51 @@ const SOURCE_ICON = {
   call_recording: { Icon: Phone, title: "Phone call recording draft" },
 };
 
-function EstimatePipelineViewV2() {
+// Deep-link from a notification: /admin/estimates?estimateId=<id> scrolls the
+// matching estimate into view and briefly highlights it (estimate_expired and
+// bundle_quote_requested notifications). The pipeline has no per-estimate detail
+// view, so the highlight is the "you're here" cue. Shared by the desktop and
+// mobile estimate lists.
+//
+// Deliberately minimal: it highlights the row only if it's already visible in
+// the current list, and otherwise leaves the list untouched. The notification
+// bell navigates with window.location.href (a full reload), so the list always
+// mounts fresh with default filters / no search — the target is visible without
+// the hook ever having to touch the operator's filters. Not auto-clearing
+// filters is what keeps this side-effect-free (no fighting the operator's input,
+// no timers, no load-race).
+//
+// `targetId` is the deep-link id; `token` bumps once per navigation (captured +
+// one-shotted by the page) so clicking the same notification again re-arms the
+// cue. `rows` is the rendered list — passed only so the effect re-checks as the
+// list loads. Returns the id to highlight while active.
+function useEstimateDeepLinkHighlight({ targetId, token, rows }) {
+  const [activeId, setActiveId] = useState(null);
+  // The nav token we've already highlighted — guards against re-scrolling on
+  // every later render, while a new token (repeat click) re-arms.
+  const doneTokenRef = useRef(null);
+
+  useEffect(() => {
+    if (!targetId || doneTokenRef.current === token) return;
+    const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
+    const node = document.querySelector(`[data-estimate-id="${sel}"]`);
+    if (!node) return; // not visible in the current view — leave the list as-is
+    doneTokenRef.current = token;
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    setActiveId(targetId);
+  }, [token, targetId, rows]);
+
+  // Fade the highlight a few seconds after it activates.
+  useEffect(() => {
+    if (!activeId) return undefined;
+    const t = setTimeout(() => setActiveId(null), 2600);
+    return () => clearTimeout(t);
+  }, [activeId]);
+
+  return activeId;
+}
+
+function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }) {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
@@ -1759,6 +1803,39 @@ function EstimatePipelineViewV2() {
     [refreshEstimates],
   );
 
+  // Classify + sort newest-first so the most recent estimates stay at the top.
+  // Computed (with the deep-link hook) before the loading/error early returns
+  // so the hooks below always run in the same order — `estimates` is [] while
+  // loading, so this is cheap and the hook no-ops until rows arrive.
+  const classified = estimates.map((e) => ({
+    ...e,
+    _class: classifyEstimateForPipeline(e),
+  }));
+  const sorted = [...classified].sort(
+    (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
+  );
+
+  const filtered = sorted
+    .filter((e) => estimateMatchesFilter(e, filter))
+    .filter((e) => {
+      const q = search.trim().toLowerCase();
+      if (!q) return true;
+      const ref = shortEstimateRef(e.id).toLowerCase();
+      return (
+        (e.customerName || "").toLowerCase().includes(q) ||
+        (e.address || "").toLowerCase().includes(q) ||
+        (e.customerEmail || "").toLowerCase().includes(q) ||
+        (e.customerPhone || "").includes(q) ||
+        ref.includes(q)
+      );
+    });
+
+  const highlightId = useEstimateDeepLinkHighlight({
+    targetId: deepLinkEstimateId,
+    token: deepLinkToken,
+    rows: filtered,
+  });
+
   if (loading) {
     return (
       <div className="p-10 text-center text-13 text-ink-secondary">
@@ -1783,30 +1860,6 @@ function EstimatePipelineViewV2() {
       </div>
     );
   }
-
-  // Classify + sort newest-first so the most recent estimates stay at the top.
-  const classified = estimates.map((e) => ({
-    ...e,
-    _class: classifyEstimateForPipeline(e),
-  }));
-  const sorted = [...classified].sort(
-    (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
-  );
-
-  const filtered = sorted
-    .filter((e) => estimateMatchesFilter(e, filter))
-    .filter((e) => {
-      const q = search.trim().toLowerCase();
-      if (!q) return true;
-      const ref = shortEstimateRef(e.id).toLowerCase();
-      return (
-        (e.customerName || "").toLowerCase().includes(q) ||
-        (e.address || "").toLowerCase().includes(q) ||
-        (e.customerEmail || "").toLowerCase().includes(q) ||
-        (e.customerPhone || "").includes(q) ||
-        ref.includes(q)
-      );
-    });
 
   return (
     <div style={{ fontFamily: ROBOTO }}>
@@ -1958,9 +2011,12 @@ function EstimatePipelineViewV2() {
                 return (
                   <Card
                     key={e.id}
+                    data-estimate-id={e.id}
                     className={cn(
                       "p-4 flex flex-wrap items-center gap-3 relative",
                       e.isPriority && "border-alert-fg",
+                      String(e.id) === String(highlightId) &&
+                        "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white transition-shadow",
                     )}
                   >
                     {e.isPriority && (
@@ -2838,6 +2894,7 @@ function MobileEstimateRow({
   onExtend,
   onLawnOutline,
   v3Flag = false,
+  highlighted = false,
 }) {
   const navigate = useNavigate();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
@@ -2851,6 +2908,7 @@ function MobileEstimateRow({
   };
   return (
     <div
+      data-estimate-id={estimate.id}
       // Row-level click only activates when the estimate is linked to a
       // customer. Showing cursor-pointer + hover shade on an unlinked
       // estimate reads as "this should open a panel" and then silently
@@ -2872,6 +2930,8 @@ function MobileEstimateRow({
           ? "cursor-pointer hover:bg-zinc-50 active:bg-zinc-100"
           : "cursor-default",
         isDraftMuted && "opacity-60",
+        highlighted &&
+          "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white transition-shadow",
       )}
       style={{ height: 64 }}
     >
@@ -3205,7 +3265,11 @@ function MobileEstimateRow({
 // 1:1 on data + endpoint (GET /admin/estimates). The Leads, Create Estimate,
 // and Pricing Logic tabs render their own sections under the shared
 // PipelineCommandHeader, which now drives all four tabs on mobile too.
-function EstimatesMobileListView({ onCreateFromAddress }) {
+function EstimatesMobileListView({
+  onCreateFromAddress,
+  deepLinkEstimateId = null,
+  deepLinkToken = 0,
+}) {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3473,6 +3537,12 @@ function EstimatesMobileListView({ onCreateFromAddress }) {
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
   const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
 
+  const highlightId = useEstimateDeepLinkHighlight({
+    targetId: deepLinkEstimateId,
+    token: deepLinkToken,
+    rows: flat,
+  });
+
   return (
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
     // edge-to-edge overrides, list rows are cards (not hairlined rows).
@@ -3580,6 +3650,7 @@ function EstimatesMobileListView({ onCreateFromAddress }) {
             <MobileEstimateRow
               key={e.id}
               estimate={e}
+              highlighted={String(e.id) === String(highlightId)}
               onCreateFromAddress={onCreateFromAddress}
               onOpenCustomerPanel={setCustomerPanelId}
               onSend={refreshEstimates}
@@ -3672,11 +3743,23 @@ export default function EstimatesPageV2() {
   );
   const initialTab = TABS.some((t) => t.key === searchParams.get("tab"))
     ? searchParams.get("tab")
-    : null;
+    : // A notification deep-link (?estimateId=<id>) carries no tab but must land
+      // on the Estimates list so the row can be scrolled to + highlighted.
+      searchParams.get("estimateId")
+      ? "estimates"
+      : null;
 
   const [activeTab, setActiveTab] = useState(
     initialTab || (hasPrefill ? "new" : "leads"),
   );
+
+  // The deep-link target for the Estimates list. Captured into state (and
+  // stripped from the URL by the effect below) so it's consumed exactly once —
+  // a stale ?estimateId left in the URL can't snap later tab changes back to
+  // Estimates. `token` bumps on every consume so clicking the same notification
+  // again still re-highlights. The effect is the sole consumer (keeps it to a
+  // single arming per navigation).
+  const [deepLink, setDeepLink] = useState({ id: null, token: 0 });
 
   // Watch URL params for incoming prefill. Two cases this needs to handle:
   //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
@@ -3699,20 +3782,42 @@ export default function EstimatesPageV2() {
     );
     const tabParam = searchParams.get("tab");
     const hasTabParam = TABS.some((t) => t.key === tabParam);
-    if (!hasIncoming && !hasTabParam) return;
+    // A notification deep-link (?estimateId=) that arrives via client-side
+    // navigation while this page is already mounted must still snap to the
+    // Estimates tab so the row can be scrolled to + highlighted. An explicit
+    // tab still wins (e.g. ?estimateId=…&tab=pricing honors pricing).
+    const estimateId = searchParams.get("estimateId");
+    if (!hasIncoming && !hasTabParam && !estimateId) return;
     if (hasIncoming) {
       setPrefill(incoming);
       setActiveTab("new");
     } else if (hasTabParam) {
       setActiveTab(tabParam);
+    } else if (estimateId) {
+      setActiveTab("estimates");
     }
-    if (hasIncoming) {
+    if (estimateId) setDeepLink((prev) => ({ id: estimateId, token: prev.token + 1 }));
+    // Strip one-shot params so a later tab change / refresh doesn't re-snap.
+    if (hasIncoming || estimateId) {
       const stripped = new URLSearchParams(searchParams);
-      PREFILL_PARAM_KEYS.forEach((k) => stripped.delete(k));
-      stripped.delete("tab");
+      if (hasIncoming) {
+        PREFILL_PARAM_KEYS.forEach((k) => stripped.delete(k));
+        stripped.delete("tab");
+      }
+      if (estimateId) stripped.delete("estimateId");
       setSearchParams(stripped, { replace: true });
     }
   }, [searchParams, setSearchParams, readLeadPrefill]);
+
+  // One-shot the deep link: once the operator leaves the Estimates tab, drop the
+  // captured target. The list unmounts/remounts across tab switches, so without
+  // this a stale notification's estimate would re-scroll/re-highlight every time
+  // they returned to the tab. A fresh ?estimateId re-populates it (new token).
+  useEffect(() => {
+    if (activeTab !== "estimates" && deepLink.id) {
+      setDeepLink((prev) => ({ id: null, token: prev.token }));
+    }
+  }, [activeTab, deepLink.id]);
 
   // Drop lead/customer prefill once the operator leaves the Create Estimate
   // tab, so the next blank "Create Estimate" doesn't reopen seeded with the
@@ -3756,6 +3861,8 @@ export default function EstimatesPageV2() {
         // own filters/sort; desktop gets the full table/board pipeline view.
         (isMobile ? (
           <EstimatesMobileListView
+            deepLinkEstimateId={deepLink.id}
+            deepLinkToken={deepLink.token}
             onCreateFromAddress={(addr) => {
               setPrefill({
                 leadId: "",
@@ -3770,7 +3877,10 @@ export default function EstimatesPageV2() {
             }}
           />
         ) : (
-          <EstimatePipelineViewV2 />
+          <EstimatePipelineViewV2
+            deepLinkEstimateId={deepLink.id}
+            deepLinkToken={deepLink.token}
+          />
         ))}
       {activeTab === "new" && (
         <EstimateToolViewV2
