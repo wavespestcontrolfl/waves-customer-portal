@@ -3279,6 +3279,16 @@ export function LeadsSection() {
             >
               Response Time vs Conversion
             </h2>
+            <div
+              style={{
+                margin: "-12px 0 14px",
+                color: C.muted,
+                fontSize: 11,
+                fontFamily: ROBOTO,
+              }}
+            >
+              Year to date
+            </div>
             {responseBuckets.length === 0 ? (
               <div style={{ color: C.muted, fontSize: 13 }}>
                 No response data yet
@@ -3412,6 +3422,16 @@ export function LeadsSection() {
             >
               Lost Lead Reasons
             </h2>
+            <div
+              style={{
+                margin: "-12px 0 14px",
+                color: C.muted,
+                fontSize: 11,
+                fontFamily: ROBOTO,
+              }}
+            >
+              Year to date
+            </div>
             {totalLost === 0 ? (
               <div style={{ color: C.muted, fontSize: 13 }}>
                 No lost leads yet
