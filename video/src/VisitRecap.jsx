@@ -161,7 +161,9 @@ const ItsWorking = ({ pestReportV2 }) => {
     <AbsoluteFill style={{ background: `linear-gradient(160deg, ${C.green}, #0E7A3A 70%, ${C.blueDeep})`, padding: '160px 90px', justifyContent: 'center', gap: 18 }}>
       <Eyebrow color="#BBF7D0" delay={2}>It’s working</Eyebrow>
       <div style={{ transform: `scale(${0.4 + 0.6 * pop})`, opacity: interpolate(pop, [0, 1], [0, 1]), fontFamily: FONT, fontWeight: 900, fontSize: 240, color: C.white, lineHeight: 1, letterSpacing: -4 }}>{big}</div>
-      <Title color={C.white} size={56} delay={22}>{down ? 'Pest pressure, down since you started.' : `Pressure is ${(metric?.label || 'low').toLowerCase()} and holding.`}</Title>
+      <Title color={C.white} size={56} delay={22}>{down
+        ? 'Pest pressure, down since you started.'
+        : (metric?.label ? `Pressure is ${metric.label.toLowerCase()} and holding.` : 'Your protection is active and holding.')}</Title>
     </AbsoluteFill>
   );
 };

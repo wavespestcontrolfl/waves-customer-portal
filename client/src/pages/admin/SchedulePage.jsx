@@ -9287,7 +9287,7 @@ export function CompletionPanel({
               />
             </div>
           )}
-          {pestRecapFlag && pestRecapReady && String(service?.service_line || "").toLowerCase() === "pest" && (
+          {pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest" && (
             <div style={{ padding: "12px 16px 0" }}>
               <RecapCapture serviceId={service.id} />
               <PestRecapCard serviceId={service.id} />

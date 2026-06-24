@@ -60,13 +60,24 @@ async function headRecap(key) {
 }
 
 // Returns the S3 object body as a readable stream (for piping to the client) or null.
-async function getRecapStream(key) {
+// Pass an HTTP `range` header value to fetch a byte range — the result then carries
+// `contentRange` (and size = the partial length) so the route can answer 206.
+async function getRecapStream(key, range = null) {
   if (!key) return null;
   assertConfigured();
   try {
-    const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: key }));
-    return { body: object.Body, size: object.ContentLength || 0, contentType: object.ContentType || 'video/mp4' };
+    const object = await s3.send(new GetObjectCommand({
+      Bucket: config.s3.bucket, Key: key, ...(range ? { Range: range } : {}),
+    }));
+    return {
+      body: object.Body,
+      size: object.ContentLength || 0,
+      contentType: object.ContentType || 'video/mp4',
+      contentRange: object.ContentRange || null,
+      acceptRanges: object.AcceptRanges || 'bytes',
+    };
   } catch (err) {
+    if (err?.$metadata?.httpStatusCode === 416 || err?.name === 'InvalidRange') return { rangeNotSatisfiable: true };
     if (err?.name === 'NoSuchKey' || err?.$metadata?.httpStatusCode === 404) return null;
     logger.warn(`[recap-storage] read failed for ${key}: ${err.message}`);
     return null;

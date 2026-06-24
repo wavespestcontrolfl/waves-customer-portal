@@ -553,11 +553,19 @@ router.get('/:token/recap/video', async (req, res, next) => {
     const recap = await getRecap(service.scheduled_service_id);
     if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();
     const { getRecapStream } = require('../services/service-report/recap-storage');
-    const obj = await getRecapStream(recap.s3_key);
+    const range = req.headers.range || null;
+    const obj = await getRecapStream(recap.s3_key, range);
     if (!obj) return res.status(404).end();
+    if (obj.rangeNotSatisfiable) return res.status(416).set('Accept-Ranges', 'bytes').end();
+    res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Type', obj.contentType || 'video/mp4');
-    if (obj.size) res.setHeader('Content-Length', obj.size);
     res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    // 206 with Content-Range when the browser asked for a byte range (iOS/Safari MP4
+    // seeking); otherwise a full 200. obj.size is the partial length for a range hit.
+    if (range && obj.contentRange) {
+      res.status(206).setHeader('Content-Range', obj.contentRange);
+    }
+    if (obj.size) res.setHeader('Content-Length', obj.size);
     obj.body.on('error', (streamErr) => {
       logger.warn(`[recap] public video stream error: ${streamErr.message}`);
       if (!res.headersSent) res.status(502).end(); else res.destroy(streamErr);

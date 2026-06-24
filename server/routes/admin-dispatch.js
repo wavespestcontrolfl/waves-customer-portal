@@ -6628,11 +6628,17 @@ router.get('/:serviceId/recap-video/file', async (req, res, next) => {
     if (!(await recapOwnerOk(req, res))) return undefined;
     const recap = await recapPipeline.getRecap(req.params.serviceId);
     if (!recap?.s3_key) return res.status(404).end();
-    const obj = await recapStorage.getRecapStream(recap.s3_key);
+    const range = req.headers.range || null;
+    const obj = await recapStorage.getRecapStream(recap.s3_key, range);
     if (!obj) return res.status(404).end();
+    if (obj.rangeNotSatisfiable) return res.status(416).set('Accept-Ranges', 'bytes').end();
+    res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Type', obj.contentType || 'video/mp4');
-    if (obj.size) res.setHeader('Content-Length', obj.size);
     res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    if (range && obj.contentRange) {
+      res.status(206).setHeader('Content-Range', obj.contentRange);
+    }
+    if (obj.size) res.setHeader('Content-Length', obj.size);
     obj.body.on('error', (streamErr) => {
       logger.warn(`[recap] video stream error: ${streamErr.message}`);
       if (!res.headersSent) res.status(502).end(); else res.destroy(streamErr);
