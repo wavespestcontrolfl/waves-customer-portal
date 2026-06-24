@@ -471,11 +471,37 @@ function formatServiceProfileLabel(services) {
   return parts.join(' + ');
 }
 
+// Per-service durations for a one-time visit, so a multi-service one-time accept
+// (e.g. a pest visit plus a Bora-Care wood treatment) reserves a slot sized for the
+// actual work instead of the default one-time length. Mirrors the public booking
+// page's per-service durations; the profile sums these and clampDuration caps the
+// total at MAX_ESTIMATE_SLOT_DURATION_MINUTES.
+const ONE_TIME_SERVICE_DURATION_MINUTES = {
+  pest_control: 60,
+  one_time_pest: 60,
+  pest_initial_roach: 75,
+  german_roach: 75,
+  bora_care: 90,
+  mosquito: 45,
+  one_time_mosquito: 45,
+  lawn_care: 60,
+  tree_shrub: 60,
+  termite_bait: 90,
+  termite_trenching: 90,
+  pre_slab_termiticide: 90,
+  rodent: 60,
+};
+const DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES = 45;
+function oneTimeServiceDurationMinutes(service) {
+  return ONE_TIME_SERVICE_DURATION_MINUTES[String(service || '').toLowerCase()]
+    || DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES;
+}
+
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
-// hides paid add-ons from dispatch/tech. Carries durationMinutes 0 — surfacing the
-// mix must not change one-time slot sizing (per-add-on duration is out of scope).
+// hides paid add-ons from dispatch/tech, and so the slot is sized for the combined
+// work (each row carries its per-service duration; the profile sums them).
 //
 // Delegates to the canonical billing/normalization helpers so the mix matches what
 // is actually billed/accepted: normalizeOneTimeBreakdown already drops on-program
@@ -494,7 +520,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
     seen.add(key);
-    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: 0 });
+    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: oneTimeServiceDurationMinutes(service) });
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)
