@@ -134,7 +134,18 @@ const FoundAndDid = ({ pestReportV2, media }) => {
             <span style={{ fontFamily: FONT, fontWeight: 500, fontSize: 32, color: '#3F4A65' }}>{bug.whatWeDid}</span>
           </div>
         </>
-      ) : <Title size={80} delay={8}>No pest activity today — all clear.</Title>}
+      ) : (
+        // "All clear" only when the protection status is actually good — bugFiles
+        // can be empty while the status is still watch/action with a next step.
+        pestReportV2.status?.tone === 'good'
+          ? <Title size={80} delay={8}>No pest activity today — all clear.</Title>
+          : (
+            <>
+              <Title size={64} delay={8}>{pestReportV2.statusSummary || 'Here’s what we’re keeping an eye on.'}</Title>
+              {pestReportV2.primaryMove?.title ? <Body size={36} delay={18}>Your next step: {pestReportV2.primaryMove.title}</Body> : null}
+            </>
+          )
+      )}
     </Pad>
   );
 };
@@ -159,13 +170,16 @@ const ItsWorking = ({ pestReportV2 }) => {
 const WhatsNext = ({ pestReportV2 }) => {
   const f = pestReportV2.forecast;
   const top = (f?.pests || [])[0];
+  // Honest wording from the pest's actual trend (not always "rising").
+  const trendWord = top?.trend === 'up' ? 'pressure rising' : top?.trend === 'down' ? 'pressure easing' : 'steady this month';
+  const trendColor = top?.trend === 'down' ? C.green : top?.trend === 'up' ? C.orange : '#CFE8FA';
   return (
     <AbsoluteFill style={{ background: `linear-gradient(160deg, ${C.blueDeep}, ${C.blueMid})`, padding: '160px 90px', justifyContent: 'center', gap: 22 }}>
       <Eyebrow color={C.blue} delay={2}>What’s coming{f?.monthName ? ` in ${f.monthName}` : ''}</Eyebrow>
       {top ? (
         <div style={{ ...useEnter(10, 30) }}>
           <div style={{ fontFamily: FONT, fontWeight: 800, fontSize: 64, color: C.white }}>{top.label}</div>
-          <div style={{ fontFamily: FONT, fontWeight: 600, fontSize: 34, color: C.orange, textTransform: 'capitalize' }}>{top.level} · pressure rising</div>
+          <div style={{ fontFamily: FONT, fontWeight: 600, fontSize: 34, color: trendColor, textTransform: 'capitalize' }}>{top.level} · {trendWord}</div>
         </div>
       ) : null}
       <Body color="#CFE8FA" size={40} delay={24}>{f?.headline || 'We’ll keep your barrier strong through the season.'}</Body>

@@ -71,7 +71,7 @@ export default function CloseoutPreview() {
     <div style={{ minHeight: '100vh', background: '#0f1923', padding: '20px 16px', fontFamily: "'DM Sans', system-ui, sans-serif" }}>
       <div style={{ maxWidth: 460, margin: '0 auto' }}>
         <div style={{ color: '#e2e8f0', fontWeight: 800, fontSize: 16, marginBottom: 4 }}>Fast Closeout — preview</div>
-        <div style={{ color: '#94a3b8', fontSize: 13, marginBottom: 14 }}>Tech completes a lawn visit. System builds the customer report.</div>
+        <div style={{ color: '#94a3b8', fontSize: 14, marginBottom: 14 }}>Tech completes a lawn visit. System builds the customer report.</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>{Object.keys(SCENARIOS).map(tab)}</div>
         <FastCloseoutSummary summary={s.summary} onAddIssue={() => {}} onComplete={() => {}} />
       </div>

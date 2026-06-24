@@ -7481,7 +7481,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />
+        {/* V2 shows the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
+        {!data.reportV2 && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.

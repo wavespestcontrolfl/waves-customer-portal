@@ -185,7 +185,7 @@ export default function LawnReportV2Preview() {
         border: `1px solid ${scenario === key ? TEXT : BORDER}`,
         background: scenario === key ? TEXT : COLORS.white,
         color: scenario === key ? COLORS.white : TEXT,
-        fontFamily: FONTS.heading, fontWeight: 700, fontSize: 13,
+        fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14,
       }}
     >
       {label}

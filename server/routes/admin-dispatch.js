@@ -6634,6 +6634,14 @@ router.post('/:serviceId/recap-media/presign', async (req, res, next) => {
 router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) => {
   try {
     if (!(await recapOwnerOk(req, res))) return undefined;
+    // Cap accidental oversized clips — a 4K/long video can time out the render or
+    // blow up storage/render cost. Drop the uploaded object + row and reject.
+    const RECAP_MAX_BYTES = 80 * 1024 * 1024; // ~80MB
+    const RECAP_MAX_DURATION_MS = 20000; // ~20s
+    if ((Number(req.body?.bytes) || 0) > RECAP_MAX_BYTES || (Number(req.body?.durationMs) || 0) > RECAP_MAX_DURATION_MS) {
+      await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.serviceId });
+      return res.status(413).json({ error: 'Clip too large — keep it under ~20 seconds.' });
+    }
     const row = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.serviceId, bytes: req.body?.bytes, durationMs: req.body?.durationMs });
     if (!row) return res.status(404).json({ error: 'media not found' });
     return res.json({ ok: true, id: row.id, status: row.status });
