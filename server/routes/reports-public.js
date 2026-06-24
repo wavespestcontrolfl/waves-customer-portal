@@ -558,6 +558,10 @@ router.get('/:token/recap/video', async (req, res, next) => {
     res.setHeader('Content-Type', obj.contentType || 'video/mp4');
     if (obj.size) res.setHeader('Content-Length', obj.size);
     res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    obj.body.on('error', (streamErr) => {
+      logger.warn(`[recap] public video stream error: ${streamErr.message}`);
+      if (!res.headersSent) res.status(502).end(); else res.destroy(streamErr);
+    });
     return obj.body.pipe(res);
   } catch (err) { return next(err); }
 });

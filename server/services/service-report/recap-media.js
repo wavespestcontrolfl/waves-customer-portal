@@ -3,7 +3,7 @@
 // action `role` (never trusted from the client). getMediaForRecap maps ready rows
 // to the composition's media[] slots (presigned GET srcs + beat role + caption).
 const crypto = require('node:crypto');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../../models/db');
 const config = require('../../config');
@@ -92,13 +92,38 @@ async function presignUpload({ scheduledServiceId, role, mediaType = 'video', co
   return { mediaId: row.id, key, uploadUrl };
 }
 
-async function confirmUpload(mediaId, { scheduledServiceId = null, bytes = null, durationMs = null } = {}, knex = db) {
-  const q = knex('service_media').where({ id: mediaId });
-  if (scheduledServiceId) q.andWhere({ scheduled_service_id: scheduledServiceId });
-  const [row] = await q.update({
-    status: 'ready', bytes, duration_ms: durationMs, updated_at: new Date(),
+const RECAP_MAX_BYTES = 80 * 1024 * 1024; // ~80MB
+const RECAP_MAX_DURATION_MS = 20000; // ~20s
+
+// Verifies the uploaded object exists + is within limits using AUTHORITATIVE S3
+// size (not the client-reported bytes, which can be spoofed/missing), then marks
+// it ready. Oversized/missing objects are dropped (row + S3) and rejected, so they
+// can never reach the renderer. Returns { ok, row } | { ok:false, reason }.
+async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = null } = {}, knex = db) {
+  const lookup = knex('service_media').where({ id: mediaId });
+  if (scheduledServiceId) lookup.andWhere({ scheduled_service_id: scheduledServiceId });
+  const row = await lookup.first();
+  if (!row) return { ok: false, reason: 'not_found' };
+
+  let realBytes = null;
+  if (config.s3?.bucket) {
+    try {
+      const head = await s3.send(new HeadObjectCommand({ Bucket: config.s3.bucket, Key: row.s3_key }));
+      realBytes = Number(head.ContentLength) || 0;
+    } catch { realBytes = null; }
+  }
+  if (realBytes == null) { await deleteMedia(mediaId, { scheduledServiceId }, knex); return { ok: false, reason: 'not_uploaded' }; }
+
+  const dur = Number(durationMs) || 0;
+  if (realBytes > RECAP_MAX_BYTES || dur > RECAP_MAX_DURATION_MS) {
+    await deleteMedia(mediaId, { scheduledServiceId }, knex);
+    return { ok: false, reason: 'too_large' };
+  }
+
+  const [updated] = await knex('service_media').where({ id: row.id }).update({
+    status: 'ready', bytes: realBytes, duration_ms: durationMs, updated_at: new Date(),
   }).returning('*');
-  return row || null;
+  return { ok: true, row: updated };
 }
 
 async function listMedia(scheduledServiceId, knex = db) {

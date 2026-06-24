@@ -2364,10 +2364,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           const fmt = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
           const daily = await getAreaDailyRainfall(waterSnapshot.area_id, fmt(s), fmt(d), knex).catch(() => []);
           if (Array.isArray(daily) && daily.length) {
-            areaRain7d = daily.map((r) => ({
-              d: new Date(r.date).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
-              in: r.rain,
-            }));
+            areaRain7d = daily.map((r) => {
+              // r.date is a DATE — anchor at noon so the ET weekday label doesn't
+              // shift a day back from a UTC-midnight instant.
+              const ymd = r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10);
+              return {
+                d: new Date(`${ymd}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
+                in: r.rain,
+              };
+            });
           }
         }
       } catch { /* area calibration optional (tables may be unmigrated/unseeded) */ }

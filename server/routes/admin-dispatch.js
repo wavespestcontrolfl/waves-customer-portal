@@ -6568,6 +6568,7 @@ router.get('/:serviceId/recap-video', async (req, res, next) => {
       status: recap.status,
       ready: recap.status === 'ready' || recap.status === 'approved',
       approved: recap.status === 'approved',
+      sent: Boolean(recap.sent_at),
       durationMs: recap.duration_ms || null,
       error: recap.last_error || null,
     });
@@ -6586,19 +6587,25 @@ router.post('/:serviceId/recap-video/generate', async (req, res, next) => {
 
 router.post('/:serviceId/recap-video/approve', async (req, res, next) => {
   try {
+    if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap is disabled' });
     if (!(await recapOwnerOk(req, res))) return undefined;
     const result = await recapPipeline.approveRecap(req.params.serviceId, { approvedBy: recapVideoActor(req) });
     if (!result.ok) return res.status(409).json({ error: result.error });
     // Approval sends the customer the watch-recap link (best-effort, idempotent).
+    // sendRecap is idempotent + retryable, so a failed send leaves the recap
+    // approved-but-unsent and the client surfaces a retry (sent:false).
     let sent = false;
+    let sendError = null;
     try {
       const { sendRecap } = require('../services/service-report/recap-delivery');
       const send = await sendRecap(req.params.serviceId);
       sent = Boolean(send?.ok);
+      if (!sent) sendError = send?.reason || 'send_failed';
     } catch (err) {
+      sendError = err.message;
       logger.warn(`[dispatch] recap send failed for ${req.params.serviceId}: ${err.message}`);
     }
-    return res.json({ ok: true, status: 'approved', sent });
+    return res.json({ ok: true, status: 'approved', sent, sendError });
   } catch (err) { return next(err); }
 });
 
@@ -6613,6 +6620,10 @@ router.get('/:serviceId/recap-video/file', async (req, res, next) => {
     res.setHeader('Content-Type', obj.contentType || 'video/mp4');
     if (obj.size) res.setHeader('Content-Length', obj.size);
     res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    obj.body.on('error', (streamErr) => {
+      logger.warn(`[recap] video stream error: ${streamErr.message}`);
+      if (!res.headersSent) res.status(502).end(); else res.destroy(streamErr);
+    });
     return obj.body.pipe(res);
   } catch (err) { return next(err); }
 });
@@ -6634,17 +6645,15 @@ router.post('/:serviceId/recap-media/presign', async (req, res, next) => {
 router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) => {
   try {
     if (!(await recapOwnerOk(req, res))) return undefined;
-    // Cap accidental oversized clips — a 4K/long video can time out the render or
-    // blow up storage/render cost. Drop the uploaded object + row and reject.
-    const RECAP_MAX_BYTES = 80 * 1024 * 1024; // ~80MB
-    const RECAP_MAX_DURATION_MS = 20000; // ~20s
-    if ((Number(req.body?.bytes) || 0) > RECAP_MAX_BYTES || (Number(req.body?.durationMs) || 0) > RECAP_MAX_DURATION_MS) {
-      await recapMedia.deleteMedia(req.params.mediaId, { scheduledServiceId: req.params.serviceId });
-      return res.status(413).json({ error: 'Clip too large — keep it under ~20 seconds.' });
+    // Size/duration verified server-side (authoritative S3 size) in confirmUpload;
+    // oversized/missing objects are dropped + rejected so they never hit the renderer.
+    const result = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.serviceId, durationMs: req.body?.durationMs });
+    if (!result.ok) {
+      if (result.reason === 'too_large') return res.status(413).json({ error: 'Clip too large — keep it under ~20 seconds.' });
+      if (result.reason === 'not_uploaded') return res.status(409).json({ error: 'Upload not found — try again.' });
+      return res.status(404).json({ error: 'media not found' });
     }
-    const row = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.serviceId, bytes: req.body?.bytes, durationMs: req.body?.durationMs });
-    if (!row) return res.status(404).json({ error: 'media not found' });
-    return res.json({ ok: true, id: row.id, status: row.status });
+    return res.json({ ok: true, id: result.row.id, status: result.row.status });
   } catch (err) { return next(err); }
 });
 

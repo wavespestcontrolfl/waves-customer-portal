@@ -6691,10 +6691,18 @@ function PestRecapCard({ serviceId }) {
             ? <video src={videoUrl} controls playsInline style={{ width: "100%", maxWidth: 240, display: "block", margin: "0 auto 10px", borderRadius: 10, background: "#000" }} />
             : <div style={{ fontSize: 13, color: D.muted, marginBottom: 10 }}>Loading preview…</div>}
           {s === "approved" ? (
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{ flex: 1, fontSize: 12.5, color: D.green, fontWeight: 700 }}>✓ Approved — sends with this visit</span>
-              <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
-            </div>
+            state.sent ? (
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ flex: 1, fontSize: 12.5, color: D.green, fontWeight: 700 }}>Approved &amp; sent to the customer</span>
+                <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 700, minWidth: 130 }}>Approved — the text didn’t send</span>
+                <button style={btn(D.green, "#04240f")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
+                <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
+              </div>
+            )
           ) : (
             <div style={{ display: "flex", gap: 8 }}>
               <button style={btn(D.green, "#04240f")} disabled={busy} onClick={() => act("approve")}>Approve &amp; send</button>

@@ -34,7 +34,9 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
     const existing = await knex('service_recaps').where({ scheduled_service_id: scheduledServiceId }).first();
     if (existing) {
       if (['pending', 'rendering'].includes(existing.status)) return { ok: true, queued: false, recap: existing };
-      if (!force) return { ok: true, queued: false, recap: existing };
+      // Never regenerate a recap already SENT to the customer — keep the approved
+      // asset + link live. force only re-renders ready/failed/approved-but-unsent.
+      if (!force || existing.sent_at) return { ok: true, queued: false, recap: existing };
       const [updated] = await knex('service_recaps').where({ id: existing.id }).update({
         status: 'pending', attempts: 0, next_attempt_at: now, locked_at: null, last_error: null,
         approved_at: null, approved_by: null, updated_at: now,
