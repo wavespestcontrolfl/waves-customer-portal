@@ -632,46 +632,64 @@ function ChannelChip({ channel }) {
 // the table shows "—" rather than a misleading 0.
 function mergeAttributionRows(calls, leads) {
   const byName = new Map();
-  for (const c of calls) {
-    byName.set(c.name, {
-      name: c.name,
-      channel: c.channel || null,
-      sourceType: c.sourceType,
-      isActive: c.isActive,
-      calls: c.calls || 0,
-      uniqueCallers: c.uniqueCallers || 0,
-      leads: 0,
-      booked: 0,
-      conversionPct: null,
-      hasCalls: true,
-      hasLeads: false,
-    });
-  }
-  for (const l of leads) {
-    const existing = byName.get(l.name);
-    if (existing) {
-      existing.leads = l.leads || 0;
-      existing.booked = l.booked || 0;
-      existing.conversionPct = l.conversionPct;
-      existing.hasLeads = true;
-      existing.channel = existing.channel || l.channel || null;
-    } else {
-      byName.set(l.name, {
-        name: l.name,
-        channel: l.channel || null,
-        sourceType: l.sourceType,
+  const ensure = (name) => {
+    if (!byName.has(name)) {
+      byName.set(name, {
+        name,
+        channel: null,
+        sourceType: null,
         isActive: null,
         calls: 0,
         uniqueCallers: 0,
-        leads: l.leads || 0,
-        booked: l.booked || 0,
-        conversionPct: l.conversionPct,
+        leads: 0,
+        booked: 0,
+        conversionPct: null,
         hasCalls: false,
-        hasLeads: true,
+        hasLeads: false,
       });
     }
+    return byName.get(name);
+  };
+  // /calls-by-source groups by name + dialed number, and source names are not
+  // unique, so one source can arrive as several rows — AGGREGATE them rather
+  // than overwrite, or the table undercounts vs the funnel total. A NULL name
+  // (call_log.to_phone IS NULL → COALESCE concat yields NULL) collapses to one
+  // 'Unmapped' bucket so it never crashes the name sort.
+  for (const c of calls) {
+    const row = ensure(c.name || 'Unmapped');
+    row.calls += c.calls || 0;
+    row.uniqueCallers += c.uniqueCallers || 0;
+    row.hasCalls = true;
+    if (row.channel == null) row.channel = c.channel || null;
+    if (row.sourceType == null) row.sourceType = c.sourceType ?? null;
+    if (c.isActive === true) row.isActive = true;
+    else if (row.isActive == null) row.isActive = c.isActive ?? null;
+  }
+  for (const l of leads) {
+    const row = ensure(l.name || 'Unattributed');
+    row.leads += l.leads || 0;
+    row.booked += l.booked || 0;
+    row.hasLeads = true;
+    if (row.channel == null) row.channel = l.channel || null;
+    if (row.sourceType == null) row.sourceType = l.sourceType ?? null;
+  }
+  // Recompute conversion from aggregated totals (a per-row pct can't be summed);
+  // null for sources with no leads so the cell shows "—" and sorts as absent.
+  for (const row of byName.values()) {
+    row.conversionPct = row.hasLeads && row.leads > 0
+      ? Math.round((row.booked / row.leads) * 1000) / 10
+      : null;
   }
   return [...byName.values()];
+}
+
+// Sortable value for a metric, treating a metric the row doesn't have (a
+// call-only DID has no leads; a lead-only web source has no calls) as null so
+// it sorts last in BOTH directions — matching the "—" the cell renders.
+function attributionMetric(row, key) {
+  if ((key === 'calls' || key === 'uniqueCallers') && !row.hasCalls) return null;
+  if ((key === 'leads' || key === 'booked' || key === 'conversionPct') && !row.hasLeads) return null;
+  return row[key];
 }
 
 const SCORECARD_COLUMNS = [
@@ -685,11 +703,11 @@ const SCORECARD_COLUMNS = [
 function sortAttributionRows(rows, key, dir) {
   const m = dir === 'asc' ? 1 : -1;
   return [...rows].sort((a, b) => {
-    if (key === 'name') return a.name.localeCompare(b.name) * m;
-    // Null metrics (no calls, or no leads) always sort last so empty rows don't
-    // float to the top on an ascending sort.
-    const av = a[key];
-    const bv = b[key];
+    if (key === 'name') return (a.name || '').localeCompare(b.name || '') * m;
+    // Absent metrics (a row that has no calls, or no leads) always sort last so
+    // "—" cells don't float to the top of an ascending sort.
+    const av = attributionMetric(a, key);
+    const bv = attributionMetric(b, key);
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
     if (bv == null) return -1;
