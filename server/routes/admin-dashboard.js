@@ -603,7 +603,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     // not-deleted + a customer stage), so churn (stage→churned), going dormant,
     // and soft-delete are all counted as losses; reactivation is handled because
     // the live state is the source of truth, not the sticky churned_at.
-    let retentionPct = null, lost = 0, lostMRR = 0;
+    let retentionPct = null, lost = 0, lostMRR = 0, retentionOk = false;
     try {
       const departedInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
       // Cohort = "was a live customer at the window start": became a customer
@@ -658,6 +658,11 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       lostMRR = Math.max(0, baseMRR - parseFloat(retainedRow?.mrr || 0));
 
       retentionPct = base > 0 ? Math.max(0, Math.round((retained / base) * 1000) / 10) : null;
+      // Mark the lost side as trustworthy only after it fully computed. A
+      // null retentionPct (empty cohort) still counts as success — lost=0 is
+      // correct there. What we must NOT do is publish momentum off a thrown
+      // retention query, where lost/lostMRR are still their 0 initializers.
+      retentionOk = true;
     } catch (err) {
       logger.error(`[admin-dashboard] retention failed: ${err.message}`);
     }
@@ -669,8 +674,14 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     // retention cohort loss computed just above. Net = new − lost (acquisition
     // vs. churn) — no upgrade/expansion movement is inferred, so this is an
     // honest new-vs-lost figure, not a fabricated expansion number.
+    //
+    // Gated on `retentionOk`: if the retention query above threw, lost/lostMRR
+    // are still their 0 initializers — publishing momentum then would paint
+    // every new customer/dollar as pure net growth with $0 churned. When the
+    // lost side is unavailable we leave momentum null so the UI hides the
+    // section rather than showing a falsely rosy number.
     let momentum = null;
-    try {
+    if (retentionOk) try {
       const newRow = await db('customers')
         .where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
         .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [todayStr])
