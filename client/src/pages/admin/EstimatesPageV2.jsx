@@ -1514,59 +1514,33 @@ const SOURCE_ICON = {
 // view, so the highlight is the "you're here" cue. Shared by the desktop and
 // mobile estimate lists.
 //
+// Deliberately minimal: it highlights the row only if it's already visible in
+// the current list, and otherwise leaves the list untouched. The notification
+// bell navigates with window.location.href (a full reload), so the list always
+// mounts fresh with default filters / no search — the target is visible without
+// the hook ever having to touch the operator's filters. Not auto-clearing
+// filters is what keeps this side-effect-free (no fighting the operator's input,
+// no timers, no load-race).
+//
 // `targetId` is the deep-link id; `token` bumps once per navigation (captured +
 // one-shotted by the page) so clicking the same notification again re-arms the
 // cue. `rows` is the rendered list — passed only so the effect re-checks as the
-// list loads/filters settle. `resetView` clears any status/search/date filter
-// that could be hiding the row; it's called at most ONCE per navigation, so a
-// missing target never fights the operator's own filter/search input. The
-// search is also time-bounded: if the row never renders (deleted/stale id) the
-// hook gives up instead of polling the DOM forever. Returns the id to highlight
-// while active.
-function useEstimateDeepLinkHighlight({ targetId, token, loading, rows, resetView }) {
+// list loads. Returns the id to highlight while active.
+function useEstimateDeepLinkHighlight({ targetId, token, rows }) {
   const [activeId, setActiveId] = useState(null);
-  // Per-navigation state: which token we're resolving, whether we've already
-  // cleared filters once, and whether the search is finished (found or gave up).
-  const navRef = useRef({ token: null, didReset: false, done: false });
+  // The nav token we've already highlighted — guards against re-scrolling on
+  // every later render, while a new token (repeat click) re-arms.
+  const doneTokenRef = useRef(null);
 
   useEffect(() => {
-    if (!targetId) return;
-    if (navRef.current.token !== token) {
-      navRef.current = { token, didReset: false, done: false };
-      setActiveId(null);
-    }
-    const nav = navRef.current;
-    if (nav.done) return;
-
+    if (!targetId || doneTokenRef.current === token) return;
     const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
     const node = document.querySelector(`[data-estimate-id="${sel}"]`);
-    if (node) {
-      nav.done = true;
-      node.scrollIntoView({ behavior: "smooth", block: "center" });
-      setActiveId(targetId);
-      return;
-    }
-    // Not rendered yet — clear a hiding filter/search/date ONCE, then wait for
-    // a rows change to re-run this. Resetting only once is what keeps a missing
-    // target from clobbering filter changes the operator makes afterwards.
-    if (!nav.didReset) {
-      nav.didReset = true;
-      resetView();
-    }
-  }, [token, targetId, rows, resetView]);
-
-  // Bound the search: once the list has finished loading, give it a few seconds
-  // to render the target; if it never shows (deleted / stale / typo'd id), mark
-  // the nav done so the effect above stops querying the DOM on every later
-  // render. Gated on !loading so a slow/cold fetch (>6s) can't trip the timer
-  // before any rows render — the timer (re)starts each time loading settles.
-  useEffect(() => {
-    if (!targetId || loading) return undefined;
-    const t = setTimeout(() => {
-      if (navRef.current.token === token) navRef.current.done = true;
-    }, 6000);
-    return () => clearTimeout(t);
-  }, [token, targetId, loading]);
+    if (!node) return; // not visible in the current view — leave the list as-is
+    doneTokenRef.current = token;
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    setActiveId(targetId);
+  }, [token, targetId, rows]);
 
   // Fade the highlight a few seconds after it activates.
   useEffect(() => {
@@ -1588,15 +1562,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const [filter, setFilter] = useState("all");
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
-
-  // Clear any filter/search/date that could hide a deep-linked estimate. No-ops
-  // (no re-render) when already at defaults, so the highlight hook can call it
-  // every render without looping.
-  const resetDeepLinkView = useCallback(() => {
-    setFilter((f) => (f === "all" ? f : "all"));
-    setSearch((s) => (s ? "" : s));
-    setDateRange((d) => (d === "all" ? d : "all"));
-  }, []);
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -1868,9 +1833,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
-    loading,
     rows: filtered,
-    resetView: resetDeepLinkView,
   });
 
   if (loading) {
@@ -3314,14 +3277,6 @@ function EstimatesMobileListView({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("all");
-
-  // Clear any filter/search/date that could hide a deep-linked estimate. No-ops
-  // when already at defaults, so the highlight hook can call it without looping.
-  const resetDeepLinkView = useCallback(() => {
-    setFilter((f) => (f === "all" ? f : "all"));
-    setSearch((s) => (s ? "" : s));
-    setDateFilter((d) => (d === "all" ? d : "all"));
-  }, []);
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
@@ -3585,9 +3540,7 @@ function EstimatesMobileListView({
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
-    loading,
     rows: flat,
-    resetView: resetDeepLinkView,
   });
 
   return (
