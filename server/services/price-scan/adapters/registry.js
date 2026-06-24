@@ -12,6 +12,20 @@ const HOST_MAP = [
   { test: /veseris\.com|veseris/i, key: 'veseris' },
 ];
 
+// Amazon hosts. Anchored to a PARSED hostname (like Shopify) — not a raw substring — so a
+// vendor with website notamazon.com or amazon.com.evil.com can't be misrouted to the Amazon
+// adapter. Just amazon.com (its subdomains — www.amazon.com, business.amazon.com — match via
+// the dot-suffix rule); the vendor row + curated product URLs all live on amazon.com, so
+// isOnHost in weekly-scan validates curated URLs correctly. The API host (na.business-api)
+// is fixed in the adapter and never used for routing.
+const AMAZON_HOSTS = ['amazon.com'];
+function isAmazonVendor(vendor) {
+  return [vendor.host, vendor.url, vendor.website].some((src) => {
+    const h = hostOf(src);
+    return !!h && AMAZON_HOSTS.some((b) => h === b || h.endsWith(`.${b}`));
+  });
+}
+
 // The parsed hostname of a vendor-supplied location string (accepts a scheme-less host by
 // assuming https), or '' if unparseable. Used to anchor Shopify routing to a real host
 // rather than a substring of operator-editable text.
@@ -39,6 +53,7 @@ function isShopifyVendor(vendor) {
 // vendor: { name?, host?, url?, website? }
 function selectAdapterKey(vendor = {}) {
   if (isShopifyVendor(vendor)) return 'shopify';
+  if (isAmazonVendor(vendor)) return 'amazon';
   const hay = `${vendor.host || ''} ${vendor.url || ''} ${vendor.website || ''} ${vendor.name || ''}`.trim();
   if (!hay) return 'generic';
   for (const { test, key } of HOST_MAP) if (test.test(hay)) return key;
@@ -53,6 +68,7 @@ const ADAPTER_LOADERS = {
   keystone: () => require('./keystone'),
   veseris: () => require('./veseris'), // B2B login adapter (account pricing)
   shopify: () => require('./shopify'), // generic Shopify storefront (base URL from vendor.website)
+  amazon: () => require('./amazon-business'), // Amazon Business Product Search API (no browser)
   generic: () => require('./generic'),
 };
 
