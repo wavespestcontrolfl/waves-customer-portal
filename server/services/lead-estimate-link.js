@@ -159,6 +159,12 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
   }
 }
 
+function parseEstimateData(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 async function markLinkedLeadEstimateAccepted({
   estimateId,
   customerId,
@@ -170,37 +176,66 @@ async function markLinkedLeadEstimateAccepted({
 }) {
   if (!estimateId) return;
 
-  let leads = (await database('leads').where({ estimate_id: estimateId }))
-    .filter((lead) => !CLOSED_LEAD_STATUSES.has(lead.status));
-
-  // Accepted-but-unlinked fallback: when the estimate was never FK-linked to
-  // its originating lead (created standalone, so `leads.estimate_id` is null),
-  // the query above finds nothing and the lead would stay stuck in `new` even
-  // though the customer just accepted. Acceptance is the authoritative "won"
-  // signal, so match the accepted customer's contact to an open, never-yet-
-  // converted lead (customer_id IS NULL — see findUnconvertedLeadsByContact for
-  // why we never sweep an existing customer's other open add-on leads).
-  if (!leads.length && customerId) {
-    const customer = await database('customers').where({ id: customerId }).first();
-    if (customer) {
-      leads = (await findUnconvertedLeadsByContact(database, customer.phone, customer.email))
-        .filter((lead) => !CLOSED_LEAD_STATUSES.has(lead.status));
-      if (leads.length > 1) {
-        logger.warn(`[lead-trigger] estimate ${estimateId} acceptance matched ${leads.length} open leads by contact; converting all`, {
-          estimateId,
-          customerId,
-          leadIds: leads.map((lead) => lead.id),
-        });
-      }
+  // Stamp the accepted estimate onto a rescued (previously unlinked) lead so
+  // accepted-estimate reporting that joins on `leads.estimate_id`
+  // (seo/conversion-feedback-miner) counts it, then convert it.
+  const convert = async (lead) => {
+    if (!lead.estimate_id) {
+      await database('leads').where({ id: lead.id }).update({ estimate_id: estimateId, updated_at: new Date() });
     }
-  }
-
-  for (const lead of leads) {
     await leadAttributionService.markConverted(lead.id, {
       customerId,
       monthlyValue,
       initialServiceValue,
       waveguardTier,
+    });
+  };
+
+  // 1. Directly FK-linked leads. If ANY linkage row exists — even one already
+  //    closed (lost/duplicate) — the originating lead for this estimate is
+  //    known, so convert the open ones and STOP. We must NOT fall through to
+  //    fuzzy matching here: a previously-linked-then-lost lead means the deal's
+  //    lead is accounted for, and contact matching could win an unrelated one.
+  const linked = await database('leads').where({ estimate_id: estimateId });
+  if (linked.length) {
+    for (const lead of linked) {
+      if (!CLOSED_LEAD_STATUSES.has(lead.status)) await convert(lead);
+    }
+    return;
+  }
+
+  // No `leads.estimate_id` row exists at all — rescue the originating lead that
+  // was never linked via the FK.
+  const estimate = await database('estimates').where({ id: estimateId }).first();
+  if (!estimate) return;
+
+  // 2. Quote-wizard origination: public-quote stamps `leads.customer_id` and
+  //    mirrors the lead id in `estimate_data.lead_id` (NOT `leads.estimate_id`).
+  //    The contact fallback's `customer_id IS NULL` guard would miss it, so
+  //    convert that exact lead by id — precise, no sweeping.
+  const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
+  if (dataLeadId) {
+    const lead = await database('leads').where({ id: dataLeadId }).first();
+    if (lead && !CLOSED_LEAD_STATUSES.has(lead.status)) await convert(lead);
+    return;
+  }
+
+  // 3. Standalone estimate (no lead linkage anywhere): match the accepted
+  //    customer's contact to an open, never-converted lead. Acceptance of one
+  //    estimate identifies at most ONE originating lead, so convert only when
+  //    the match is unambiguous — skip (don't over-count wins) when 0 or 2+.
+  if (!customerId) return;
+  const customer = await database('customers').where({ id: customerId }).first();
+  if (!customer) return;
+  const matches = (await findUnconvertedLeadsByContact(database, customer.phone, customer.email))
+    .filter((lead) => !CLOSED_LEAD_STATUSES.has(lead.status));
+  if (matches.length === 1) {
+    await convert(matches[0]);
+  } else if (matches.length > 1) {
+    logger.warn(`[lead-trigger] estimate ${estimateId} acceptance: ambiguous contact match (${matches.length} open leads) — skipping fallback`, {
+      estimateId,
+      customerId,
+      leadIds: matches.map((lead) => lead.id),
     });
   }
 }

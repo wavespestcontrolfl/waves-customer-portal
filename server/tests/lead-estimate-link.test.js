@@ -176,86 +176,113 @@ describe('lead-estimate link service', () => {
     expect(activities).toEqual([]);
   });
 
-  test('marks open linked leads converted when estimate is accepted', async () => {
-    db.mockImplementation((table) => ({
-      where: async (clause) => {
-        expect(table).toBe('leads');
-        expect(clause).toEqual({ estimate_id: 'estimate-1' });
-        return [
-          { id: 'lead-open', status: 'estimate_viewed' },
-          { id: 'lead-lost', status: 'lost' },
-        ];
+  // Richer mock for markLinkedLeadEstimateAccepted's multi-branch resolution:
+  //   leads.where({estimate_id}) -> array (FK-linked rows)
+  //   leads.where({id}).first()/.update() -> single lead read + estimate_id stamp
+  //   estimates.where({id}).first(), customers.where({id}).first()
+  //   leads.whereNotIn(...).whereNull(...).andWhere(...) -> contact matches
+  function makeAcceptDb(opts = {}) {
+    const updates = [];
+    const database = (table) => ({
+      where(clause) {
+        if (table === 'leads' && clause && 'estimate_id' in clause) return Promise.resolve(opts.linked || []);
+        if (table === 'leads' && clause && 'id' in clause) {
+          return {
+            first: async () => (opts.leadsById || {})[clause.id] || null,
+            update: async (patch) => { updates.push({ id: clause.id, patch }); return 1; },
+          };
+        }
+        if (table === 'estimates') return { first: async () => opts.estimate || null };
+        if (table === 'customers') return { first: async () => opts.customer || null };
+        return Promise.resolve([]);
       },
-    }));
+      whereNotIn() {
+        return { whereNull: () => ({ andWhere: () => Promise.resolve(opts.contactLeads || []) }) };
+      },
+    });
+    database._updates = updates;
+    return database;
+  }
+
+  test('converts open FK-linked leads and stops (no fallback) when a linkage row exists', async () => {
+    const database = makeAcceptDb({
+      linked: [
+        { id: 'lead-open', status: 'estimate_viewed', estimate_id: 'estimate-1' },
+        { id: 'lead-lost', status: 'lost', estimate_id: 'estimate-1' },
+      ],
+    });
 
     await markLinkedLeadEstimateAccepted({
-      estimateId: 'estimate-1',
-      customerId: 'customer-1',
-      monthlyValue: 125,
-      initialServiceValue: 99,
-      waveguardTier: 'Gold',
+      estimateId: 'estimate-1', customerId: 'customer-1',
+      monthlyValue: 125, initialServiceValue: 99, waveguardTier: 'Gold', database,
     });
 
     expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-open', {
-      customerId: 'customer-1',
-      monthlyValue: 125,
-      initialServiceValue: 99,
-      waveguardTier: 'Gold',
+      customerId: 'customer-1', monthlyValue: 125, initialServiceValue: 99, waveguardTier: 'Gold',
     });
+    expect(database._updates).toHaveLength(0); // already linked → no estimate_id re-stamp
   });
 
-  test('accept fallback: converts the unlinked originating lead by customer contact', async () => {
-    // No lead is FK-linked to the estimate, so acceptance falls back to matching
-    // the accepted customer's contact among never-converted leads.
-    db.mockImplementation((table) => ({
-      where: (clause) => {
-        if (table === 'leads' && clause && 'estimate_id' in clause) return Promise.resolve([]);
-        if (table === 'customers') {
-          return { first: async () => ({ id: 'customer-1', phone: '+19412269100', email: 'taryn@example.com' }) };
-        }
-        return Promise.resolve([]);
-      },
-      whereNotIn: () => ({
-        whereNull: () => ({
-          andWhere: () => Promise.resolve([{ id: 'lead-unlinked', status: 'new', customer_id: null }]),
-        }),
-      }),
-    }));
+  test('does NOT run the contact fallback when the only linked lead is closed', async () => {
+    const database = makeAcceptDb({
+      linked: [{ id: 'lead-lost', status: 'lost', estimate_id: 'estimate-1' }],
+      // a contact-matching open lead exists, but must be left alone
+      customer: { id: 'customer-1', phone: '+19412269100' },
+      contactLeads: [{ id: 'lead-other', status: 'new', customer_id: null }],
+    });
+
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+  });
+
+  test('rescues a quote-wizard lead via estimate_data.lead_id and stamps the estimate link', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2', estimate_data: { lead_id: 'lead-qw' } },
+      leadsById: { 'lead-qw': { id: 'lead-qw', status: 'new', customer_id: 'customer-1' } },
+    });
 
     await markLinkedLeadEstimateAccepted({
-      estimateId: 'estimate-2',
-      customerId: 'customer-1',
-      monthlyValue: 80,
-      initialServiceValue: null,
-      waveguardTier: 'Silver',
+      estimateId: 'estimate-2', customerId: 'customer-1', monthlyValue: 60, database,
     });
 
-    expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-unlinked', {
-      customerId: 'customer-1',
-      monthlyValue: 80,
-      initialServiceValue: null,
-      waveguardTier: 'Silver',
-    });
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-qw', expect.objectContaining({ customerId: 'customer-1' }));
+    expect(database._updates).toEqual([{ id: 'lead-qw', patch: expect.objectContaining({ estimate_id: 'estimate-2' }) }]);
   });
 
-  test('accept fallback does not fire when an estimate-linked lead exists', async () => {
-    let customersQueried = false;
-    db.mockImplementation((table) => ({
-      where: (clause) => {
-        if (table === 'leads' && clause && 'estimate_id' in clause) {
-          return Promise.resolve([{ id: 'lead-linked', status: 'estimate_viewed' }]);
-        }
-        if (table === 'customers') { customersQueried = true; return { first: async () => null }; }
-        return Promise.resolve([]);
-      },
-    }));
+  test('standalone estimate: rescues a single unlinked lead by contact and stamps the link', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-3', estimate_data: null },
+      customer: { id: 'customer-1', phone: '+19412269100', email: 'taryn@example.com' },
+      contactLeads: [{ id: 'lead-unlinked', status: 'new', customer_id: null }],
+    });
 
-    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-3', customerId: 'customer-2' });
+    await markLinkedLeadEstimateAccepted({
+      estimateId: 'estimate-3', customerId: 'customer-1', monthlyValue: 80, waveguardTier: 'Silver', database,
+    });
 
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-linked', expect.objectContaining({ customerId: 'customer-2' }));
-    expect(customersQueried).toBe(false); // no contact fallback when FK link resolves
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-unlinked', expect.objectContaining({ customerId: 'customer-1' }));
+    expect(database._updates).toEqual([{ id: 'lead-unlinked', patch: expect.objectContaining({ estimate_id: 'estimate-3' }) }]);
+  });
+
+  test('standalone estimate: skips an AMBIGUOUS contact match (2+ open leads) without converting', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-4', estimate_data: null },
+      customer: { id: 'customer-1', phone: '+19412269100' },
+      contactLeads: [
+        { id: 'lead-a', status: 'new', customer_id: null },
+        { id: 'lead-b', status: 'contacted', customer_id: null },
+      ],
+    });
+
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-4', customerId: 'customer-1', database });
+
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toHaveLength(0);
   });
 });
 
