@@ -13,7 +13,7 @@ const dbModule = require('../../models/db');
 const logger = require('../logger');
 const { runScanMany } = require('./scanner');
 const { createDraft } = require('./price-match-draft');
-const { selectAdapterKey } = require('./adapters/registry');
+const { selectAdapterKey, getAdapter } = require('./adapters/registry');
 const { quantityToOz } = require('./extract');
 const { getVendorLoginCredentials } = require('../vendor-credentials');
 
@@ -44,7 +44,7 @@ const APPROVED_STATES = ['approved', 'auto_approved'];
 // if it's price_scraping_enabled AND resolves to one of these; everything else falls to the
 // generic adapter (direct URL, no search), so it's not driven autonomously. Veseris is a
 // LOGIN adapter — it additionally needs decrypted credentials attached (see LOGIN_ADAPTER_KEYS).
-const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris', 'shopify'];
+const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris', 'shopify', 'amazon'];
 
 // Adapters that authenticate before scraping (account pricing). For these, the weekly scan
 // decrypts the vendor's stored credentials and attaches them to the scan spec.
@@ -106,7 +106,17 @@ async function scrapableVendors(db) {
     .where('price_scraping_enabled', true)
     .andWhere((b) => b.where('active', true).orWhereNull('active'))
     .select('id', 'name', 'website');
-  return rows.filter((v) => SCRAPABLE_ADAPTER_KEYS.includes(selectAdapterKey({ name: v.name, url: v.website })));
+  return rows.filter((v) => {
+    const key = selectAdapterKey({ name: v.name, url: v.website });
+    if (!SCRAPABLE_ADAPTER_KEYS.includes(key)) return false;
+    // An API adapter (e.g. amazon) is INERT until its credentials are configured — skip
+    // it rather than burn a guaranteed-empty fetch every run before access is granted.
+    // Once the env creds are set, isConfigured() flips true and Amazon joins the scan
+    // automatically — no code change needed.
+    const adapter = getAdapter(key);
+    if (typeof adapter.isConfigured === 'function' && !adapter.isConfigured()) return false;
+    return true;
+  });
 }
 
 // PURE: a baseline DB row + the competitor vendor list -> { product, vendors, spend }

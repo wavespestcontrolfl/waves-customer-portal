@@ -10,6 +10,10 @@ const HOST_MAP = [
   { test: /solutionsstores\.com|solutions\s*pest|solutionsstores/i, key: 'solutions' },
   { test: /keystonepestsolutions|keystone\s*pest|keystone/i, key: 'keystone' },
   { test: /veseris\.com|veseris/i, key: 'veseris' },
+  // Amazon Business API adapter (no browser navigation — it calls the fixed Amazon
+  // Business API host, never the vendor.website — so a raw substring match carries no
+  // SSRF risk the way a navigating scraper would).
+  { test: /amazon\.com|amazonbusiness\.com|amazon\s*business/i, key: 'amazon' },
 ];
 
 // The parsed hostname of a vendor-supplied location string (accepts a scheme-less host by
@@ -53,6 +57,7 @@ const ADAPTER_LOADERS = {
   keystone: () => require('./keystone'),
   veseris: () => require('./veseris'), // B2B login adapter (account pricing)
   shopify: () => require('./shopify'), // generic Shopify storefront (base URL from vendor.website)
+  amazon: () => require('./amazon-business'), // Amazon Business Product Search API (no browser)
   generic: () => require('./generic'),
 };
 
