@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
@@ -158,6 +159,12 @@ async function markLinkedLeadEstimateViewed({ estimateId, performedBy = 'system'
   }
 }
 
+function parseEstimateData(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 async function markLinkedLeadEstimateAccepted({
   estimateId,
   customerId,
@@ -165,17 +172,190 @@ async function markLinkedLeadEstimateAccepted({
   initialServiceValue,
   waveguardTier,
   leadAttributionService = leadAttribution,
+  database = db,
 }) {
   if (!estimateId) return;
-  const leads = await db('leads').where({ estimate_id: estimateId });
-  for (const lead of leads) {
-    if (CLOSED_LEAD_STATUSES.has(lead.status)) continue;
+
+  // Stamp the accepted estimate onto a rescued (previously unlinked) lead so
+  // accepted-estimate reporting that joins on `leads.estimate_id`
+  // (seo/conversion-feedback-miner) counts it, then convert it.
+  const convert = async (lead) => {
+    if (!lead.estimate_id) {
+      await database('leads').where({ id: lead.id }).update({ estimate_id: estimateId, updated_at: new Date() });
+    }
     await leadAttributionService.markConverted(lead.id, {
       customerId,
       monthlyValue,
       initialServiceValue,
       waveguardTier,
     });
+  };
+
+  // 1. Directly FK-linked leads. If ANY linkage row exists — even one already
+  //    closed (lost/duplicate) — the originating lead for this estimate is
+  //    known, so convert the open ones and STOP. We must NOT fall through to
+  //    fuzzy matching here: a previously-linked-then-lost lead means the deal's
+  //    lead is accounted for, and contact matching could win an unrelated one.
+  const linked = await database('leads').where({ estimate_id: estimateId });
+  if (linked.length) {
+    for (const lead of linked) {
+      if (!CLOSED_LEAD_STATUSES.has(lead.status)) await convert(lead);
+    }
+    return;
+  }
+
+  // No `leads.estimate_id` row exists at all — rescue the originating lead that
+  // was never linked via the FK.
+  const estimate = await database('estimates').where({ id: estimateId }).first();
+  if (!estimate) return;
+
+  // 2. Quote-wizard origination: public-quote stamps `leads.customer_id` and
+  //    mirrors the lead id in `estimate_data.lead_id` (NOT `leads.estimate_id`).
+  //    The contact fallback's `customer_id IS NULL` guard would miss it, so
+  //    convert that exact lead by id — precise, no sweeping.
+  const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
+  if (dataLeadId) {
+    const lead = await database('leads').where({ id: dataLeadId }).first();
+    if (lead && !CLOSED_LEAD_STATUSES.has(lead.status)) await convert(lead);
+    return;
+  }
+
+  // 3. Standalone estimate (no lead linkage anywhere): match the accepted
+  //    customer's contact to an open, never-converted lead. Acceptance of one
+  //    estimate identifies at most ONE originating lead, so convert only when
+  //    the match is unambiguous — skip (don't over-count wins) when 0 or 2+.
+  if (!customerId) return;
+  const customer = await database('customers').where({ id: customerId }).first();
+  if (!customer) return;
+  const matches = (await findUnconvertedLeadsByContact(database, customer.phone, customer.email))
+    .filter((lead) => !CLOSED_LEAD_STATUSES.has(lead.status));
+  if (matches.length === 1) {
+    await convert(matches[0]);
+  } else if (matches.length > 1) {
+    logger.warn(`[lead-trigger] estimate ${estimateId} acceptance: ambiguous contact match (${matches.length} open leads) — skipping fallback`, {
+      estimateId,
+      customerId,
+      leadIds: matches.map((lead) => lead.id),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared lead resolver used by the one-off backfill (server/scripts/
+// backfill-lead-acceptance-triggers.js). Resolves the originating lead by the
+// strongest signal available — estimate link, then the customer's normalized
+// phone/email among never-converted leads — and converts it. NEVER throws: a
+// miss returns a reason instead of breaking the caller.
+// ---------------------------------------------------------------------------
+
+function estimateValueHints(estimate) {
+  if (!estimate) return {};
+  const money = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  return {
+    monthlyValue: money(estimate.monthly_total),
+    initialServiceValue: money(estimate.onetime_total),
+    waveguardTier: estimate.waveguard_tier || null,
+  };
+}
+
+// Contact fallback — only OPEN, NOT-yet-converted leads (customer_id IS NULL),
+// matched on the last 10 phone digits (lead/customer phones are stored in
+// mixed E.164 / 10-digit formats) or a case-insensitive email. The
+// `customer_id IS NULL` guard is deliberate: an existing customer can hold
+// separate open leads already attached to them (e.g. public quote links stamp
+// `leads.customer_id`), and we must never sweep those unrelated add-on leads.
+// We only rescue the originating lead that was never linked to anyone.
+async function findUnconvertedLeadsByContact(database, phone, email) {
+  const np = normalizePhone(phone);
+  const ne = normalizeEmail(email);
+  if (!np && !ne) return [];
+  return database('leads')
+    .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+    .whereNull('customer_id')
+    .andWhere((builder) => {
+      if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
+      if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
+    });
+}
+
+async function convertLeadFromEvent({
+  source,
+  estimateId = null,
+  customerId = null,
+  phone = null,
+  email = null,
+  database = db,
+  leadAttributionService = leadAttribution,
+}) {
+  try {
+    let resolvedCustomerId = customerId || null;
+    let resolvedPhone = phone || null;
+    let resolvedEmail = email || null;
+    let valueHints = {};
+    let haveEstimateHints = false;
+
+    if (estimateId) {
+      const estimate = await database('estimates').where({ id: estimateId }).first();
+      if (estimate) {
+        resolvedCustomerId = resolvedCustomerId || estimate.customer_id || null;
+        resolvedPhone = resolvedPhone || estimate.customer_phone || null;
+        resolvedEmail = resolvedEmail || estimate.customer_email || null;
+        valueHints = estimateValueHints(estimate);
+        haveEstimateHints = true;
+      }
+    }
+
+    // Resolve the originating lead:
+    //  1. estimate link (`leads.estimate_id`) — authoritative.
+    //  2. contact match among UNCONVERTED leads — the originating lead that was
+    //     never linked. We do NOT match every open lead on the customer; see
+    //     findUnconvertedLeadsByContact for why.
+    let candidates = [];
+    if (estimateId) {
+      candidates = await database('leads').where({ estimate_id: estimateId });
+    }
+    if (!candidates.length) {
+      if (!resolvedPhone && !resolvedEmail && resolvedCustomerId) {
+        const customer = await database('customers').where({ id: resolvedCustomerId }).first();
+        resolvedPhone = customer?.phone || null;
+        resolvedEmail = customer?.email || null;
+      }
+      if (resolvedPhone || resolvedEmail) {
+        candidates = await findUnconvertedLeadsByContact(database, resolvedPhone, resolvedEmail);
+      }
+    }
+
+    const open = (candidates || []).filter((lead) => lead && !CLOSED_LEAD_STATUSES.has(lead.status));
+    if (!open.length) return { converted: false, reason: 'no_open_lead' };
+    if (open.length > 1) {
+      logger.warn(`[lead-trigger] ${source} matched ${open.length} open leads; converting all`, {
+        source,
+        estimateId,
+        customerId: resolvedCustomerId,
+        leadIds: open.map((lead) => lead.id),
+      });
+    }
+
+    for (const lead of open) {
+      const conversion = { triggerSource: source };
+      if (resolvedCustomerId) conversion.customerId = resolvedCustomerId;
+      else if (lead.customer_id) conversion.customerId = lead.customer_id;
+      // Pass revenue fields only when an estimate supplied them — otherwise
+      // markConverted preserves whatever the lead already has.
+      if (haveEstimateHints) {
+        conversion.monthlyValue = valueHints.monthlyValue;
+        conversion.initialServiceValue = valueHints.initialServiceValue;
+        conversion.waveguardTier = valueHints.waveguardTier;
+      }
+      await leadAttributionService.markConverted(lead.id, conversion);
+    }
+    return { converted: true, count: open.length, leadIds: open.map((lead) => lead.id) };
+  } catch (err) {
+    logger.error(`[lead-trigger] convertLeadFromEvent failed (${source || 'unknown'}): ${err.message}`);
+    return { converted: false, reason: 'error' };
   }
 }
 
@@ -186,4 +366,6 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  convertLeadFromEvent,
+  findUnconvertedLeadsByContact,
 };
