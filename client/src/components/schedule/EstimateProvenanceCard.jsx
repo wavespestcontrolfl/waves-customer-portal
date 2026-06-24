@@ -10,13 +10,14 @@
 //
 // Props:
 //   quotedTotal  number  — estimate's quoted total (monthly + annual + one-time)
-//   currentPrice number  — pre-tax charge for a single visit before deposit
-//                          credit (the modal's net subtotal / the visit's price);
-//                          null hides the vs-quoted note and the balance-due line.
+//   currentPrice number  — this visit's current price, used only for the
+//                          "current price vs quoted" note; null hides that note.
 //                          Pass null when lines span multiple cadences (no single
-//                          per-visit charge) — the balance shown is a pre-tax
-//                          estimate and won't match commercial-tax / payer-billed
-//                          invoices exactly.
+//                          per-visit charge). Deliberately NOT used to compute a
+//                          per-visit "charge less deposit" figure: a deposit
+//                          credits the estimate's first invoice (not any one
+//                          visit, and never a payer-billed one), so the credit is
+//                          shown as an estimate-level note on the deposit row.
 //   deposit      object  — summarizeEstimateDeposit() payload from the server:
 //                          { enforced, oneTime, policyAmount, required,
 //                            exemptReason, paid, creditRemaining }
@@ -55,11 +56,23 @@ function depositRow(deposit) {
   const exempt = deposit.exemptReason && deposit.exemptReason !== 'feature_disabled';
 
   if (paid > 0) {
+    // A homeowner deposit credits the FIRST invoice for the estimate — never a
+    // specific visit and never a payer-billed invoice (the invoice path skips
+    // deposit credit when a third party is billed). So we state the credit as an
+    // estimate-level fact rather than deducting it from any one visit's charge.
+    if (deposit.exemptReason === 'payer_billed') {
+      return {
+        label: 'Deposit paid',
+        value: money(paid),
+        sub: 'on file · not credited (billed to third party)',
+        tone: 'paid',
+      };
+    }
     return {
       label: 'Deposit paid',
       value: money(paid),
       sub: creditRemaining > 0
-        ? `${money(creditRemaining)} credit toward first invoice`
+        ? `${money(creditRemaining)} credit · applied to first invoice`
         : 'credited to first invoice',
       tone: 'paid',
     };
@@ -90,9 +103,6 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   const quoted = Number(quotedTotal) || 0;
   const price = currentPrice != null ? Number(currentPrice) : null;
   const dep = depositRow(deposit);
-  const creditRemaining = Number(deposit?.creditRemaining) || 0;
-  const showBalance = price != null && creditRemaining > 0;
-  const balanceDue = showBalance ? Math.max(0, Math.round((price - creditRemaining) * 100) / 100) : null;
   const showVsQuoted = price != null && quoted > 0 && price > 0 && Math.abs(quoted - price) > 0.01;
   const deltaPct = showVsQuoted ? Math.round(((price - quoted) / quoted) * 100) : 0;
 
@@ -118,32 +128,17 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
           </span>
         </div>
 
-        {(dep || showBalance) && (
+        {dep && (
           <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
-            {dep && (
-              <div style={lineStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: INK }}>{dep.label}</div>
-                  {dep.sub && <div style={{ fontSize: 11, color: MUTED, marginTop: 1 }}>{dep.sub}</div>}
-                </div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: dep.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                  {dep.value}
-                </div>
+            <div style={lineStyle}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: INK }}>{dep.label}</div>
+                {dep.sub && <div style={{ fontSize: 11, color: MUTED, marginTop: 1 }}>{dep.sub}</div>}
               </div>
-            )}
-            {showBalance && (
-              <div style={lineStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: INK }}>Charge this visit (est.)</div>
-                  <div style={{ fontSize: 11, color: MUTED, marginTop: 1 }}>
-                    {money(price)} less {money(creditRemaining)} deposit credit · before tax
-                  </div>
-                </div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                  {money(balanceDue)}
-                </div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: dep.tone === 'paid' ? GREEN : INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                {dep.value}
               </div>
-            )}
+            </div>
           </div>
         )}
       </div>
