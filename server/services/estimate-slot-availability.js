@@ -471,26 +471,94 @@ function formatServiceProfileLabel(services) {
   return parts.join(' + ');
 }
 
+// Billable one-time services for a one-time accept, so the reserved appointment's
+// service label + notes show the actual mix (e.g. a pest visit plus a separately
+// billed Bora-Care wood treatment) instead of a generic "One-time service" that
+// hides paid add-ons from dispatch/tech. Carries durationMinutes 0 — surfacing the
+// mix must not change one-time slot sizing (per-add-on duration is out of scope).
+//
+// Delegates to the canonical billing/normalization helpers so the mix matches what
+// is actually billed/accepted: normalizeOneTimeBreakdown already drops on-program
+// (included) rows, reads top-level specItems, and infers the service for name-only
+// rows. Lazy require avoids a route<->service load cycle.
+function oneTimeProfileServices(estimate = {}, estData = {}) {
+  let ep;
+  try { ep = require('../routes/estimate-public'); } catch (_) { ep = {}; }
+  const { normalizeOneTimeBreakdown, serviceCategoryForOneTimeChoice, serviceCategoryForOneTimeItem, oneTimeInvoiceLabelForCategory } = ep;
+  if (typeof normalizeOneTimeBreakdown !== 'function') return [];
+
+  const rows = [];
+  const seen = new Set();
+  const add = (service, label) => {
+    const clean = String(label || '').trim();
+    const key = clean.toLowerCase();
+    if (!clean || !service || seen.has(key)) return;
+    seen.add(key);
+    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: 0 });
+  };
+  const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
+    ? oneTimeInvoiceLabelForCategory(category)
+    : null);
+
+  // For a show_one_time_option estimate the customer's chosen visit is synthetic;
+  // derive its category (pest, mosquito, …) so the appointment names the right
+  // primary instead of a hardcoded pest visit, and so the matching priced row in
+  // the breakdown isn't duplicated as an add-on.
+  const showOneTimeOption = !!(estimate.show_one_time_option || estimate.showOneTimeOption);
+  let primaryCategory = null;
+  if (showOneTimeOption && typeof serviceCategoryForOneTimeChoice === 'function') {
+    primaryCategory = serviceCategoryForOneTimeChoice(estData) || null;
+    if (primaryCategory) add(primaryCategory, labelForCategory(primaryCategory) || 'One-time service');
+  }
+
+  // Setup fees and discounts carry no dispatchable service. A positive
+  // one_time_adjustment ("Other one-time services") is intentionally NOT here — it
+  // is a real billable charge that dispatch must perform, so it stays visible
+  // (negative adjustments are dropped by the discount/amount guards below).
+  const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount'];
+  for (const item of (normalizeOneTimeBreakdown(estData).items || [])) {
+    if (!item || typeof item !== 'object') continue;
+    if (item.quoteRequired === true || item.kind === 'discount') continue;
+    const service = String(item.service || '').toLowerCase();
+    if (NON_SERVICE.includes(service)) continue;
+    const amount = Number(item.amount ?? item.price ?? item.total);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    const category = typeof serviceCategoryForOneTimeItem === 'function' ? serviceCategoryForOneTimeItem(item) : null;
+    // Skip the priced one-time CHOICE row for the chosen category — it's the visit
+    // already represented by the synthetic primary. The choice row is the generic
+    // primary service (`one_time_pest` / `one_time_mosquito`, or the legacy
+    // `pest_control` shape), NOT a specialty: pest specialties (roach cleanout, etc.)
+    // share the pest category but use distinct service keys, so they still surface.
+    if (showOneTimeOption && primaryCategory && category === primaryCategory
+      && (service === primaryCategory || service.startsWith('one_time_'))) continue;
+    let label = String(item.label || item.name || '').trim();
+    if (!label || label.toLowerCase() === service) {
+      label = (category && labelForCategory(category)) || label;
+    }
+    add(category || service || 'one_time_service', label);
+  }
+  return rows;
+}
+
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const selectedFrequency = userOpts.selectedFrequency || '';
-  const rawRows = serviceMode === 'one_time'
-    ? []
-    : recurringRowsForEstimate(estimate, estData, selectedFrequency);
 
-  const services = rawRows
-    .map((row) => {
-      const key = serviceKeyFor(row);
-      const label = labelForService(row);
-      return {
-        service: key,
-        label,
-        visitsPerYear: visitsForService(row),
-        durationMinutes: durationForService(row, estData),
-      };
-    })
-    .filter((row) => row.service && row.label);
+  const services = serviceMode === 'one_time'
+    ? oneTimeProfileServices(estimate, estData)
+    : recurringRowsForEstimate(estimate, estData, selectedFrequency)
+      .map((row) => {
+        const key = serviceKeyFor(row);
+        const label = labelForService(row);
+        return {
+          service: key,
+          label,
+          visitsPerYear: visitsForService(row),
+          durationMinutes: durationForService(row, estData),
+        };
+      })
+      .filter((row) => row.service && row.label);
 
   const totalDuration = services.reduce((sum, svc) => sum + (Number(svc.durationMinutes) || 0), 0);
   const durationMinutes = clampDuration(userOpts.durationMinutes || totalDuration || DEFAULT_OPTS.durationMinutes);

@@ -1316,6 +1316,94 @@ describe('public estimate one-time breakdown', () => {
     expect(estimateData.result.recurring.services[0].mo).toBe(96);
   });
 
+  test('one-time slot profile surfaces a Bora-Care add-on so dispatch sees it', () => {
+    const estimate = {
+      show_one_time_option: true,
+      service_interest: 'Pest Control',
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50 }] },
+          oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] },
+        },
+      },
+    };
+    const profile = estimateSlotAvailability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    // The label drives the appointment notes ("Accepted service mix: …") + display.
+    expect(profile.serviceLabel).toContain('One-Time Pest Control');
+    expect(profile.serviceLabel).toContain('Bora-Care'); // the row's own name is preserved
+    // Pest stays the primary service so the appointment service_type isn't the add-on.
+    expect(profile.services[0]).toEqual(expect.objectContaining({ service: 'pest_control' }));
+    // A name-less engine row maps to the friendly label, never the raw key.
+    const namelessProfile = estimateSlotAvailability.resolveEstimateSlotProfile({
+      show_one_time_option: true,
+      service_interest: 'Pest Control',
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [{ service: 'bora_care', price: 1051 }] } } },
+    }, { serviceMode: 'one_time' });
+    expect(namelessProfile.serviceLabel).toContain('Bora-Care Wood Treatment');
+    expect(namelessProfile.serviceLabel).not.toContain('bora_care');
+  });
+
+  test('one-time slot profile names the chosen category (mosquito), not a hardcoded pest visit', () => {
+    const profile = estimateSlotAvailability.resolveEstimateSlotProfile({
+      show_one_time_option: true,
+      estimate_data: { result: { recurring: { services: [] }, oneTime: { total: 120, items: [{ service: 'one_time_mosquito', name: 'One-Time Mosquito Control', price: 120 }] } } },
+    }, { serviceMode: 'one_time' });
+    expect(profile.serviceLabel).toContain('One-Time Mosquito Control');
+    expect(profile.serviceLabel).not.toContain('Pest Control');
+    // No duplicate: the synthetic primary and the priced one_time_mosquito row collapse to one.
+    expect(profile.services.filter((s) => /mosquito/i.test(s.label))).toHaveLength(1);
+  });
+
+  test('one-time slot profile follows the billing source: name-only specItems in, on-program + duplicate choice rows out', () => {
+    const profile = estimateSlotAvailability.resolveEstimateSlotProfile({
+      show_one_time_option: true,
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'pest_control', mo: 50 }] },
+          oneTime: {
+            total: 383,
+            items: [
+              { service: 'one_time_pest', name: 'One-Time Pest Control', price: 264 }, // duplicate choice row
+              { service: 'bora_care', name: 'Bora-Care', price: 1051, onProg: true },   // on-program → dropped
+            ],
+          },
+          specItems: [{ name: 'Initial Roach Knockdown', price: 119 }],                  // top-level, name-only
+        },
+      },
+    }, { serviceMode: 'one_time' });
+    // Synthetic pest primary present exactly once (the priced one_time_pest row is deduped).
+    expect(profile.services.filter((s) => /one-time pest control/i.test(s.label))).toHaveLength(1);
+    // Name-only top-level pest specialty surfaces (it's a separate billable service).
+    expect(profile.serviceLabel).toContain('Initial Roach Knockdown');
+    // On-program Bora-Care is excluded (matches the billing breakdown).
+    expect(profile.serviceLabel).not.toContain('Bora-Care');
+  });
+
+  test('one-time slot profile keeps a positive one_time_adjustment but dedups a legacy pest-choice row', () => {
+    const profile = estimateSlotAvailability.resolveEstimateSlotProfile({
+      show_one_time_option: true,
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'pest_control', mo: 50 }] },
+          // oneTime.total exceeds the listed rows → normalizeOneTimeBreakdown emits a
+          // positive "Other one-time services" adjustment (a real billable charge).
+          oneTime: {
+            total: 1480,
+            items: [
+              { service: 'pest_control', label: 'Pest Control', price: 264 }, // legacy choice row, different label
+              { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+            ],
+          },
+        },
+      },
+    }, { serviceMode: 'one_time' });
+    // The legacy pest-choice row collapses into the synthetic primary (no duplicate pest line).
+    expect(profile.services.filter((s) => /pest/i.test(s.label))).toHaveLength(1);
+    // The positive adjustment stays visible so dispatch sees the extra paid work.
+    expect(profile.serviceLabel).toContain('Other one-time services');
+    expect(profile.serviceLabel).toContain('Bora-Care');
+  });
+
   test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-mosquito-recurring-test',
