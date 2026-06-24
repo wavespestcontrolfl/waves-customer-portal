@@ -1192,6 +1192,9 @@ router.get('/', async (req, res, next) => {
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
         };
       }),
+      // Signals the ESTIMATE_LIST_LIMIT cap was hit, so the client can warn that
+      // list-derived KPIs may be incomplete instead of silently undercounting.
+      truncated: estimates.length >= ESTIMATE_LIST_LIMIT,
     });
   } catch (err) { next(err); }
 });

@@ -128,7 +128,11 @@ async function fetchEstimatePipelineRows(filter) {
   const responses = await Promise.all(
     estimatePipelineFetchPaths(filter).map((path) => adminFetch(path)),
   );
-  return mergeEstimateRows(...responses.map((d) => d.estimates || []));
+  return {
+    rows: mergeEstimateRows(...responses.map((d) => d.estimates || [])),
+    // Any capped page means the pipeline list (and its KPIs) is incomplete.
+    truncated: responses.some((d) => d?.truncated),
+  };
 }
 
 function summarizeEstimateSend(data) {
@@ -1558,6 +1562,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
+  const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
@@ -1582,15 +1587,16 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
       // funnel and MRR-won KPI don't shrink when old wins get archived.
       // estimateMatchesFilter keeps them out of the All list. Desktop-only —
       // the mobile list view has no KPI bar and skips this fetch.
+      // Keep the full response (not just .estimates) so its truncated flag
+      // isn't lost — the Won funnel / MRR-won KPI depend on these archived wins.
       fetches.push(
-        adminFetch(
-          "/admin/estimates?archived=only&status=accepted&limit=all",
-        ).then((d) => d.estimates || []),
+        adminFetch("/admin/estimates?archived=only&status=accepted&limit=all"),
       );
     }
     Promise.all(fetches)
-      .then(([rows, archivedWon = []]) => {
-        setEstimates(mergeEstimateRows(rows, archivedWon));
+      .then(([pipeline, archived = {}]) => {
+        setEstimates(mergeEstimateRows(pipeline.rows, archived.estimates || []));
+        setEstimatesTruncated(!!pipeline.truncated || !!archived.truncated);
         setLoading(false);
       })
       .catch((err) => {
@@ -1947,6 +1953,15 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
 
       <div className="grid gap-4 items-start grid-cols-1">
         <div className="min-w-0">
+          {estimatesTruncated && (
+            <div
+              role="status"
+              className="mb-3 px-3 py-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 text-12 text-ink-secondary"
+            >
+              Showing the most recent estimates only — the list hit its size cap,
+              so these KPIs may undercount older offers.
+            </div>
+          )}
           <PipelineAnalytics
             estimates={estimates}
             activeFilter={filter}
@@ -3288,7 +3303,7 @@ function EstimatesMobileListView({
   const refreshEstimates = useCallback(() => {
     setError(null);
     fetchEstimatePipelineRows(filter)
-      .then((rows) => setEstimates(rows))
+      .then(({ rows }) => setEstimates(rows))
       .catch((err) => setError(err))
       .finally(() => setLoading(false));
   }, [filter]);

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Card, cn } from "../../components/ui";
+import { adminFetch } from "../../utils/admin-fetch";
 
 // Verify-flag win/loss card (estimator accuracy loop). Answers: do
 // estimates built on UNVERIFIED property facts (lookup fieldVerifyFlags)
@@ -9,19 +10,12 @@ import { Card, cn } from "../../components/ui";
 // as PipelineAnalytics above it. Self-fetching so the pipeline list
 // payload stays slim (flags live in estimate_data, not the list API).
 
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const DAY_OPTIONS = [30, 90, 365];
 
+// Uses the shared adminFetch (base URL, auth header, 429/403 handling, retry)
+// so this card behaves like every other admin request instead of a bespoke fetch.
 function fetchSlices(days) {
-  return fetch(`${API_BASE}/admin/estimates/win-loss-slices?days=${days}`, {
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-      "Content-Type": "application/json",
-    },
-  }).then(async (r) => {
-    if (!r.ok) throw new Error(`win-loss-slices ${r.status}`);
-    return r.json();
-  });
+  return adminFetch(`/admin/estimates/win-loss-slices?days=${days}`);
 }
 
 function pct(cell) {
