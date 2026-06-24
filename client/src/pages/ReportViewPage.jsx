@@ -823,13 +823,14 @@ export function lawnWateringGuidance(app = {}) {
   return { headline: 'Watering note for this product', detail: note };
 }
 
-function applicationZoneText(app = {}, zoneById = new Map()) {
+function applicationZoneText(app = {}, zoneById = new Map(), serviceLine = 'pest') {
   const zones = applicationZoneIds(app).map((id) => zoneById.get(String(id))).filter(Boolean);
   if (!zones.length) return app.applicationArea || 'Treated area recorded';
-  // Applied to every zone → "your whole lawn" reads far better than listing each one
-  // (and the internal A/B/C/D zone letters mean nothing to a homeowner).
+  // Applied to every zone → a friendly whole-coverage phrase beats listing each one
+  // (and the internal A/B/C/D zone letters mean nothing to a homeowner). "Your whole
+  // lawn" is only right for lawn; perimeter pest/mosquito/tree covers the property.
   const totalZones = zoneById.size;
-  if (totalZones > 1 && zones.length >= totalZones) return 'Your whole lawn';
+  if (totalZones > 1 && zones.length >= totalZones) return serviceLine === 'lawn' ? 'Your whole lawn' : 'Your whole property';
   // Otherwise name the AREAS the customer recognizes — never the internal letters.
   const labels = zones.map((zone) => zone.label).filter(Boolean);
   if (labels.length) return labels.join(', ');
@@ -861,7 +862,7 @@ function groupApplicationsByPurpose(applications = [], data = {}) {
   for (const app of applications) {
     const purpose = applicationPurpose(app, data.serviceLine);
     const method = app.methodLabel || formatEnumLabel(app.method) || 'Application';
-    const zones = applicationZoneText(app, zoneById);
+    const zones = applicationZoneText(app, zoneById, data.serviceLine);
     const key = [purpose, method, zones].join('|');
     if (!groups.has(key)) {
       groups.set(key, {
@@ -2454,7 +2455,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const epa = applicationEpaReg(app);
             const purpose = applicationPurpose(app, data.serviceLine);
             const why = applicationPurposeCopy(app, data.serviceLine);
-            const usedIn = applicationZoneText(app, zoneById);
+            const usedIn = applicationZoneText(app, zoneById, data.serviceLine);
             const productSummary = applicationProductSummary(app);
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);

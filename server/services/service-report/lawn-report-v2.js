@@ -381,7 +381,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // Unify the water status the diagnosis + insights reason about: prefer the
   // area snapshot (high/low/balanced) mapped to the advice vocabulary, else the
   // live irrigation-advice status.
-  const usingSnapshot = !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown');
+  // Same guard as mapWater: a rain-unknown snapshot (irrigation-only) must not drive the
+  // water diagnosis/overwatering signal either — fall back to the live irrigation advice.
+  const usingSnapshot = !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+    && waterSnapshot.interpretation !== 'rain_unknown');
   const SNAP_TO_ADVICE = { high: 'surplus', low: 'deficit', balanced: 'balanced' };
   const effectiveWaterStatus = usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null);
   const overwatering = !!lawnAssessment.overwateringSignal || (usingSnapshot && waterSnapshot.interpretation === 'wet_condition_watch');

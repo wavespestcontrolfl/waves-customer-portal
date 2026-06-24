@@ -6634,7 +6634,7 @@ router.get('/:serviceId/recap-video/file', async (req, res, next) => {
     if (obj.rangeNotSatisfiable) return res.status(416).set('Accept-Ranges', 'bytes').end();
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Type', obj.contentType || 'video/mp4');
-    res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    res.setHeader('Cache-Control', 'no-store');
     if (range && obj.contentRange) {
       res.status(206).setHeader('Content-Range', obj.contentRange);
     }

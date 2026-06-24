@@ -559,7 +559,9 @@ router.get('/:token/recap/video', async (req, res, next) => {
     if (obj.rangeNotSatisfiable) return res.status(416).set('Accept-Ranges', 'bytes').end();
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Type', obj.contentType || 'video/mp4');
-    res.setHeader('Cache-Control', 'private, max-age=0, no-cache');
+    // no-store (not no-cache): a tokenized recap can show the customer's home — don't
+    // let shared-device browsers persist it, matching the other tokenized report assets.
+    res.setHeader('Cache-Control', 'no-store');
     // 206 with Content-Range when the browser asked for a byte range (iOS/Safari MP4
     // seeking); otherwise a full 200. obj.size is the partial length for a range hit.
     if (range && obj.contentRange) {

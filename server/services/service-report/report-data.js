@@ -2424,7 +2424,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             if (weeks) {
               const est = new Date(`${svcIso}T12:00:00Z`);
               est.setUTCDate(est.getUTCDate() + weeks * 7);
-              nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
+              // Report tokens are permanent — only surface an ESTIMATED next visit when
+              // it's still in the future; reopening an old report must not show a past
+              // date as the "next visit".
+              if (est.getTime() > Date.now()) {
+                nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
+              }
             }
           }
           if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;

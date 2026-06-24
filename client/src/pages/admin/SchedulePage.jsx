@@ -6519,6 +6519,7 @@ function RecapCapture({ serviceId }) {
   const [pendingFile, setPendingFile] = useState(null);
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);
+  const [err, setErr] = useState(null);
   const fileRef = useRef(null);
 
   const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-media`)
@@ -6537,6 +6538,7 @@ function RecapCapture({ serviceId }) {
     setShowMore(false);
     if (!file) return;
     setUploading((n) => n + 1);
+    setErr(null);
     try {
       const mediaType = file.type.startsWith("image/") ? "image" : "video";
       const durationMs = mediaType === "video" ? await readVideoDurationMs(file) : null;
@@ -6549,8 +6551,11 @@ function RecapCapture({ serviceId }) {
         method: "POST", body: JSON.stringify({ bytes: file.size, durationMs }),
       });
       await refresh();
-    } catch { /* surfaced via the strip not updating; keep closeout unblocked */ }
-    finally { setUploading((n) => Math.max(0, n - 1)); }
+    } catch (e) {
+      // Surface the server reason (e.g. unsupported iPhone HEVC/MOV or HEIC) instead of
+      // silently dropping the clip; closeout stays unblocked either way.
+      setErr(e?.message || "Couldn’t add that clip — use an MP4 video or JPEG photo.");
+    } finally { setUploading((n) => Math.max(0, n - 1)); }
   };
 
   const remove = async (id) => {
@@ -6586,6 +6591,7 @@ function RecapCapture({ serviceId }) {
         </div>
       )}
 
+      {err && <div style={{ fontSize: 12, color: D.red, margin: "0 0 8px", lineHeight: 1.4 }}>{err}</div>}
       <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: D.teal, color: "#04240f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
         {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
       </button>
@@ -6978,6 +6984,7 @@ export function CompletionPanel({
   const usesPlantHealthChips =
     serviceCategory === "lawn" || serviceCategory === "tree_shrub";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -8819,7 +8826,10 @@ export function CompletionPanel({
       );
       // A required follow-up suggestion keeps the success overlay open so
       // the tech can act on the CTA — it dismisses via the Done button.
-      if (!result?.followupSuggestion?.required) {
+      // Keep the panel open when a pest recap is pending — it renders async and the
+      // tech approves/sends it from the success overlay (the approve UI is otherwise
+      // unreachable once the panel auto-closes).
+      if (!result?.followupSuggestion?.required && !recapEligible) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
@@ -9287,7 +9297,7 @@ export function CompletionPanel({
               />
             </div>
           )}
-          {pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest" && (
+          {recapEligible && (
             <div style={{ padding: "12px 16px 0" }}>
               <RecapCapture serviceId={service.id} />
               <PestRecapCard serviceId={service.id} />
@@ -9366,6 +9376,20 @@ export function CompletionPanel({
                   Report stored — customer delivery is off for this service
                   type.
                 </div>
+              )}
+              {recapEligible && (
+                <div style={{ marginTop: 18, width: "100%", maxWidth: 360 }}>
+                  <PestRecapCard serviceId={service.id} />
+                </div>
+              )}
+              {recapEligible && !completionResult?.followupSuggestion?.required && (
+                <button
+                  type="button"
+                  onClick={() => onClose(true)}
+                  style={{ ...secondaryPill, marginTop: 16 }}
+                >
+                  Done
+                </button>
               )}
               {completionResult?.followupSuggestion?.required && (
                 <div
