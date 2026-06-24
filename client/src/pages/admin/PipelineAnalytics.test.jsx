@@ -331,24 +331,42 @@ describe("engagement-based idle checks", () => {
     expect(isFollowUpOverdueEstimate(clicked, NOW.getTime())).toBe(false);
   });
 
-  it("still flags follow-up overdue when the latest engagement is stale", () => {
+  it("flags follow-up overdue once a viewed offer is quiet past the going-cold window (7d+)", () => {
     const e = estimate({
       id: "stale",
       status: "viewed",
-      viewedAt: hoursAgo(120),
-      lastViewedAt: hoursAgo(72),
+      viewedAt: hoursAgo(200),
+      lastViewedAt: hoursAgo(180),
     });
+    // 180h idle is past the 7d cold window → follow-up overdue, not going cold.
     expect(isFollowUpOverdueEstimate(e, NOW.getTime())).toBe(true);
+    expect(isGoingColdEstimate(e, NOW.getTime())).toBe(false);
   });
 
-  it("counts sent-but-never-opened estimates past 72h as going cold (matches the row badge)", () => {
+  it("treats sent-but-never-opened past 72h as follow-up overdue, not going cold (disjoint buckets)", () => {
     const e = estimate({
       id: "unopened",
       status: "sent",
       sentAt: hoursAgo(96),
       viewedAt: null,
     });
-    expect(isGoingColdEstimate(e, NOW.getTime())).toBe(true);
+    expect(isFollowUpOverdueEstimate(e, NOW.getTime())).toBe(true);
+    expect(isGoingColdEstimate(e, NOW.getTime())).toBe(false);
+  });
+
+  it("keeps going-cold and follow-up-overdue disjoint (no offer in both)", () => {
+    const now = NOW.getTime();
+    const cases = [
+      estimate({ id: "cold", status: "viewed", viewedAt: hoursAgo(100) }), // 48–168h → cold
+      estimate({ id: "viewed-overdue", status: "viewed", viewedAt: hoursAgo(200) }), // 7d+ → overdue
+      estimate({ id: "sent-overdue", status: "sent", sentAt: hoursAgo(96), viewedAt: null }), // unopened → overdue
+    ];
+    for (const e of cases) {
+      expect(isGoingColdEstimate(e, now) && isFollowUpOverdueEstimate(e, now)).toBe(false);
+    }
+    expect(isGoingColdEstimate(cases[0], now)).toBe(true);
+    expect(isFollowUpOverdueEstimate(cases[1], now)).toBe(true);
+    expect(isFollowUpOverdueEstimate(cases[2], now)).toBe(true);
   });
 
   it("uses last engagement for the going-cold window", () => {
@@ -408,6 +426,8 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("57%")).toBeInTheDocument();
     expect(screen.getByText("4 accepted of 7 resolved")).toBeInTheDocument();
     expect(screen.getByText("$400")).toBeInTheDocument();
+    // "all" range has no comparable prior period → no trend line at all.
+    expect(screen.queryByText(/vs prior/)).not.toBeInTheDocument();
     // ROI table discloses per-line counting (bundles appear once per quoted
     // service, so its totals can exceed the estimate-level KPI counts).
     expect(
@@ -538,6 +558,21 @@ describe("PipelineAnalytics", () => {
     expect(screen.queryByText("$18")).not.toBeInTheDocument();
   });
 
+  it("compares avg ticket to the prior EQUAL-length period, not a fixed 30d", () => {
+    renderAnalytics({
+      dateRange: "30d",
+      estimates: [
+        // In the current 30d window.
+        estimate({ id: "cur", status: "accepted", monthlyTotal: 100, createdAt: daysAgo(5) }),
+        // In the PRIOR 30d window (30–60d ago).
+        estimate({ id: "prior", status: "accepted", monthlyTotal: 60, createdAt: daysAgo(45) }),
+      ],
+    });
+
+    // avg now $100 vs prior $60 → ↑ $40, and the label tracks the selected range.
+    expect(screen.getByText("↑ $40 vs prior 30d")).toBeInTheDocument();
+  });
+
   it("splits the MRR-won subtitle when one-time jobs are among the wins", () => {
     renderAnalytics({
       estimates: [
@@ -620,6 +655,22 @@ describe("PipelineAnalytics", () => {
     fireEvent.click(screen.getByRole("button", { name: /Going cold/i }));
 
     expect(onFilterChange).toHaveBeenCalledWith("going_cold");
+    // Subtitle reflects the disjoint (viewed-only) bucket — no stale "unopened 72h+".
+    expect(screen.queryByText(/unopened 72h/i)).not.toBeInTheDocument();
+  });
+
+  it("anchors the YTD avg-ticket trend to the ET year (prior window aligns)", () => {
+    renderAnalytics({
+      dateRange: "ytd",
+      estimates: [
+        // Current ET-year YTD.
+        estimate({ id: "cur", status: "accepted", monthlyTotal: 100, createdAt: daysAgo(5) }),
+        // Prior window (equal length, immediately before ET Jan 1).
+        estimate({ id: "prior", status: "accepted", monthlyTotal: 50, createdAt: daysAgo(150) }),
+      ],
+    });
+
+    expect(screen.getByText("↑ $50 vs prior period")).toBeInTheDocument();
   });
 
   it("fires dedicated pricing-risk subfilters", () => {
@@ -645,6 +696,27 @@ describe("PipelineAnalytics", () => {
     expect(onFilterChange).toHaveBeenNthCalledWith(3, "low_margin");
   });
 
+  it("surfaces the warning category so the pricing-risk headline reconciles", () => {
+    const { onFilterChange } = renderAnalytics({
+      estimates: [
+        estimate({
+          id: "warn",
+          pricingRisk: {
+            hasRisk: true,
+            status: "warning",
+            missingCogsCount: 0,
+            lowMarginCount: 0,
+            warningCount: 1,
+          },
+        }),
+      ],
+    });
+
+    // Without this, the "1" headline would have an empty breakdown (0 + 0).
+    fireEvent.click(screen.getByRole("button", { name: /1 warnings/i }));
+    expect(onFilterChange).toHaveBeenCalledWith("pricing_warning");
+  });
+
   it("discloses scheduled estimates in the Sent funnel subtitle", () => {
     renderAnalytics({
       estimates: [
@@ -663,8 +735,9 @@ describe("PipelineAnalytics", () => {
       estimates: [
         estimate({
           id: "overdue",
-          status: "viewed",
-          viewedAt: hoursAgo(72),
+          status: "sent",
+          sentAt: hoursAgo(96),
+          viewedAt: null,
           monthlyTotal: 150,
           pricingRisk: { hasRisk: true, missingCogsCount: 1, lowMarginCount: 1 },
         }),

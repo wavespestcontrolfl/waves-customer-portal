@@ -88,6 +88,10 @@ export function resolutionDate(estimate) {
   return null;
 }
 
+// Follow-up overdue = offers needing action NOW: a send unopened past 72h, or a
+// viewed offer gone quiet past the going-cold window (7d+). Kept DISJOINT from
+// isGoingColdEstimate so the two "Needs attention" cards never double-count the
+// same offer — every open offer lands in at most one bucket.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   if (
     estimate?.status === "sent" &&
@@ -97,22 +101,18 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
   }
-  if (estimate?.status === "viewed" && estimate.viewedAt) {
+  if (estimate?.status === "viewed") {
     const last = lastEngagementMs(estimate);
-    return last != null && nowMs - last > 48 * HOUR;
+    return last != null && nowMs - last >= 168 * HOUR;
   }
   return false;
 }
 
-// Matches the row-badge definition in getUrgencyIndicator(): an estimate is
-// going cold when it sits unopened 72h after sending, or when a viewed
-// estimate has had no engagement for 48h–7d (past 7d it's final-follow-up /
-// expiry territory, not "going cold").
+// Going cold = the early-warning window only: a VIEWED offer idle 48h–7d. A
+// never-opened send is follow-up-overdue (not "cold"), and past 7d a viewed
+// offer crosses into follow-up-overdue too — so this is the complement slice,
+// disjoint from isFollowUpOverdueEstimate.
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
-    const sentAt = new Date(estimate.sentAt).getTime();
-    return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
-  }
   if (estimate?.status !== "viewed") return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
@@ -215,13 +215,30 @@ function avgTicketFor(estimates) {
   return Math.round(priced.reduce((sum, e) => sum + amount(e), 0) / priced.length);
 }
 
-function prior30Estimates(estimates, nowMs) {
+// The prior equal-length window immediately before the selected range, so the
+// avg-ticket trend compares like-for-like (90d vs prior 90d, not a fixed 30d).
+// Returns null for "all" — there is no comparable prior period.
+function priorPeriodWindow(range, nowMs) {
+  if (range === "7d") return { start: nowMs - 14 * DAY, end: nowMs - 7 * DAY, label: "vs prior 7d" };
+  if (range === "30d") return { start: nowMs - 60 * DAY, end: nowMs - 30 * DAY, label: "vs prior 30d" };
+  if (range === "90d") return { start: nowMs - 180 * DAY, end: nowMs - 90 * DAY, label: "vs prior 90d" };
+  if (range === "ytd") {
+    // Anchor Jan 1 at ET midnight (same basis as withinDateRange's ET-year
+    // boundary) so the prior window lines up with the current YTD window in any
+    // browser timezone. January is always EST (UTC-5), so this is unambiguous.
+    const jan1 = Date.UTC(etParts(new Date(nowMs)).year, 0, 1, 5, 0, 0);
+    const span = nowMs - jan1;
+    return { start: jan1 - span, end: jan1, label: "vs prior period" };
+  }
+  return null; // "all" — no comparable prior period
+}
+
+function estimatesInWindow(estimates, win) {
+  if (!win) return [];
   return estimates.filter((e) => {
     if (!e.createdAt) return false;
     const ts = new Date(e.createdAt).getTime();
-    if (Number.isNaN(ts)) return false;
-    const age = nowMs - ts;
-    return age > 30 * DAY && age <= 60 * DAY;
+    return !Number.isNaN(ts) && ts >= win.start && ts < win.end;
   });
 }
 
@@ -320,7 +337,7 @@ AttentionCard.propTypes = {
   onFilterChange: PropTypes.func.isRequired,
 };
 
-function PricingRiskCard({ value, missingCogs, lowMargin, onFilterChange }) {
+function PricingRiskCard({ value, missingCogs, lowMargin, warnings, onFilterChange }) {
   return (
     <Card>
       <div className="w-full p-4 text-left rounded-sm bg-white text-zinc-900">
@@ -347,6 +364,15 @@ function PricingRiskCard({ value, missingCogs, lowMargin, onFilterChange }) {
           >
             <span className="u-nums">{lowMargin}</span> low margin
           </button>
+          {warnings > 0 && (
+            <button
+              type="button"
+              onClick={() => onFilterChange("pricing_warning")}
+              className="px-2 py-1 rounded-full text-11 border-hairline border-zinc-200 text-ink-tertiary u-focus-ring hover:bg-zinc-50"
+            >
+              <span className="u-nums">{warnings}</span> warnings
+            </button>
+          )}
         </div>
       </div>
     </Card>
@@ -357,6 +383,7 @@ PricingRiskCard.propTypes = {
   value: PropTypes.number.isRequired,
   missingCogs: PropTypes.number.isRequired,
   lowMargin: PropTypes.number.isRequired,
+  warnings: PropTypes.number,
   onFilterChange: PropTypes.func.isRequired,
 };
 
@@ -416,12 +443,16 @@ export default function PipelineAnalytics({
     );
     const pipelineValue = pipelineEstimates.reduce((sum, e) => sum + amount(e), 0);
     const avgTicket = avgTicketFor(inRange);
-    const priorAvg = avgTicketFor(prior30Estimates(activeRows, nowMs));
+    const priorWin = priorPeriodWindow(selectedRange, nowMs);
+    const priorAvg = avgTicketFor(estimatesInWindow(activeRows, priorWin));
     const avgDelta = Math.round(avgTicket - priorAvg);
-    const avgTrend =
-      priorAvg === 0
-        ? "→ vs prior 30d"
-        : `${avgDelta > 0 ? "↑" : avgDelta < 0 ? "↓" : "→"} ${money(Math.abs(avgDelta))} vs prior 30d`;
+    // "all" has no comparable prior window → no trend line (StatCard hides a
+    // null sub) rather than a meaningless "vs prior period".
+    const avgTrend = !priorWin
+      ? null
+      : priorAvg === 0
+        ? `→ ${priorWin.label}`
+        : `${avgDelta > 0 ? "↑" : avgDelta < 0 ? "↓" : "→"} ${money(Math.abs(avgDelta))} ${priorWin.label}`;
 
     const needsEstimate = classified.filter((e) => e._class === "needs_estimate").length;
     const readyToSend = classified.filter((e) => e._class === "ready_to_send").length;
@@ -452,6 +483,12 @@ export default function PipelineAnalytics({
     ).length;
     const lowMargin = activeRows.filter(
       (e) => (e.pricingRisk?.lowMarginCount || 0) > 0,
+    ).length;
+    // Pricing-warning rows (status 'warning' — billed but with audit warnings,
+    // no missing-COGS/low-margin line). Surfacing this reconciles the headline
+    // pricing-risk count, which is otherwise dominated by this hidden category.
+    const pricingWarnings = activeRows.filter(
+      (e) => e.pricingRisk?.status === "warning",
     ).length;
     const goingCold = activeRows.filter((e) =>
       isGoingColdEstimate(e, nowMs),
@@ -496,6 +533,7 @@ export default function PipelineAnalytics({
         pricingRisk: pricingRisk.length,
         missingCogs,
         lowMargin,
+        pricingWarnings,
         goingCold,
       },
       total,
@@ -693,12 +731,13 @@ export default function PipelineAnalytics({
           value={metrics.attention.pricingRisk}
           missingCogs={metrics.attention.missingCogs}
           lowMargin={metrics.attention.lowMargin}
+          warnings={metrics.attention.pricingWarnings}
           onFilterChange={onFilterChange}
         />
         <AttentionCard
           label="Going cold"
           value={metrics.attention.goingCold}
-          sub="Idle 48h–7d · unopened 72h+"
+          sub="Viewed · idle 48h–7d"
           filterKey="going_cold"
           onFilterChange={onFilterChange}
         />

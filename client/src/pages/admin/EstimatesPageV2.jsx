@@ -345,6 +345,7 @@ function estimateMatchesFilter(e, filter) {
   if (filter === "missing_cogs")
     return (e.pricingRisk?.missingCogsCount || 0) > 0;
   if (filter === "low_margin") return (e.pricingRisk?.lowMarginCount || 0) > 0;
+  if (filter === "pricing_warning") return e.pricingRisk?.status === "warning";
   return e._class === filter;
 }
 
@@ -353,6 +354,7 @@ function estimateFilterLabel(filter) {
   if (filter === "sent_group") return "Sent";
   if (filter === "follow_up_overdue") return "Follow-up overdue";
   if (filter === "going_cold") return "Going cold";
+  if (filter === "pricing_warning") return "Pricing warnings";
   return PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label;
 }
 
