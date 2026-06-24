@@ -9,14 +9,12 @@ import {
 } from "../../components/ui";
 import {
   AgingBar,
-  CallsBySourceList,
-  ChannelMixDonut,
+  AttributionScorecard,
   ChartCard,
   CompletionGauge,
   EmptyState,
   EstimateFunnel,
   KpiSparklineTile,
-  LeadsBySourceList,
   MrrTrendChart,
   RevenueTrendArea,
   ServiceMixDonut,
@@ -720,13 +718,13 @@ export default function DashboardPageV2() {
           Uses the same period selector as Core KPIs. */}
       {isMobile ? (
         <MobileFold
-          title="Lead Attribution"
+          title="Marketing Attribution"
           sub={
             callsBySource?.period?.label || kpis?.periodLabel || "Month to Date"
           }
         >
           {" "}
-          <AttributionPanels
+          <AttributionScorecard
             callsBySource={callsBySource}
             leadsBySource={leadsBySource}
             channelMix={channelMix}
@@ -735,13 +733,21 @@ export default function DashboardPageV2() {
           />{" "}
         </MobileFold>
       ) : (
-        <AttributionPanels
-          callsBySource={callsBySource}
-          leadsBySource={leadsBySource}
-          channelMix={channelMix}
-          loading={attributionLoading}
-          error={attributionError}
-        />
+        <ChartCard
+          title="Marketing Attribution"
+          sub={
+            callsBySource?.period?.label || kpis?.periodLabel || "Month to Date"
+          }
+          className="mb-5"
+        >
+          <AttributionScorecard
+            callsBySource={callsBySource}
+            leadsBySource={leadsBySource}
+            channelMix={channelMix}
+            loading={attributionLoading}
+            error={attributionError}
+          />
+        </ChartCard>
       )}
       {/* Tech leaderboard — bar variant */}
       {kpis?.leaderboard?.length > 0 &&
@@ -856,67 +862,6 @@ function MobileFold({ title, sub, children }) {
   );
 }
 
-function AttributionPanels({
-  callsBySource,
-  leadsBySource,
-  channelMix,
-  loading,
-  error,
-}) {
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
-      {" "}
-      <ChartCard
-        title="Calls by Source"
-        sub={
-          callsBySource?.total_inbound_calls != null
-            ? `${callsBySource.total_inbound_calls} inbound calls · ${callsBySource.period?.label || "MTD"}`
-            : ""
-        }
-      >
-        {loading ? (
-          <EmptyState>Loading…</EmptyState>
-        ) : error ? (
-          <EmptyState>Failed to load attribution</EmptyState>
-        ) : (
-          <CallsBySourceList sources={callsBySource?.sources || []} />
-        )}
-      </ChartCard>{" "}
-      <ChartCard
-        title="Leads by Source"
-        sub={
-          leadsBySource?.total_leads != null
-            ? `${leadsBySource.total_leads} leads · ${leadsBySource.overall_conversion_pct ?? 0}% booked · ${leadsBySource.period?.label || "MTD"}`
-            : ""
-        }
-      >
-        {loading ? (
-          <EmptyState>Loading…</EmptyState>
-        ) : error ? (
-          <EmptyState>Failed to load attribution</EmptyState>
-        ) : (
-          <LeadsBySourceList sources={leadsBySource?.sources || []} />
-        )}
-      </ChartCard>{" "}
-      <ChartCard
-        title="Channel Mix"
-        sub={
-          channelMix?.total_leads != null
-            ? `${channelMix.total_leads} leads by first-contact channel`
-            : ""
-        }
-      >
-        {loading ? (
-          <EmptyState>Loading…</EmptyState>
-        ) : error ? (
-          <EmptyState>Failed to load attribution</EmptyState>
-        ) : (
-          <ChannelMixDonut channels={channelMix?.channels || []} />
-        )}
-      </ChartCard>{" "}
-    </div>
-  );
-}
 
 function pct(n) {
   return n == null ? "—" : `${n}%`;

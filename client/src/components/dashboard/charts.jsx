@@ -6,6 +6,7 @@
 // kept scoped to the Dashboard's data-viz primitives at the owner's
 // request — text + chrome on every other admin surface stays zinc.
 
+import { useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -616,140 +617,235 @@ function ChannelChip({ channel }) {
   );
 }
 
-// CallsBySourceList — call_log JOIN lead_sources by dialed number.
-// `sources` is the array returned by /admin/dashboard/calls-by-source.
-export function CallsBySourceList({ sources = [], maxRows = 10 }) {
-  if (!sources.length) return <EmptyState>No inbound calls in this window</EmptyState>;
-  const rows = sources.slice(0, maxRows);
-  const max = Math.max(...rows.map((r) => r.calls), 1);
-  return (
-    <ul className="space-y-2">
-      {rows.map((r, i) => {
-        const unmapped = r.sourceType === 'unmapped';
-        const dormant = r.isActive === false;
-        return (
-          <li key={`${r.name}-${i}`}>
-            <div className="flex items-baseline justify-between text-12 mb-1 gap-2">
-              <span className={cn('truncate min-w-0 flex items-center gap-2', dormant && 'text-ink-tertiary')}>
-                <span className="truncate">{r.name}</span>
-                <ChannelChip channel={r.channel} />
-                {unmapped && (
-                  <span className="text-[10px] uppercase tracking-label text-alert-fg">unmapped</span>
-                )}
-              </span>
-              <span className="u-nums whitespace-nowrap">
-                <span className="font-medium">{r.calls}</span>
-                <span className="text-ink-tertiary ml-2">{r.uniqueCallers} unique</span>
-              </span>
-            </div>
-            <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-              <div
-                className="h-full"
-                style={{
-                  width: `${(r.calls / max) * 100}%`,
-                  background: unmapped ? CHART_ALERT : (dormant ? CHART_PRIOR : CHART_PRIMARY),
-                }}
-              />
-            </div>
-          </li>
-        );
-      })}
-    </ul>
-  );
+// ─── Marketing Attribution scorecard ──────────────────────────────
+//
+// ServiceTitan-style unified view: a Calls → Leads → Booked funnel strip
+// over a single sortable per-source table (merging calls-by-source and
+// leads-by-source by source name), plus a slim first-contact channel-mix
+// bar. Replaces the prior three separate cards (calls list / leads list /
+// channel donut). Same data/endpoints — purely a visual rework. The caller
+// wraps it in a ChartCard / MobileFold.
+
+// Merge calls-by-source + leads-by-source into one record per source name. A
+// source can have calls but no leads (a tracking DID / "Unmapped — …") or leads
+// but no calls (web "Unattributed"); hasCalls / hasLeads keep those distinct so
+// the table shows "—" rather than a misleading 0.
+function mergeAttributionRows(calls, leads) {
+  const byName = new Map();
+  for (const c of calls) {
+    byName.set(c.name, {
+      name: c.name,
+      channel: c.channel || null,
+      sourceType: c.sourceType,
+      isActive: c.isActive,
+      calls: c.calls || 0,
+      uniqueCallers: c.uniqueCallers || 0,
+      leads: 0,
+      booked: 0,
+      conversionPct: null,
+      hasCalls: true,
+      hasLeads: false,
+    });
+  }
+  for (const l of leads) {
+    const existing = byName.get(l.name);
+    if (existing) {
+      existing.leads = l.leads || 0;
+      existing.booked = l.booked || 0;
+      existing.conversionPct = l.conversionPct;
+      existing.hasLeads = true;
+      existing.channel = existing.channel || l.channel || null;
+    } else {
+      byName.set(l.name, {
+        name: l.name,
+        channel: l.channel || null,
+        sourceType: l.sourceType,
+        isActive: null,
+        calls: 0,
+        uniqueCallers: 0,
+        leads: l.leads || 0,
+        booked: l.booked || 0,
+        conversionPct: l.conversionPct,
+        hasCalls: false,
+        hasLeads: true,
+      });
+    }
+  }
+  return [...byName.values()];
 }
 
-// LeadsBySourceList — `leads` GROUP BY lead_source_id.
-// Shows count + booked + conversion %. Conversion below 20% renders in alert-fg.
-export function LeadsBySourceList({ sources = [], maxRows = 10 }) {
-  if (!sources.length) return <EmptyState>No leads in this window</EmptyState>;
-  const rows = sources.slice(0, maxRows);
-  const max = Math.max(...rows.map((r) => r.leads), 1);
-  return (
-    <ul className="space-y-2">
-      {rows.map((r, i) => {
-        const conv = r.conversionPct;
-        const lowConv = conv != null && conv < 20 && r.leads >= 5;
-        return (
-          <li key={`${r.name}-${i}`}>
-            <div className="flex items-baseline justify-between text-12 mb-1 gap-2">
-              <span className="truncate min-w-0 flex items-center gap-2">
-                <span className="truncate">{r.name}</span>
-                <ChannelChip channel={r.channel} />
-              </span>
-              <span className="u-nums whitespace-nowrap">
-                <span className="font-medium">{r.leads}</span>
-                <span className="text-ink-tertiary ml-2">{r.booked} won</span>
-                {conv != null && (
-                  <span className={cn('ml-2', lowConv ? 'text-alert-fg font-medium' : 'text-ink-tertiary')}>
-                    {conv}%
-                  </span>
-                )}
-              </span>
-            </div>
-            <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-              <div
-                className="h-full"
-                style={{ width: `${(r.leads / max) * 100}%`, background: CHART_PRIMARY }}
-              />
-            </div>
-          </li>
-        );
-      })}
-    </ul>
-  );
+const SCORECARD_COLUMNS = [
+  { key: 'calls', label: 'Calls' },
+  { key: 'uniqueCallers', label: 'Unique' },
+  { key: 'leads', label: 'Leads' },
+  { key: 'booked', label: 'Booked' },
+  { key: 'conversionPct', label: 'Conv' },
+];
+
+function sortAttributionRows(rows, key, dir) {
+  const m = dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    if (key === 'name') return a.name.localeCompare(b.name) * m;
+    // Null metrics (no calls, or no leads) always sort last so empty rows don't
+    // float to the top on an ascending sort.
+    const av = a[key];
+    const bv = b[key];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return (av - bv) * m;
+  });
 }
 
-// ChannelMixDonut — leads.first_contact_channel breakdown.
-// Phone vs form vs sms vs other — answers "is the web catching the phone yet?".
-// Reuses the same monochrome ramp as ServiceMixDonut so the dashboard reads
-// as a single visual system.
-export function ChannelMixDonut({ channels = [], height = 200 }) {
-  if (!channels.length) return <EmptyState>No leads in this window</EmptyState>;
-  const data = channels.map((c, i) => ({
-    name: c.channel,
-    value: c.leads,
-    pct: c.pctOfTotal,
-    booked: c.booked,
-    fill: CHART_SERIES[i % CHART_SERIES.length],
-  }));
+function FunnelStat({ label, value, accent }) {
   return (
-    <div className="grid grid-cols-2 gap-4 items-center" style={{ minHeight: height }}>
-      <div style={{ height }}>
-        <ResponsiveContainer
-          width="100%"
-          height="100%"
-          minWidth={0}
-          initialDimension={RESPONSIVE_INITIAL_DIMENSION}
-        >
-          <PieChart>
-            <Pie
-              data={data}
-              dataKey="value"
-              nameKey="name"
-              innerRadius="58%"
-              outerRadius="92%"
-              stroke="#FFFFFF"
-              strokeWidth={1}
-              isAnimationActive={false}
-            >
-              {data.map((d, i) => (<Cell key={i} fill={d.fill} />))}
-            </Pie>
-            <Tooltip
-              contentStyle={TOOLTIP_STYLE}
-              formatter={(v, name, p) => [`${v} (${p?.payload?.pct}%) · ${p?.payload?.booked} won`, name]}
-            />
-          </PieChart>
-        </ResponsiveContainer>
+    <div className="flex-1 min-w-0">
+      <div className={cn('u-nums text-22 leading-none text-ink-primary', accent && 'font-medium')}>
+        {value != null ? value.toLocaleString() : '—'}
       </div>
-      <ul className="text-12 space-y-2">
-        {data.map((d) => (
-          <li key={d.name} className="flex items-center gap-2 min-w-0">
-            <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: d.fill }} />
-            <span className="truncate capitalize">{d.name}</span>
-            <span className="ml-auto u-nums text-ink-secondary">{d.pct}%</span>
-          </li>
-        ))}
-      </ul>
+      <div className="u-label text-ink-tertiary mt-1">{label}</div>
     </div>
   );
 }
+
+function FunnelArrow({ pct, pctLabel }) {
+  return (
+    <div className="flex flex-col items-center justify-center px-1 shrink-0">
+      <span className="text-ink-disabled text-14 leading-none">→</span>
+      {pct != null && (
+        <span className="u-nums text-11 text-ink-tertiary mt-1 whitespace-nowrap">
+          {pct}% {pctLabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ChannelMixBar({ channels }) {
+  if (!channels.length) return null;
+  const total = channels.reduce((s, c) => s + (c.leads || 0), 0) || 1;
+  return (
+    <div className="mt-4 pt-3 border-t border-hairline border-zinc-200">
+      <div className="u-label text-ink-tertiary mb-2">Channel mix · first contact</div>
+      <div className="flex h-2 rounded-sm overflow-hidden mb-2 bg-surface-sunken">
+        {channels.map((c, i) => (
+          <div
+            key={c.channel}
+            style={{ width: `${(c.leads / total) * 100}%`, background: CHART_SERIES[i % CHART_SERIES.length] }}
+            title={`${c.channel}: ${c.leads} (${c.pctOfTotal}%)`}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        {channels.map((c, i) => (
+          <span key={c.channel} className="flex items-center gap-1.5 text-12">
+            <span
+              className="w-2 h-2 rounded-full flex-shrink-0"
+              style={{ background: CHART_SERIES[i % CHART_SERIES.length] }}
+            />
+            <span className="capitalize text-ink-secondary">{c.channel}</span>
+            <span className="u-nums text-ink-tertiary">{c.pctOfTotal}%</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const SCORECARD_GRID = 'grid-cols-[minmax(0,1fr)_3.25rem_3.25rem_3.25rem_3.25rem_3rem]';
+
+export function AttributionScorecard({ callsBySource, leadsBySource, channelMix, loading, error }) {
+  const [sortKey, setSortKey] = useState('leads');
+  const [sortDir, setSortDir] = useState('desc');
+
+  if (loading) return <EmptyState>Loading…</EmptyState>;
+  if (error) return <EmptyState>Failed to load attribution</EmptyState>;
+
+  const rows = mergeAttributionRows(callsBySource?.sources || [], leadsBySource?.sources || []);
+  if (!rows.length) return <EmptyState>No attribution data in this window</EmptyState>;
+
+  const sorted = sortAttributionRows(rows, sortKey, sortDir);
+  // The faint in-row bar tracks the sorted column (falls back to leads for the
+  // name / conversion sorts), so visual weight always matches the ranking.
+  const barKey = ['calls', 'uniqueCallers', 'leads', 'booked'].includes(sortKey) ? sortKey : 'leads';
+  const barMax = Math.max(...sorted.map((r) => r[barKey] || 0), 1);
+
+  const onSort = (key) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortKey(key);
+      setSortDir(key === 'name' ? 'asc' : 'desc');
+    }
+  };
+  const arrow = (key) => (key === sortKey ? (sortDir === 'desc' ? ' ↓' : ' ↑') : '');
+  const cell = (has, value) =>
+    has ? value : <span className="text-ink-disabled">—</span>;
+
+  return (
+    <div>
+      <div className="flex items-stretch gap-1 pb-3 mb-3 border-b border-hairline border-zinc-200">
+        <FunnelStat label="Calls" value={callsBySource?.total_inbound_calls ?? null} />
+        <FunnelArrow />
+        <FunnelStat label="Leads" value={leadsBySource?.total_leads ?? null} />
+        <FunnelArrow pct={leadsBySource?.overall_conversion_pct ?? null} pctLabel="booked" />
+        <FunnelStat label="Booked" value={leadsBySource?.total_booked ?? null} accent />
+      </div>
+
+      <div className="overflow-x-auto">
+        <div className="min-w-[460px]">
+          <div className={cn('grid gap-x-2 pb-2 text-ink-tertiary', SCORECARD_GRID)}>
+            <button type="button" onClick={() => onSort('name')} className="u-label text-left hover:text-ink-secondary">
+              Source{arrow('name')}
+            </button>
+            {SCORECARD_COLUMNS.map((c) => (
+              <button
+                key={c.key}
+                type="button"
+                onClick={() => onSort(c.key)}
+                className="u-label text-right hover:text-ink-secondary whitespace-nowrap"
+              >
+                {c.label}
+                {arrow(c.key)}
+              </button>
+            ))}
+          </div>
+          {sorted.map((r, i) => {
+            const unmapped = r.sourceType === 'unmapped';
+            const dormant = r.isActive === false;
+            const lowConv = r.conversionPct != null && r.conversionPct < 20 && r.leads >= 5;
+            const barPct = ((r[barKey] || 0) / barMax) * 100;
+            return (
+              <div
+                key={`${r.name}-${i}`}
+                className={cn('relative grid gap-x-2 items-center py-1.5 text-12 border-t border-hairline border-zinc-100', SCORECARD_GRID)}
+              >
+                <div
+                  className="absolute inset-y-0.5 left-0 rounded-xs pointer-events-none"
+                  style={{ width: `${barPct}%`, background: CHART_PRIMARY, opacity: 0.08 }}
+                />
+                <div className={cn('relative flex items-center gap-2 min-w-0', dormant && 'text-ink-tertiary')}>
+                  <span className="truncate">{r.name}</span>
+                  <ChannelChip channel={r.channel} />
+                  {unmapped && (
+                    <span className="text-[10px] uppercase tracking-label text-alert-fg shrink-0">unmapped</span>
+                  )}
+                </div>
+                <span className="relative text-right u-nums">{cell(r.hasCalls, r.calls)}</span>
+                <span className="relative text-right u-nums text-ink-tertiary">{cell(r.hasCalls, r.uniqueCallers)}</span>
+                <span className="relative text-right u-nums">{cell(r.hasLeads, r.leads)}</span>
+                <span className="relative text-right u-nums text-ink-secondary">{cell(r.hasLeads, r.booked)}</span>
+                <span className={cn('relative text-right u-nums', lowConv ? 'text-alert-fg font-medium' : 'text-ink-tertiary')}>
+                  {r.conversionPct != null ? `${r.conversionPct}%` : <span className="text-ink-disabled">—</span>}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <ChannelMixBar channels={channelMix?.channels || []} />
+    </div>
+  );
+}
+
