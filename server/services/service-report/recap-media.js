@@ -43,23 +43,24 @@ const ROLE_MAP = {
 const MEDIA_ROLE_IDS = Object.keys(ROLE_MAP);
 const roleInfo = (role) => ROLE_MAP[role] || ROLE_MAP.other;
 
-// Only formats Remotion's headless-Chromium <OffthreadVideo>/<Img> can decode.
-// NOTE (go-live): iPhones default to HEVC/MOV video + HEIC photos, which are NOT
-// renderable here — they must be transcoded (or captured as mp4/jpeg) before this
-// feature works on real iPhone captures. We reject them at upload for now so a clip
-// can't pass confirm and then silently fail the render.
+// Formats a tech may upload. mp4/webm/jpeg/png/webp render straight into Remotion;
+// iPhone-native HEVC/MOV + HEIC/HEIF are accepted too and TRANSCODED to mp4/jpg at
+// render time (recap-transcode.ensureRenderable). Anything outside this set is
+// rejected at upload. (Transcoding needs ffmpeg + libheif on the render host; if a
+// clip can't be transcoded there it's gracefully dropped from that recap.)
 const EXT_BY_CONTENT_TYPE = {
-  'video/mp4': 'mp4', 'video/webm': 'webm',
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
   'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+  'image/heic': 'heic', 'image/heif': 'heic',
 };
-const RENDERABLE_VIDEO = new Set(['video/mp4', 'video/webm']);
-const RENDERABLE_IMAGE = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const ACCEPTED_VIDEO = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
+const ACCEPTED_IMAGE = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
 function extFor(contentType, mediaType) {
   return EXT_BY_CONTENT_TYPE[String(contentType || '').toLowerCase()] || (mediaType === 'image' ? 'jpg' : 'mp4');
 }
 function isAllowedContentType(contentType, mediaType) {
   const ct = String(contentType || '').toLowerCase();
-  return mediaType === 'image' ? RENDERABLE_IMAGE.has(ct) : RENDERABLE_VIDEO.has(ct);
+  return mediaType === 'image' ? ACCEPTED_IMAGE.has(ct) : ACCEPTED_VIDEO.has(ct);
 }
 
 function assertConfigured() {
@@ -73,8 +74,8 @@ async function presignUpload({ scheduledServiceId, role, mediaType = 'video', co
   const type = mediaType === 'image' ? 'image' : 'video';
   if (!isAllowedContentType(contentType, type)) {
     const err = new Error(type === 'image'
-      ? 'Photo must be JPEG, PNG, or WebP.'
-      : 'Video must be MP4 or WebM (iPhone HEVC/MOV isn’t supported yet).');
+      ? 'Photo must be JPEG, PNG, WebP, or HEIC.'
+      : 'Video must be MP4, WebM, or MOV.');
     err.status = 400;
     throw err;
   }
@@ -174,11 +175,17 @@ async function getMediaForRecap(scheduledServiceId, knex = db) {
     throw err;
   }
   if (!rows.length || !config.s3?.bucket) return [];
+  const { ensureRenderable } = require('./recap-transcode');
   const out = [];
   for (const row of rows) {
     try {
+      // iPhone HEVC/MOV + HEIC get transcoded to mp4/jpg here; renderable formats pass
+      // through unchanged. A null means transcoding wasn't possible on this host — drop
+      // the clip rather than feed Remotion something it can't decode.
+      const renderKey = await ensureRenderable({ s3Key: row.s3_key, contentType: row.content_type, mediaType: row.media_type });
+      if (!renderKey) continue;
       const src = await getSignedUrl(s3, new GetObjectCommand({
-        Bucket: config.s3.bucket, Key: row.s3_key,
+        Bucket: config.s3.bucket, Key: renderKey,
       }), { expiresIn: 2 * 60 * 60 });
       out.push({ type: row.media_type === 'image' ? 'image' : 'video', src, role: roleInfo(row.role).beat, caption: row.caption || roleInfo(row.role).caption });
     } catch (err) {
