@@ -47,6 +47,7 @@ import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
+import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
@@ -168,6 +169,7 @@ export default function TechHomePage() {
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
+  const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
   const techName = getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
@@ -497,6 +499,10 @@ export default function TechHomePage() {
         </div>
         {visualServiceNotesEnabled && nextStop.status === 'on_site' && (
           <VisualNotesPanel service={nextStop} />
+        )}
+        {/* During-visit recap clip capture (P4b) — active pest job only, flag-gated. */}
+        {recapCaptureEnabled && nextStop.status === 'on_site' && isPestControlService(nextStop) && (
+          <TechRecapCapture service={nextStop} request={techRequest} />
         )}
         </>
       ) : (
