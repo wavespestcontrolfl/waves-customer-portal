@@ -27,7 +27,7 @@ const talstar = { vendorProductName: 'Talstar P', productName: 'Talstar P', pack
 // product-level price shape
 const talstarFlat = { asin: 'B001', title: 'Talstar P Professional Insecticide 96 oz', price: { amount: 44.5, currencyCode: 'USD' }, inStock: true };
 // documented nested OFFERS shape: offers[].price.value.amount
-const talstarOffers = { asin: 'B010', title: 'Talstar P Professional Insecticide 96 oz', offers: [{ price: { value: { amount: 41.25, currencyCode: 'USD' } }, inStock: true }] };
+const talstarOffers = { asin: 'B010', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [{ price: { value: { amount: 41.25, currencyCode: 'USD' } }, inStock: true }] } };
 const vendor = { vendor_id: 'amz', name: 'Amazon', website: 'https://www.amazon.com' };
 
 describe('amazon-business adapter', () => {
@@ -90,8 +90,8 @@ describe('amazon-business adapter', () => {
       const url = String(call[0]);
       expect(url).toContain('productRegion=US');
       expect(url).toContain('locale=en_US');
-      expect(url).toContain('includedDataTypes=OFFERS');
-      expect(call[1].headers.Authorization).toBe('Bearer ATK');
+      expect(url).toContain('facets=OFFERS');
+      expect(call[1].headers['x-amz-access-token']).toBe('ATK'); // Amazon Business auth header
       expect(call[1].headers['x-amz-user-email']).toBe('buyer@wavespestcontrol.com');
     });
     test('reads the documented nested OFFER price (offers[].price.value.amount) (#2)', async () => {
@@ -100,11 +100,20 @@ describe('amazon-business adapter', () => {
       expect(cand).toMatchObject({ price: 41.25, currency: 'USD' });
       expect(cand.source_url).toContain('/dp/B010');
     });
-    test('skips an offer the account cannot buy; restricted-only product -> no candidate (#5)', async () => {
+    test('skips offers the account cannot buy or that are not new -> no candidate (#5, BLOCKED, condition)', async () => {
       setCreds();
-      const restricted = { asin: 'B020', title: 'Talstar P Professional Insecticide 96 oz', offers: [{ price: { value: { amount: 30, currencyCode: 'USD' } }, buyingRestrictions: ['PROFESSIONAL_USE'] }] };
-      const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [restricted] })));
-      expect(cand).toBeNull();
+      const price = { value: { amount: 30, currencyCode: 'USD' } };
+      const mk = (offer) => ({ asin: 'B0X', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [offer] } });
+      const cases = [
+        mk({ price, buyingRestrictions: ['PROFESSIONAL_USE'] }), // restricted
+        mk({ price, buyingGuidance: 'BLOCKED' }), // guided-buying blocked
+        mk({ price, productCondition: 'Used - Like New' }), // non-new
+      ];
+      for (const p of cases) {
+        // eslint-disable-next-line no-await-in-loop
+        const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [p] })));
+        expect(cand).toBeNull();
+      }
     });
     test('throws on an HTTP error so the scan records a retryable fetch_error', async () => {
       setCreds();
@@ -129,6 +138,7 @@ describe('amazon-business adapter', () => {
     test('hasBuyingRestriction detects restriction arrays + non-purchasable flags', () => {
       expect(amazon.hasBuyingRestriction({ buyingRestrictions: ['X'] })).toBe(true);
       expect(amazon.hasBuyingRestriction({ purchasable: false })).toBe(true);
+      expect(amazon.hasBuyingRestriction({ buyingGuidance: 'BLOCKED' })).toBe(true);
       expect(amazon.hasBuyingRestriction({})).toBe(false);
     });
     test('availabilityOf maps stock signals; unknown stays unknown', () => {

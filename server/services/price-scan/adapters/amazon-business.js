@@ -33,7 +33,7 @@ const API_HOST = process.env.AMAZON_BUSINESS_API_HOST || 'https://api.business.a
 const API_VERSION = '2020-08-26';
 const PRODUCT_REGION = process.env.AMAZON_BUSINESS_PRODUCT_REGION || 'US'; // REQUIRED by the API (US or DE)
 const LOCALE = process.env.AMAZON_BUSINESS_LOCALE || 'en_US'; // REQUIRED by the API
-const INCLUDED_DATA_TYPES = process.env.AMAZON_BUSINESS_INCLUDED_DATA_TYPES || 'OFFERS'; // include account pricing
+const FACETS = process.env.AMAZON_BUSINESS_FACETS || 'OFFERS'; // data facets to include (account pricing lives in OFFERS)
 const MAX_CANDIDATES = 5; // top relevance-ranked results to verify
 const TOKEN_SKEW_MS = 60 * 1000; // refresh a minute before expiry
 // Stay under the published 0.5 req/s usage plan (≈2.1s spacing) so a 25-product run
@@ -106,19 +106,38 @@ function productsFromResponse(json) {
     || (json.data && json.data.products)
     || [];
 }
-// Buyable OFFERS for a product (where account pricing + restrictions live per the docs).
+// Buyable OFFERS for a product. Documented shape: facets=OFFERS returns them under
+// product.includedDataTypes.OFFERS; fall back to a few plausible keys so a doc/live
+// mismatch degrades to "no offers" rather than crashing.
 function offersOf(product) {
   if (!product) return [];
-  const o = product.offers || (product.offerData && product.offerData.offers) || product.buyingOptions;
+  const idt = product.includedDataTypes && product.includedDataTypes.OFFERS;
+  const o = idt || product.offers || (product.offerData && product.offerData.offers) || product.buyingOptions;
   return Array.isArray(o) ? o : [];
 }
-// True when this product/offer carries buying restrictions for the account (can't buy).
+// True when this product/offer can't be purchased by the account: explicit restrictions,
+// a non-purchasable flag, OR guided-buying buyingGuidance === 'BLOCKED'.
 function hasBuyingRestriction(node) {
   if (!node) return false;
   const r = node.buyingRestrictions || node.restrictions;
   if (Array.isArray(r) && r.length) return true;
   if (r && typeof r === 'object' && Object.keys(r).length) return true;
+  if (String(node.buyingGuidance || '').toUpperCase() === 'BLOCKED') return true;
   return node.purchasable === false || node.buyable === false;
+}
+// True unless the offer/product is explicitly a NON-new condition (used, refurbished,
+// collectible, open-box). The rest of the price-scan lane compares NEW inventory, so a
+// non-new Amazon offer must not be staged against SiteOne's new pricing. Unspecified
+// condition is treated as new (Amazon search defaults to new).
+function isNewCondition(node) {
+  if (!node) return true;
+  const c = node.productCondition
+    || (node.condition && (node.condition.conditionValue || node.condition.value)) || node.condition
+    || node.conditionValue;
+  if (!c) return true;
+  // Detect NON-new markers rather than the presence of "new" — "Used - Like New" must
+  // NOT count as new just because it contains the word "new".
+  return !/used|refurb|renew|collectible|open[\s-]?box|pre[\s-]?owned/i.test(String(c));
 }
 // Price object -> { amount, currency }. Documented shape nests the amount at
 // price.value.amount (currency at price.value.currencyCode); flatter fallbacks cover a
@@ -157,13 +176,15 @@ function candidateFromProduct(product, vendor) {
   const offers = offersOf(product);
   let chosen = null;
   for (const o of offers) {
-    if (hasBuyingRestriction(o)) continue;
+    if (hasBuyingRestriction(o) || !isNewCondition(o)) continue; // can't buy / not new
     if (priceOf(o)) { chosen = o; break; }
   }
-  // No buyable offer: only fall back to a product-level price if the PRODUCT itself
-  // isn't restricted (else the account can't buy it — don't surface it).
-  if (!chosen && (offers.length || hasBuyingRestriction(product))) {
-    if (hasBuyingRestriction(product) || offers.length) return null;
+  // No buyable+new offer: fall back to a product-level price ONLY when the product
+  // carries NO offers at all AND isn't itself restricted/non-new — otherwise we'd surface
+  // something the account can't buy (or a used price) as a savings opportunity.
+  if (!chosen) {
+    if (offers.length) return null;
+    if (hasBuyingRestriction(product) || !isNewCondition(product)) return null;
   }
   const priceNode = chosen || product;
   const priced = priceOf(priceNode);
@@ -200,13 +221,16 @@ async function searchProducts(keywords, deps = {}) {
     keywords,
     productRegion: PRODUCT_REGION,
     locale: LOCALE,
-    includedDataTypes: INCLUDED_DATA_TYPES,
+    facets: FACETS, // request the OFFERS facet so account pricing comes back
   });
   const url = `${API_HOST}/products/${API_VERSION}/products?${qs.toString()}`;
   await throttle(deps);
   const res = await fetchImpl(url, {
     method: 'GET',
     headers: {
+      // Amazon Business expects the LWA token in x-amz-access-token. Authorization is
+      // kept as a harmless fallback (trim after the first authorized call confirms).
+      'x-amz-access-token': token,
       Authorization: `Bearer ${token}`,
       'x-amz-user-email': c.userEmail,
       Accept: 'application/json',
