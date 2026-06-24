@@ -879,7 +879,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     if (!service?.id) return undefined;
     let cancelled = false;
     adminFetch(`/admin/schedule/${service.id}/estimate-source`)
-      .then((data) => { if (!cancelled && data?.linked) setEstimateSource(data); })
+      .then((data) => { if (!cancelled) setEstimateSource(data?.linked ? data : null); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [service?.id]);
