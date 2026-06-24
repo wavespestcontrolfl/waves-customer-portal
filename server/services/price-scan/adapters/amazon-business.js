@@ -210,6 +210,9 @@ function availabilityOf(node) {
   const raw = node.availability || node.availabilityStatus || node.availabilityMessage;
   return raw ? mapAvailability(raw) : 'unknown';
 }
+// Preference when choosing among multiple offers (higher = better availability).
+const AVAIL_PREF = { in_stock: 3, limited: 2, unknown: 1, backorder: 0, out_of_stock: 0 };
+const availabilityRank = (a) => (AVAIL_PREF[a] != null ? AVAIL_PREF[a] : 1);
 
 // One product node -> a candidate in the shared shape, or null. Prefers a concrete
 // buyable OFFER (account pricing + restrictions live there per the docs), skipping
@@ -217,10 +220,15 @@ function availabilityOf(node) {
 // opportunity; falls back to a product-level price.
 function candidateFromProduct(product, vendor) {
   const offers = offersOf(product);
+  // Evaluate ALL buyable, new, priced offers and pick the BEST — prefer in-stock
+  // availability, then the lowest price — rather than stopping at the first priced offer
+  // (which could be out of stock or pricier than a later one).
   let chosen = null;
   for (const o of offers) {
-    if (hasBuyingRestriction(o) || !isNewCondition(o)) continue; // can't buy / not new
-    if (priceOf(o)) { chosen = o; break; }
+    if (hasBuyingRestriction(o) || !isNewCondition(o) || !priceOf(o)) continue; // can't buy / not new / unpriced
+    if (!chosen) { chosen = o; continue; }
+    const delta = availabilityRank(availabilityOf(o)) - availabilityRank(availabilityOf(chosen));
+    if (delta > 0 || (delta === 0 && priceOf(o).amount < priceOf(chosen).amount)) chosen = o;
   }
   // No buyable+new offer: fall back to a product-level price ONLY when the product
   // carries NO offers at all AND isn't itself restricted/non-new — otherwise we'd surface

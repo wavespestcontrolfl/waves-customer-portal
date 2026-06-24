@@ -129,6 +129,15 @@ describe('amazon-business adapter', () => {
         expect(cand).toBeNull();
       }
     });
+    test('picks the best offer (in-stock + cheaper) among multiple, not just the first', async () => {
+      setCreds();
+      const p = { asin: 'B0M', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [
+        { price: { value: { amount: 50, currencyCode: 'USD' } }, productCondition: 'New', availability: 'OutOfStock' }, // first, but worse
+        { price: { value: { amount: 42, currencyCode: 'USD' } }, productCondition: 'New', inStock: true }, // later, in-stock + cheaper
+      ] } };
+      const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [p] })));
+      expect(cand).toMatchObject({ price: 42, availability: 'in_stock' });
+    });
     test('an explicit NEW offer is accepted', async () => {
       setCreds();
       const p = { asin: 'B0N', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [{ price: { value: { amount: 40, currencyCode: 'USD' } }, productCondition: 'New' }] } };
