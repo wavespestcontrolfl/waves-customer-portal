@@ -29,11 +29,23 @@ const { convertToOz } = require('../../product-costing');
 const logger = require('../../logger');
 
 const LWA_TOKEN_URL = 'https://api.amazon.com/auth/o2/token';
-const API_HOST = process.env.AMAZON_BUSINESS_API_HOST || 'https://api.business.amazon.com';
+// Production Amazon Business API hosts are REGIONAL — North America is na.business-api,
+// EU/JP are eu./jp.business-api (api.business.amazon.com is only the docs/explorer host).
+// Default NA (Waves); override via env for another region.
+const API_HOST = process.env.AMAZON_BUSINESS_API_HOST || 'https://na.business-api.amazon.com';
 const API_VERSION = '2020-08-26';
 const PRODUCT_REGION = process.env.AMAZON_BUSINESS_PRODUCT_REGION || 'US'; // REQUIRED by the API (US or DE)
 const LOCALE = process.env.AMAZON_BUSINESS_LOCALE || 'en_US'; // REQUIRED by the API
 const FACETS = process.env.AMAZON_BUSINESS_FACETS || 'OFFERS'; // data facets to include (account pricing lives in OFFERS)
+// Delivery ZIP — Amazon uses shippingPostalCode to pick the shipping region, so without it
+// the scan could surface an offer not deliverable to Waves' SW-FL service area. Default to
+// Waves' ZIP; override via env. Set empty to omit.
+const SHIPPING_POSTAL_CODE = process.env.AMAZON_BUSINESS_SHIPPING_POSTAL_CODE != null
+  ? process.env.AMAZON_BUSINESS_SHIPPING_POSTAL_CODE : '34211';
+// Fail CLOSED on a missing/ambiguous offer condition: only an explicit NEW is compared
+// against SiteOne's new pricing. Flip this env true only if first-live testing shows the
+// OFFERS facet legitimately omits condition for new items.
+const ALLOW_UNSPECIFIED_CONDITION = process.env.AMAZON_BUSINESS_ALLOW_UNSPECIFIED_CONDITION === 'true';
 const MAX_CANDIDATES = 5; // top relevance-ranked results to verify
 const TOKEN_SKEW_MS = 60 * 1000; // refresh a minute before expiry
 // Stay under the published 0.5 req/s usage plan (≈2.1s spacing) so a 25-product run
@@ -148,11 +160,11 @@ function hasBuyingRestriction(node) {
 // non-new Amazon offer must not be staged against SiteOne's new pricing. Unspecified
 // condition is treated as new (Amazon search defaults to new).
 function isNewCondition(node) {
-  if (!node) return true;
+  if (!node) return ALLOW_UNSPECIFIED_CONDITION;
   const c = node.productCondition
     || (node.condition && (node.condition.conditionValue || node.condition.value)) || node.condition
     || node.conditionValue;
-  if (!c) return true; // unspecified -> new (Amazon search defaults to new inventory)
+  if (!c) return ALLOW_UNSPECIFIED_CONDITION; // missing condition -> fail closed (only explicit NEW)
   const s = String(c).trim().toLowerCase();
   // Reject every non-new value — used/refurbished/renewed/collectible/open-box AND the
   // ambiguous OTHER/UNKNOWN enums — so ONLY explicit new inventory is compared against
@@ -180,6 +192,15 @@ function asinOf(product) {
 function detailUrlOf(product, asin) {
   return (product && (product.detailPageUrl || product.detailPageURL || product.url))
     || (asin ? `https://www.amazon.com/dp/${asin}` : null);
+}
+// Extract a 10-char ASIN from a curated Amazon product URL (/dp/<ASIN>, /gp/product/<ASIN>,
+// ?ASIN=...). Used as the PRECISE lookup before falling back to keyword search, mirroring
+// the direct-URL-first contract of the browser adapters.
+function asinFromUrl(url) {
+  const s = String(url || '');
+  const m = s.match(/\/(?:dp|gp\/product|gp\/aw\/d|product)\/([A-Z0-9]{10})(?:[/?]|$)/i)
+    || s.match(/[?&]asin=([A-Z0-9]{10})\b/i);
+  return m ? m[1].toUpperCase() : null;
 }
 function availabilityOf(node) {
   if (!node) return 'unknown';
@@ -243,6 +264,7 @@ async function searchProducts(keywords, deps = {}) {
     locale: LOCALE,
     facets: FACETS, // request the OFFERS facet so account pricing comes back
   });
+  if (SHIPPING_POSTAL_CODE) qs.set('shippingPostalCode', SHIPPING_POSTAL_CODE);
   const url = `${API_HOST}/products/${API_VERSION}/products?${qs.toString()}`;
   await throttle(deps);
   const res = await timedFetch(url, {
@@ -267,7 +289,9 @@ async function searchProducts(keywords, deps = {}) {
 async function fetchCandidate(page, vendor, product, opts = {}) {
   if (!isConfigured()) return null; // belt-and-suspenders; scrapableVendors also gates this
   const deps = opts.amazonDeps || {};
-  const q = searchQuery(product);
+  // Prefer a curated ASIN (from an approved vendor product URL) as the precise lookup —
+  // searching by ASIN returns the exact product — before falling back to keyword search.
+  const q = asinFromUrl(vendor && vendor.url) || searchQuery(product);
   if (!q) return null;
 
   const targetOz = product.packSizeValue != null && product.packSizeUnit

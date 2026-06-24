@@ -24,10 +24,10 @@ function makeFetch({ products = [], tokenStatus = 200, productsStatus = 200 } = 
 const deps = (fetchImpl) => ({ amazonDeps: { fetch: fetchImpl, sleep: noSleep } });
 
 const talstar = { vendorProductName: 'Talstar P', productName: 'Talstar P', packSizeValue: 96, packSizeUnit: 'oz' };
-// product-level price shape
-const talstarFlat = { asin: 'B001', title: 'Talstar P Professional Insecticide 96 oz', price: { amount: 44.5, currencyCode: 'USD' }, inStock: true };
+// product-level price shape (explicit NEW — missing condition now fails closed)
+const talstarFlat = { asin: 'B001', title: 'Talstar P Professional Insecticide 96 oz', price: { amount: 44.5, currencyCode: 'USD' }, productCondition: 'New', inStock: true };
 // documented nested OFFERS shape: offers[].price.value.amount
-const talstarOffers = { asin: 'B010', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [{ price: { value: { amount: 41.25, currencyCode: 'USD' } }, inStock: true }] } };
+const talstarOffers = { asin: 'B010', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [{ price: { value: { amount: 41.25, currencyCode: 'USD' } }, productCondition: 'New', inStock: true }] } };
 const vendor = { vendor_id: 'amz', name: 'Amazon', website: 'https://www.amazon.com' };
 
 describe('amazon-business adapter', () => {
@@ -88,9 +88,11 @@ describe('amazon-business adapter', () => {
       expect(cand.source_url).toContain('/dp/B001');
       const call = f.mock.calls.find((c) => String(c[0]).includes('/products/'));
       const url = String(call[0]);
+      expect(url).toContain('na.business-api.amazon.com'); // regional NA host, not the explorer host
       expect(url).toContain('productRegion=US');
       expect(url).toContain('locale=en_US');
       expect(url).toContain('facets=OFFERS');
+      expect(url).toContain('shippingPostalCode=34211'); // delivery region
       expect(call[1].headers['x-amz-access-token']).toBe('ATK'); // Amazon Business auth header
       expect(call[1].headers['x-amz-user-email']).toBe('buyer@wavespestcontrol.com');
       expect(call[1].signal).toBeTruthy(); // abort timeout wired
@@ -112,6 +114,7 @@ describe('amazon-business adapter', () => {
         mk({ price, productCondition: 'Used - Like New' }), // non-new (contains "New")
         mk({ price, productCondition: 'OTHER' }), // ambiguous enum -> non-new
         mk({ price, productCondition: 'UNKNOWN' }), // ambiguous enum -> non-new
+        mk({ price }), // MISSING condition -> fail closed (default)
       ];
       for (const p of cases) {
         // eslint-disable-next-line no-await-in-loop
@@ -125,13 +128,21 @@ describe('amazon-business adapter', () => {
       const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [p] })));
       expect(cand).toMatchObject({ price: 40, currency: 'USD' });
     });
+    test('a curated Amazon product URL is searched by ASIN (precise lookup before keyword)', async () => {
+      setCreds();
+      const f = makeFetch({ products: [talstarFlat] });
+      const curated = { ...vendor, url: 'https://www.amazon.com/dp/B07XYZ1234?ref=foo' };
+      await amazon.fetchCandidate(null, curated, talstar, deps(f));
+      const url = String(f.mock.calls.find((c) => String(c[0]).includes('/products/'))[0]);
+      expect(url).toContain('keywords=B07XYZ1234'); // ASIN used as the keyword, not the product name
+    });
     test('throws on an HTTP error so the scan records a retryable fetch_error', async () => {
       setCreds();
       await expect(amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ productsStatus: 429 })))).rejects.toThrow(/amazon products 429/);
     });
     test('non-USD currency is carried through (scanner drops it before ranking)', async () => {
       setCreds();
-      const cad = { asin: 'B002', title: 'Talstar P Professional Insecticide 96 oz', price: { amount: 60, currencyCode: 'CAD' }, inStock: true };
+      const cad = { asin: 'B002', title: 'Talstar P Professional Insecticide 96 oz', price: { amount: 60, currencyCode: 'CAD' }, productCondition: 'New', inStock: true };
       const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [cad] })));
       expect(cand.currency).toBe('CAD');
     });
