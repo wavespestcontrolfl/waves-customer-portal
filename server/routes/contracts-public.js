@@ -264,6 +264,20 @@ router.post('/:token/sign', async (req, res, next) => {
       });
     }
 
+    // Email the customer their signed branded PDF as a record. Signing
+    // consumes the single-use token, so this email is their copy. Document-
+    // library contracts only — autopay has its own confirmation email above.
+    // Fire-and-forget: never block or fail the sign response on email.
+    if (response.body.contract?.id && response.body.contract.contractType === 'document_template') {
+      const { sendSignedContractCopy } = require('../services/contract-signed-email');
+      // Send failures are handled (sanitized) inside the service; this catch
+      // is a backstop for unexpected errors. Log only the contract id — never
+      // the error body, which could echo the recipient email.
+      sendSignedContractCopy(response.body.contract.id).catch(() => {
+        logger.warn(`[contracts-public] signed-copy email errored for contract ${response.body.contract.id}`);
+      });
+    }
+
     res.json(response.body);
   } catch (err) { next(err); }
 });
