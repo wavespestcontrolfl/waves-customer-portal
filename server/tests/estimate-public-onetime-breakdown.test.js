@@ -2955,6 +2955,63 @@ describe('public estimate one-time breakdown', () => {
     expect(Math.round(addOnNet * 100) / 100).toBe(1451);
   });
 
+  test('an already-aligned choice breakdown is NOT re-discounted on accept', () => {
+    // finalizePricingBundle aligns the bundle into a net choice breakdown (discount
+    // baked into the add-on, synthetic One-Time Pest Control row present). The accept
+    // path re-runs this helper over that bundle; the manual slice must not be
+    // subtracted a second time.
+    const estimate = { show_one_time_option: true };
+    const estData = {
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50, perTreatment: 120 }] },
+        oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] },
+        manualDiscount: { type: 'FIXED', amount: 100, oneTimeAmount: 100 },
+      },
+    };
+    // The finalized bundle: Bora-Care already net of the $100 slice ($951), and the
+    // synthetic pest-choice row present.
+    const alignedBundle = {
+      oneTimeBreakdown: {
+        total: 264 + 951,
+        items: [
+          { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 264 },
+          { service: 'bora_care', label: 'Bora-Care', amount: 951 },
+        ],
+      },
+    };
+    const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, alignedBundle, 264);
+    const bora = list.find((r) => r.service === 'bora_care');
+    // Stays at the already-net $951 — not re-discounted to $851.
+    expect(bora.price).toBe(951);
+  });
+
+  test('invoice-mode one-time accept itemizes a Bora-Care add-on instead of hiding it in a pest line', () => {
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 1, show_one_time_option: true },
+      estData: {},
+      treatAsOneTime: true,
+      effectiveOneTimeTotal: 264 + 951,
+      oneTimeList: [
+        { service: 'one_time_pest', label: 'One-Time Pest Control', price: 264 },
+        { service: 'bora_care', label: 'Bora-Care Wood Treatment', price: 951 },
+      ],
+    });
+    expect(draft.lineItems).toHaveLength(2);
+    expect(draft.lineItems.map((li) => li.description)).toEqual(['One-Time Pest Control', 'Bora-Care Wood Treatment']);
+    expect(draft.lineItems.find((li) => li.description === 'Bora-Care Wood Treatment').unit_price).toBe(951);
+    expect(draft.title).toContain('Bora-Care Wood Treatment');
+
+    // A single-service one-time accept keeps the single collapsed line.
+    const single = buildEstimateInvoiceModeDraft({
+      estimate: { id: 2, show_one_time_option: true },
+      estData: {},
+      treatAsOneTime: true,
+      effectiveOneTimeTotal: 264,
+      oneTimeList: [{ service: 'one_time_pest', label: 'One-Time Pest Control', price: 264 }],
+    });
+    expect(single.lineItems).toHaveLength(1);
+  });
+
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
     // A positive one_time_adjustment (or any unrecognized positive charge) is a
     // real billable line — unlike the negative member discount it must NOT switch

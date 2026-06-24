@@ -719,12 +719,30 @@ function buildEstimateInvoiceModeDraft({
       pricingBundle,
       oneTimeList,
     });
+    // Itemize when the accepted one-time list covers more than one billable service
+    // (e.g. a pest visit plus a Bora-Care add-on) so each charge is visible on the
+    // invoice instead of being hidden inside a single "One-Time Pest Control" line.
+    // Only itemize when the rows reconcile to the billed amount; else keep one line.
+    const billableRows = (Array.isArray(oneTimeList) ? oneTimeList : [])
+      .map((row) => ({
+        description: String(row?.label || row?.name || '').trim(),
+        unit_price: roundInvoiceAmount(row?.price),
+      }))
+      .filter((row) => row.description && Number(row.unit_price) > 0);
+    const rowsTotal = billableRows.reduce((sum, row) => Math.round((sum + row.unit_price) * 100) / 100, 0);
+    const itemize = billableRows.length > 1 && Math.abs(rowsTotal - amount) < 0.01;
+    const lineItems = itemize
+      ? billableRows.map((row) => ({ description: row.description, quantity: 1, unit_price: row.unit_price }))
+      : [{ description: serviceLabel, quantity: 1, unit_price: amount }];
+    const title = itemize
+      ? `${billableRows.map((row) => row.description).join(' + ')} — one-time service`
+      : `${serviceLabel} — one-time service`;
     return {
       invoiceKind: 'one_time',
       serviceLabel,
       amount,
-      title: `${serviceLabel} — one-time service`,
-      lineItems: [{ description: serviceLabel, quantity: 1, unit_price: amount }],
+      title,
+      lineItems,
       notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode one-time).`,
     };
   }
@@ -7950,6 +7968,18 @@ function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount =
   return applyManualOneTimeDiscountToChoiceRows(rows, manualDiscount);
 }
 
+// The manual one-time discount to apply when preserving add-on rows for a choice.
+// finalizePricingBundle() already aligns the bundle into a net choice breakdown
+// (the discount applied once, baked into the add-on rows, and a synthetic
+// "One-Time Pest Control" row present). When the accept path re-runs this over
+// that already-net breakdown, re-applying the discount would subtract the slice a
+// second time — so return null in that case and only apply it on the raw breakdown.
+function manualDiscountForChoiceBreakdown(breakdown = {}, estData = {}) {
+  const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+  if (items.some(isOneTimePestChoiceItem)) return null;
+  return normalizeManualDiscountSummary(estData);
+}
+
 function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
   if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return null;
   const breakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
@@ -7958,7 +7988,7 @@ function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBund
   if (category === 'pest_control') {
     const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
     if (!pestChoiceAmount) return null;
-    const addOnTotal = preservedOneTimeAddOnRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))
+    const addOnTotal = preservedOneTimeAddOnRowsFromBreakdown(breakdown, manualDiscountForChoiceBreakdown(breakdown, estData))
       .reduce((sum, item) => Math.round((sum + Number(item.price || 0)) * 100) / 100, 0);
     return Math.round((pestChoiceAmount + addOnTotal) * 100) / 100;
   }
@@ -7979,7 +8009,7 @@ function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, prici
     name: 'One-Time Pest Control',
     label: 'One-Time Pest Control',
     price: Math.round(amount * 100) / 100,
-  }, ...preservedOneTimeAddOnRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))];
+  }, ...preservedOneTimeAddOnRowsFromBreakdown(breakdown, manualDiscountForChoiceBreakdown(breakdown, estData))];
 }
 
 function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingBundle = null, choicePrice = null) {
