@@ -305,9 +305,18 @@ async function getProductByAsin(asin, deps = {}) {
   const url = `${API_HOST}/products/${API_VERSION}/products/${encodeURIComponent(asin)}?${baseProductQuery().toString()}`;
   await throttle(deps);
   const res = await timedFetch(url, { method: 'GET', headers: businessHeaders(token, deps) }, deps);
-  if (res.status === 404) return null; // ASIN not found -> caller falls back to keyword search
-  if (!res.ok) throw new Error(`amazon product ${res.status}`);
-  return res.json();
+  if (res.ok) return res.json();
+  // A stale/unknown ASIN is reported as 404 OR a 400 ErrorList with a NOT_FOUND code
+  // (e.g. PRODUCT_NOT_FOUND) — treat that as a MISS so the caller falls back to keyword
+  // search, not a retryable fetch_error. (Body is read only to classify; never logged —
+  // it can echo the account email.) Any other error still throws.
+  if (res.status === 404) return null;
+  if (res.status === 400) {
+    let txt = '';
+    try { txt = await res.text(); } catch (e) { txt = ''; }
+    if (/NOT_FOUND/i.test(txt)) return null;
+  }
+  throw new Error(`amazon product ${res.status}`);
 }
 
 // Resolve the candidate product list: a curated ASIN (from the vendor's approved product

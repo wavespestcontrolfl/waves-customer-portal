@@ -13,14 +13,14 @@ const clearCreds = () => CRED_KEYS.forEach((k) => delete process.env[k]);
 const noSleep = () => Promise.resolve(); // skip the real throttle delay in tests
 
 // fetch stub routing the LWA token URL, the by-ASIN endpoint, and the keyword search.
-function makeFetch({ products = [], byAsinProduct = null, tokenStatus = 200, productsStatus = 200, byAsinStatus = 200 } = {}) {
+function makeFetch({ products = [], byAsinProduct = null, byAsinBody = '', tokenStatus = 200, productsStatus = 200, byAsinStatus = 200 } = {}) {
   return jest.fn(async (url) => {
     const s = String(url);
     if (s.includes('api.amazon.com/auth/o2/token')) {
       return { ok: tokenStatus < 400, status: tokenStatus, json: async () => ({ access_token: 'ATK', expires_in: 3600 }) };
     }
     if (/\/products\/2020-08-26\/products\/[^?]+/.test(s)) { // by-ASIN retrieval
-      return { ok: byAsinStatus < 400, status: byAsinStatus, json: async () => (byAsinProduct || {}) };
+      return { ok: byAsinStatus < 400, status: byAsinStatus, json: async () => (byAsinProduct || {}), text: async () => byAsinBody };
     }
     return { ok: productsStatus < 400, status: productsStatus, json: async () => ({ products }) }; // keyword search
   });
@@ -161,6 +161,20 @@ describe('amazon-business adapter', () => {
       const cand = await amazon.fetchCandidate(null, curated, talstar, deps(f));
       expect(f.mock.calls.map((c) => String(c[0])).some((u) => u.includes('keywords='))).toBe(true); // fell back
       expect(cand).toMatchObject({ price: 44.5 });
+    });
+    test('a stale ASIN (400 PRODUCT_NOT_FOUND ErrorList) falls back to keyword search', async () => {
+      setCreds();
+      const f = makeFetch({ byAsinStatus: 400, byAsinBody: JSON.stringify({ errors: [{ code: 'PRODUCT_NOT_FOUND' }] }), products: [talstarFlat] });
+      const curated = { ...vendor, url: 'https://www.amazon.com/dp/B0STALE123' };
+      const cand = await amazon.fetchCandidate(null, curated, talstar, deps(f));
+      expect(f.mock.calls.map((c) => String(c[0])).some((u) => u.includes('keywords='))).toBe(true);
+      expect(cand).toMatchObject({ price: 44.5 });
+    });
+    test('a non-not-found 400 on by-ASIN throws (real fetch_error, no silent fallback)', async () => {
+      setCreds();
+      const f = makeFetch({ byAsinStatus: 400, byAsinBody: JSON.stringify({ errors: [{ code: 'INVALID_INPUT' }] }) });
+      const curated = { ...vendor, url: 'https://www.amazon.com/dp/B0BADREQ12' };
+      await expect(amazon.fetchCandidate(null, curated, talstar, deps(f))).rejects.toThrow(/amazon product 400/);
     });
     test('throws on an HTTP error so the scan records a retryable fetch_error', async () => {
       setCreds();
