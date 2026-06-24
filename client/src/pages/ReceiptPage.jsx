@@ -727,28 +727,6 @@ export default function ReceiptPage() {
               <Icon name="print" size={16} strokeWidth={2} />
               Print
             </button>
-            {invoice.stripeReceiptUrl && (
-              <a
-                href={invoice.stripeReceiptUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  minHeight: 40,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border)',
-                  color: 'var(--text-muted)',
-                  textDecoration: 'none',
-                  fontSize: 14,
-                  fontWeight: 750,
-                  background: '#FFFFFF',
-                }}
-              >
-                Stripe receipt
-              </a>
-            )}
           </div>
         </BrandCard>
 

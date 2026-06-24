@@ -85,7 +85,6 @@ router.get('/:token', async (req, res, next) => {
         paymentMethod: data.payment_method,
         cardBrand: data.card_brand,
         cardLastFour: data.card_last_four,
-        stripeReceiptUrl: data.receipt_url,
         notes: data.notes,
       },
       service: {
