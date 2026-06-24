@@ -15,7 +15,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
-const { normalizeWebsiteQuoteContact } = require('../utils/intake-normalize');
+const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -348,8 +348,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const quoteFullAddress = normalizedAddress.fullAddress || [quoteAddress, quoteCity, [quoteState, quoteZip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
 
     const contact = normalizeWebsiteQuoteContact({ firstName, lastName, email, phone });
-    const contactFirstName = contact.firstName;
-    const contactLastName = contact.lastName;
+    // Proper-case here (normalizeWebsiteQuoteContact only trims) so the leads
+    // row written earlier in this request and the customer row are both
+    // canonical — otherwise every quote like "CHARLES SANTIAGO" reintroduces raw
+    // lead data after the backfill.
+    const contactFirstName = normalizeContactName(contact.firstName);
+    const contactLastName = normalizeContactName(contact.lastName);
     const contactEmail = contact.email;
     const contactPhone = contact.phoneForStorage;
     const normalizedPhone = contact.phoneE164;
@@ -677,7 +681,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         customerId = existingCust.id;
       } else {
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-        const [newCust] = await db('customers').insert({
+        const [newCust] = await db('customers').insert(applyContactNormalization({
           first_name: contactFirstName,
           last_name: contactLastName,
           email: emailLc,
@@ -703,7 +707,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           last_contact_date: new Date(),
           last_contact_type: 'website_quote',
           active: true,
-        }).returning(['id']);
+        })).returning(['id']);
         customerId = newCust.id;
       }
 

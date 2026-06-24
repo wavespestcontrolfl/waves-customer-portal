@@ -16,6 +16,15 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
 const CustomerCredit = require('../services/customer-credit');
+const {
+  normalizeContactName,
+  normalizeContactPhone,
+  normalizeContactEmail,
+  normalizeContactStreet,
+  normalizeContactCity,
+  normalizeContactZip,
+  normalizeContactRecord,
+} = require('../utils/intake-normalize');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -962,11 +971,15 @@ async function ensureCustomerAccount(trx, input) {
   const existing = await findAccountByContact(trx, input);
   if (existing?.accountId) return existing;
 
+  // Canonical-format the account row here so callers that pass raw lead data
+  // (e.g. admin-leads lead→customer conversion) still create a normalized
+  // account, matching the linked customer row. Idempotent for callers that
+  // already normalized their input (admin create / quick-add).
   const [account] = await trx('customer_accounts').insert({
-    first_name: input.firstName,
-    last_name: input.lastName,
-    phone: input.phone || null,
-    email: input.email ? String(input.email).trim().toLowerCase() : null,
+    first_name: normalizeContactName(input.firstName),
+    last_name: normalizeContactName(input.lastName),
+    phone: normalizeContactPhone(input.phone) || null,
+    email: input.email ? normalizeContactEmail(input.email) : null,
     company_name: input.companyName || null,
   }).returning('*');
 
@@ -1099,14 +1112,14 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'firstName and phone required' });
     }
     const normalized = {
-      firstName: cleanText(firstName),
-      lastName: cleanText(lastName),
-      phone: cleanText(phone),
+      firstName: normalizeContactName(cleanText(firstName)),
+      lastName: normalizeContactName(cleanText(lastName)),
+      phone: normalizeContactPhone(cleanText(phone)),
       email: cleanEmail(email),
-      address: cleanText(addressLine1 || address),
-      city: cleanText(city),
+      address: normalizeContactStreet(cleanText(addressLine1 || address)),
+      city: normalizeContactCity(cleanText(city)),
       state: cleanState(state),
-      zip: cleanText(zip),
+      zip: normalizeContactZip(cleanText(zip)),
       profileLabel: cleanOptionalText(profileLabel),
       leadSource: cleanOptionalText(leadSource) || 'admin_manual',
       pipelineStage: cleanText(pipelineStage) || 'new_lead',
@@ -1982,14 +1995,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const { firstName, lastName, phone, email, address, addressLine1, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
     const normalized = {
-      firstName: cleanText(firstName),
-      lastName: cleanText(lastName),
-      phone: cleanText(phone),
+      firstName: normalizeContactName(cleanText(firstName)),
+      lastName: normalizeContactName(cleanText(lastName)),
+      phone: normalizeContactPhone(cleanText(phone)),
       email: cleanEmail(email),
-      addressLine1: cleanText(addressLine1 || address),
-      city: cleanText(city),
+      addressLine1: normalizeContactStreet(cleanText(addressLine1 || address)),
+      city: normalizeContactCity(cleanText(city)),
       state: cleanState(state),
-      zip: cleanText(zip),
+      zip: normalizeContactZip(cleanText(zip)),
       tier: cleanOptionalText(tier),
       monthlyRate: monthlyRate === '' || monthlyRate === undefined || monthlyRate === null ? 0 : parseFloat(monthlyRate) || 0,
       leadSource: cleanOptionalText(leadSource),
@@ -2099,6 +2112,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else { updates[v] = req.body[k]; }
       }
     }
+    // Proper-case names, E.164 phone, abbreviated/clean street, title-case city,
+    // 5-digit zip on edits too — same canonical formatting as customer creation,
+    // and applied before the cross-account conflict check so dedup compares the
+    // stored format.
+    Object.assign(updates, normalizeContactRecord(updates));
     // Stamp when the review flag flips so admins can see who/when later.
     if (updates.has_left_google_review !== undefined) {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;

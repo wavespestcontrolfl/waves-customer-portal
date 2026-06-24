@@ -1,6 +1,7 @@
 const { normalizeEmail, collapseWhitespace } = require('./contact-normalize');
 const { toE164 } = require('./phone');
-const { normalizeStreetLine } = require('./address-normalizer');
+const { normalizeStreetLine, titleCaseWords, normalizeState } = require('./address-normalizer');
+const { properCase } = require('./name-case');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -112,6 +113,82 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
   };
 }
 
+// --- Canonical contact-field normalization ---------------------------------
+// One place that decides how a customer/lead contact field is stored, so every
+// ingestion path (admin create, quick-add, Intelligence Bar, public quote, lead
+// webhook, call triage, booking, estimates, proposals, SMS) produces the same
+// format. Each per-field helper PRESERVES the value the call site chose when the
+// input is empty/null — it only reformats real content, never coerces null<->''
+// (so a path that intentionally inserts null for a column keeps inserting null).
+
+function normalizeContactName(value) {
+  const cleaned = cleanText(value);
+  return cleaned ? properCase(cleaned) : value;
+}
+
+function normalizeContactEmail(value) {
+  const cleaned = cleanEmail(value);
+  return cleaned ? cleaned : value;
+}
+
+function normalizeContactPhone(value) {
+  const cleaned = cleanText(value);
+  return cleaned ? normalizePhoneForStorage(cleaned) : value;
+}
+
+function normalizeContactStreet(value) {
+  const cleaned = cleanText(value);
+  return cleaned ? normalizeStreetLine(cleaned) : value;
+}
+
+function normalizeContactCity(value) {
+  const cleaned = cleanText(value);
+  return cleaned ? titleCaseWords(cleaned) : value;
+}
+
+function normalizeContactStateField(value) {
+  const cleaned = cleanText(value);
+  if (!cleaned) return value;
+  return normalizeState(cleaned) || cleaned.toUpperCase().slice(0, 2);
+}
+
+function normalizeContactZip(value) {
+  const cleaned = cleanText(value);
+  if (!cleaned) return value;
+  return normalizeZip(cleaned) || value;
+}
+
+const CONTACT_FIELD_NORMALIZERS = {
+  first_name: normalizeContactName,
+  last_name: normalizeContactName,
+  email: normalizeContactEmail,
+  phone: normalizeContactPhone,
+  address_line1: normalizeContactStreet,
+  address_line2: normalizeContactStreet,
+  city: normalizeContactCity,
+  state: normalizeContactStateField,
+  zip: normalizeContactZip,
+};
+
+// Return a NEW object holding only the recognized contact keys that were present
+// in `fields`, each normalized. Keys the caller didn't supply are not invented.
+function normalizeContactRecord(fields = {}) {
+  const src = fields && typeof fields === 'object' ? fields : {};
+  const out = {};
+  for (const key of Object.keys(CONTACT_FIELD_NORMALIZERS)) {
+    if (Object.prototype.hasOwnProperty.call(src, key) && src[key] !== undefined) {
+      out[key] = CONTACT_FIELD_NORMALIZERS[key](src[key]);
+    }
+  }
+  return out;
+}
+
+// Convenience for insert/update call sites: pass the full row object and get it
+// back with its contact fields normalized and every other field untouched.
+function applyContactNormalization(fields = {}) {
+  return { ...fields, ...normalizeContactRecord(fields) };
+}
+
 module.exports = {
   EMAIL_RE,
   cleanText,
@@ -122,4 +199,14 @@ module.exports = {
   normalizePhoneForStorage,
   normalizeWebsiteQuoteContact,
   normalizeCallExtraction,
+  normalizeContactRecord,
+  applyContactNormalization,
+  CONTACT_FIELD_NORMALIZERS,
+  normalizeContactName,
+  normalizeContactEmail,
+  normalizeContactPhone,
+  normalizeContactStreet,
+  normalizeContactCity,
+  normalizeContactStateField,
+  normalizeContactZip,
 };

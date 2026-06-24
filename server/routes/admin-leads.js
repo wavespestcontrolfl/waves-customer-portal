@@ -6,6 +6,7 @@ const leadAttribution = require('../services/lead-attribution');
 const logger = require('../services/logger');
 const { startOfETMonth, etDateString } = require('../utils/datetime-et');
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');
+const { applyContactNormalization } = require('../utils/intake-normalize');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -964,7 +965,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           phone: lead.phone || '',
           email: lead.email || null,
         });
-        const [created] = await trx('customers').insert({
+        const [created] = await trx('customers').insert(applyContactNormalization({
           account_id: account.accountId,
           is_primary_profile: !account.existingCustomer,
           profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
@@ -982,7 +983,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           pipeline_stage: 'won',
           pipeline_stage_changed_at: new Date(),
           assigned_to: req.technicianId,
-        }).returning('*');
+        })).returning('*');
         await createDefaultCustomerRows(trx, created.id);
         customerId = created.id;
       } else if (existingCustomer) {

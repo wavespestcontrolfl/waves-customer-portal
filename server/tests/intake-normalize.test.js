@@ -4,6 +4,11 @@ const {
   normalizeNanpPhone,
   normalizePhoneForStorage,
   normalizeWebsiteQuoteContact,
+  normalizeContactRecord,
+  applyContactNormalization,
+  normalizeContactZip,
+  normalizeContactStreet,
+  normalizeContactStateField,
 } = require('../utils/intake-normalize');
 
 describe('intake contact normalization', () => {
@@ -134,5 +139,102 @@ describe('intake contact normalization', () => {
       phone: null,
       state: null,
     });
+  });
+});
+
+describe('normalizeContactRecord — canonical write-path formatting', () => {
+  test('formats every contact field to its stored form', () => {
+    expect(normalizeContactRecord({
+      first_name: 'charles',
+      last_name: 'SANTIAGO',
+      email: '  Charles.Santiago@GMAIL.com ',
+      phone: '(727) 421-9951',
+      address_line1: '1234 sw 5th avenue',
+      address_line2: 'apt b',
+      city: 'PORT CHARLOTTE',
+      state: 'florida',
+      zip: '33948-1234',
+    })).toEqual({
+      first_name: 'Charles',
+      last_name: 'Santiago',
+      email: 'charles.santiago@gmail.com',
+      phone: '+17274219951',
+      address_line1: '1234 SW 5th Ave',
+      address_line2: 'Apt B',
+      city: 'Port Charlotte',
+      state: 'FL',
+      zip: '33948',
+    });
+  });
+
+  test('abbreviates street suffixes and keeps 5-digit zip', () => {
+    expect(normalizeContactStreet('45 north harbor boulevard')).toBe('45 North Harbor Blvd');
+    // Suffix is abbreviated; spelled-out directionals stay words, abbreviated
+    // ones are upper-cased.
+    expect(normalizeContactStreet('789 East Main Street')).toBe('789 East Main St');
+    expect(normalizeContactStreet('1234 sw 5th avenue')).toBe('1234 SW 5th Ave');
+    expect(normalizeContactZip('34102-5567')).toBe('34102');
+    expect(normalizeContactZip('34102')).toBe('34102');
+  });
+
+  test('handles Mc/Mac/O\' and naming particles via properCase', () => {
+    expect(normalizeContactRecord({ first_name: 'macdonald', last_name: "o'brien-smith" }))
+      .toEqual({ first_name: 'MacDonald', last_name: "O'Brien-Smith" });
+    expect(normalizeContactRecord({ last_name: 'de la cruz' }))
+      .toEqual({ last_name: 'De la Cruz' });
+  });
+
+  test('only returns keys that were supplied', () => {
+    expect(normalizeContactRecord({ first_name: 'jane' })).toEqual({ first_name: 'Jane' });
+    expect(Object.keys(normalizeContactRecord({ city: 'venice', zip: '34285' })).sort())
+      .toEqual(['city', 'zip']);
+  });
+
+  test('preserves the value the caller chose for empty/null fields (no null<->"" coercion)', () => {
+    expect(normalizeContactRecord({ phone: null, email: null, last_name: null }))
+      .toEqual({ phone: null, email: null, last_name: null });
+    expect(normalizeContactRecord({ city: '', zip: '' }))
+      .toEqual({ city: '', zip: '' });
+  });
+
+  test('is idempotent on already-canonical values', () => {
+    const once = normalizeContactRecord({
+      first_name: 'Charles', last_name: 'Santiago', phone: '+17274219951',
+      email: 'a@b.com', address_line1: '1234 SW 5th Ave', city: 'Port Charlotte',
+      state: 'FL', zip: '33948',
+    });
+    expect(normalizeContactRecord(once)).toEqual(once);
+  });
+
+  test('state falls back to a 2-letter upper code for unmapped values', () => {
+    expect(normalizeContactStateField('dc')).toBe('DC');
+    expect(normalizeContactStateField('Georgia')).toBe('GA');
+    expect(normalizeContactStateField('')).toBe('');
+  });
+
+  test('applyContactNormalization normalizes contact fields and leaves the rest untouched', () => {
+    expect(applyContactNormalization({
+      first_name: 'jose',
+      last_name: 'de la cruz',
+      phone: null,
+      city: '',
+      pipeline_stage: 'won',
+      account_id: 42,
+      monthly_rate: 89,
+    })).toEqual({
+      first_name: 'Jose',
+      last_name: 'De la Cruz',
+      phone: null,
+      city: '',
+      pipeline_stage: 'won',
+      account_id: 42,
+      monthly_rate: 89,
+    });
+  });
+
+  test('tolerates non-object input', () => {
+    expect(normalizeContactRecord(null)).toEqual({});
+    expect(normalizeContactRecord(undefined)).toEqual({});
+    expect(applyContactNormalization(null)).toEqual({});
   });
 });

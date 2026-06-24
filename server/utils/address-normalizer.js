@@ -403,6 +403,8 @@ function normalizeLeadAddress(input = {}) {
 module.exports = {
   normalizeLeadAddress,
   normalizeStreetLine,
+  titleCaseWords,
+  normalizeState,
   parseRawAddress,
   STREET_SUFFIX_ALIASES,
 };

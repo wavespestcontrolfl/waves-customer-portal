@@ -14,6 +14,7 @@ const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-fail
 const { hasSchedulingIntent, isSmsReaction } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
+const { applyContactNormalization } = require('../utils/intake-normalize');
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
 // numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
@@ -343,7 +344,7 @@ router.post('/sms', async (req, res) => {
       const inboundContactName = extractContactNameFromSms(Body);
 
       try {
-        const [newCust] = await db('customers').insert({
+        const [newCust] = await db('customers').insert(applyContactNormalization({
           first_name: inboundContactName?.firstName || 'Unknown',
           last_name: inboundContactName?.lastName || '',
           phone: From, address_line1: '', city: numberConfig.area || '', state: 'FL', zip: '',
@@ -355,7 +356,7 @@ router.post('/sms', async (req, res) => {
           last_contact_date: new Date(), last_contact_type: Body ? 'sms_inbound' : 'call_inbound',
           member_since: etDateString(),
           crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,
-        }).returning('*');
+        })).returning('*');
 
         await db('property_preferences').insert({ customer_id: newCust.id });
         await db('notification_prefs').insert({ customer_id: newCust.id });

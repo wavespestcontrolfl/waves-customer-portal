@@ -16,12 +16,10 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const twilio = require('twilio');
 
+// Delegates to the shared robust title-caser (Mc/Mac/O'/particles/hyphens) so
+// AI call-extracted names match every other ingestion path.
 function capitalizeName(name) {
-  if (!name) return '';
-  return name.trim().toLowerCase()
-    .replace(/\b\w/g, c => c.toUpperCase())
-    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
-    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
+  return properCase(name);
 }
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
@@ -29,7 +27,8 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
-const { normalizeCallExtraction } = require('../utils/intake-normalize');
+const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
+const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { buildExtractionPrompt, PROMPT_HASH } = require('./prompts/call-extraction-v1');
@@ -1897,9 +1896,9 @@ const CallRecordingProcessor = {
             }
           }
 
-          const [newCust] = await db('customers').insert({
-            first_name: capitalizeName(extracted.first_name),
-            last_name: extracted.last_name ? capitalizeName(extracted.last_name) : null,
+          const [newCust] = await db('customers').insert(applyContactNormalization({
+            first_name: extracted.first_name,
+            last_name: extracted.last_name || null,
             phone,
             email: extracted.email || null,
             address_line1: addrLine || null,
@@ -1912,7 +1911,7 @@ const CallRecordingProcessor = {
             pipeline_stage: 'new_lead',
             pipeline_stage_changed_at: new Date(),
             nearest_location_id: loc.id,
-          }).returning('*');
+          })).returning('*');
           customerId = newCust.id;
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);

@@ -10,6 +10,16 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const {
+  normalizeContactName,
+  normalizeContactPhone,
+  normalizeContactEmail,
+  normalizeContactStreet,
+  normalizeContactCity,
+  normalizeContactStateField,
+  normalizeContactZip,
+  normalizeContactRecord,
+} = require('../../utils/intake-normalize');
 
 // ─── TOOL DEFINITIONS (Anthropic format) ────────────────────────
 
@@ -823,9 +833,9 @@ const CREATABLE_STAGES = new Set([
 ]);
 
 async function createCustomer(input) {
-  const firstName = String(input.first_name || '').trim();
-  const lastName = String(input.last_name || '').trim() || null;
-  const phone = String(input.phone || '').trim();
+  const firstName = normalizeContactName(String(input.first_name || '').trim());
+  const lastName = normalizeContactName(String(input.last_name || '').trim()) || null;
+  const phone = normalizeContactPhone(String(input.phone || '').trim());
   if (!firstName || !phone) return { error: 'first_name and phone are required' };
 
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
@@ -834,7 +844,7 @@ async function createCustomer(input) {
   const stage = input.pipeline_stage || 'new_lead';
   if (!CREATABLE_STAGES.has(stage)) return { error: `Invalid pipeline_stage: ${stage}` };
 
-  const email = input.email ? String(input.email).trim().toLowerCase() : null;
+  const email = normalizeContactEmail(input.email) || null;
 
   const existing = await db('customers')
     .whereNull('deleted_at')
@@ -862,10 +872,10 @@ async function createCustomer(input) {
     last_name: lastName,
     phone,
     email,
-    address_line1: String(input.address_line1 || '').trim() || null,
-    city: String(input.city || '').trim() || null,
-    state: String(input.state || '').trim().toUpperCase().slice(0, 2) || 'FL',
-    zip: String(input.zip || '').trim() || null,
+    address_line1: normalizeContactStreet(String(input.address_line1 || '').trim()) || null,
+    city: normalizeContactCity(String(input.city || '').trim()) || null,
+    state: normalizeContactStateField(String(input.state || '').trim()) || 'FL',
+    zip: normalizeContactZip(String(input.zip || '').trim()) || null,
     pipeline_stage: stage,
     lead_source: String(input.lead_source || '').trim() || 'intelligence_bar',
   };
@@ -932,6 +942,7 @@ async function createCustomer(input) {
 
 async function updateCustomer(customerId, updates) {
   const clean = sanitizeUpdates(updates);
+  Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
 
   const before = await db('customers').where('id', customerId).first();
@@ -973,6 +984,7 @@ async function updateCustomer(customerId, updates) {
 
 async function bulkUpdateCustomers(customerIds, updates) {
   const clean = sanitizeUpdates(updates);
+  Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
 
