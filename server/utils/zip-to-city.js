@@ -10,10 +10,15 @@
 // lead lands with a blank city. This map recovers the city from the ZIP.
 //
 // City values are USPS primary place names (what appears on mail for the ZIP).
-// The ZIP set mirrors the county lists already maintained in
-// services/tax-calculator.js and services/compliance.js, extended with the
-// Charlotte-county ZIPs the business also serves. Unknown ZIPs return '' — we
-// never guess outside the known service area.
+// The ZIP set covers the canonical county service-area sets in
+// services/property-lookup/ai-property-lookup.js (MANATEE_ZIPS / SARASOTA_ZIPS
+// / CHARLOTTE_ZIPS); a few non-delivery / PO-box-only ZIPs from those sets
+// (e.g. 34249) are intentionally omitted. Unknown ZIPs return '' — we never
+// guess outside the known service area.
+//
+// IMPORTANT: every city emitted here must also have a CITY_TO_LOCATION entry in
+// config/locations.js, or a recovered city routes to the Bradenton default
+// instead of the correct office.
 
 const ZIP_TO_CITY = {
   // ── Manatee County ──
@@ -29,12 +34,19 @@ const ZIP_TO_CITY = {
   '34210': 'Bradenton',
   '34211': 'Bradenton', // Lakewood Ranch (USPS city = Bradenton)
   '34212': 'Bradenton',
+  '34215': 'Cortez',
+  '34216': 'Anna Maria',
+  '34217': 'Bradenton Beach',
+  '34218': 'Holmes Beach',
   '34219': 'Parrish',
+  '34220': 'Palmetto',
   '34221': 'Palmetto',
   '34222': 'Ellenton',
   '34243': 'Sarasota', // University Park — USPS city = Sarasota
   '34250': 'Terra Ceia',
   '34251': 'Myakka City',
+  '34264': 'Oneco',
+  '34270': 'Tallevast',
   '34280': 'Bradenton',
   '34281': 'Bradenton',
   '34282': 'Bradenton',
@@ -56,6 +68,8 @@ const ZIP_TO_CITY = {
   '34241': 'Sarasota',
   '34242': 'Sarasota', // Siesta Key
   '34260': 'Sarasota',
+  '34272': 'Laurel',
+  '34274': 'Nokomis',
   '34275': 'Nokomis',
   '34276': 'Sarasota',
   '34277': 'Sarasota',
@@ -75,7 +89,10 @@ const ZIP_TO_CITY = {
   '34295': 'Englewood',
 
   // ── Charlotte County ──
+  '33921': 'Boca Grande',
+  '33927': 'Placida',
   '33938': 'Port Charlotte',
+  '33946': 'Placida',
   '33947': 'Placida',
   '33948': 'Port Charlotte',
   '33949': 'Port Charlotte',

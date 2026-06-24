@@ -199,7 +199,11 @@ router.post('/', async (req, res) => {
 
     let customer;
     let isNewCustomer = false;
-    const location = resolveLocation(leadSource.area || '');
+    // Resolve the office from the recovered city first so a ZIP-derived city
+    // (e.g. 34219 -> Parrish on a main-site lead with no area) routes to the
+    // right office for nearest_location_id and the auto-reply, instead of
+    // falling back to the Bradenton default. Falls through to area, then ''.
+    const location = resolveLocation(resolvedCity || leadSource.area || '');
 
     if (existing) {
       customer = existing;

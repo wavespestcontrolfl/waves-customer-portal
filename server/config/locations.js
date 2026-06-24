@@ -164,12 +164,18 @@ function nearestLocation(latitude, longitude) {
   return best;
 }
 
-// City → location mapping
+// City → location mapping. Every city the ZIP fallback (utils/zip-to-city.js)
+// can emit must have an entry here, or a recovered city would silently route
+// to the Bradenton default — e.g. Charlotte-county leads must reach the Venice
+// office, not Bradenton.
 const CITY_TO_LOCATION = {
   'lakewood ranch': 'bradenton', 'bradenton': 'bradenton', 'university park': 'bradenton',
-  'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota',
-  'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'port charlotte': 'venice',
-  'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'ruskin': 'parrish', 'apollo beach': 'parrish',
+  'cortez': 'bradenton', 'anna maria': 'bradenton', 'bradenton beach': 'bradenton', 'holmes beach': 'bradenton',
+  'oneco': 'bradenton', 'tallevast': 'bradenton', 'myakka city': 'bradenton',
+  'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota', 'longboat key': 'sarasota',
+  'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'laurel': 'venice',
+  'port charlotte': 'venice', 'punta gorda': 'venice', 'placida': 'venice', 'boca grande': 'venice',
+  'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'ruskin': 'parrish', 'apollo beach': 'parrish', 'terra ceia': 'parrish',
 };
 
 function resolveLocation(city) {

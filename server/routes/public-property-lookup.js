@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { zipToCity } = require('../utils/zip-to-city');
 
 // Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
 // 5 per IP per hour is enough for a real lead to iterate on
@@ -185,7 +186,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       email: String(email).toLowerCase().trim(),
       phone: normPhone,
       address: lookupAddress,
-      city: normalizedAddress.city || null,
+      city: normalizedAddress.city || zipToCity(normalizedAddress.zip) || null,
       zip: normalizedAddress.zip || null,
       lead_type: 'quote_wizard',
       first_contact_channel: 'website_quote',
