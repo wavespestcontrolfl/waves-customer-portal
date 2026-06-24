@@ -159,13 +159,37 @@ const DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
 // once (the caller maps that to a clean skip), while a per-PRODUCT scrape failure
 // is captured as { product, error } and never sinks the rest of the batch.
 //   specs: [{ product, vendors }]  ->  [{ product, scan } | { product, error }]
+// Does any selected vendor use a browser-backed adapter? API-only adapters
+// (adapter.apiOnly, e.g. Amazon) ignore the page, so an all-API batch must NOT launch
+// Chromium — otherwise a missing browser binary would abort an Amazon-only run even
+// though it never needed a browser.
+function specsNeedBrowser(specs) {
+  return (specs || []).some((spec) => (spec.vendors || []).some((v) => {
+    const adapter = getAdapter(selectAdapterKey(v));
+    return !(adapter && adapter.apiOnly);
+  }));
+}
+
 async function runScanMany(specs, opts = {}) {
-  const { chromium } = require('playwright');
-  const browser = await chromium.launch({ headless: opts.headless !== false });
+  // Launch Chromium ONLY when a browser-backed adapter is in the batch. When present,
+  // a launch failure still rejects the whole batch (caller maps to browser_unavailable)
+  // exactly as before; an all-API batch skips the browser entirely.
+  const needBrowser = specsNeedBrowser(specs);
+  let browser = null;
+  let context = null;
+  if (needBrowser) {
+    const { chromium } = require('playwright');
+    browser = await chromium.launch({ headless: opts.headless !== false });
+    context = await browser.newContext({ userAgent: opts.userAgent || DESKTOP_UA });
+  }
   const results = [];
   try {
-    const context = await browser.newContext({ userAgent: opts.userAgent || DESKTOP_UA });
+    // API-only adapters (or any adapter when no browser was launched) run with a null
+    // page — they make HTTP calls and never touch Chromium.
     const fetchCandidate = async (adapter, vendor, prod) => {
+      if (!context || (adapter && adapter.apiOnly)) {
+        return adapter.fetchCandidate(null, vendor, prod);
+      }
       const page = await context.newPage();
       try {
         return await adapter.fetchCandidate(page, vendor, prod);
@@ -182,7 +206,7 @@ async function runScanMany(specs, opts = {}) {
       }
     }
   } finally {
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
   return results;
 }
@@ -198,6 +222,7 @@ async function runScan(product, vendors, opts = {}) {
 module.exports = {
   SOURCE_TYPE,
   runScanMany,
+  specsNeedBrowser,
   hasProof,
   buildReportItem,
   scanProduct,

@@ -10,11 +10,18 @@ const HOST_MAP = [
   { test: /solutionsstores\.com|solutions\s*pest|solutionsstores/i, key: 'solutions' },
   { test: /keystonepestsolutions|keystone\s*pest|keystone/i, key: 'keystone' },
   { test: /veseris\.com|veseris/i, key: 'veseris' },
-  // Amazon Business API adapter (no browser navigation — it calls the fixed Amazon
-  // Business API host, never the vendor.website — so a raw substring match carries no
-  // SSRF risk the way a navigating scraper would).
-  { test: /amazon\.com|amazonbusiness\.com|amazon\s*business/i, key: 'amazon' },
 ];
+
+// Amazon Business hosts. Anchored to a PARSED hostname (like Shopify) — not a raw
+// substring — so a vendor with website notamazon.com or amazon.com.evil.com can't be
+// misrouted to the Amazon adapter and have an Amazon Business price attributed to it.
+const AMAZON_HOSTS = ['amazon.com', 'amazonbusiness.com', 'business.amazon.com'];
+function isAmazonVendor(vendor) {
+  return [vendor.host, vendor.url, vendor.website].some((src) => {
+    const h = hostOf(src);
+    return !!h && AMAZON_HOSTS.some((b) => h === b || h.endsWith(`.${b}`));
+  });
+}
 
 // The parsed hostname of a vendor-supplied location string (accepts a scheme-less host by
 // assuming https), or '' if unparseable. Used to anchor Shopify routing to a real host
@@ -43,6 +50,7 @@ function isShopifyVendor(vendor) {
 // vendor: { name?, host?, url?, website? }
 function selectAdapterKey(vendor = {}) {
   if (isShopifyVendor(vendor)) return 'shopify';
+  if (isAmazonVendor(vendor)) return 'amazon';
   const hay = `${vendor.host || ''} ${vendor.url || ''} ${vendor.website || ''} ${vendor.name || ''}`.trim();
   if (!hay) return 'generic';
   for (const { test, key } of HOST_MAP) if (test.test(hay)) return key;
