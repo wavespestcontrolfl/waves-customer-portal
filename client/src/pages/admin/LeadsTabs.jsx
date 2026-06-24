@@ -580,6 +580,10 @@ export function LeadsSection() {
   const [overview, setOverview] = useState(null);
   const [funnel, setFunnel] = useState([]);
   const [bySource, setBySource] = useState([]);
+  // Sources-table ROI is kept separate from `bySource`: it includes inactive
+  // sources and is fetched only on the Sources tab, so a late-resolving response
+  // can never overwrite the Analytics tab's active-only `bySource`.
+  const [sourcesRoi, setSourcesRoi] = useState([]);
   const [byChannel, setByChannel] = useState([]);
   const [responseBuckets, setResponseBuckets] = useState([]);
   const [lostReasons, setLostReasons] = useState([]);
@@ -649,7 +653,7 @@ export function LeadsSection() {
       const bs = await adminFetch(
         "/admin/leads/analytics/by-source?include_inactive=1",
       );
-      setBySource(bs.sources || []);
+      setSourcesRoi(bs.sources || []);
     } catch (e) {
       console.error("loadSourceROI", e);
     }
@@ -904,6 +908,9 @@ export function LeadsSection() {
           body: formData,
         });
         loadSources();
+        // Cost/ROI columns render from the analytics payload — refresh it too so
+        // the just-logged cost is reflected immediately, not after a tab reload.
+        loadSourceROI();
       }
       setShowModal(null);
       setFormData({});
@@ -2633,7 +2640,7 @@ export function LeadsSection() {
   const renderSources = () => {
     // Real revenue-based ROI per source from /analytics/by-source (same backend
     // as Channel Comparison / ROI Matrix / Phone Number ROI), keyed by id.
-    const roiBySourceId = new Map(bySource.map((b) => [b.source?.id, b]));
+    const roiBySourceId = new Map(sourcesRoi.map((b) => [b.source?.id, b]));
     return (
       <>
         {" "}

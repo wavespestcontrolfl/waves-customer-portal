@@ -212,7 +212,7 @@ async function logSourceTouch(sourceId, customerId, type) {
 // can de-dupe a customer's invoice/service rows ACROSS sources (a customer with
 // won leads under two sources must not have the same invoice credited to both).
 // Omitted for a standalone single-source call, which only needs within-source dedup.
-async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInvoiceIds, claimedServiceIds } = {}) {
+async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInvoiceIds, claimedServiceIds, billedCustomers } = {}) {
   const source = await db('lead_sources').where('id', leadSourceId).first();
   if (!source) return null;
 
@@ -286,7 +286,11 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInv
   const windowEnd = new Date(end);
   const usedInvoiceIds = claimedInvoiceIds || new Set();
   const usedServiceIds = claimedServiceIds || new Set();
-  const customersWithBilling = new Set();
+  // Shared across the all-source run: once any source counts a customer's real
+  // billing, no later source may add the captured-value fallback for that same
+  // customer (the shared invoice/service claim sets already prevent re-counting
+  // the rows themselves).
+  const customersWithBilling = billedCustomers || new Set();
   // Earliest conversion first, so it claims a customer's shared invoice rows.
   const orderedWonLeads = [...wonLeads].sort(
     (a, b) => new Date(a.converted_at || start) - new Date(b.converted_at || start),
@@ -372,9 +376,10 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
   const sources = await query;
   const claimedInvoiceIds = new Set();
   const claimedServiceIds = new Set();
+  const billedCustomers = new Set();
   const results = [];
   for (const source of sources) {
-    const roi = await calculateSourceROI(source.id, startDate, endDate, { claimedInvoiceIds, claimedServiceIds });
+    const roi = await calculateSourceROI(source.id, startDate, endDate, { claimedInvoiceIds, claimedServiceIds, billedCustomers });
     if (roi) results.push(roi);
   }
   return results;

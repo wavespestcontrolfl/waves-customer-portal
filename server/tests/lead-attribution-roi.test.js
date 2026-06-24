@@ -165,4 +165,24 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     });
     expect(res.totalRevenue).toBe(0); // not 200 — the row was already counted elsewhere
   });
+
+  test('suppresses the fallback for a customer already billed under another source', async () => {
+    setup({
+      costs: [{ cost_amount: 3 }],
+      leads: [{
+        id: 'L1', status: 'won', customer_id: 'c1', converted_at: start,
+        monthly_value: '80', initial_service_value: '200',
+      }],
+      invoices: [{ id: 'i1', customer_id: 'c1', total: '500', created_at: new Date('2026-06-20T00:00:00Z') }],
+    });
+
+    // i1 claimed AND c1 already counted as billed by an earlier source — the
+    // estimate fallback must NOT re-bill the same customer here.
+    const res = await calculateSourceROI('src-1', start, end, {
+      claimedInvoiceIds: new Set(['i1']),
+      claimedServiceIds: new Set(),
+      billedCustomers: new Set(['c1']),
+    });
+    expect(res.totalRevenue).toBe(0); // not 280 (80 + 200)
+  });
 });
