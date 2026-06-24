@@ -103,6 +103,12 @@ function buildSupportingMetric({ pestPressure, activity }) {
         label: pestPressure.label || null,
         trend: pestPressure.trend || null,
         caption: 'Pest pressure',
+        // Keep the one-shot client-rating calibration flow that the suppressed
+        // legacy PestPressureCard used to own.
+        rating: pestPressure.canCaptureClientRating
+          ? { question: pestPressure.clientRatingQuestion || 'Over the past 3 months, how much pest activity have you noticed?' }
+          : null,
+        submittedRating: pestPressure.submittedClientRating ?? null,
       };
     }
   }

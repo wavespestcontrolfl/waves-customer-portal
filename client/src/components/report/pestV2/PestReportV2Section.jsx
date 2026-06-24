@@ -19,7 +19,7 @@ import {
   PestSeasonForecast,
 } from './PestReportV2';
 
-export default function PestReportV2Section({ data, print = false }) {
+export default function PestReportV2Section({ data, print = false, token = null, mode = 'live' }) {
   if (!data) return null;
   return (
     <div style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 24px' }}>
@@ -28,6 +28,8 @@ export default function PestReportV2Section({ data, print = false }) {
         statusSummary={data.statusSummary}
         supportingMetric={data.supportingMetric}
         aiSummary={data.aiSummary}
+        token={token}
+        mode={mode}
       />
       {/* "Where we protected" — the branded coverage centerpiece, right after the
           status so the report reads: how you're doing → where we treated → next. */}

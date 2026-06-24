@@ -15,6 +15,8 @@
 import { useState, useEffect } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
 // ── Surface tokens (shared with the lawn V2 / public estimate surface) ──────────
 const TEXT = '#1B2C5B';
 const BODY = '#3F4A65';
@@ -86,7 +88,7 @@ function TrendArrow({ trend, goodWhenDown = false }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary }) {
+export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live' }) {
   if (!status) return null;
   const t = tone(status.tone);
   return (
@@ -100,6 +102,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         <p style={{ fontSize: 15, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
       ) : null}
       {supportingMetric ? <SupportingMetric metric={supportingMetric} /> : null}
+      <PestPressureRating metric={supportingMetric} token={token} live={mode === 'live'} />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
       ) : null}
@@ -121,6 +124,40 @@ function SupportingMetric({ metric }) {
       {showOutOf ? <span style={{ fontSize: 12, color: MUTED }}>/ {metric.max}</span> : null}
       {metric.label && metric.score != null ? <span style={{ fontSize: 12, color: MUTED }}>· {metric.label}</span> : null}
       <TrendArrow trend={metric.trend} goodWhenDown />
+    </div>
+  );
+}
+
+// One-shot customer calibration (replaces the suppressed legacy PestPressureCard
+// picker). Posts to the same token route; live mode only; hides once submitted.
+function PestPressureRating({ metric, token, live }) {
+  const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
+  const [busy, setBusy] = useState(false);
+  if (!metric || metric.kind !== 'pressure') return null;
+  if (submitted) {
+    return <div style={{ marginTop: 12, fontSize: 13, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
+  }
+  if (!metric.rating || !token || !live) return null;
+  const submit = async (n) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/reports/${token}/pest-pressure/client-rating`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: n }),
+      });
+      if (res.ok) setSubmitted(true);
+    } catch { /* leave the picker up for a retry */ } finally { setBusy(false); }
+  };
+  return (
+    <div style={{ marginTop: 14, padding: '12px 14px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: TEXT, marginBottom: 8 }}>{metric.rating.question}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
+        {[0, 1, 2, 3, 4, 5].map((n) => (
+          <button key={n} type="button" disabled={busy} onClick={() => submit(n)} aria-label={`Rating ${n} of 5`}
+            style={{ padding: '10px 0', borderRadius: 9, border: `1px solid ${BORDER}`, background: COLORS.white, color: TEXT, fontWeight: 700, fontSize: 15, cursor: busy ? 'wait' : 'pointer' }}>{n}</button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
     </div>
   );
 }

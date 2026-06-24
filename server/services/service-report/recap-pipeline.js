@@ -121,7 +121,10 @@ async function processRecap(recap, knex = db) {
     outFile = await renderRecapToFile(payload);
     const key = await putRecapFromFile(recap.scheduled_service_id, outFile);
     await knex('service_recaps').where({ id: recap.id }).update({
-      status: 'ready', s3_key: key, duration_ms: RECAP_DURATION_MS, media: JSON.stringify(payload.media || []),
+      // Persist only non-secret media metadata — payload.media carries 2h presigned
+      // S3 URLs (src) that must not be retained in the DB.
+      status: 'ready', s3_key: key, duration_ms: RECAP_DURATION_MS,
+      media: JSON.stringify((payload.media || []).map((m) => ({ role: m.role, caption: m.caption, type: m.type }))),
       rendered_at: new Date(), locked_at: null, last_error: null, updated_at: new Date(),
     });
     return { status: 'ready', key };

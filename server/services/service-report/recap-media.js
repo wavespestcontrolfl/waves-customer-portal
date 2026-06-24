@@ -43,16 +43,23 @@ const ROLE_MAP = {
 const MEDIA_ROLE_IDS = Object.keys(ROLE_MAP);
 const roleInfo = (role) => ROLE_MAP[role] || ROLE_MAP.other;
 
+// Only formats Remotion's headless-Chromium <OffthreadVideo>/<Img> can decode.
+// NOTE (go-live): iPhones default to HEVC/MOV video + HEIC photos, which are NOT
+// renderable here — they must be transcoded (or captured as mp4/jpeg) before this
+// feature works on real iPhone captures. We reject them at upload for now so a clip
+// can't pass confirm and then silently fail the render.
 const EXT_BY_CONTENT_TYPE = {
-  'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm',
-  'image/jpeg': 'jpg', 'image/png': 'png', 'image/heic': 'heic', 'image/webp': 'webp',
+  'video/mp4': 'mp4', 'video/webm': 'webm',
+  'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
 };
+const RENDERABLE_VIDEO = new Set(['video/mp4', 'video/webm']);
+const RENDERABLE_IMAGE = new Set(['image/jpeg', 'image/png', 'image/webp']);
 function extFor(contentType, mediaType) {
   return EXT_BY_CONTENT_TYPE[String(contentType || '').toLowerCase()] || (mediaType === 'image' ? 'jpg' : 'mp4');
 }
 function isAllowedContentType(contentType, mediaType) {
   const ct = String(contentType || '').toLowerCase();
-  return mediaType === 'image' ? ct.startsWith('image/') : ct.startsWith('video/');
+  return mediaType === 'image' ? RENDERABLE_IMAGE.has(ct) : RENDERABLE_VIDEO.has(ct);
 }
 
 function assertConfigured() {
@@ -65,7 +72,9 @@ async function presignUpload({ scheduledServiceId, role, mediaType = 'video', co
   if (!scheduledServiceId) throw new Error('scheduledServiceId is required');
   const type = mediaType === 'image' ? 'image' : 'video';
   if (!isAllowedContentType(contentType, type)) {
-    const err = new Error(`unsupported content type for ${type}`);
+    const err = new Error(type === 'image'
+      ? 'Photo must be JPEG, PNG, or WebP.'
+      : 'Video must be MP4 or WebM (iPhone HEVC/MOV isn’t supported yet).');
     err.status = 400;
     throw err;
   }

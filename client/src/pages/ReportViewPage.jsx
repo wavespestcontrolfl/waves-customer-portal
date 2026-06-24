@@ -7231,7 +7231,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             pest-pressure chart + products + photos stay below as supporting detail. */}
         {data.pestReportV2 && (
           <div id="visit-summary">
-            <PestReportV2Section data={data.pestReportV2} print={mode === 'pdf' || mode === 'static'} />
+            <PestReportV2Section data={data.pestReportV2} print={mode === 'pdf' || mode === 'static'} token={token} mode={mode} />
           </div>
         )}
 
