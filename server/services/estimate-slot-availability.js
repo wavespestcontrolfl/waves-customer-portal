@@ -471,11 +471,48 @@ function formatServiceProfileLabel(services) {
   return parts.join(' + ');
 }
 
+// Per-service durations for a one-time visit, so a multi-service one-time accept
+// (e.g. a pest visit plus a Bora-Care wood treatment) reserves a slot sized for the
+// actual work instead of the default one-time length. Mirrors the public booking
+// page's per-service durations; the profile sums these and clampDuration caps the
+// total at MAX_ESTIMATE_SLOT_DURATION_MINUTES.
+const ONE_TIME_SERVICE_DURATION_MINUTES = {
+  pest_control: 60,
+  one_time_pest: 60,
+  pest_initial_roach: 75,
+  german_roach: 75,
+  bora_care: 90,
+  mosquito: 45,
+  one_time_mosquito: 45,
+  lawn_care: 60,
+  tree_shrub: 60,
+  termite: 90,
+  termite_bait: 90,
+  termite_trenching: 90,
+  pre_slab_termiticide: 90,
+  rodent: 60,
+};
+// Unknown/residual billable one-time rows (e.g. the positive "Other one-time
+// services" adjustment) keep the standard one-time length so they aren't
+// under-reserved — matches the prior DEFAULT_OPTS.durationMinutes fallback.
+const DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES = 60;
+// Tries each key in order (raw service key first, then the broad category): a
+// specialty like german_roach gets its own 75, while a raw alias not in the table
+// (e.g. termite_bait_installation) falls back to its category's duration (termite_bait
+// → 90) instead of the generic default.
+function oneTimeServiceDurationMinutes(...keys) {
+  for (const key of keys) {
+    const value = ONE_TIME_SERVICE_DURATION_MINUTES[String(key || '').toLowerCase()];
+    if (value) return value;
+  }
+  return DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES;
+}
+
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
-// hides paid add-ons from dispatch/tech. Carries durationMinutes 0 — surfacing the
-// mix must not change one-time slot sizing (per-add-on duration is out of scope).
+// hides paid add-ons from dispatch/tech, and so the slot is sized for the combined
+// work (each row carries its per-service duration; the profile sums them).
 //
 // Delegates to the canonical billing/normalization helpers so the mix matches what
 // is actually billed/accepted: normalizeOneTimeBreakdown already drops on-program
@@ -489,12 +526,17 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
 
   const rows = [];
   const seen = new Set();
-  const add = (service, label) => {
+  // `service` is the category (used for the row's service field + label dedup) and
+  // `durationKey` is the raw service key for the duration lookup — a pest specialty
+  // classifies as the broad `pest_control` category but should keep its own duration
+  // (e.g. german_roach → 75, not the 60 of a plain pest visit).
+  const add = (service, label, ...durationKeys) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
     seen.add(key);
-    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: 0 });
+    const keys = durationKeys.length ? durationKeys : [service];
+    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: oneTimeServiceDurationMinutes(...keys) });
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)
@@ -535,7 +577,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     if (!label || label.toLowerCase() === service) {
       label = (category && labelForCategory(category)) || label;
     }
-    add(category || service || 'one_time_service', label);
+    add(category || service || 'one_time_service', label, service, category);
   }
   return rows;
 }
