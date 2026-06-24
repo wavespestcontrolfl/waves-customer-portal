@@ -496,9 +496,16 @@ const ONE_TIME_SERVICE_DURATION_MINUTES = {
 // services" adjustment) keep the standard one-time length so they aren't
 // under-reserved — matches the prior DEFAULT_OPTS.durationMinutes fallback.
 const DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES = 60;
-function oneTimeServiceDurationMinutes(service) {
-  return ONE_TIME_SERVICE_DURATION_MINUTES[String(service || '').toLowerCase()]
-    || DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES;
+// Tries each key in order (raw service key first, then the broad category): a
+// specialty like german_roach gets its own 75, while a raw alias not in the table
+// (e.g. termite_bait_installation) falls back to its category's duration (termite_bait
+// → 90) instead of the generic default.
+function oneTimeServiceDurationMinutes(...keys) {
+  for (const key of keys) {
+    const value = ONE_TIME_SERVICE_DURATION_MINUTES[String(key || '').toLowerCase()];
+    if (value) return value;
+  }
+  return DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES;
 }
 
 // Billable one-time services for a one-time accept, so the reserved appointment's
@@ -523,12 +530,13 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   // `durationKey` is the raw service key for the duration lookup — a pest specialty
   // classifies as the broad `pest_control` category but should keep its own duration
   // (e.g. german_roach → 75, not the 60 of a plain pest visit).
-  const add = (service, label, durationKey) => {
+  const add = (service, label, ...durationKeys) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
     seen.add(key);
-    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: oneTimeServiceDurationMinutes(durationKey || service) });
+    const keys = durationKeys.length ? durationKeys : [service];
+    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: oneTimeServiceDurationMinutes(...keys) });
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)
@@ -569,7 +577,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     if (!label || label.toLowerCase() === service) {
       label = (category && labelForCategory(category)) || label;
     }
-    add(category || service || 'one_time_service', label, service || category);
+    add(category || service || 'one_time_service', label, service, category);
   }
   return rows;
 }

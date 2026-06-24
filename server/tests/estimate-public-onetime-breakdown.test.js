@@ -1436,6 +1436,12 @@ describe('public estimate one-time breakdown', () => {
       estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite', name: 'Termite Inspection', price: 175 }] } } },
     }).durationMinutes).toBe(90);
 
+    // A termite-install alias (termite_bait_installation, not in the table) classifies
+    // as termite_bait and falls back to the category's 90, not the generic default.
+    expect(mk({
+      estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite Bait Installation', price: 1200 }] } } },
+    }).durationMinutes).toBe(90);
+
     // An unknown/residual row (positive "Other one-time services" adjustment) keeps
     // the 60-minute default rather than being under-reserved: pest 60 + adjustment 60.
     expect(mk({
