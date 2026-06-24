@@ -1428,9 +1428,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           balance to collect at the visit once any paid deposit
                           is credited — same card the appointment detail sheet
                           shows at checkout. */}
+                      {/* Mixed cadences fan out into separate per-group
+                          appointments at submit (each charging only its own
+                          group subtotal), so the all-line netSubtotal isn't a
+                          single visit's charge. Pass null in that case to hide
+                          the price/balance lines (deposit posture still shows). */}
                       <EstimateProvenanceCard
                         quotedTotal={linkedEstimate.quotedTotal}
-                        currentPrice={netSubtotal}
+                        currentPrice={groupServicesByCadence(services).length <= 1 ? netSubtotal : null}
                         deposit={linkedEstimate.deposit}
                         style={{ marginTop: 10 }}
                       />

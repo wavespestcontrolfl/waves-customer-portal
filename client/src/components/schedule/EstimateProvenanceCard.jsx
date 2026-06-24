@@ -10,9 +10,13 @@
 //
 // Props:
 //   quotedTotal  number  — estimate's quoted total (monthly + annual + one-time)
-//   currentPrice number  — what the visit will be charged before deposit credit
-//                          (the modal's net subtotal / the visit's price); null hides
-//                          the vs-quoted note and the balance-due line
+//   currentPrice number  — pre-tax charge for a single visit before deposit
+//                          credit (the modal's net subtotal / the visit's price);
+//                          null hides the vs-quoted note and the balance-due line.
+//                          Pass null when lines span multiple cadences (no single
+//                          per-visit charge) — the balance shown is a pre-tax
+//                          estimate and won't match commercial-tax / payer-billed
+//                          invoices exactly.
 //   deposit      object  — summarizeEstimateDeposit() payload from the server:
 //                          { enforced, oneTime, policyAmount, required,
 //                            exemptReason, paid, creditRemaining }
@@ -130,9 +134,9 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
             {showBalance && (
               <div style={lineStyle}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: INK }}>Charge this visit</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: INK }}>Charge this visit (est.)</div>
                   <div style={{ fontSize: 11, color: MUTED, marginTop: 1 }}>
-                    {money(price)} less {money(creditRemaining)} deposit credit
+                    {money(price)} less {money(creditRemaining)} deposit credit · before tax
                   </div>
                 </div>
                 <div style={{ fontSize: 14, fontWeight: 700, color: INK, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
