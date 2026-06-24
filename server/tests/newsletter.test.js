@@ -2520,6 +2520,34 @@ describe('newsletter quiz — multi-quiz tokens + picker/results helpers (Phase 
   });
 });
 
+describe('newsletter quiz — quizBookingUrl (thank-you deep link)', () => {
+  const quiz = require('../services/newsletter-quiz');
+
+  // Mirrors SERVICES[].id in client/src/pages/PublicBookingPage.jsx — a quiz
+  // bookService that isn't here would land on the page's default service.
+  const BOOK_SERVICE_IDS = new Set([
+    'pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite', 'rodent', 'bora_care',
+  ]);
+
+  test('deep-links to /book with the quiz service pre-selected + quiz attribution', () => {
+    expect(quiz.quizBookingUrl('lawn-headache-v1')).toMatch(/\/book\?service=lawn_care&source=newsletter-quiz$/);
+    expect(quiz.quizBookingUrl('pest-pressure-v1')).toMatch(/\/book\?service=pest_control&source=newsletter-quiz$/);
+    expect(quiz.quizBookingUrl('mosquito-v1')).toMatch(/\/book\?service=mosquito&source=newsletter-quiz$/);
+  });
+
+  test('every quiz bookService maps to a real /book service id', () => {
+    for (const q of Object.values(quiz.QUIZZES)) {
+      expect(BOOK_SERVICE_IDS.has(q.bookService)).toBe(true);
+    }
+  });
+
+  test('unknown quiz degrades to /book with source only — never a mis-selected service', () => {
+    const url = quiz.quizBookingUrl('does-not-exist');
+    expect(url).toContain('/book?source=newsletter-quiz');
+    expect(url).not.toContain('service=');
+  });
+});
+
 describe('newsletter quiz — aggregateQuizResults (results dashboard)', () => {
   const { aggregateQuizResults } = require('../services/newsletter-quiz');
 

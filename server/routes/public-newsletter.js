@@ -17,9 +17,8 @@ const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
-const { resolveAnswer, recordQuizResponse, getQuiz } = require('../services/newsletter-quiz');
+const { resolveAnswer, recordQuizResponse, getQuiz, quizBookingUrl } = require('../services/newsletter-quiz');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } = require('../constants/business');
-const { publicPortalUrl } = require('../utils/portal-url');
 
 // Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
 // index.js is shared across every public endpoint, so a subscribe-spam
@@ -226,7 +225,9 @@ router.post('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
     const quiz = getQuiz(quizId);
     const landingLine = quiz?.landingLine || "We'll follow up on your next visit.";
     const bookLabel = quiz?.bookLabel || 'Book a visit';
-    const bookUrl = `${publicPortalUrl()}/book`;
+    // Deep-link straight to /book with the respondent's service pre-selected +
+    // quiz attribution, instead of dropping them on the generic service picker.
+    const bookUrl = quizBookingUrl(quizId);
     const heading = "Thanks — we've got you.";
     const bodyHtml = `
           <p>${escapeHtml(landingLine)}</p>
