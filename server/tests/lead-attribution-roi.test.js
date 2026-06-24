@@ -51,8 +51,8 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
       costs: [{ cost_amount: 3 }],
       leads: [{ id: 'L1', status: 'won', customer_id: 'c1', converted_at: convertedAt }],
       invoices: [
-        { customer_id: 'c1', total: '500', created_at: new Date('2026-06-10T00:00:00Z') }, // pre-conversion → ignored
-        { customer_id: 'c1', total: '120', created_at: new Date('2026-06-20T00:00:00Z') }, // post-conversion → counted
+        { id: 'i1', customer_id: 'c1', total: '500', created_at: new Date('2026-06-10T00:00:00Z') }, // pre-conversion → ignored
+        { id: 'i2', customer_id: 'c1', total: '120', created_at: new Date('2026-06-20T00:00:00Z') }, // post-conversion → counted
       ],
     });
 
@@ -100,5 +100,54 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(res.totalRevenue).toBe(0);
     expect(res.conversions).toBe(0);
     expect(res.roi).toBe(-100); // (0 - 3) / 3 * 100
+  });
+
+  test('de-duplicates an invoice across repeat won leads for the same customer', async () => {
+    setup({
+      costs: [{ cost_amount: 3 }],
+      leads: [
+        { id: 'L1', status: 'won', customer_id: 'c1', converted_at: new Date('2026-06-10T00:00:00Z') },
+        { id: 'L2', status: 'won', customer_id: 'c1', converted_at: new Date('2026-06-12T00:00:00Z') },
+      ],
+      // One invoice, dated after BOTH conversions — must be counted ONCE, not per lead.
+      invoices: [{ id: 'i1', customer_id: 'c1', total: '300', created_at: new Date('2026-06-20T00:00:00Z') }],
+    });
+
+    const res = await calculateSourceROI('src-1', start, end);
+    expect(res.conversions).toBe(2);
+    expect(res.totalRevenue).toBe(300); // not 600
+  });
+
+  test('skips the captured-value fallback when the conversion is AFTER the report end', async () => {
+    setup({
+      costs: [{ cost_amount: 3 }],
+      // First-contacted in window but won after `end` → no revenue in this closed period.
+      leads: [{
+        id: 'L1', status: 'won', customer_id: 'c1',
+        converted_at: new Date('2026-07-15T00:00:00Z'),
+        monthly_value: '80', initial_service_value: '200',
+      }],
+      invoices: [],
+      services: [],
+    });
+
+    const res = await calculateSourceROI('src-1', start, end);
+    expect(res.totalRevenue).toBe(0);
+  });
+
+  test('uses the window start (NOT updated_at) as the cutoff when converted_at is missing', async () => {
+    setup({
+      costs: [{ cost_amount: 3 }],
+      // converted_at null + a late updated_at; the in-window invoice predates
+      // updated_at and would be wrongly dropped if updated_at were the cutoff.
+      leads: [{
+        id: 'L1', status: 'won', customer_id: 'c1',
+        converted_at: null, updated_at: new Date('2026-06-28T00:00:00Z'),
+      }],
+      invoices: [{ id: 'i1', customer_id: 'c1', total: '150', created_at: new Date('2026-06-10T00:00:00Z') }],
+    });
+
+    const res = await calculateSourceROI('src-1', start, end);
+    expect(res.totalRevenue).toBe(150);
   });
 });

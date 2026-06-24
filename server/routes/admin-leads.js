@@ -205,6 +205,9 @@ router.get('/analytics/by-channel', async (req, res, next) => {
 
     const byChannel = {};
     for (const r of allROI) {
+      // Channel ROI reflects only ACTIVE sources (calculateAllSourceROI now
+      // returns inactive ones too, for the Sources table).
+      if (!r.source.is_active) continue;
       const ch = r.source.channel || 'Other';
       if (!byChannel[ch]) {
         byChannel[ch] = { channel: ch, totalLeads: 0, conversions: 0, totalCost: 0, totalRevenue: 0, sources: 0 };

@@ -240,17 +240,19 @@ async function calculateSourceROI(leadSourceId, startDate, endDate) {
     totalCost = parseFloat(source.monthly_cost) * months;
   }
 
-  // Revenue attributable to THIS source's conversions — computed PER won-lead
-  // and strictly bounded:
-  //   • window-bounded [start, end]. The old query was `created_at >= start`
-  //     with NO upper bound, so revenue leaked in from AFTER the period while
-  //     leads and costs were windowed — inflating ROI.
-  //   • conversion-bounded. Only revenue dated at/after the lead's converted_at
-  //     counts, so a customer's PRE-conversion billing history is never credited
-  //     to the source that won them.
-  // Per-lead fallback chain: invoices → service_records → the monthly_value /
-  // initial_service_value captured at conversion (for a won customer not yet
-  // billed in range).
+  // Revenue attributable to THIS source's conversions — per won-lead, strictly
+  // bounded, and de-duplicated:
+  //   • window-bounded [start, end] (the old query had no upper bound, leaking
+  //     post-period revenue while leads/costs were windowed).
+  //   • conversion-bounded — counted only from the lead's converted_at onward,
+  //     so a customer's pre-conversion billing is never credited. converted_at
+  //     when known, else the window start; NEVER updated_at (the admin edit
+  //     route restamps it on any field change, which would mis-date the cutoff).
+  //   • de-duplicated — when a customer has multiple won leads for this source,
+  //     each invoice/service row is attributed to ONE conversion (earliest), so
+  //     repeat/add-on leads never sum the same row twice.
+  // Falls back to the captured monthly_value / initial_service_value only for a
+  // customer with no billing in range AND a conversion on/before the report end.
   let totalRevenue = 0;
   const wonCustomerIds = [...new Set(wonLeads.map(l => l.customer_id).filter(Boolean))];
 
@@ -262,7 +264,7 @@ async function calculateSourceROI(leadSourceId, startDate, endDate) {
         .whereIn('customer_id', wonCustomerIds)
         .where('created_at', '>=', start)
         .where('created_at', '<=', end)
-        .select('customer_id', 'total', 'created_at');
+        .select('id', 'customer_id', 'total', 'created_at');
     } catch (e) {
       invoiceRows = []; // invoices table may not exist / differ — fall through
     }
@@ -271,31 +273,52 @@ async function calculateSourceROI(leadSourceId, startDate, endDate) {
         .whereIn('customer_id', wonCustomerIds)
         .where('service_date', '>=', start)
         .where('service_date', '<=', end)
-        .select('customer_id', 'price', 'service_date');
+        .select('id', 'customer_id', 'price', 'service_date');
     } catch (e) {
       serviceRows = [];
     }
   }
 
-  for (const lead of wonLeads) {
-    const convertedAt = new Date(lead.converted_at || lead.updated_at || start);
+  const windowEnd = new Date(end);
+  const usedInvoiceIds = new Set();
+  const usedServiceIds = new Set();
+  const customersWithBilling = new Set();
+  // Earliest conversion first, so it claims a customer's shared invoice rows.
+  const orderedWonLeads = [...wonLeads].sort(
+    (a, b) => new Date(a.converted_at || start) - new Date(b.converted_at || start),
+  );
+
+  for (const lead of orderedWonLeads) {
+    const convertedAt = new Date(lead.converted_at || start);
     let leadRevenue = 0;
 
     if (lead.customer_id) {
-      leadRevenue = invoiceRows
-        .filter(r => r.customer_id === lead.customer_id && new Date(r.created_at) >= convertedAt)
-        .reduce((sum, r) => sum + parseFloat(r.total || 0), 0);
-      if (leadRevenue === 0) {
-        leadRevenue = serviceRows
-          .filter(r => r.customer_id === lead.customer_id && new Date(r.service_date) >= convertedAt)
-          .reduce((sum, r) => sum + parseFloat(r.price || 0), 0);
+      const leadInvoices = invoiceRows.filter(r =>
+        r.customer_id === lead.customer_id
+        && new Date(r.created_at) >= convertedAt
+        && !usedInvoiceIds.has(r.id));
+      if (leadInvoices.length) {
+        leadInvoices.forEach(r => usedInvoiceIds.add(r.id));
+        leadRevenue = leadInvoices.reduce((sum, r) => sum + parseFloat(r.total || 0), 0);
+      } else {
+        const leadServices = serviceRows.filter(r =>
+          r.customer_id === lead.customer_id
+          && new Date(r.service_date) >= convertedAt
+          && !usedServiceIds.has(r.id));
+        if (leadServices.length) {
+          leadServices.forEach(r => usedServiceIds.add(r.id));
+          leadRevenue = leadServices.reduce((sum, r) => sum + parseFloat(r.price || 0), 0);
+        }
       }
+      if (leadRevenue > 0) customersWithBilling.add(lead.customer_id);
     }
 
-    if (leadRevenue === 0) {
-      // Not billed in range yet — estimate from the values captured at conversion.
+    // Captured-value fallback — only when this customer has no billing in range
+    // and the conversion happened on/before the report end (a lead won AFTER a
+    // historical window must not credit revenue to that closed period).
+    if (leadRevenue === 0 && convertedAt <= windowEnd && !customersWithBilling.has(lead.customer_id)) {
       if (lead.monthly_value) {
-        const monthsSince = Math.max(1, Math.ceil((new Date(end) - convertedAt) / (30 * 86400000)));
+        const monthsSince = Math.max(1, Math.ceil((windowEnd - convertedAt) / (30 * 86400000)));
         leadRevenue += parseFloat(lead.monthly_value) * monthsSince;
       }
       if (lead.initial_service_value) {
@@ -335,8 +358,11 @@ async function calculateSourceROI(leadSourceId, startDate, endDate) {
 // ---------------------------------------------------------------------------
 // 7. calculateAllSourceROI
 // ---------------------------------------------------------------------------
+// Returns ROI for ALL sources (active + inactive). The Sources table lists
+// inactive sources too and needs their ROI; channel aggregation filters to
+// active itself (see /analytics/by-channel) so Channel Comparison is unchanged.
 async function calculateAllSourceROI(startDate, endDate) {
-  const sources = await db('lead_sources').where('is_active', true).orderBy('name');
+  const sources = await db('lead_sources').orderBy('name');
   const results = [];
   for (const source of sources) {
     const roi = await calculateSourceROI(source.id, startDate, endDate);

@@ -629,18 +629,24 @@ export function LeadsSection() {
   const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
       if (!silent) setLoadError(null);
-      // Pull the real revenue-based ROI alongside the source list so the Sources
-      // table shows the SAME numbers as Analytics (Channel/Matrix/Phone) instead
-      // of a placeholder — without waiting for the Analytics tab to be opened.
-      const [data, bs] = await Promise.all([
-        adminFetch("/admin/leads/sources"),
-        adminFetch("/admin/leads/analytics/by-source"),
-      ]);
+      const data = await adminFetch("/admin/leads/sources");
       setSources(data.sources || []);
-      setBySource(bs.sources || []);
     } catch (e) {
       console.error("loadSources", e);
       if (!silent) setLoadError(e);
+    }
+  }, []);
+
+  // Real revenue-based ROI for the Sources table (same backend as Analytics).
+  // Loaded only on the Sources tab — the Pipeline/Analytics tabs already get
+  // `bySource` via loadAnalytics, so this avoids double-running the expensive
+  // calculateAllSourceROI on those tabs.
+  const loadSourceROI = useCallback(async () => {
+    try {
+      const bs = await adminFetch("/admin/leads/analytics/by-source");
+      setBySource(bs.sources || []);
+    } catch (e) {
+      console.error("loadSourceROI", e);
     }
   }, []);
 
@@ -702,9 +708,12 @@ export function LeadsSection() {
       loadAnalytics();
       loadSources();
     }
-    if (tab === "sources") loadSources();
+    if (tab === "sources") {
+      loadSources();
+      loadSourceROI();
+    }
     if (tab === "analytics") loadAnalytics();
-  }, [tab, loadLeads, loadSources, loadAnalytics]);
+  }, [tab, loadLeads, loadSources, loadSourceROI, loadAnalytics]);
 
   useEffect(() => {
     if (tab !== "pipeline") return undefined;
@@ -842,7 +851,10 @@ export function LeadsSection() {
       loadAnalytics();
       loadSources();
     }
-    if (tab === "sources") loadSources();
+    if (tab === "sources") {
+      loadSources();
+      loadSourceROI();
+    }
     if (tab === "analytics") loadAnalytics();
   };
 
