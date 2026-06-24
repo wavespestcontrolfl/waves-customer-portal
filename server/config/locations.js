@@ -184,6 +184,20 @@ function resolveLocation(city) {
   return WAVES_LOCATIONS.find(l => l.id === locId) || WAVES_LOCATIONS[0];
 }
 
+// Resolve the office from an ordered list of city/area candidates, returning
+// the first that is actually in CITY_TO_LOCATION. resolveLocation() alone maps
+// BOTH an unknown city and an empty string to the Bradenton default, so a bare
+// resolveLocation(cityA || cityB) can never fall through to cityB when cityA is
+// a real-but-unmapped city (e.g. a Places city of "Rotonda West" would shadow a
+// known "Venice" source area). Falls back to the default office when none map.
+function resolveLocationFromCandidates(candidates = []) {
+  for (const candidate of candidates) {
+    const key = (candidate || '').toLowerCase().trim();
+    if (key && CITY_TO_LOCATION[key]) return resolveLocation(key);
+  }
+  return resolveLocation('');
+}
+
 module.exports = {
   WAVES_LOCATIONS,
   CITY_TO_LOCATION,
@@ -193,6 +207,7 @@ module.exports = {
   gbpTrackingUrlForLocation,
   isGbpUtmCampaign,
   resolveLocation,
+  resolveLocationFromCandidates,
   nearestLocation,
   haversineMiles,
 };

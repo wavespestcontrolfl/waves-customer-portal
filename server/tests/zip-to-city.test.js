@@ -1,5 +1,5 @@
 const { zipToCity, ZIP_TO_CITY } = require('../utils/zip-to-city');
-const { CITY_TO_LOCATION } = require('../config/locations');
+const { CITY_TO_LOCATION, resolveLocationFromCandidates } = require('../config/locations');
 
 describe('zipToCity', () => {
   test('resolves the Parrish ZIP that triggered the blank-city lead', () => {
@@ -49,5 +49,26 @@ describe('zipToCity', () => {
     expect(zipToCity(null)).toBe('');
     expect(zipToCity(undefined)).toBe('');
     expect(zipToCity('abc')).toBe('');
+  });
+});
+
+describe('resolveLocationFromCandidates', () => {
+  test('uses the ZIP-derived city when there is no area (main-site 34219 lead)', () => {
+    expect(resolveLocationFromCandidates(['', '', 'Parrish']).id).toBe('parrish');
+  });
+
+  test('an unmapped structured city falls through to the known source area', () => {
+    // The Codex regression: "Rotonda West" is not in CITY_TO_LOCATION; a bare
+    // resolveLocation('Rotonda West') would return Bradenton and shadow the
+    // Venice source area. The walker must skip it and use the area.
+    expect(resolveLocationFromCandidates(['Rotonda West', 'Venice', '']).id).toBe('venice');
+  });
+
+  test('a mapped structured city wins over the source area', () => {
+    expect(resolveLocationFromCandidates(['Punta Gorda', 'Bradenton', '']).id).toBe('venice');
+  });
+
+  test('falls back to the Bradenton default when nothing is routable', () => {
+    expect(resolveLocationFromCandidates(['Rotonda West', 'SW Florida', '']).id).toBe('bradenton');
   });
 });

@@ -4,7 +4,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
 const LeadScorer = require('../services/lead-scorer');
-const { resolveLocation, findGbpLocationByUtmContent } = require('../config/locations');
+const { resolveLocationFromCandidates, findGbpLocationByUtmContent } = require('../config/locations');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -199,11 +199,13 @@ router.post('/', async (req, res) => {
 
     let customer;
     let isNewCustomer = false;
-    // Resolve the office from the recovered city first so a ZIP-derived city
-    // (e.g. 34219 -> Parrish on a main-site lead with no area) routes to the
-    // right office for nearest_location_id and the auto-reply, instead of
-    // falling back to the Bradenton default. Falls through to area, then ''.
-    const location = resolveLocation(resolvedCity || leadSource.area || '');
+    // Resolve the office from the best routable signal: the structured city,
+    // then the source area, then the ZIP-derived city — skipping any that
+    // aren't a known office city. This recovers location for a ZIP-derived
+    // city (34219 -> Parrish on a main-site lead with no area) without letting
+    // a real-but-unmapped Places city (e.g. "Rotonda West") shadow a known
+    // source area (e.g. a Venice spoke). Falls back to the Bradenton default.
+    const location = resolveLocationFromCandidates([normalizedAddress.city, leadSource.area, zipCity]);
 
     if (existing) {
       customer = existing;
