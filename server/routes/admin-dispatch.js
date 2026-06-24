@@ -3989,7 +3989,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
     // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
     // failure here never blocks completion; the tech approves before it ever sends.
-    if (process.env.PEST_RECAP === 'true' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
+    if (process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
       try {
         const { enqueueRecap } = require('../services/service-report/recap-pipeline');
         // Keyed on the scheduled-service id so pre-completion captures match the render.
@@ -4355,7 +4355,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // source of truth) and run the consistency check, so the SMS below leads with
         // the same line as the report. Best-effort; never blocks completion.
         let lawnReportSmsSummary = null;
-        if (serviceReportV1Delivery && process.env.LAWN_REPORT_V2 === 'true') {
+        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && process.env.LAWN_REPORT_V2 === 'true') {
           try {
             const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
             const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });

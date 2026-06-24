@@ -87,9 +87,16 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
     await releaseClaim();
     return { ok: false, reason: msg?.reason || msg?.code || 'send_failed' };
   }
-  // Confirmed sent — stamp sent_at and clear the in-flight marker.
-  await knex('service_recaps').where({ id: recap.id })
-    .update({ sent_at: knex.fn.now(), send_attempt_at: null, updated_at: knex.fn.now() }).catch(() => {});
+  // Confirmed sent — stamp sent_at and clear the in-flight marker. The SMS already went
+  // out, so we still return ok (reporting failure here would trigger a resend); but we
+  // must NOT swallow a stamp failure: until sent_at lands, the stale in-flight marker
+  // could let a retry re-send the same SMS, so surface it loudly for reconciliation.
+  try {
+    await knex('service_recaps').where({ id: recap.id })
+      .update({ sent_at: knex.fn.now(), send_attempt_at: null, updated_at: knex.fn.now() });
+  } catch (stampErr) {
+    logger.error(`[recap-delivery] CRITICAL: recap SMS sent for ${scheduledServiceId} but sent_at stamp failed (${stampErr.message}) — sent_at left NULL risks a duplicate send on retry; needs manual reconciliation`);
+  }
   return { ok: true, url };
 }
 

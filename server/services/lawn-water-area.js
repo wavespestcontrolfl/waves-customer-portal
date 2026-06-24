@@ -95,9 +95,17 @@ async function getAreaRainfall(areaId, startDate, endDate, knex = db) {
       .where({ area_id: areaId })
       .andWhere('date', '>=', startDate)
       .andWhere('date', '<=', endDate)
-      .sum({ total: 'rain_inches' })
+      .select(knex.raw('SUM(rain_inches) AS total'), knex.raw('COUNT(DISTINCT date) AS days'))
       .first();
-    return row && row.total != null ? round2(row.total) : null;
+    if (!row || row.total == null) return null;
+    // A partial window (the sync or upstream API missed a day) undercounts rain. Treat
+    // it as UNKNOWN rather than persisting a bogus low/balanced/high reading — the
+    // snapshot's rainKnown then flips false and the report falls back to live advice.
+    const expectedDays = Math.round(
+      (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000,
+    ) + 1;
+    if (Number.isFinite(expectedDays) && Number(row.days) < expectedDays) return null;
+    return round2(Number(row.total));
   } catch { return null; }
 }
 
