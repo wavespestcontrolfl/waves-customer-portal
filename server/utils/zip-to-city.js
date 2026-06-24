@@ -42,7 +42,9 @@ const ZIP_TO_CITY = {
   '34220': 'Palmetto',
   '34221': 'Palmetto',
   '34222': 'Ellenton',
-  '34243': 'Sarasota', // University Park — USPS city = Sarasota
+  '34243': 'University Park', // USPS labels this "Sarasota", but it's Manatee/
+  // University Park and the office + review maps route it to Bradenton — emit
+  // the community name so a ZIP-only lead keeps Bradenton routing, not Sarasota.
   '34250': 'Terra Ceia',
   '34251': 'Myakka City',
   '34264': 'Oneco',

@@ -1,5 +1,6 @@
 const { zipToCity, ZIP_TO_CITY } = require('../utils/zip-to-city');
 const { CITY_TO_LOCATION, resolveLocationFromCandidates } = require('../config/locations');
+const { REVIEW_GBP_BY_CITY } = require('../services/completion-defaults-resolver');
 
 describe('zipToCity', () => {
   test('resolves the Parrish ZIP that triggered the blank-city lead', () => {
@@ -31,6 +32,21 @@ describe('zipToCity', () => {
     for (const city of new Set(Object.values(ZIP_TO_CITY))) {
       expect(CITY_TO_LOCATION[city.toLowerCase()]).toBeDefined();
     }
+  });
+
+  test('every emitted city is also known to the review-routing map', () => {
+    // Guards the second routing surface: a recovered city must not silently
+    // default to the Bradenton GBP for review links/routing.
+    for (const city of new Set(Object.values(ZIP_TO_CITY))) {
+      // A defined entry means resolveReviewRouting() won't hit default_fallback.
+      expect(REVIEW_GBP_BY_CITY[city.toLowerCase()]).toBeDefined();
+    }
+  });
+
+  test('34243 (University Park) keeps Bradenton office + review routing, not Sarasota', () => {
+    expect(zipToCity('34243')).toBe('University Park');
+    expect(resolveLocationFromCandidates(['', '', zipToCity('34243')]).id).toBe('bradenton');
+    expect(REVIEW_GBP_BY_CITY['university park']).toBe('bradenton');
   });
 
   test('accepts ZIP+4 and messy input, using the first 5 digits', () => {
