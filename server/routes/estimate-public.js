@@ -7975,8 +7975,11 @@ function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount =
 // that already-net breakdown, re-applying the discount would subtract the slice a
 // second time — so return null in that case and only apply it on the raw breakdown.
 function manualDiscountForChoiceBreakdown(breakdown = {}, estData = {}) {
-  const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
-  if (items.some(isOneTimePestChoiceItem)) return null;
+  // Only the aligned choice breakdown built by oneTimeChoiceBreakdownForEstimate is
+  // already net of the manual one-time discount — detect it by its explicit marker,
+  // NOT the mere presence of a one_time_pest row (a raw/admin-saved estimate can
+  // carry that row, and there the discount must still be applied to the add-ons).
+  if (breakdown && breakdown.choiceAligned === true) return null;
   return normalizeManualDiscountSummary(estData);
 }
 
@@ -8033,6 +8036,9 @@ function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingB
     total: Math.round(total * 100) / 100,
     quoteRequired: false,
     quoteRequiredItems: [],
+    // Marks this as the aligned choice breakdown whose add-on rows are already net
+    // of the manual one-time discount, so the accept path doesn't re-apply it.
+    choiceAligned: true,
   };
 }
 

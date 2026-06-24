@@ -2968,11 +2968,12 @@ describe('public estimate one-time breakdown', () => {
         manualDiscount: { type: 'FIXED', amount: 100, oneTimeAmount: 100 },
       },
     };
-    // The finalized bundle: Bora-Care already net of the $100 slice ($951), and the
-    // synthetic pest-choice row present.
+    // The finalized bundle: Bora-Care already net of the $100 slice ($951), the
+    // synthetic pest-choice row present, and the explicit aligned marker.
     const alignedBundle = {
       oneTimeBreakdown: {
         total: 264 + 951,
+        choiceAligned: true,
         items: [
           { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 264 },
           { service: 'bora_care', label: 'Bora-Care', amount: 951 },
@@ -2982,6 +2983,30 @@ describe('public estimate one-time breakdown', () => {
     const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, alignedBundle, 264);
     const bora = list.find((r) => r.service === 'bora_care');
     // Stays at the already-net $951 — not re-discounted to $851.
+    expect(bora.price).toBe(951);
+  });
+
+  test('a RAW breakdown that happens to carry a one_time_pest row is still discounted', () => {
+    // A raw/admin-saved estimate can contain a one_time_pest item without being the
+    // aligned (net) choice breakdown. The manual one-time slice must still apply to
+    // the gross add-on — detection must rely on the aligned marker, not the row.
+    const estimate = { show_one_time_option: true };
+    const estData = {
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50, perTreatment: 120 }] },
+        oneTime: {
+          total: 1215,
+          items: [
+            { service: 'one_time_pest', name: 'One-Time Pest Control', price: 264 },
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+          ],
+        },
+        manualDiscount: { type: 'FIXED', amount: 100, oneTimeAmount: 100 },
+      },
+    };
+    const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, null, 264);
+    const bora = list.find((r) => r.service === 'bora_care');
+    // Gross $1,051 minus the $100 slice = $951 (applied exactly once).
     expect(bora.price).toBe(951);
   });
 
