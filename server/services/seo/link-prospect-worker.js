@@ -90,7 +90,10 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     if (domainAllow && domainAllow.length) {
       q = q.where((b) => {
         for (const d of domainAllow) {
-          b.orWhereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [d]);
+          // NB: write the optional scheme as https{0,1}, NOT https? — a literal ? inside a knex
+          // whereRaw is parsed as a positional binding placeholder, so https? plus the real "= ?"
+          // reads as 2 placeholders for 1 value ("Expected 1 bindings, saw 2"). {0,1} is equivalent.
+          b.orWhereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https{0,1}://', ''), '^www\\.', '')) = ?", [d]);
         }
       });
     } else if (domainAllow) {

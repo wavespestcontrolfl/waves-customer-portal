@@ -170,7 +170,8 @@ async function reconcileByDomain(prospect) {
     // duplicate-Omega the same source_url). >1 (i.e. this row has a sibling) → bail.
     const siblings = await db('seo_link_prospects')
       .whereIn('status', ['placed', 'live', 'indexed'])
-      .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [dom])
+      // https{0,1} not https? — a literal ? inside a knex whereRaw is parsed as a positional binding.
+      .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https{0,1}://', ''), '^www\\.', '')) = ?", [dom])
       .whereRaw("COALESCE(quality_signals->>'cited_homepage','') = 'true'")
       .count('* as c').first();
     if (Number(siblings && siblings.c) > 1) return null;
