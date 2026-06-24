@@ -117,7 +117,11 @@ async function sendSignedContractCopy(contractId) {
       html: payload.html,
       text: payload.text,
       categories: ['document_signed_copy'],
-      asmGroupId: sendgrid.serviceGroupId(),
+      // Transactional/required: the customer's record of a contract they just
+      // signed. Must NOT be subject to the service ASM suppression group, or a
+      // service-unsubscribed signer silently loses their only signed copy (the
+      // share token is already burned). asmGroupId 0 → no suppression block.
+      asmGroupId: 0,
       attachments: payload.attachments,
       // A rejection for an invalid/suppressed recipient can echo the email
       // address in the raw SendGrid body. Suppress that log and emit only a
