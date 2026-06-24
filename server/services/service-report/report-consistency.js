@@ -48,8 +48,11 @@ function reconcileLawnReport({ data = {}, reportV2 = null } = {}) {
   const la = data.lawnAssessment || {};
   const nextVisitFocus = la.recommendations && la.recommendations.nextVisitFocus;
   const summaryText = `${la.aiSummary || ''} ${la.customerSummary || ''} ${data.summary || ''}`;
+  // Don't manufacture a "follow-up planned" card from loose summary text when the
+  // copy explicitly says none is needed — a real nextVisitFocus still counts.
+  const deniesFollowUp = /\bno\b[^.]{0,40}\b(?:follow[- ]?up|re-?check|return|next visit)\b|\b(?:follow[- ]?up|re-?check)\b[^.]{0,20}\bnot needed\b|\bno (?:further|additional) (?:visit|action)\b/i.test(summaryText);
   const mentionsFollowUp = !!nextVisitFocus
-    || /\bfollow[- ]?up\b|\bnext visit\b|\bre-?check\b|\breturn (?:on|this|next|to)\b/i.test(summaryText);
+    || (!deniesFollowUp && /\bfollow[- ]?up\b|\bnext visit\b|\bre-?check\b|\breturn (?:on|this|next|to)\b/i.test(summaryText));
   let followUp = null;
   if (mentionsFollowUp) {
     followUp = {
