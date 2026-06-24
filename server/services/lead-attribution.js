@@ -108,7 +108,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // ---------------------------------------------------------------------------
 // 2. markConverted
 // ---------------------------------------------------------------------------
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier }) {
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource } = {}) {
   await db('leads').where('id', leadId).update({
     status: 'won',
     customer_id: customerId || null,
@@ -123,12 +123,12 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   await db('lead_activities').insert({
     lead_id: leadId,
     activity_type: 'converted',
-    description: `Converted to customer${customerId ? ` (${customerId})` : ''}. Monthly: $${monthlyValue || 0}, Initial: $${initialServiceValue || 0}`,
+    description: `Converted to customer${customerId ? ` (${customerId})` : ''}. Monthly: $${monthlyValue || 0}, Initial: $${initialServiceValue || 0}${triggerSource ? ` [via ${triggerSource}]` : ''}`,
     performed_by: 'system',
-    metadata: JSON.stringify({ customerId, monthlyValue, initialServiceValue, waveguardTier }),
+    metadata: JSON.stringify({ customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource }),
   });
 
-  logger.info(`[LeadAttribution] Lead ${leadId} converted`);
+  logger.info(`[LeadAttribution] Lead ${leadId} converted${triggerSource ? ` (${triggerSource})` : ''}`);
 }
 
 // ---------------------------------------------------------------------------

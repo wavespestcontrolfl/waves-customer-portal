@@ -2024,6 +2024,19 @@ const InvoiceService = {
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
         });
+
+      // Sending an invoice means the deal is live — convert the originating
+      // lead if it's still open. Best-effort; never blocks the send result.
+      // Uses the invoice already loaded by the send claim (no extra query).
+      try {
+        const customerId = claim.invoice?.customer_id;
+        if (customerId) {
+          const { convertLeadFromEvent } = require("./lead-estimate-link");
+          await convertLeadFromEvent({ source: "invoice_sent", customerId });
+        }
+      } catch (err) {
+        logger.warn(`[invoice] lead conversion after send skipped for ${invoiceId}: ${err.message}`);
+      }
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
       // No channel delivered — reverse the credit this seam auto-applied before
