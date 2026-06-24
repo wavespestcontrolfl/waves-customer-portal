@@ -109,16 +109,23 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // 2. markConverted
 // ---------------------------------------------------------------------------
 async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource } = {}) {
-  await db('leads').where('id', leadId).update({
+  // Only write the fields the caller actually supplied. Trigger-driven
+  // conversions (service completed / invoice sent) have no estimate to source
+  // revenue from, so they omit the value fields rather than null them out —
+  // overwriting would erase monthly_value / initial_service_value /
+  // waveguard_tier that the quote flow already stored for lead-ROI analytics.
+  const updates = {
     status: 'won',
-    customer_id: customerId || null,
-    monthly_value: monthlyValue || null,
-    initial_service_value: initialServiceValue || null,
-    waveguard_tier: waveguardTier || null,
     converted_at: new Date(),
     is_qualified: true,
     updated_at: new Date(),
-  });
+  };
+  if (customerId !== undefined) updates.customer_id = customerId || null;
+  if (monthlyValue !== undefined) updates.monthly_value = monthlyValue || null;
+  if (initialServiceValue !== undefined) updates.initial_service_value = initialServiceValue || null;
+  if (waveguardTier !== undefined) updates.waveguard_tier = waveguardTier || null;
+
+  await db('leads').where('id', leadId).update(updates);
 
   await db('lead_activities').insert({
     lead_id: leadId,

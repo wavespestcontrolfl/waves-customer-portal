@@ -205,15 +205,21 @@ function estimateValueHints(estimate) {
   };
 }
 
-// Contact fallback — only OPEN leads, matched on the last 10 phone digits
-// (lead/customer phones are stored in mixed E.164 / 10-digit formats) or a
-// case-insensitive email. Wrapped by convertLeadFromEvent's try/catch.
-async function findOpenLeadsByContact(database, phone, email) {
+// Contact fallback — only OPEN, NOT-yet-converted leads (customer_id IS NULL),
+// matched on the last 10 phone digits (lead/customer phones are stored in
+// mixed E.164 / 10-digit formats) or a case-insensitive email. The
+// `customer_id IS NULL` guard is deliberate: an existing customer can hold
+// separate open leads already attached to them (e.g. public quote links stamp
+// `leads.customer_id`), and an unrelated routine service/invoice must never
+// mark those add-on leads won. We only rescue the originating lead that was
+// never linked to anyone. Wrapped by convertLeadFromEvent's try/catch.
+async function findUnconvertedLeadsByContact(database, phone, email) {
   const np = normalizePhone(phone);
   const ne = normalizeEmail(email);
   if (!np && !ne) return [];
   return database('leads')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+    .whereNull('customer_id')
     .andWhere((builder) => {
       if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
       if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
@@ -226,6 +232,7 @@ async function convertLeadFromEvent({
   customerId = null,
   phone = null,
   email = null,
+  requireAcceptedEstimate = false,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
@@ -234,36 +241,47 @@ async function convertLeadFromEvent({
     let resolvedPhone = phone || null;
     let resolvedEmail = email || null;
     let valueHints = {};
+    let haveEstimateHints = false;
 
     if (estimateId) {
       const estimate = await database('estimates').where({ id: estimateId }).first();
-      if (estimate) {
+      if (!estimate) {
+        if (requireAcceptedEstimate) return { converted: false, reason: 'estimate_missing' };
+      } else {
+        // Deposit path: a deposit PI can be captured BEFORE the accept
+        // transaction creates the customer, and may later be abandoned or
+        // refunded. Converting then would mark the lead won with no customer and
+        // make the real accept-time conversion a no-op (the lead is already
+        // closed). Only convert once the estimate is genuinely accepted and has
+        // a customer to attach.
+        if (requireAcceptedEstimate && (estimate.status !== 'accepted' || !estimate.customer_id)) {
+          return { converted: false, reason: 'estimate_not_accepted' };
+        }
         resolvedCustomerId = resolvedCustomerId || estimate.customer_id || null;
         resolvedPhone = resolvedPhone || estimate.customer_phone || null;
         resolvedEmail = resolvedEmail || estimate.customer_email || null;
         valueHints = estimateValueHints(estimate);
+        haveEstimateHints = true;
       }
     }
 
-    // Resolve candidate leads by precedence: estimate link → customer link →
-    // contact. Stop at the first signal that yields any rows.
+    // Resolve the originating lead:
+    //  1. estimate link (`leads.estimate_id`) — authoritative.
+    //  2. contact match among UNCONVERTED leads — the originating lead that was
+    //     never linked. We do NOT match every open lead on the customer; see
+    //     findUnconvertedLeadsByContact for why.
     let candidates = [];
     if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
     }
-    if (!candidates.length && resolvedCustomerId) {
-      candidates = await database('leads').where({ customer_id: resolvedCustomerId });
-    }
     if (!candidates.length) {
-      // Pull contact off the customer record when only an id was supplied
-      // (e.g. service-completed / invoice-sent on a lead never FK-linked).
       if (!resolvedPhone && !resolvedEmail && resolvedCustomerId) {
         const customer = await database('customers').where({ id: resolvedCustomerId }).first();
         resolvedPhone = customer?.phone || null;
         resolvedEmail = customer?.email || null;
       }
       if (resolvedPhone || resolvedEmail) {
-        candidates = await findOpenLeadsByContact(database, resolvedPhone, resolvedEmail);
+        candidates = await findUnconvertedLeadsByContact(database, resolvedPhone, resolvedEmail);
       }
     }
 
@@ -279,13 +297,17 @@ async function convertLeadFromEvent({
     }
 
     for (const lead of open) {
-      await leadAttributionService.markConverted(lead.id, {
-        customerId: resolvedCustomerId || lead.customer_id || null,
-        monthlyValue: valueHints.monthlyValue ?? null,
-        initialServiceValue: valueHints.initialServiceValue ?? null,
-        waveguardTier: valueHints.waveguardTier ?? null,
-        triggerSource: source,
-      });
+      const conversion = { triggerSource: source };
+      if (resolvedCustomerId) conversion.customerId = resolvedCustomerId;
+      else if (lead.customer_id) conversion.customerId = lead.customer_id;
+      // Pass revenue fields only when an estimate supplied them — otherwise
+      // markConverted preserves whatever the lead already has.
+      if (haveEstimateHints) {
+        conversion.monthlyValue = valueHints.monthlyValue;
+        conversion.initialServiceValue = valueHints.initialServiceValue;
+        conversion.waveguardTier = valueHints.waveguardTier;
+      }
+      await leadAttributionService.markConverted(lead.id, conversion);
     }
     return { converted: true, count: open.length, leadIds: open.map((lead) => lead.id) };
   } catch (err) {
@@ -302,5 +324,5 @@ module.exports = {
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
   convertLeadFromEvent,
-  findOpenLeadsByContact,
+  findUnconvertedLeadsByContact,
 };

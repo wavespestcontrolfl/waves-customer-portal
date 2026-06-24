@@ -7,33 +7,64 @@
  *
  * For each target contact it resolves the customer record (by normalized phone
  * or email), then reuses the shared `convertLeadFromEvent` so the conversion is
- * identical to what the live triggers do — open leads only, idempotent, links
- * the customer. Already-won leads are skipped.
+ * identical to what the live triggers do — open, unconverted leads only,
+ * idempotent, links the customer. Already-won leads are skipped.
  *
- * SAFE BY DEFAULT: dry-run unless `--commit` is passed. This writes to whatever
- * DATABASE_URL points at, so run it deliberately (break-glass on prod, per the
- * waves-db policy).
+ * Targets are supplied at RUN TIME — never committed. Pass a non-committed JSON
+ * file of `[{ "phone": "...", "email": "..." }]`, or a single contact inline:
  *
- *   node server/scripts/backfill-lead-acceptance-triggers.js            # dry-run
- *   node server/scripts/backfill-lead-acceptance-triggers.js --commit   # write
+ *   node server/scripts/backfill-lead-acceptance-triggers.js --file=./targets.json
+ *   node server/scripts/backfill-lead-acceptance-triggers.js --phone=+15551234567
+ *   node server/scripts/backfill-lead-acceptance-triggers.js --email=a@b.com --commit
+ *
+ * SAFE BY DEFAULT: dry-run unless `--commit` is passed. Contacts are logged
+ * masked (no full phone/email/name). This writes to whatever DATABASE_URL
+ * points at, so run it deliberately (break-glass on prod, per the waves-db
+ * policy).
  */
 require('dotenv').config();
+const fs = require('fs');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { convertLeadFromEvent } = require('../services/lead-estimate-link');
 
-// The two leads reported as stuck. Add more `{ phone, email }` entries here if
-// other contacts surface; only one of phone/email is required per entry.
-const TARGETS = [
-  { phone: '+14022107112', email: 'taryn.n.hamer@gmail.com', note: 'Taryn Hamer — estimate accepted + deposit paid' },
-  { phone: '+19412269100', email: 'bubbleyutea@gmail.com', note: 'Holly Thompson — service completed + invoice sent' },
-];
-
 const COMMIT = process.argv.includes('--commit');
+
+function argValue(name) {
+  const prefix = `--${name}=`;
+  const hit = process.argv.find((a) => a.startsWith(prefix));
+  return hit ? hit.slice(prefix.length) : null;
+}
+
+function loadTargets() {
+  const file = argValue('file');
+  if (file) {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!Array.isArray(parsed)) throw new Error('--file must contain a JSON array of { phone, email }');
+    return parsed;
+  }
+  const phone = argValue('phone');
+  const email = argValue('email');
+  if (phone || email) return [{ phone, email }];
+  return [];
+}
 
 function last10(value) {
   const digits = String(value || '').replace(/\D/g, '');
   return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+// Mask for logs — never emit full phone/email (PII).
+function maskContact({ phone, email }) {
+  const parts = [];
+  const np = last10(phone);
+  if (np) parts.push(`phone:***${np.slice(-4)}`);
+  const ne = String(email || '').trim().toLowerCase();
+  if (ne.includes('@')) {
+    const [user, domain] = ne.split('@');
+    parts.push(`email:${user.slice(0, 1)}***@${domain}`);
+  }
+  return parts.join(' ') || '(no contact)';
 }
 
 async function findCustomer({ phone, email }) {
@@ -49,20 +80,26 @@ async function findCustomer({ phone, email }) {
 }
 
 async function run() {
-  logger.info(`[backfill-lead-triggers] starting (${COMMIT ? 'COMMIT' : 'DRY-RUN'})`);
+  const targets = loadTargets();
+  if (!targets.length) {
+    logger.error('[backfill-lead-triggers] no targets — pass --file=<path>, or --phone=/--email=');
+    return;
+  }
+  logger.info(`[backfill-lead-triggers] starting (${COMMIT ? 'COMMIT' : 'DRY-RUN'}) — ${targets.length} target(s)`);
   let converted = 0;
   let skipped = 0;
 
-  for (const target of TARGETS) {
+  for (const target of targets) {
+    const masked = maskContact(target);
     const customer = await findCustomer(target);
     if (!customer) {
-      logger.warn(`[backfill-lead-triggers] no customer found for ${target.note}; skipping`);
+      logger.warn(`[backfill-lead-triggers] no customer found for ${masked}; skipping`);
       skipped += 1;
       continue;
     }
 
     if (!COMMIT) {
-      logger.info(`[backfill-lead-triggers] DRY-RUN would convert open lead(s) for ${target.note} -> customer ${customer.id}`);
+      logger.info(`[backfill-lead-triggers] DRY-RUN would convert open lead(s) for ${masked} -> customer ${customer.id}`);
       continue;
     }
 
@@ -74,10 +111,10 @@ async function run() {
     });
     if (result.converted) {
       converted += result.count;
-      logger.info(`[backfill-lead-triggers] converted ${result.count} lead(s) for ${target.note}: ${result.leadIds.join(', ')}`);
+      logger.info(`[backfill-lead-triggers] converted ${result.count} lead(s) for ${masked}: ${result.leadIds.join(', ')}`);
     } else {
       skipped += 1;
-      logger.info(`[backfill-lead-triggers] nothing to convert for ${target.note} (${result.reason})`);
+      logger.info(`[backfill-lead-triggers] nothing to convert for ${masked} (${result.reason})`);
     }
   }
 

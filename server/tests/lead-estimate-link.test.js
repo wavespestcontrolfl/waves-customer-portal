@@ -207,8 +207,11 @@ describe('lead-estimate link service', () => {
 });
 
 describe('convertLeadFromEvent (funnel triggers)', () => {
+  // contactQuery captures the where-builder used by findUnconvertedLeadsByContact
+  // so a test can assert the customer_id IS NULL guard is applied.
   function makeConvertDb(opts = {}) {
-    return (table) => {
+    const calls = { whereNull: [] };
+    const db = (table) => {
       if (opts.throwOnTable === table) throw new Error('db boom');
       return {
         where(clause) {
@@ -217,28 +220,34 @@ describe('convertLeadFromEvent (funnel triggers)', () => {
           if (table === 'leads' && clause && 'estimate_id' in clause) {
             return Promise.resolve(opts.leadsByEstimate || []);
           }
-          if (table === 'leads' && clause && 'customer_id' in clause) {
-            return Promise.resolve(opts.leadsByCustomer || []);
-          }
           return Promise.resolve([]);
         },
         whereNotIn() {
-          return { andWhere: () => Promise.resolve(opts.contactLeads || []) };
+          // findUnconvertedLeadsByContact: .whereNotIn(...).whereNull('customer_id').andWhere(...)
+          return {
+            whereNull(col) {
+              calls.whereNull.push(col);
+              return { andWhere: () => Promise.resolve(opts.contactLeads || []) };
+            },
+          };
         },
       };
     };
+    db._calls = calls;
+    return db;
   }
 
-  test('deposit_paid: matches by estimate link and passes estimate value hints', async () => {
+  test('deposit_paid: accepted estimate → matches by estimate link with value hints', async () => {
     const markConverted = jest.fn().mockResolvedValue();
     const database = makeConvertDb({
-      estimate: { id: 'e1', customer_id: 'c1', monthly_total: 125, onetime_total: 99, waveguard_tier: 'Gold' },
+      estimate: { id: 'e1', status: 'accepted', customer_id: 'c1', monthly_total: 125, onetime_total: 99, waveguard_tier: 'Gold' },
       leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }],
     });
 
     const result = await convertLeadFromEvent({
       source: 'deposit_paid',
       estimateId: 'e1',
+      requireAcceptedEstimate: true,
       database,
       leadAttributionService: { markConverted },
     });
@@ -253,9 +262,31 @@ describe('convertLeadFromEvent (funnel triggers)', () => {
     });
   });
 
-  test('service_completed: matches by customer link when no estimate is given', async () => {
+  test('deposit_paid: estimate not yet accepted → skipped, no conversion', async () => {
+    const markConverted = jest.fn();
+    const database = makeConvertDb({
+      estimate: { id: 'e1', status: 'sent', customer_id: null },
+      leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'deposit_paid',
+      estimateId: 'e1',
+      requireAcceptedEstimate: true,
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'estimate_not_accepted' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('service_completed: matches the unconverted originating lead by contact, preserves values', async () => {
     const markConverted = jest.fn().mockResolvedValue();
-    const database = makeConvertDb({ leadsByCustomer: [{ id: 'L2', status: 'new' }] });
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', email: 'holly@example.com' },
+      contactLeads: [{ id: 'L3', status: 'new', customer_id: null }],
+    });
 
     const result = await convertLeadFromEvent({
       source: 'service_completed',
@@ -264,35 +295,20 @@ describe('convertLeadFromEvent (funnel triggers)', () => {
       leadAttributionService: { markConverted },
     });
 
-    expect(result).toMatchObject({ converted: true, count: 1 });
-    expect(markConverted).toHaveBeenCalledWith('L2', expect.objectContaining({
-      customerId: 'c1',
-      triggerSource: 'service_completed',
-    }));
-  });
-
-  test('falls back to the customer contact when the lead was never FK-linked', async () => {
-    const markConverted = jest.fn().mockResolvedValue();
-    const database = makeConvertDb({
-      leadsByCustomer: [],
-      customer: { id: 'c1', phone: '+19412269100', email: 'holly@example.com' },
-      contactLeads: [{ id: 'L3', status: 'new', customer_id: null }],
-    });
-
-    const result = await convertLeadFromEvent({
-      source: 'invoice_sent',
-      customerId: 'c1',
-      database,
-      leadAttributionService: { markConverted },
-    });
-
     expect(result).toMatchObject({ converted: true, leadIds: ['L3'] });
-    expect(markConverted).toHaveBeenCalledWith('L3', expect.objectContaining({ customerId: 'c1' }));
+    // Only the customer + source — no revenue fields, so markConverted preserves
+    // any monthly_value/waveguard_tier already on the lead.
+    expect(markConverted.mock.calls[0][1]).toEqual({ customerId: 'c1', triggerSource: 'service_completed' });
+    // The contact fallback must restrict to unconverted leads.
+    expect(database._calls.whereNull).toContain('customer_id');
   });
 
   test('skips already-closed leads and reports no_open_lead', async () => {
     const markConverted = jest.fn().mockResolvedValue();
-    const database = makeConvertDb({ leadsByCustomer: [{ id: 'Lwon', status: 'won' }] });
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100' },
+      contactLeads: [{ id: 'Lwon', status: 'won', customer_id: null }],
+    });
 
     const result = await convertLeadFromEvent({
       source: 'service_completed',
@@ -307,10 +323,10 @@ describe('convertLeadFromEvent (funnel triggers)', () => {
 
   test('never throws — a db failure resolves to an error result', async () => {
     const markConverted = jest.fn();
-    const database = makeConvertDb({ throwOnTable: 'leads' });
+    const database = makeConvertDb({ throwOnTable: 'customers' });
 
     const result = await convertLeadFromEvent({
-      source: 'deposit_paid',
+      source: 'service_completed',
       customerId: 'c1',
       database,
       leadAttributionService: { markConverted },

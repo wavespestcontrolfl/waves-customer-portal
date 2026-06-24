@@ -747,12 +747,14 @@ async function handleDepositIntentSucceeded(paymentIntent) {
   });
   logger.info('[estimate-deposits] deposit received', { estimateId });
 
-  // A paid deposit is a strong accept signal — convert the originating lead if
-  // it's still open. Best-effort and never throws; a conversion miss must not
-  // leave captured money unrecorded by failing the webhook.
+  // A paid deposit on an ACCEPTED estimate is a strong signal the originating
+  // lead is won — convert it if it's still open. Gated on requireAcceptedEstimate
+  // so a deposit captured before accept (or later abandoned/refunded) can't mark
+  // a lead won with no customer and pre-empt the real accept-time conversion.
+  // Best-effort and never throws; a miss must not fail the deposit webhook.
   try {
     const { convertLeadFromEvent } = require('./lead-estimate-link');
-    await convertLeadFromEvent({ source: 'deposit_paid', estimateId });
+    await convertLeadFromEvent({ source: 'deposit_paid', estimateId, requireAcceptedEstimate: true });
   } catch (err) {
     logger.warn('[estimate-deposits] lead conversion after deposit skipped', { estimateId, error: err.message });
   }
