@@ -185,10 +185,13 @@ router.get('/analytics/overview', async (req, res, next) => {
 // GET /api/admin/leads/analytics/by-source — ROI per source
 router.get('/analytics/by-source', async (req, res, next) => {
   try {
-    const { start_date, end_date } = req.query;
+    const { start_date, end_date, include_inactive } = req.query;
+    // The Sources table requests inactive sources too (include_inactive=1); the
+    // Analytics-tab panels call without it and stay active-only.
     const results = await leadAttribution.calculateAllSourceROI(
       start_date ? new Date(start_date) : undefined,
       end_date ? new Date(end_date) : undefined,
+      { includeInactive: include_inactive === '1' || include_inactive === 'true' },
     );
     res.json({ sources: results });
   } catch (err) { next(err); }
@@ -205,9 +208,6 @@ router.get('/analytics/by-channel', async (req, res, next) => {
 
     const byChannel = {};
     for (const r of allROI) {
-      // Channel ROI reflects only ACTIVE sources (calculateAllSourceROI now
-      // returns inactive ones too, for the Sources table).
-      if (!r.source.is_active) continue;
       const ch = r.source.channel || 'Other';
       if (!byChannel[ch]) {
         byChannel[ch] = { channel: ch, totalLeads: 0, conversions: 0, totalCost: 0, totalRevenue: 0, sources: 0 };

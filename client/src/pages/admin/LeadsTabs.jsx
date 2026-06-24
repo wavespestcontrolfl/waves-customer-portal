@@ -643,7 +643,12 @@ export function LeadsSection() {
   // calculateAllSourceROI on those tabs.
   const loadSourceROI = useCallback(async () => {
     try {
-      const bs = await adminFetch("/admin/leads/analytics/by-source");
+      // include_inactive: the Sources table lists inactive sources too and needs
+      // their ROI. The Analytics tab (loadAnalytics) calls without it, so its
+      // ROI Matrix / Phone / Channel panels stay active-only and consistent.
+      const bs = await adminFetch(
+        "/admin/leads/analytics/by-source?include_inactive=1",
+      );
       setBySource(bs.sources || []);
     } catch (e) {
       console.error("loadSourceROI", e);

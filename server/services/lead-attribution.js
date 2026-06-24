@@ -208,7 +208,11 @@ async function logSourceTouch(sourceId, customerId, type) {
 // ---------------------------------------------------------------------------
 // 6. calculateSourceROI
 // ---------------------------------------------------------------------------
-async function calculateSourceROI(leadSourceId, startDate, endDate) {
+// claimedInvoiceIds / claimedServiceIds: optional shared Sets so calculateAllSourceROI
+// can de-dupe a customer's invoice/service rows ACROSS sources (a customer with
+// won leads under two sources must not have the same invoice credited to both).
+// Omitted for a standalone single-source call, which only needs within-source dedup.
+async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInvoiceIds, claimedServiceIds } = {}) {
   const source = await db('lead_sources').where('id', leadSourceId).first();
   if (!source) return null;
 
@@ -280,8 +284,8 @@ async function calculateSourceROI(leadSourceId, startDate, endDate) {
   }
 
   const windowEnd = new Date(end);
-  const usedInvoiceIds = new Set();
-  const usedServiceIds = new Set();
+  const usedInvoiceIds = claimedInvoiceIds || new Set();
+  const usedServiceIds = claimedServiceIds || new Set();
   const customersWithBilling = new Set();
   // Earliest conversion first, so it claims a customer's shared invoice rows.
   const orderedWonLeads = [...wonLeads].sort(
@@ -358,14 +362,19 @@ async function calculateSourceROI(leadSourceId, startDate, endDate) {
 // ---------------------------------------------------------------------------
 // 7. calculateAllSourceROI
 // ---------------------------------------------------------------------------
-// Returns ROI for ALL sources (active + inactive). The Sources table lists
-// inactive sources too and needs their ROI; channel aggregation filters to
-// active itself (see /analytics/by-channel) so Channel Comparison is unchanged.
-async function calculateAllSourceROI(startDate, endDate) {
-  const sources = await db('lead_sources').orderBy('name');
+// Active-only by default — the Analytics tab (Channel Comparison, ROI Matrix,
+// Phone Number ROI) must not show decommissioned sources. The Sources table
+// passes includeInactive: true to also list inactive sources with their ROI.
+// A shared claim set de-dupes each invoice/service row across sources.
+async function calculateAllSourceROI(startDate, endDate, { includeInactive = false } = {}) {
+  const query = db('lead_sources').orderBy('name');
+  if (!includeInactive) query.where('is_active', true);
+  const sources = await query;
+  const claimedInvoiceIds = new Set();
+  const claimedServiceIds = new Set();
   const results = [];
   for (const source of sources) {
-    const roi = await calculateSourceROI(source.id, startDate, endDate);
+    const roi = await calculateSourceROI(source.id, startDate, endDate, { claimedInvoiceIds, claimedServiceIds });
     if (roi) results.push(roi);
   }
   return results;

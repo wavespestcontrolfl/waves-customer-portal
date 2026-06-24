@@ -150,4 +150,19 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     const res = await calculateSourceROI('src-1', start, end);
     expect(res.totalRevenue).toBe(150);
   });
+
+  test('honors a shared claim set so an invoice is not credited to two sources', async () => {
+    setup({
+      costs: [{ cost_amount: 3 }],
+      leads: [{ id: 'L1', status: 'won', customer_id: 'c1', converted_at: start }],
+      invoices: [{ id: 'i1', customer_id: 'c1', total: '200', created_at: new Date('2026-06-20T00:00:00Z') }],
+    });
+
+    // i1 already claimed by an earlier source in the same all-source run.
+    const res = await calculateSourceROI('src-1', start, end, {
+      claimedInvoiceIds: new Set(['i1']),
+      claimedServiceIds: new Set(),
+    });
+    expect(res.totalRevenue).toBe(0); // not 200 — the row was already counted elsewhere
+  });
 });
