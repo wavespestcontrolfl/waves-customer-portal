@@ -603,7 +603,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     // not-deleted + a customer stage), so churn (stage→churned), going dormant,
     // and soft-delete are all counted as losses; reactivation is handled because
     // the live state is the source of truth, not the sticky churned_at.
-    let retentionPct = null, lost = 0;
+    let retentionPct = null, lost = 0, lostMRR = 0, retentionOk = false;
     try {
       const departedInWindow = `pipeline_stage_changed_at >= ${ET_MIDNIGHT_TS}`;
       // Cohort = "was a live customer at the window start": became a customer
@@ -638,8 +638,10 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
             });
         });
 
-      const baseRow = await cohort().count('* as c').first();
+      const baseRow = await cohort()
+        .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
       const base = parseInt(baseRow?.c || 0);
+      const baseMRR = parseFloat(baseRow?.mrr || 0);
 
       // Retained = cohort members still live now (active, not deleted, still a
       // customer stage). Everyone else who was a customer at the start — churned,
@@ -647,13 +649,51 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       // "churn", so the field is reported as `lost`).
       const retainedRow = await cohort()
         .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES)
-        .count('* as c').first();
+        .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
       const retained = parseInt(retainedRow?.c || 0);
       lost = Math.max(0, base - retained);
+      // MRR lost this period = recurring revenue of cohort members who are no
+      // longer live — the SAME single "lost" definition as the count above, so
+      // the two can never drift. Churned rows keep their last monthly_rate.
+      lostMRR = Math.max(0, baseMRR - parseFloat(retainedRow?.mrr || 0));
 
       retentionPct = base > 0 ? Math.max(0, Math.round((retained / base) * 1000) / 10) : null;
+      // Mark the lost side as trustworthy only after it fully computed. A
+      // null retentionPct (empty cohort) still counts as success — lost=0 is
+      // correct there. What we must NOT do is publish momentum off a thrown
+      // retention query, where lost/lostMRR are still their 0 initializers.
+      retentionOk = true;
     } catch (err) {
       logger.error(`[admin-dashboard] retention failed: ${err.message}`);
+    }
+
+    // Net momentum — the period's growth story: customers and recurring revenue
+    // gained vs. lost. The NEW side reuses the canonical conversion-date
+    // new-customer source of truth (member_since in window, the same definition
+    // the headline "new this month" tile uses); the LOST side reuses the
+    // retention cohort loss computed just above. Net = new − lost (acquisition
+    // vs. churn) — no upgrade/expansion movement is inferred, so this is an
+    // honest new-vs-lost figure, not a fabricated expansion number.
+    //
+    // Gated on `retentionOk`: if the retention query above threw, lost/lostMRR
+    // are still their 0 initializers — publishing momentum then would paint
+    // every new customer/dollar as pure net growth with $0 churned. When the
+    // lost side is unavailable we leave momentum null so the UI hides the
+    // section rather than showing a falsely rosy number.
+    let momentum = null;
+    if (retentionOk) try {
+      const newRow = await db('customers')
+        .where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
+        .whereRaw(`${CONVERSION_DATE_SQL} >= ?`, [start]).whereRaw(`${CONVERSION_DATE_SQL} <= ?`, [todayStr])
+        .select(db.raw('COUNT(*) as c'), db.raw('COALESCE(SUM(monthly_rate), 0) as mrr')).first();
+      const newCount = parseInt(newRow?.c || 0);
+      const newMRR = parseFloat(newRow?.mrr || 0);
+      momentum = {
+        customers: { new: newCount, lost, net: newCount - lost },
+        mrr: { new: newMRR, churned: lostMRR, net: Math.round((newMRR - lostMRR) * 100) / 100 },
+      };
+    } catch (err) {
+      logger.error(`[admin-dashboard] net momentum failed: ${err.message}`);
     }
 
     // Tech leaderboard — revenue + jobs + RPMH per tech in window
@@ -738,6 +778,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
         customerBase,
       },
       retention: { pct: retentionPct, lost },
+      momentum,
       leaderboard,
     });
   } catch (err) { next(err); }

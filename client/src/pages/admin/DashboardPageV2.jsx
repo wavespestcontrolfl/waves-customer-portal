@@ -473,6 +473,27 @@ export default function DashboardPageV2() {
           ) : (
             <>
               {" "}
+              {kpis.momentum && (
+                <>
+                  {" "}
+                  <SectionLabel>Momentum</SectionLabel>{" "}
+                  <KpiGrid>
+                    {" "}
+                    <KpiTile
+                      label="Net Customers"
+                      value={signed(kpis.momentum.customers?.net, fmtInt)}
+                      sub={`+${fmtInt(kpis.momentum.customers?.new ?? 0)} new · ${fmtInt(kpis.momentum.customers?.lost ?? 0)} lost`}
+                      alert={kpis.momentum.customers?.net < 0}
+                    />{" "}
+                    <KpiTile
+                      label="Net MRR"
+                      value={signed(kpis.momentum.mrr?.net, fmtMoney)}
+                      sub={`+${fmtMoneyCompact(kpis.momentum.mrr?.new ?? 0)} new · ${fmtMoneyCompact(kpis.momentum.mrr?.churned ?? 0)} lost`}
+                      alert={kpis.momentum.mrr?.net < 0}
+                    />{" "}
+                  </KpiGrid>{" "}
+                </>
+              )}{" "}
               <SectionLabel>Operations</SectionLabel>{" "}
               <KpiGrid>
                 {" "}
@@ -899,6 +920,15 @@ function AttributionPanels({
 
 function pct(n) {
   return n == null ? "—" : `${n}%`;
+}
+
+// Signed display for net-momentum tiles: explicit + on gains, a true minus
+// glyph on losses, bare 0 at flat. Magnitude is formatted by `fmt`.
+function signed(n, fmt) {
+  if (n == null) return "—";
+  const v = Number(n);
+  if (v === 0) return fmt(0);
+  return `${v > 0 ? "+" : "−"}${fmt(Math.abs(v))}`;
 }
 
 function SectionLabel({ children }) {
