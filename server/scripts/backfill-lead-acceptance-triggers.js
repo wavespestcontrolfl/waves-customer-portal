@@ -67,16 +67,23 @@ function maskContact({ phone, email }) {
   return parts.join(' ') || '(no contact)';
 }
 
-async function findCustomer({ phone, email }) {
+// Resolve the target to EXACTLY ONE customer. Shared family phones, duplicate
+// rows, or a phone from one customer + email from another can match multiple
+// customers; converting onto an arbitrary `.first()` would corrupt attribution,
+// so an ambiguous (or empty) match is reported and skipped, never guessed.
+async function resolveCustomer({ phone, email }) {
   const np = last10(phone);
   const ne = String(email || '').trim().toLowerCase() || null;
-  if (!np && !ne) return null;
-  return db('customers')
+  if (!np && !ne) return { customer: null, reason: 'no_contact' };
+  const matches = await db('customers')
     .where((builder) => {
       if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
       if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
     })
-    .first();
+    .limit(2);
+  if (!matches.length) return { customer: null, reason: 'no_customer' };
+  if (matches.length > 1) return { customer: null, reason: 'ambiguous_customer' };
+  return { customer: matches[0], reason: null };
 }
 
 async function run() {
@@ -91,9 +98,9 @@ async function run() {
 
   for (const target of targets) {
     const masked = maskContact(target);
-    const customer = await findCustomer(target);
+    const { customer, reason } = await resolveCustomer(target);
     if (!customer) {
-      logger.warn(`[backfill-lead-triggers] no customer found for ${masked}; skipping`);
+      logger.warn(`[backfill-lead-triggers] skipping ${masked} (${reason})`);
       skipped += 1;
       continue;
     }

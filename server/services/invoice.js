@@ -572,20 +572,6 @@ function invoiceNotSendableError(invoice) {
   );
 }
 
-// An invoice reaching customers (any finalization path) means the deal is
-// live — convert the originating lead if it's still open. Best-effort: a
-// conversion miss must never affect the send result. Shared by both
-// sendViaSMSAndEmail and markDeliverySent.
-async function convertLeadOnInvoiceSent(invoiceId, customerId) {
-  if (!customerId) return;
-  try {
-    const { convertLeadFromEvent } = require("./lead-estimate-link");
-    await convertLeadFromEvent({ source: "invoice_sent", customerId });
-  } catch (err) {
-    logger.warn(`[invoice] lead conversion after send skipped for ${invoiceId}: ${err.message}`);
-  }
-}
-
 async function claimInvoiceForSend(invoiceId, { allowClaimed = false } = {}) {
   const current = await db("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
@@ -2038,11 +2024,6 @@ const InvoiceService = {
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
         });
-
-      // Sending an invoice means the deal is live — convert the originating
-      // lead if it's still open. Uses the invoice already loaded by the send
-      // claim (no extra query). markDeliverySent covers the other send paths.
-      await convertLeadOnInvoiceSent(invoiceId, claim.invoice?.customer_id);
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
       // No channel delivered — reverse the credit this seam auto-applied before
@@ -2132,12 +2113,6 @@ const InvoiceService = {
           `[invoice] Review request schedule failed after ${source}: ${err.message}`,
         );
       }
-    }
-
-    // Convert the originating lead only when THIS call performed the
-    // send finalization (matches the review-request gate above).
-    if (updated) {
-      await convertLeadOnInvoiceSent(invoiceId, invoice.customer_id);
     }
 
     try {

@@ -3559,19 +3559,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
 
-    // A completed visit means this contact is a customer now — convert the
-    // originating lead if it's still open. Best-effort and post-commit;
-    // idempotent (already-converted leads are skipped), so the resume path is
-    // safe. Incomplete visits don't count.
-    if (!isIncompleteVisit && svc.customer_id) {
-      try {
-        const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
-      } catch (err) {
-        logger.warn(`[dispatch] lead conversion after completion skipped for customer=${svc.customer_id}: ${err.message}`);
-      }
-    }
-
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
     // durably committed. Runs on BOTH first-run and durable-resume paths. On
     // resume the reading was written in a prior pass (so turfOcrReadingId is

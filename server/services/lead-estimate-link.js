@@ -166,11 +166,36 @@ async function markLinkedLeadEstimateAccepted({
   initialServiceValue,
   waveguardTier,
   leadAttributionService = leadAttribution,
+  database = db,
 }) {
   if (!estimateId) return;
-  const leads = await db('leads').where({ estimate_id: estimateId });
+
+  let leads = (await database('leads').where({ estimate_id: estimateId }))
+    .filter((lead) => !CLOSED_LEAD_STATUSES.has(lead.status));
+
+  // Accepted-but-unlinked fallback: when the estimate was never FK-linked to
+  // its originating lead (created standalone, so `leads.estimate_id` is null),
+  // the query above finds nothing and the lead would stay stuck in `new` even
+  // though the customer just accepted. Acceptance is the authoritative "won"
+  // signal, so match the accepted customer's contact to an open, never-yet-
+  // converted lead (customer_id IS NULL — see findUnconvertedLeadsByContact for
+  // why we never sweep an existing customer's other open add-on leads).
+  if (!leads.length && customerId) {
+    const customer = await database('customers').where({ id: customerId }).first();
+    if (customer) {
+      leads = (await findUnconvertedLeadsByContact(database, customer.phone, customer.email))
+        .filter((lead) => !CLOSED_LEAD_STATUSES.has(lead.status));
+      if (leads.length > 1) {
+        logger.warn(`[lead-trigger] estimate ${estimateId} acceptance matched ${leads.length} open leads by contact; converting all`, {
+          estimateId,
+          customerId,
+          leadIds: leads.map((lead) => lead.id),
+        });
+      }
+    }
+  }
+
   for (const lead of leads) {
-    if (CLOSED_LEAD_STATUSES.has(lead.status)) continue;
     await leadAttributionService.markConverted(lead.id, {
       customerId,
       monthlyValue,
@@ -181,15 +206,11 @@ async function markLinkedLeadEstimateAccepted({
 }
 
 // ---------------------------------------------------------------------------
-// Post-acceptance conversion triggers (deposit paid / service completed /
-// invoice sent). The estimate-accepted path above only fires when the lead is
-// linked to the estimate by `estimate_id`. These later funnel events are the
-// backstop: a deal can be live (deposit charged, work done, invoice out)
-// without an estimate-accept ever having been recorded, leaving the lead stuck
-// in `new`. `convertLeadFromEvent` resolves the originating lead by the
-// strongest signal available — estimate link, then customer link, then
-// normalized phone/email — and converts it. It NEVER throws: a conversion miss
-// must never break the deposit/completion/invoice flow that called it.
+// Shared lead resolver used by the one-off backfill (server/scripts/
+// backfill-lead-acceptance-triggers.js). Resolves the originating lead by the
+// strongest signal available — estimate link, then the customer's normalized
+// phone/email among never-converted leads — and converts it. NEVER throws: a
+// miss returns a reason instead of breaking the caller.
 // ---------------------------------------------------------------------------
 
 function estimateValueHints(estimate) {
@@ -210,9 +231,8 @@ function estimateValueHints(estimate) {
 // mixed E.164 / 10-digit formats) or a case-insensitive email. The
 // `customer_id IS NULL` guard is deliberate: an existing customer can hold
 // separate open leads already attached to them (e.g. public quote links stamp
-// `leads.customer_id`), and an unrelated routine service/invoice must never
-// mark those add-on leads won. We only rescue the originating lead that was
-// never linked to anyone. Wrapped by convertLeadFromEvent's try/catch.
+// `leads.customer_id`), and we must never sweep those unrelated add-on leads.
+// We only rescue the originating lead that was never linked to anyone.
 async function findUnconvertedLeadsByContact(database, phone, email) {
   const np = normalizePhone(phone);
   const ne = normalizeEmail(email);
@@ -232,7 +252,6 @@ async function convertLeadFromEvent({
   customerId = null,
   phone = null,
   email = null,
-  requireAcceptedEstimate = false,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
@@ -245,18 +264,7 @@ async function convertLeadFromEvent({
 
     if (estimateId) {
       const estimate = await database('estimates').where({ id: estimateId }).first();
-      if (!estimate) {
-        if (requireAcceptedEstimate) return { converted: false, reason: 'estimate_missing' };
-      } else {
-        // Deposit path: a deposit PI can be captured BEFORE the accept
-        // transaction creates the customer, and may later be abandoned or
-        // refunded. Converting then would mark the lead won with no customer and
-        // make the real accept-time conversion a no-op (the lead is already
-        // closed). Only convert once the estimate is genuinely accepted and has
-        // a customer to attach.
-        if (requireAcceptedEstimate && (estimate.status !== 'accepted' || !estimate.customer_id)) {
-          return { converted: false, reason: 'estimate_not_accepted' };
-        }
+      if (estimate) {
         resolvedCustomerId = resolvedCustomerId || estimate.customer_id || null;
         resolvedPhone = resolvedPhone || estimate.customer_phone || null;
         resolvedEmail = resolvedEmail || estimate.customer_email || null;
