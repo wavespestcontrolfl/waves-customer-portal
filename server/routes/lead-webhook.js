@@ -4,7 +4,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
 const LeadScorer = require('../services/lead-scorer');
-const { resolveLocationFromCandidates, findGbpLocationByUtmContent } = require('../config/locations');
+const { resolveLocationFromCandidates, isOfficeCity, findGbpLocationByUtmContent } = require('../config/locations');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -108,8 +108,17 @@ router.post('/', async (req, res) => {
     // lead never lands with a blank city. zipCity is also used standalone on
     // the existing-customer update path, which fills from the submitted
     // address only (no marketing-page area).
+    //
+    // Order: parsed city → a *routable* source area → ZIP city → raw area. A
+    // non-city source area ("SW Florida" for the brand-wide lawn domain, or
+    // arbitrary Google Ads utm_content) must lose to the ZIP city — storing it
+    // would mislabel the city and break downstream city-based routing.
     const zipCity = zipToCity(normalizedAddress.zip) || '';
-    const resolvedCity = normalizedAddress.city || leadSource.area || zipCity || '';
+    const resolvedCity = normalizedAddress.city
+      || (isOfficeCity(leadSource.area) ? leadSource.area : '')
+      || zipCity
+      || leadSource.area
+      || '';
 
     const phone = cleanPhone(rawPhone);
     if (!phone || phone.length < 10) {

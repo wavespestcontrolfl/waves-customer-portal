@@ -175,13 +175,24 @@ const CITY_TO_LOCATION = {
   'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota', 'longboat key': 'sarasota',
   'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'laurel': 'venice',
   'port charlotte': 'venice', 'punta gorda': 'venice', 'placida': 'venice', 'boca grande': 'venice',
-  'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'ruskin': 'parrish', 'apollo beach': 'parrish', 'terra ceia': 'parrish',
+  'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'terra ceia': 'parrish',
+  // Northern reach into south Hillsborough served by the Parrish office
+  // (mirrors the ZIP routing in routes/satisfaction.js).
+  'ruskin': 'parrish', 'apollo beach': 'parrish', 'sun city center': 'parrish',
+  'wimauma': 'parrish', 'gibsonton': 'parrish', 'riverview': 'parrish',
 };
 
 function resolveLocation(city) {
   const key = (city || '').toLowerCase().trim();
   const locId = CITY_TO_LOCATION[key] || 'bradenton';
   return WAVES_LOCATIONS.find(l => l.id === locId) || WAVES_LOCATIONS[0];
+}
+
+// True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
+// non-city source area (e.g. "SW Florida" for the brand-wide lawn domain, or
+// arbitrary Google Ads utm_content) from being stored as a customer's city.
+function isOfficeCity(city) {
+  return !!CITY_TO_LOCATION[(city || '').toLowerCase().trim()];
 }
 
 // Resolve the office from an ordered list of city/area candidates, returning
@@ -208,6 +219,7 @@ module.exports = {
   isGbpUtmCampaign,
   resolveLocation,
   resolveLocationFromCandidates,
+  isOfficeCity,
   nearestLocation,
   haversineMiles,
 };

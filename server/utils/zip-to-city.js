@@ -1,5 +1,6 @@
 // ZIP → city fallback for the Waves service area (Manatee / Sarasota /
-// Charlotte counties).
+// Charlotte counties, plus the south-Hillsborough reach the Parrish office
+// serves — Ruskin / Sun City Center / Riverview / etc.).
 //
 // Why this exists: website lead forms only capture a structured city when the
 // visitor PICKS a Google Places suggestion. If Places autocomplete fails to
@@ -108,6 +109,17 @@ const ZIP_TO_CITY = {
   '33981': 'Port Charlotte', // Gulf Cove / El Jobean
   '33982': 'Punta Gorda',
   '33983': 'Punta Gorda', // Deep Creek
+
+  // ── South Hillsborough (Parrish office's northern reach) ──
+  // Mirrors the Parrish ZIP routing in routes/satisfaction.js.
+  '33534': 'Gibsonton',
+  '33569': 'Riverview',
+  '33570': 'Ruskin',
+  '33572': 'Apollo Beach',
+  '33573': 'Sun City Center',
+  '33578': 'Riverview',
+  '33579': 'Riverview',
+  '33598': 'Wimauma',
 };
 
 // Resolve a city name from a ZIP. Accepts ZIP+4 / messy input; uses the first

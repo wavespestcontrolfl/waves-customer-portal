@@ -1,5 +1,5 @@
 const { zipToCity, ZIP_TO_CITY } = require('../utils/zip-to-city');
-const { CITY_TO_LOCATION, resolveLocationFromCandidates } = require('../config/locations');
+const { CITY_TO_LOCATION, resolveLocationFromCandidates, isOfficeCity } = require('../config/locations');
 const { REVIEW_GBP_BY_CITY } = require('../services/completion-defaults-resolver');
 
 describe('zipToCity', () => {
@@ -24,6 +24,15 @@ describe('zipToCity', () => {
     expect(zipToCity('34220')).toBe('Palmetto');
     expect(zipToCity('33921')).toBe('Boca Grande'); // Charlotte
     expect(zipToCity('34272')).toBe('Laurel'); // Sarasota
+  });
+
+  test('covers the south-Hillsborough ZIPs the Parrish office serves', () => {
+    // Mirror routes/satisfaction.js — these route to the Parrish office.
+    expect(zipToCity('33572')).toBe('Apollo Beach');
+    expect(zipToCity('33573')).toBe('Sun City Center');
+    expect(zipToCity('33534')).toBe('Gibsonton');
+    expect(zipToCity('33579')).toBe('Riverview');
+    expect(resolveLocationFromCandidates(['', '', zipToCity('33573')]).id).toBe('parrish');
   });
 
   test('every emitted city routes to a real office (no silent Bradenton default)', () => {
@@ -86,5 +95,31 @@ describe('resolveLocationFromCandidates', () => {
 
   test('falls back to the Bradenton default when nothing is routable', () => {
     expect(resolveLocationFromCandidates(['Rotonda West', 'SW Florida', '']).id).toBe('bradenton');
+  });
+});
+
+describe('stored-city precedence (mirrors lead-webhook resolvedCity)', () => {
+  // Mirrors the resolvedCity expression in routes/lead-webhook.js so the
+  // ordering is locked: parsed → routable area → ZIP city → raw area.
+  const storedCity = (parsedCity, area, zip) => {
+    const zipCity = zipToCity(zip) || '';
+    return parsedCity || (isOfficeCity(area) ? area : '') || zipCity || area || '';
+  };
+
+  test('a non-city source area (SW Florida) loses to the ZIP city', () => {
+    expect(isOfficeCity('SW Florida')).toBe(false);
+    expect(storedCity('', 'SW Florida', '34219')).toBe('Parrish');
+  });
+
+  test('a routable source area still wins (spoke behavior preserved)', () => {
+    expect(storedCity('', 'Venice', '34219')).toBe('Venice');
+  });
+
+  test('a parsed structured city always wins', () => {
+    expect(storedCity('Rotonda West', 'Venice', '34219')).toBe('Rotonda West');
+  });
+
+  test('a non-city area is kept only as a last resort when no ZIP city', () => {
+    expect(storedCity('', 'SW Florida', '')).toBe('SW Florida');
   });
 });
