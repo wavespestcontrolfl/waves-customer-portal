@@ -402,6 +402,15 @@ async function submitRecap({
     } catch (referralErr) {
       logger.warn(`[pest-recap] referral first-service credit failed for customer=${svc.customer_id}: ${referralErr.message}`);
     }
+    // Same performed-visit signal as the referral credit: convert the
+    // originating lead to won if it's still open. Best-effort + idempotent;
+    // only matches never-converted leads.
+    try {
+      const { convertLeadFromEvent } = require('./lead-estimate-link');
+      await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+    } catch (leadErr) {
+      logger.warn(`[pest-recap] lead conversion failed for customer=${svc.customer_id}: ${leadErr.message}`);
+    }
   }
 
   // 4. Customer-facing track_state -> complete (best-effort, post-trx).

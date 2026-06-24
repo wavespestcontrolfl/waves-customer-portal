@@ -44,6 +44,12 @@ const mockResolveForInvoice = jest.fn(async () => ({ payerId: null }));
 jest.mock('../services/payer', () => ({
   resolveForInvoice: (...args) => mockResolveForInvoice(...args),
 }));
+// Lead-conversion trigger fired on a recorded deposit. Spy on the wiring; the
+// resolver itself is unit-tested in lead-estimate-link.test.js.
+const mockConvertLeadFromEvent = jest.fn(async () => ({ converted: false, reason: 'no_open_lead' }));
+jest.mock('../services/lead-estimate-link', () => ({
+  convertLeadFromEvent: (...args) => mockConvertLeadFromEvent(...args),
+}));
 
 const {
   assessDepositFollowUpEligibility,
@@ -619,6 +625,31 @@ describe('webhook + invoice credit', () => {
     expect(result.refunded).toBeUndefined();
     expect(state.row).toMatchObject({ estimate_id: 'est-1', amount: 70, status: 'received' });
     expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  it('converts the originating lead to won when an eligible deposit is recorded', async () => {
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    mockConvertLeadFromEvent.mockClear();
+    const { handler } = statefulWebhookDb({ estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280 } });
+    mockDbHandler = handler;
+
+    const result = await handleDepositIntentSucceeded(succeededPi);
+    expect(result.handled).toBe(true);
+    // requireAcceptedEstimate: a paid deposit only converts once the estimate is
+    // actually accepted — the resolver enforces it (unit-tested in lead-estimate-link).
+    expect(mockConvertLeadFromEvent).toHaveBeenCalledWith({ source: 'deposit_paid', estimateId: 'est-1', requireAcceptedEstimate: true });
+  });
+
+  it('does NOT convert a lead when the deposit is refunded as stale (deal not accepted)', async () => {
+    mockIsEstimateAcceptActive.mockReturnValue(false);
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_stale' });
+    mockConvertLeadFromEvent.mockClear();
+    const { handler } = statefulWebhookDb({ estimateRow: { id: 'est-1', status: 'expired' } });
+    mockDbHandler = handler;
+
+    const result = await handleDepositIntentSucceeded(succeededPi);
+    expect(result.refunded).toBe(true);
+    expect(mockConvertLeadFromEvent).not.toHaveBeenCalled();
   });
 
   it('REFUNDS a stale deposit when the estimate is no longer acceptable — claim first, Stripe second, stamp third', async () => {
