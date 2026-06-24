@@ -1,8 +1,17 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
+const { etDateString } = require('../utils/datetime-et');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
+
+// A DATE column comes back as a 'YYYY-MM-DD' string or a UTC-midnight Date — take
+// its calendar day directly, without shifting it through a timezone.
+function dateOnly(v) {
+  if (v == null) return null;
+  if (typeof v === 'string') return v.slice(0, 10);
+  return new Date(v).toISOString().slice(0, 10);
+}
 
 function normalizePhone(value) {
   const digits = String(value || '').replace(/\D/g, '');
@@ -324,12 +333,17 @@ async function isOriginatingLead(database, customerId, lead) {
   const customer = await database('customers')
     .where({ id: customerId })
     .first('member_since', 'created_at');
-  const becameCustomer = customer && (customer.member_since || customer.created_at);
-  if (!becameCustomer) return false;
-  // Compare at day granularity — a same-day intake→conversion still originated
-  // the customer. (member_since is a DATE column; avoid sub-day/TZ false skips.)
-  const day = (d) => new Date(d).toISOString().slice(0, 10);
-  return day(leadStart) <= day(becameCustomer);
+  if (!customer) return false;
+  // Compare ET calendar days — the same conversion date customer-stages.js uses.
+  // first_contact_at/created_at are timestamps → convert via the ET helper (a UTC
+  // day would mis-bucket an evening-ET contact as the next day and wrongly skip).
+  // member_since is a DATE column (already an ET calendar day) → read as-is.
+  const leadDay = etDateString(new Date(leadStart));
+  const becameDay = customer.member_since != null
+    ? dateOnly(customer.member_since)
+    : (customer.created_at != null ? etDateString(new Date(customer.created_at)) : null);
+  if (!becameDay) return false;
+  return leadDay <= becameDay;
 }
 
 async function convertLeadFromEvent({
@@ -393,7 +407,14 @@ async function convertLeadFromEvent({
       // a customer). Anything else is an add-on for an established customer —
       // skip rather than guess which deal the event closed.
       if (resolvedCustomerId) {
-        const linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
+        let linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
+        // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
+        // estimate belongs to that deal — exclude it so we never convert it or
+        // misattribute this estimate's value hints. (Tier 1 already handled a
+        // lead linked to THIS estimate.)
+        if (estimateId) {
+          linked = linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId);
+        }
         if (linked.length) {
           if (linked.length > 1) {
             logger.warn(`[lead-trigger] ${source} customer-link skip — ${linked.length} open leads (ambiguous)`, {

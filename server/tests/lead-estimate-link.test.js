@@ -489,9 +489,11 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
   test('converts a customer-linked open lead on the customer FIRST close', async () => {
     const markConverted = jest.fn().mockResolvedValue();
     const database = makeConvertDb({
-      // Originating: the lead was first contacted on/before the customer became one.
+      // Originating, and an ET-vs-UTC boundary case: first contacted 8:30pm EDT on
+      // Jun 1 (= Jun 2 00:30 UTC) — the SAME ET day the customer became one. A UTC
+      // day comparison would mis-bucket it to Jun 2 and wrongly skip; ET must convert.
       customer: { id: 'c1', phone: '+19412269100', member_since: '2026-06-01' },
-      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', first_contact_at: '2026-05-20' }],
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', first_contact_at: '2026-06-02T00:30:00Z' }],
       customerWonLead: null, // no prior won lead
     });
 
@@ -524,6 +526,30 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     });
 
     expect(result).toEqual({ converted: false, reason: 'customer_link_not_originating' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('for an estimate-scoped event, does NOT convert a lead tied to a DIFFERENT estimate', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      estimate: { id: 'estA', customer_id: 'c1' }, // deposit paid on estimate A
+      leadsByEstimate: [], // no lead FK-linked to estimate A
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-06-01' },
+      // The customer's only open lead is linked to a DIFFERENT estimate (B).
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', estimate_id: 'estB', first_contact_at: '2026-05-20T12:00:00Z' }],
+      customerWonLead: null,
+      contactLeads: [],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'deposit_paid',
+      estimateId: 'estA',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'no_open_lead' });
     expect(markConverted).not.toHaveBeenCalled();
   });
 
