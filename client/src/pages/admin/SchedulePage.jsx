@@ -39,6 +39,7 @@ import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import FastCloseoutSummary from "../../components/tech/FastCloseoutSummary";
+import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -868,6 +869,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }),
   );
   const hadAddonsInitially = Array.isArray(service.serviceAddons) && service.serviceAddons.length > 0;
+  // Estimate provenance: if this appointment was scheduled from an accepted
+  // estimate, surface the same quote/deposit/charge card the New Appointment
+  // modal and the appointment detail sheet show. The endpoint resolves the
+  // source estimate from the scheduled-service id server-side and returns
+  // { linked: false } when there's none, so no client-side guard is needed.
+  const [estimateSource, setEstimateSource] = useState(null);
+  useEffect(() => {
+    if (!service?.id) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/${service.id}/estimate-source`)
+      .then((data) => { if (!cancelled && data?.linked) setEstimateSource(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [service?.id]);
   const [isRecurring, setIsRecurring] = useState(serviceIsRecurringTemplate);
   const [recurringFreq, setRecurringFreq] = useState(
     service.recurringPattern || service.recurring_pattern || "quarterly",
@@ -2035,6 +2050,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 + Add service
               </button>{" "}
+              {estimateSource && (
+                <EstimateProvenanceCard
+                  quotedTotal={estimateSource.quotedTotal}
+                  currentPrice={
+                    (Number(form.price) || 0) +
+                    serviceLines.reduce((sum, l) => sum + (Number(l.price) || 0), 0)
+                  }
+                  deposit={estimateSource.deposit}
+                  style={{ marginBottom: 14 }}
+                />
+              )}
               {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
                 <div
                   style={{
