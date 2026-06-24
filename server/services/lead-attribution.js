@@ -217,7 +217,19 @@ async function logSourceTouch(sourceId, customerId, type) {
 // won under two sources has their revenue credited only to that one source, so
 // the all-source totals never double-count and the credit follows conversion
 // time, not source name. Omitted for a standalone single-source call.
-async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSourceByCustomer } = {}) {
+// Excludes internal/test accounts (lowercased "first last" names) from a leads
+// query, so ROI/revenue cover the same population as a caller's lead counts.
+function applyNameExclusion(qb, names) {
+  if (names && names.length) {
+    qb.whereNotIn(
+      db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+      names,
+    );
+  }
+  return qb;
+}
+
+async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSourceByCustomer, excludeCustomerNames = [] } = {}) {
   const source = await db('lead_sources').where('id', leadSourceId).first();
   if (!source) return null;
 
@@ -226,11 +238,14 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
   const start = startDate || startOfETMonth();
   const end = endDate || new Date();
 
-  // Leads in date range
+  // Leads in date range. excludeCustomerNames drops internal/test accounts so a
+  // caller (e.g. the dashboard's excluded_internal_customers contract) measures
+  // ROI over the same population as its lead counts.
   const leads = await db('leads')
     .where('lead_source_id', leadSourceId)
     .where('first_contact_at', '>=', start)
-    .where('first_contact_at', '<=', end);
+    .where('first_contact_at', '<=', end)
+    .modify((qb) => applyNameExclusion(qb, excludeCustomerNames));
 
   const totalLeads = leads.length;
   const wonLeads = leads.filter(l => l.status === 'won');
@@ -407,7 +422,7 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
 // Phone Number ROI) must not show decommissioned sources. The Sources table
 // passes includeInactive: true to also list inactive sources with their ROI.
 // A shared claim set de-dupes each invoice/service row across sources.
-async function calculateAllSourceROI(startDate, endDate, { includeInactive = false } = {}) {
+async function calculateAllSourceROI(startDate, endDate, { includeInactive = false, excludeCustomerNames = [] } = {}) {
   // ALL sources (active + inactive) — the winner map must be built from every
   // source so attribution is identical whether or not the caller displays
   // inactive ones. Only the RETURNED rows are filtered by is_active below.
@@ -431,6 +446,7 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
       .whereNotNull('customer_id')
+      .modify((qb) => applyNameExclusion(qb, excludeCustomerNames))
       .orderByRaw('COALESCE(converted_at, ?) ASC', [start])
       // Stable tiebreakers so ties on converted_at (esp. legacy NULLs that all
       // coalesce to `start`) attribute deterministically across runs/plans.
@@ -447,7 +463,7 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
   const sourcesToReturn = includeInactive ? allSources : allSources.filter((s) => s.is_active);
   const results = [];
   for (const source of sourcesToReturn) {
-    const roi = await calculateSourceROI(source.id, start, end, { revenueSourceByCustomer });
+    const roi = await calculateSourceROI(source.id, start, end, { revenueSourceByCustomer, excludeCustomerNames });
     if (roi) results.push(roi);
   }
   return results;

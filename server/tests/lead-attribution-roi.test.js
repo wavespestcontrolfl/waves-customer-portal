@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
       where(...args) { mockWhereCalls.push([table, ...args]); return builder; },
       whereIn(...args) { mockWhereCalls.push([table, 'whereIn', args[0]]); return builder; },
       whereNotIn(...args) { mockWhereCalls.push([table, 'whereNotIn', ...args]); return builder; },
+      modify(fn) { fn(builder); return builder; },
       first: async () => (Array.isArray(rows) ? (rows[0] ?? null) : (rows ?? null)),
       select: async () => (Array.isArray(rows) ? rows : []),
       then(resolve, reject) {
@@ -60,6 +61,19 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     const res = await calculateSourceROI('src-1', start, end);
     expect(res.totalRevenue).toBe(120);
     expect(res.roi).toBeCloseTo(3900, 0); // (120 - 3) / 3 * 100
+  });
+
+  test('excludeCustomerNames filters internal/test accounts out of the leads query', async () => {
+    setup({
+      costs: [{ cost_amount: 3 }],
+      leads: [{ id: 'L1', status: 'won', customer_id: 'c1', converted_at: start }],
+      invoices: [{ customer_id: 'c1', total: '100', created_at: start }],
+    });
+
+    await calculateSourceROI('src-1', start, end, { excludeCustomerNames: ['adam martinez'] });
+    const exclusion = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereNotIn');
+    expect(exclusion).toBeTruthy();
+    expect(exclusion[3]).toEqual(['adam martinez']);
   });
 
   test('bounds the invoice query to the period end (created_at <= end)', async () => {
