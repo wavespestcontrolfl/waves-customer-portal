@@ -276,10 +276,12 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     try {
       invoiceRows = await db('invoices')
         .whereIn('customer_id', wonCustomerIds)
-        // Only billed invoices count as revenue — exclude draft (never issued),
-        // void and cancelled (the codebase's canonical revenue exclusion model,
-        // see mrr-breakdown.js / admin-dashboard.js).
-        .whereNotIn('status', ['void', 'cancelled', 'draft'])
+        // Only billed, non-reversed invoices count as revenue — exclude draft
+        // (never issued), void/cancelled, and refunded (a fully-refunded invoice
+        // is terminalized to 'refunded' by customer-credit.js and is no longer
+        // revenue). Matches the canonical exclusion sets in mrr-breakdown.js /
+        // invoice.js AR. Both 'canceled'/'cancelled' spellings appear in the code.
+        .whereNotIn('status', ['void', 'cancelled', 'canceled', 'draft', 'refunded'])
         .where('created_at', '>=', start)
         .where('created_at', '<=', end)
         .select('id', 'customer_id', 'total', 'created_at');
@@ -430,6 +432,10 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
       .where('first_contact_at', '<=', end)
       .whereNotNull('customer_id')
       .orderByRaw('COALESCE(converted_at, ?) ASC', [start])
+      // Stable tiebreakers so ties on converted_at (esp. legacy NULLs that all
+      // coalesce to `start`) attribute deterministically across runs/plans.
+      .orderBy('first_contact_at', 'asc')
+      .orderBy('id', 'asc')
       .select('lead_source_id', 'customer_id', 'converted_at');
     for (const l of wonLeads) {
       if (!revenueSourceByCustomer.has(l.customer_id)) {

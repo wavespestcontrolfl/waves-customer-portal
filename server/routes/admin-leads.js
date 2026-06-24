@@ -11,7 +11,12 @@ const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/date
 // date-only param as "through the end of that ET day". Full timestamps pass through.
 function parseInclusiveEnd(endDate) {
   if (!endDate) return undefined;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return parseETDateTime(`${endDate}T23:59:59`);
+  // 23:59:59.999 ET (parseETDateTime resolves to .000, so add the fractional
+  // second) — with an inclusive `<= end` bound, .000 would still drop the final
+  // sub-second of the day.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    return new Date(parseETDateTime(`${endDate}T23:59:59`).getTime() + 999);
+  }
   return new Date(endDate);
 }
 const { ensureCustomerAccount, createDefaultCustomerRows } = require('./admin-customers');

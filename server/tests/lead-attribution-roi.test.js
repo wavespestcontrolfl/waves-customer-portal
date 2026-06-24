@@ -232,7 +232,7 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
       (c) => c[0] === 'invoices' && c[1] === 'whereNotIn' && c[2] === 'status',
     );
     expect(invStatus).toBeDefined();
-    expect(invStatus[3]).toEqual(expect.arrayContaining(['void', 'cancelled', 'draft']));
+    expect(invStatus[3]).toEqual(expect.arrayContaining(['void', 'cancelled', 'draft', 'refunded']));
 
     const svcStatus = mockWhereCalls.find(
       (c) => c[0] === 'service_records' && c[1] === 'status' && c[2] === 'completed',
