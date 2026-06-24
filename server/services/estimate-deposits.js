@@ -182,7 +182,7 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
 // computed independent of the enforcement flag so the owner can see the
 // would-be deposit even while ESTIMATE_DEPOSIT_REQUIRED is dark; `required`
 // reflects whether it is actually enforced + non-exempt right now.
-async function summarizeEstimateDeposit(estimate) {
+async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, useLinkedFallback = true } = {}) {
   const summary = {
     enforced: isDepositEnforced(),
     oneTime: false,
@@ -227,6 +227,12 @@ async function summarizeEstimateDeposit(estimate) {
       estimate,
       oneTime,
       oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
+      // When the caller answers for a specific appointment (the estimate-source
+      // route), scope the payer-billed exemption to THAT scheduled service —
+      // its per-job payer must be honored even after the job leaves the
+      // pending/confirmed window that the linked-appointment fallback covers.
+      scheduledServiceId,
+      useLinkedFallback,
     });
     summary.required = !!policy.required;
     summary.exemptReason = policy.exemptReason || null;

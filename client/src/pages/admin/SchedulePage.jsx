@@ -2053,10 +2053,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               {estimateSource && (
                 <EstimateProvenanceCard
                   quotedTotal={estimateSource.quotedTotal}
-                  currentPrice={
-                    (Number(form.price) || 0) +
-                    serviceLines.reduce((sum, l) => sum + (Number(l.price) || 0), 0)
-                  }
+                  currentPrice={appointmentTotal}
                   deposit={estimateSource.deposit}
                   style={{ marginBottom: 14 }}
                 />

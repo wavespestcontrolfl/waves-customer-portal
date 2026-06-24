@@ -4467,7 +4467,12 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     let deposit = null;
     try {
       const { summarizeEstimateDeposit } = require('../services/estimate-deposits');
-      deposit = await summarizeEstimateDeposit(est);
+      // Scope the policy to THIS scheduled service so a per-job payer is honored
+      // even once the job leaves the pending/confirmed linked-appointment window.
+      deposit = await summarizeEstimateDeposit(est, {
+        scheduledServiceId: req.params.id,
+        useLinkedFallback: false,
+      });
     } catch { deposit = null; }
     res.json({
       linked: true,
