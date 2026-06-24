@@ -1587,16 +1587,16 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
       // funnel and MRR-won KPI don't shrink when old wins get archived.
       // estimateMatchesFilter keeps them out of the All list. Desktop-only —
       // the mobile list view has no KPI bar and skips this fetch.
+      // Keep the full response (not just .estimates) so its truncated flag
+      // isn't lost — the Won funnel / MRR-won KPI depend on these archived wins.
       fetches.push(
-        adminFetch(
-          "/admin/estimates?archived=only&status=accepted&limit=all",
-        ).then((d) => d.estimates || []),
+        adminFetch("/admin/estimates?archived=only&status=accepted&limit=all"),
       );
     }
     Promise.all(fetches)
-      .then(([pipeline, archivedWon = []]) => {
-        setEstimates(mergeEstimateRows(pipeline.rows, archivedWon));
-        setEstimatesTruncated(!!pipeline.truncated);
+      .then(([pipeline, archived = {}]) => {
+        setEstimates(mergeEstimateRows(pipeline.rows, archived.estimates || []));
+        setEstimatesTruncated(!!pipeline.truncated || !!archived.truncated);
         setLoading(false);
       })
       .catch((err) => {
