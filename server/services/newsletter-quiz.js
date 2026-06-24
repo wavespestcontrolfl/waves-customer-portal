@@ -48,12 +48,20 @@ const QUIZ_TOKEN_PATTERN = '\\{\\{quiz(-text)?(?::([a-z0-9-]+))?\\}\\}';
 // re-mapping the tags already written by v1 clicks.
 const DEFAULT_QUIZ_ID = 'lawn-headache-v1';
 
+// Booking-source slug stamped on the thank-you deep-link (self_booked_appointments.source,
+// a free-text varchar) so quiz-driven bookings are attributable in /api/booking/sources.
+// NOT in ONE_TIME_BOOKING_SOURCES → the booking stays a recurring enrollment.
+const QUIZ_BOOKING_SOURCE = 'newsletter-quiz';
+
 // Each answer carries a broad interest tag (e.g. lawn-interested) plus its
 // specific tag, so a segment can target "anyone who engaged" OR a specific
 // interest without a second pass. An answer with no buy-intent (e.g. mosquito
 // "We're good") writes NO tag — it still records the response on the delivery
 // row for the results dashboard. Per-quiz copy (emailCta / landingLine /
 // bookLabel) keeps the lawn/pest/mosquito framing honest across quizzes.
+// `bookService` is the /book service id the thank-you CTA deep-links to so the
+// booking pre-selects the line the respondent just told us they want — it MUST
+// match a SERVICES[].id in client/src/pages/PublicBookingPage.jsx.
 const QUIZZES = {
   'lawn-headache-v1': {
     label: 'Lawn headache',
@@ -61,6 +69,7 @@ const QUIZZES = {
     emailCta: "Tap one — we'll bring a free lawn check on your next visit.",
     landingLine: "We'll bring a free lawn check on your next visit.",
     bookLabel: 'Book a lawn check',
+    bookService: 'lawn_care',
     answers: [
       { key: 'brown-patch', label: 'Brown patches', tags: ['lawn-interested', 'lawn:brown-patch'] },
       { key: 'weeds', label: 'Weeds', tags: ['lawn-interested', 'lawn:weeds'] },
@@ -74,6 +83,7 @@ const QUIZZES = {
     emailCta: "Tap one — we'll do a free pest check on your next visit.",
     landingLine: "We'll do a free pest check on your next visit.",
     bookLabel: 'Book a pest visit',
+    bookService: 'pest_control',
     answers: [
       { key: 'ants', label: 'Ants', tags: ['pest-interested', 'pest:ants'] },
       { key: 'roaches', label: 'Roaches', tags: ['pest-interested', 'pest:roaches'] },
@@ -87,6 +97,7 @@ const QUIZZES = {
     emailCta: "Tap one — we'll size up your yard on your next visit.",
     landingLine: "We'll size up your yard on your next visit.",
     bookLabel: 'Book a mosquito visit',
+    bookService: 'mosquito',
     answers: [
       { key: 'every-night', label: 'Every night', tags: ['mosquito-interested', 'mosquito:high'] },
       { key: 'sometimes', label: 'Some nights', tags: ['mosquito-interested'] },
@@ -201,6 +212,21 @@ function hasQuizToken(content) {
 function quizAnswerUrl(token, quizId, answerKey) {
   const base = publicPortalUrl();
   return `${base}/api/public/newsletter/quiz/${encodeURIComponent(token)}/${encodeURIComponent(quizId)}/${encodeURIComponent(answerKey)}`;
+}
+
+/**
+ * Thank-you-page "book now" deep link. Pre-selects the quiz's service on /book
+ * (?service=<id>, matched against PublicBookingPage SERVICES) and attributes the
+ * booking (?source=newsletter-quiz) so the respondent never has to re-pick the
+ * line they just told us. An unknown quiz (or one without a bookService) degrades
+ * to /book with the source only — never a broken or mis-selected link.
+ */
+function quizBookingUrl(quizId) {
+  const quiz = getQuiz(quizId);
+  const params = new URLSearchParams();
+  if (quiz?.bookService) params.set('service', quiz.bookService);
+  params.set('source', QUIZ_BOOKING_SOURCE);
+  return `${publicPortalUrl()}/book?${params.toString()}`;
 }
 
 // Minimal HTML escape for the question/labels we control (defense in depth —
@@ -371,6 +397,7 @@ module.exports = {
   QUIZ_TEXT_TOKEN,
   QUIZ_TOKEN_PATTERN,
   DEFAULT_QUIZ_ID,
+  QUIZ_BOOKING_SOURCE,
   QUIZZES,
   getQuiz,
   resolveAnswer,
@@ -380,6 +407,7 @@ module.exports = {
   parseQuizTokens,
   hasQuizToken,
   quizAnswerUrl,
+  quizBookingUrl,
   renderQuizHtml,
   renderQuizText,
   renderQuizNeutralHtml,

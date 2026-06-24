@@ -67,6 +67,20 @@ describe('public newsletter quiz landing copy (per-quiz)', () => {
     });
   });
 
+  test('POST thank-you CTA deep-links to /book with the quiz service + attribution', async () => {
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/pest-pressure-v1/ants`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: '',
+      });
+      const html = await r.text();
+      // The booking href is HTML-escaped (& → &amp;), so assert the parts.
+      expect(html).toContain('/book?service=pest_control');
+      expect(html).toContain('source=newsletter-quiz');
+    });
+  });
+
   test('POST thank-you uses mosquito copy for the mosquito quiz', async () => {
     await withServer(async (baseUrl) => {
       const r = await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/mosquito-v1/every-night`, {
