@@ -128,6 +128,23 @@ router.get('/analytics/overview', async (req, res, next) => {
       ? Math.round(responded.reduce((s, l) => s + l.response_time_minutes, 0) / responded.length)
       : null;
 
+    // Speed to Lead: how long leads we haven't responded to yet have been
+    // waiting, right now. Distinct from avgResponseTime (the historical
+    // first-contact -> first-response gap on leads we DID respond to). A lead is
+    // "still waiting" when no first response has been logged (response_time_minutes
+    // is null) and it hasn't reached a terminal status.
+    const TERMINAL_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+    const nowMs = Date.now();
+    const openUnanswered = leads.filter(l =>
+      l.response_time_minutes == null &&
+      l.first_contact_at &&
+      !TERMINAL_STATUSES.includes(l.status)
+    );
+    const avgSpeedToLead = openUnanswered.length > 0
+      ? Math.round(openUnanswered.reduce((s, l) =>
+          s + (nowMs - new Date(l.first_contact_at).getTime()) / 60000, 0) / openUnanswered.length)
+      : null;
+
     const totalCosts = await db('lead_source_costs')
       .where('month', '>=', start)
       .where('month', '<=', end)
@@ -152,7 +169,8 @@ router.get('/analytics/overview', async (req, res, next) => {
 
     res.json({
       total, won, lost, active, conversionRate,
-      avgResponseTime, costTotal: Math.round(costTotal * 100) / 100,
+      avgResponseTime, avgSpeedToLead, openUnansweredCount: openUnanswered.length,
+      costTotal: Math.round(costTotal * 100) / 100,
       revenue: Math.round(revenue * 100) / 100, cpa, roi,
       startDate: start, endDate: end,
     });
