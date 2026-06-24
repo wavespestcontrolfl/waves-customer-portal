@@ -285,8 +285,11 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     try {
       serviceRows = await db('service_records')
         .whereIn('customer_id', wonCustomerIds)
-        .where('service_date', '>=', start)
-        .where('service_date', '<=', end)
+        // service_date is a DATE column — bound by ET date strings (like
+        // lead_source_costs.month), or the 04:00-UTC ET month-start timestamp
+        // would drop services on the first ET day of the month.
+        .where('service_date', '>=', etDateString(start))
+        .where('service_date', '<=', etDateString(end))
         .select('id', 'customer_id', 'price', 'service_date');
     } catch (e) {
       serviceRows = [];
@@ -315,6 +318,9 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
       continue;
     }
     const convertedAt = new Date(lead.converted_at || start);
+    // Conversion cutoff for the DATE-typed service_date: compare ET calendar days
+    // (a same-day service still counts), not the converted_at/start timestamp.
+    const convertedDay = etDateString(convertedAt);
     let leadRevenue = 0;
 
     if (lead.customer_id) {
@@ -328,7 +334,7 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
       } else {
         const leadServices = serviceRows.filter(r =>
           r.customer_id === lead.customer_id
-          && new Date(r.service_date) >= convertedAt
+          && new Date(r.service_date).toISOString().slice(0, 10) >= convertedDay
           && !usedServiceIds.has(r.id));
         if (leadServices.length) {
           leadServices.forEach(r => usedServiceIds.add(r.id));

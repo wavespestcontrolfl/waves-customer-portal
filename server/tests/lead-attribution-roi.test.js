@@ -196,4 +196,24 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(typeof costLower[3]).toBe('string');
     expect(costLower[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
+
+  test('credits a service_record fallback (ET date-bounded) when the customer has no invoices', async () => {
+    setup({
+      costs: [{ cost_amount: 3 }],
+      leads: [{ id: 'L1', status: 'won', customer_id: 'c1', converted_at: new Date('2026-06-05T00:00:00Z') }],
+      invoices: [],
+      services: [{ id: 's1', customer_id: 'c1', price: '90', service_date: '2026-06-10' }],
+    });
+
+    const res = await calculateSourceROI('src-1', start, end);
+    expect(res.totalRevenue).toBe(90); // service after conversion day, no invoices
+
+    // service_date (a DATE column) is bound by a date string, like the cost month.
+    const svcLower = mockWhereCalls.find(
+      (c) => c[0] === 'service_records' && c[1] === 'service_date' && c[2] === '>=',
+    );
+    expect(svcLower).toBeDefined();
+    expect(typeof svcLower[3]).toBe('string');
+    expect(svcLower[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
 });
