@@ -128,7 +128,11 @@ async function fetchEstimatePipelineRows(filter) {
   const responses = await Promise.all(
     estimatePipelineFetchPaths(filter).map((path) => adminFetch(path)),
   );
-  return mergeEstimateRows(...responses.map((d) => d.estimates || []));
+  return {
+    rows: mergeEstimateRows(...responses.map((d) => d.estimates || [])),
+    // Any capped page means the pipeline list (and its KPIs) is incomplete.
+    truncated: responses.some((d) => d?.truncated),
+  };
 }
 
 function summarizeEstimateSend(data) {
@@ -1558,6 +1562,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
+  const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
@@ -1589,8 +1594,9 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
       );
     }
     Promise.all(fetches)
-      .then(([rows, archivedWon = []]) => {
-        setEstimates(mergeEstimateRows(rows, archivedWon));
+      .then(([pipeline, archivedWon = []]) => {
+        setEstimates(mergeEstimateRows(pipeline.rows, archivedWon));
+        setEstimatesTruncated(!!pipeline.truncated);
         setLoading(false);
       })
       .catch((err) => {
@@ -1947,6 +1953,15 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
 
       <div className="grid gap-4 items-start grid-cols-1">
         <div className="min-w-0">
+          {estimatesTruncated && (
+            <div
+              role="status"
+              className="mb-3 px-3 py-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 text-12 text-ink-secondary"
+            >
+              Showing the most recent estimates only — the list hit its size cap,
+              so these KPIs may undercount older offers.
+            </div>
+          )}
           <PipelineAnalytics
             estimates={estimates}
             activeFilter={filter}
@@ -3288,7 +3303,7 @@ function EstimatesMobileListView({
   const refreshEstimates = useCallback(() => {
     setError(null);
     fetchEstimatePipelineRows(filter)
-      .then((rows) => setEstimates(rows))
+      .then(({ rows }) => setEstimates(rows))
       .catch((err) => setError(err))
       .finally(() => setLoading(false));
   }, [filter]);
