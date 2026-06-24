@@ -16,6 +16,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
+const { properCase } = require('../utils/name-case');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -49,12 +50,10 @@ async function markLeadAlertCallLogFailed(callLogId, errorMessage, database = db
   });
 }
 
+// Delegates to the shared robust title-caser (Mc/Mac/O'/particles/hyphens) so
+// form-lead names match every other ingestion path.
 function capitalizeName(name) {
-  if (!name) return '';
-  return cleanText(name).toLowerCase()
-    .replace(/\b\w/g, c => c.toUpperCase())
-    .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
-    .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
+  return properCase(name);
 }
 const leadAttribution = require('../services/lead-attribution');
 

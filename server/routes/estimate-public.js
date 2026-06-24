@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
+const { applyContactNormalization } = require('../utils/intake-normalize');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const { etDateString, formatETDate } = require('../utils/datetime-et');
@@ -6488,7 +6489,7 @@ router.put('/:token/accept', async (req, res, next) => {
         } else {
           const nameParts = (estimate.customer_name || 'New Customer').split(' ');
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-          const [newCust] = await trx('customers').insert({
+          const [newCust] = await trx('customers').insert(applyContactNormalization({
             first_name: nameParts[0] || 'New',
             last_name: nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
@@ -6504,7 +6505,7 @@ router.put('/:token/accept', async (req, res, next) => {
             monthly_rate: treatAsOneTime ? null : effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
-          }).returning('*');
+          })).returning('*');
           customerId = newCust.id;
           await trx('property_preferences').insert({ customer_id: customerId });
           await trx('notification_prefs').insert({ customer_id: customerId });

@@ -34,6 +34,7 @@ const InvoiceService = require('./invoice');
 const { computeProposalTotals } = require('./estimate-proposal');
 const { etDateString } = require('../utils/datetime-et');
 const logger = require('./logger');
+const { applyContactNormalization } = require('../utils/intake-normalize');
 
 // Real-customer stages (mirrors customer-stages whereRealCustomer / the route's
 // REAL_CUSTOMER_STAGES). Entering one stamps member_since as the conversion date.
@@ -221,7 +222,7 @@ async function ensureCustomerForProposalWin({ trx, estimate, proposal, today = e
     logger.info(`[proposal-win] phone matched account ${account.accountId} for proposal estimate ${estimate.id} — creating a NEW commercial profile under it (not reusing customer ${account.existingCustomer.id})`);
   }
 
-  const [created] = await trx('customers').insert({
+  const [created] = await trx('customers').insert(applyContactNormalization({
     account_id: account.accountId,
     // Secondary profile when attaching under a phone-matched account, so we don't
     // create a second is_primary_profile on it.
@@ -242,7 +243,7 @@ async function ensureCustomerForProposalWin({ trx, estimate, proposal, today = e
     // customer is commercial.
     property_type: 'commercial',
     active: true,
-  }).returning('*');
+  })).returning('*');
   await createDefaultCustomerRows(trx, created.id);
   logger.info(`[proposal-win] created customer ${created.id} from won proposal estimate ${estimate.id}`);
   return { customerId: created.id, created: true };

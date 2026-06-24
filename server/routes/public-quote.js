@@ -15,7 +15,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
-const { normalizeWebsiteQuoteContact } = require('../utils/intake-normalize');
+const { normalizeWebsiteQuoteContact, applyContactNormalization } = require('../utils/intake-normalize');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -677,7 +677,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         customerId = existingCust.id;
       } else {
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-        const [newCust] = await db('customers').insert({
+        const [newCust] = await db('customers').insert(applyContactNormalization({
           first_name: contactFirstName,
           last_name: contactLastName,
           email: emailLc,
@@ -703,7 +703,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           last_contact_date: new Date(),
           last_contact_type: 'website_quote',
           active: true,
-        }).returning(['id']);
+        })).returning(['id']);
         customerId = newCust.id;
       }
 

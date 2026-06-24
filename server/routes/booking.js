@@ -7,6 +7,7 @@ const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const { applyContactNormalization } = require('../utils/intake-normalize');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
@@ -783,7 +784,7 @@ router.post('/confirm', async (req, res, next) => {
     // Create customer from new_customer payload if none resolved
     let createdCustomerId = null;
     if (!custId && new_customer && phoneDigits && new_customer.first_name) {
-      const [created] = await db('customers').insert({
+      const [created] = await db('customers').insert(applyContactNormalization({
         first_name: new_customer.first_name,
         last_name: new_customer.last_name || '',
         phone: phoneDigits,
@@ -794,7 +795,7 @@ router.post('/confirm', async (req, res, next) => {
         zip: new_customer.zip || null,
         latitude: new_customer.lat || null,
         longitude: new_customer.lng || null,
-      }).returning('id');
+      })).returning('id');
       custId = created.id || created;
       createdCustomerId = custId;
       await db('notification_prefs')

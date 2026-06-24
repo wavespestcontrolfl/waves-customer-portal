@@ -6,6 +6,7 @@ const { generateEstimate } = require('./pricing-engine');
 const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
 const { triggerNotification } = require('./notification-triggers');
 const { normalizePhone } = require('../utils/phone');
+const { applyContactNormalization } = require('../utils/intake-normalize');
 
 const OPEN_REQUEST_TERMINAL_STATUSES = ['resolved', 'closed', 'cancelled'];
 const INACTIVE_ESTIMATE_STATUSES = ['accepted', 'declined', 'expired', 'send_failed'];
@@ -318,7 +319,7 @@ async function resolveEstimateCustomer(database, estimate = {}) {
   }
 
   const name = splitName(estimate.customer_name);
-  const [created] = await database('customers').insert({
+  const [created] = await database('customers').insert(applyContactNormalization({
     ...name,
     phone: estimate.customer_phone,
     email: estimate.customer_email || null,
@@ -338,7 +339,7 @@ async function resolveEstimateCustomer(database, estimate = {}) {
     pipeline_stage_changed_at: new Date(),
     last_contact_date: new Date(),
     last_contact_type: 'estimate_add_service_request',
-  }).onConflict().ignore().returning('*');
+  })).onConflict().ignore().returning('*');
 
   if (!created) {
     const safeExisting = await findSafeExistingCustomerForEstimate(database, estimate);
