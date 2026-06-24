@@ -1604,6 +1604,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
       } catch (referralErr) {
         logger.warn(`[referral] status-complete credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
       }
+      // A completed service means the deal closed — convert the originating
+      // lead to won if it's still open. Best-effort + idempotent; the contact
+      // fallback only matches never-converted leads, so a recurring customer's
+      // routine completion never sweeps unrelated leads.
+      try {
+        const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+      } catch (leadErr) {
+        logger.warn(`[lead-trigger] status-complete conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
+      }
     } else if (toStatus === 'cancelled') {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
@@ -4874,6 +4884,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
       } catch (referralErr) {
         logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
+      }
+      // Same closed-deal signal as the referral credit above, and gated by the
+      // same performed-visit guard: convert the originating lead to won if it's
+      // still open. Best-effort + idempotent; only matches never-converted leads.
+      try {
+        const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+      } catch (leadErr) {
+        logger.warn(`[lead-trigger] first-service conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
       }
     }
 

@@ -1868,6 +1868,20 @@ const InvoiceService = {
       logger.info(
         `[invoice] SMS sent for ${invoice.invoice_number} (customerId=${customer.id})`,
       );
+
+      // Sending an invoice means the deal closed — convert the originating lead
+      // to won if it's still open. Best-effort + idempotent (no-op once the lead
+      // is won, and the contact fallback only matches never-converted leads, so
+      // an existing customer's recurring invoices never sweep unrelated leads).
+      // Uses the already-loaded invoice.customer_id — no extra query here.
+      // convertLeadFromEvent never throws; the wrap guards a require failure.
+      try {
+        const { convertLeadFromEvent } = require("./lead-estimate-link");
+        await convertLeadFromEvent({ source: "invoice_sent", customerId: invoice.customer_id });
+      } catch (leadErr) {
+        logger.warn(`[invoice] lead conversion on send failed (${invoiceId}): ${leadErr.message}`);
+      }
+
       return { sent: true, payUrl };
     } catch (err) {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
