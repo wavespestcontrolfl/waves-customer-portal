@@ -511,7 +511,11 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     if (primaryCategory) add(primaryCategory, labelForCategory(primaryCategory) || 'One-time service');
   }
 
-  const NON_SERVICE = ['waveguard_setup', 'one_time_adjustment', 'manual_discount', 'rodent_bundle_discount'];
+  // Setup fees and discounts carry no dispatchable service. A positive
+  // one_time_adjustment ("Other one-time services") is intentionally NOT here — it
+  // is a real billable charge that dispatch must perform, so it stays visible
+  // (negative adjustments are dropped by the discount/amount guards below).
+  const NON_SERVICE = ['waveguard_setup', 'manual_discount', 'rodent_bundle_discount'];
   for (const item of (normalizeOneTimeBreakdown(estData).items || [])) {
     if (!item || typeof item !== 'object') continue;
     if (item.quoteRequired === true || item.kind === 'discount') continue;
@@ -520,11 +524,13 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     const amount = Number(item.amount ?? item.price ?? item.total);
     if (!Number.isFinite(amount) || amount <= 0) continue;
     const category = typeof serviceCategoryForOneTimeItem === 'function' ? serviceCategoryForOneTimeItem(item) : null;
-    // Skip only the priced one-time CHOICE row (one_time_pest / one_time_mosquito …)
-    // — it's the chosen visit already represented by the synthetic primary. Pest
-    // specialties (roach cleanout, etc.) share the pest category but are separate
-    // billable services, so they must still surface.
-    if (showOneTimeOption && primaryCategory && category === primaryCategory && service.startsWith('one_time_')) continue;
+    // Skip the priced one-time CHOICE row for the chosen category — it's the visit
+    // already represented by the synthetic primary. The choice row is the generic
+    // primary service (`one_time_pest` / `one_time_mosquito`, or the legacy
+    // `pest_control` shape), NOT a specialty: pest specialties (roach cleanout, etc.)
+    // share the pest category but use distinct service keys, so they still surface.
+    if (showOneTimeOption && primaryCategory && category === primaryCategory
+      && (service === primaryCategory || service.startsWith('one_time_'))) continue;
     let label = String(item.label || item.name || '').trim();
     if (!label || label.toLowerCase() === service) {
       label = (category && labelForCategory(category)) || label;
