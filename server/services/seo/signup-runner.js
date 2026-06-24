@@ -118,7 +118,8 @@ async function alreadyPlacedAt(domain, locId) {
   if (!dom) return false;
   const row = await db('seo_link_prospects')
     .whereIn('status', ['placed', 'live', 'indexed'])
-    .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https?://', ''), '^www\\.', '')) = ?", [dom])
+    // https{0,1} not https? — a literal ? inside a knex whereRaw is parsed as a positional binding.
+    .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https{0,1}://', ''), '^www\\.', '')) = ?", [dom])
     .whereRaw("COALESCE(quality_signals->>'location','') = ?", [String(locId || 'default')])
     .first();
   return !!row;
