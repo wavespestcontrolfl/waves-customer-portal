@@ -467,6 +467,67 @@ const StripeService = {
   },
 
   /**
+   * SetupIntent for a one-time card-on-file HOLD (dark until ONE_TIME_CARD_HOLD).
+   * Captures a card to RESERVE a one-time visit WITHOUT charging at booking.
+   * Customerless on purpose: the one-time estimate may have no customer record
+   * until acceptance creates one — the SetupIntent still yields a reusable
+   * payment_method that accept-time attaches to the customer it links/creates.
+   * usage:'off_session' so the saved card can later be charged (completion
+   * total / no-show fee) with the cardholder absent. Pinned to the estimate via
+   * metadata; the webhook and accept verification both re-derive trust from
+   * purpose+estimate_id server-side rather than believing the client.
+   * `generation` salts the idempotency key so a fresh capture attempt (after a
+   * prior intent is abandoned/superseded) mints a new intent instead of
+   * replaying an old one inside Stripe's idempotency window.
+   */
+  async createEstimateCardHoldSetupIntent({ estimateId, generation = 0 }) {
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.create({
+      payment_method_types: ['card'],
+      usage: 'off_session',
+      description: 'Waves one-time visit — card on file to hold your appointment',
+      metadata: {
+        purpose: 'estimate_card_hold',
+        estimate_id: String(estimateId),
+      },
+    }, { idempotencyKey: `estimate_card_hold_${estimateId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+  },
+
+  /**
+   * Off-session charge of a SPECIFIC saved payment method (not the default
+   * autopay card the way charge() requires). Used by the one-time card-hold
+   * flow for the flat no-show / late-cancel fee — a penalty with no invoice or
+   * service rendered, so it does NOT route through the invoice charge path.
+   * Charged at FACE VALUE, surcharge-exempt: the amount the customer consented
+   * to at booking ("$49 if you no-show") must equal what we charge, and a card
+   * surcharge on an auto-charge the cardholder didn't actively initiate invites
+   * disputes. Throws on decline / authentication_required so the caller records
+   * the failure; idempotency-keyed so retries replay one PaymentIntent.
+   */
+  async chargeSavedPaymentMethodOffSession({ customerId, paymentMethodId, amountDollars, description, metadata = {}, idempotencyKey = null }) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+    if (!paymentMethodId) throw new Error('No payment method to charge');
+    const amountCents = Math.round(Number(amountDollars) * 100);
+    if (!Number.isFinite(amountCents) || amountCents <= 0) throw new Error('Invalid charge amount');
+    const stripeCustomerId = await this.ensureStripeCustomer(customerId);
+    const effectiveIdempotencyKey = idempotencyKey
+      || `pm_charge_${paymentMethodId}_${amountCents}_${require('crypto').randomUUID()}`;
+    return stripe.paymentIntents.create({
+      amount: amountCents,
+      currency: 'usd',
+      customer: stripeCustomerId,
+      payment_method: paymentMethodId,
+      off_session: true,
+      confirm: true,
+      expand: ['latest_charge'],
+      description,
+      metadata: { waves_customer_id: customerId, ...metadata },
+    }, { idempotencyKey: effectiveIdempotencyKey });
+  },
+
+  /**
    * Raw refund of a PaymentIntent — for money that should never have been
    * collected (a stale estimate deposit that succeeded after the estimate
    * became unacceptable) or the unapplied remainder of a deposit (partial,

@@ -1709,6 +1709,19 @@ async function handlePaymentMethodDetached(paymentMethod) {
  * setup_intent.succeeded — Log for auditing
  */
 async function handleSetupIntentSucceeded(setupIntent) {
+  // One-time card-on-file hold capture (dark until ONE_TIME_CARD_HOLD): record
+  // the saved payment method onto the pending hold row so accept can be
+  // satisfied even if the client never echoes the setupIntentId back.
+  // Replay-safe; no-op when the intent isn't a card hold.
+  if (setupIntent.metadata?.purpose === 'estimate_card_hold') {
+    try {
+      const CardHolds = require('../services/estimate-card-holds');
+      await CardHolds.handleCardHoldSetupIntentSucceeded(setupIntent);
+    } catch (err) {
+      logger.error(`[stripe-webhook] card-hold SetupIntent handling failed: ${err.message}`);
+    }
+    return;
+  }
   const customerId = setupIntent.metadata?.waves_customer_id || 'unknown';
   logger.info(`[stripe-webhook] SetupIntent succeeded for customer ${customerId}: ${setupIntent.id}`);
 }

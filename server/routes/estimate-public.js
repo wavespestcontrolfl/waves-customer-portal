@@ -32,6 +32,7 @@ const {
   linkedScheduledServiceId,
   computeDepositAmount,
 } = require('../services/estimate-deposits');
+const CardHolds = require('../services/estimate-card-holds');
 const {
   cleanupEstimatePricingCache,
   clearEstimatePricingCache,
@@ -5997,6 +5998,14 @@ async function handleEstimateView(req, res, next) {
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
     });
+    // Card-hold policy "as if one-time" — surfaced so the page can require a
+    // card when the customer books a single visit (enforced client-side only
+    // in one_time mode).
+    const cardHoldOneTimePolicyForView = CardHolds.resolveCardHoldPolicy({
+      treatAsOneTime: true,
+      billByInvoice: estimate.bill_by_invoice === true,
+      paymentMethodPreference: null,
+    });
 
     // "Show your work" trust block — wizard estimates only (needs
     // estimate_data.enriched). With the gate off this stays null and the
@@ -6038,6 +6047,16 @@ async function handleEstimateView(req, res, next) {
         recurringAmount: computeDepositAmount({ oneTime: false }),
         oneTimeAmount: computeDepositAmount({ oneTime: true }),
       } : { enforced: false, required: false },
+      // One-time card-on-file hold. Resolved "as if one-time" so the page knows
+      // whether a card is required when the customer books a single visit; the
+      // frontend only enforces it once serviceMode is one_time. Inert
+      // ({enforced:false}) while ONE_TIME_CARD_HOLD is off.
+      cardHoldPolicy: cardHoldOneTimePolicyForView.enforced ? {
+        enforced: true,
+        requiredForOneTime: cardHoldOneTimePolicyForView.required,
+        noShowFeeAmount: cardHoldOneTimePolicyForView.noShowFeeAmount || CardHolds.cardHoldNoShowFee(),
+        cancelWindowHours: cardHoldOneTimePolicyForView.cancelWindowHours || CardHolds.cardHoldCancelWindowHours(),
+      } : { enforced: false, requiredForOneTime: false },
     }, estData, membership, { showYourWork });
   } catch (err) { next(err); }
 }
@@ -6188,6 +6207,20 @@ router.put('/:token/accept', async (req, res, next) => {
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
 
+    // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). Read straight
+    // from the raw body so the normalized payment preference + existing
+    // pay-at-visit semantics stay untouched: the hold is an orthogonal saved
+    // card, not a payment method. A required hold means a one-time accept must
+    // carry a captured SetupIntent before it can commit.
+    const cardHoldSetupIntentId = typeof req.body?.cardHoldSetupIntentId === 'string'
+      ? req.body.cardHoldSetupIntentId.trim() : '';
+    const cardHoldPolicy = CardHolds.resolveCardHoldPolicy({
+      treatAsOneTime,
+      billByInvoice,
+      paymentMethodPreference,
+    });
+    let cardHoldVerification = null;
+
     // ─────────────────────────────────────────────
     // REQUIRED ACCEPTANCE DEPOSIT (dark until ESTIMATE_DEPOSIT_REQUIRED).
     // Every acceptance requires a verified deposit except prepay-annual
@@ -6253,6 +6286,30 @@ router.put('/:token/accept', async (req, res, next) => {
           depositRequired: true,
           depositAmount: depositPolicy.amount,
           depositReceived: depositCheck.receivedTotal || 0,
+        });
+      }
+    }
+
+    // Card-hold gate (pre-commit): a one-time accept that requires a hold must
+    // have a booked appointment AND a captured card before we commit — the
+    // completion + no-show charges resolve from the booked scheduled_service,
+    // and the card is re-verified live against Stripe, never trusted from the
+    // client. Enforced for EVERY one-time accept while the flag is on (card is
+    // how you book), regardless of which payment preference the client sent.
+    if (cardHoldPolicy.required) {
+      if (!slotId && !existingAppointmentId) {
+        return res.status(400).json({
+          error: 'Please pick your appointment so we can hold it with a card',
+          code: 'APPOINTMENT_REQUIRED',
+        });
+      }
+      cardHoldVerification = await CardHolds.verifyCardHoldIntent({ estimate, setupIntentId: cardHoldSetupIntentId });
+      if (!cardHoldVerification.ok) {
+        return res.status(402).json({
+          error: 'Add a card to hold your appointment to confirm this visit',
+          code: 'CARD_HOLD_REQUIRED',
+          noShowFeeAmount: cardHoldPolicy.noShowFeeAmount,
+          cancelWindowHours: cardHoldPolicy.cancelWindowHours,
         });
       }
     }
@@ -6649,6 +6706,23 @@ router.put('/:token/accept', async (req, res, next) => {
         }
       }
 
+      // Record the one-time card hold atomically with the booking. The pm id
+      // is frozen onto the hold row here (inside the accept transaction) so the
+      // completion + no-show charges can resolve it; the card is attached to
+      // the customer post-commit (retryable). Pinned to the just-committed
+      // appointment so the charge triggers find it.
+      if (cardHoldPolicy.required && cardHoldVerification?.ok && customerId && reservationCommitted) {
+        const heldAppointmentId = acceptedAppointmentsToRegister[0]?.id || null;
+        await CardHolds.recordCardHoldHeld({
+          estimateId: estimate.id,
+          customerId,
+          scheduledServiceId: heldAppointmentId,
+          setupIntentId: cardHoldVerification.setupIntentId,
+          paymentMethodId: cardHoldVerification.paymentMethodId,
+          trx,
+        });
+      }
+
       // Recurring public accepts continue through the invoice payment page;
       // the payment method is captured on /pay/:token.
 
@@ -6776,6 +6850,15 @@ router.put('/:token/accept', async (req, res, next) => {
     });
 
     const { customerId, reservationCommitted } = txResult;
+    // Attach the held card to the customer (post-commit, best-effort). The hold
+    // row already carries the pm id for charging, so a transient attach failure
+    // never breaks the booking — it self-heals on retry / first charge.
+    if (cardHoldPolicy.required && cardHoldVerification?.ok && customerId) {
+      void CardHolds.attachCardHoldPaymentMethod({
+        customerId,
+        paymentMethodId: cardHoldVerification.paymentMethodId,
+      }).catch(() => {});
+    }
     let invoiceMode = txResult.invoiceMode === true;
     let invoiceId = txResult.invoiceId || null;
     let invoiceAmount = txResult.invoiceAmount || null;

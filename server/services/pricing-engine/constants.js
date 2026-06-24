@@ -1687,6 +1687,19 @@ const DEPOSIT = {
   oneTimeAmount: 99,
 };
 
+// One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). A different
+// commitment device from DEPOSIT: instead of charging money at booking, the
+// customer saves a card to RESERVE a one-time visit and is charged NOTHING
+// up front. The saved card is charged the final service total on completion,
+// and a flat no-show / late-cancel fee applies only if they cancel inside the
+// window or aren't home for the visit. The fee is a flat commitment device,
+// never a percentage. DB-authoritative via pricing_config key
+// `estimate_card_hold`.
+const CARD_HOLD = {
+  noShowFeeAmount: 49,
+  cancelWindowHours: 24,
+};
+
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
@@ -1694,7 +1707,7 @@ module.exports = {
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
-  DEPOSIT,
+  DEPOSIT, CARD_HOLD,
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,
 };
