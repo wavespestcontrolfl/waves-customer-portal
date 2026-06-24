@@ -15,6 +15,7 @@ const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { zipToCity } = require('../utils/zip-to-city');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const {
@@ -100,6 +101,15 @@ router.post('/', async (req, res) => {
       serviceInterest,
       leadSource,
     } = intake;
+
+    // City fallback. Forms only capture a structured city when the visitor
+    // picks a Google Places suggestion; free-text submissions arrive with no
+    // city (e.g. "87th Street East, FL 34219"). Recover it from the ZIP so a
+    // lead never lands with a blank city. zipCity is also used standalone on
+    // the existing-customer update path, which fills from the submitted
+    // address only (no marketing-page area).
+    const zipCity = zipToCity(normalizedAddress.zip) || '';
+    const resolvedCity = normalizedAddress.city || leadSource.area || zipCity || '';
 
     const phone = cleanPhone(rawPhone);
     if (!phone || phone.length < 10) {
@@ -199,7 +209,7 @@ router.post('/', async (req, res) => {
       if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
       if (!existing.email && email) updates.email = email;
       if (!existing.address_line1 && address) updates.address_line1 = address;
-      if (!existing.city && normalizedAddress.city) updates.city = normalizedAddress.city;
+      if (!existing.city && (normalizedAddress.city || zipCity)) updates.city = normalizedAddress.city || zipCity;
       if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
       if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
       if (existing.lead_intake_status) updates.lead_intake_status = null;
@@ -223,7 +233,7 @@ router.post('/', async (req, res) => {
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
         address_line1: address || '',
-        city: normalizedAddress.city || leadSource.area || '',
+        city: resolvedCity,
         state: normalizedAddress.state || 'FL',
         zip: normalizedAddress.zip || '',
         referral_code: code,
@@ -545,7 +555,7 @@ router.post('/', async (req, res) => {
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
         address: fullAddress || '',
-        city: normalizedAddress.city || leadSource.area || '',
+        city: resolvedCity,
         lead_source_id: leadSourceId,
         lead_type: 'form_submission',
         service_interest: serviceInterest || null,
@@ -686,7 +696,7 @@ router.post('/', async (req, res) => {
         name: `${firstName} ${lastName}`,
         message: messageText,
         address: fullAddress || '',
-        city: normalizedAddress.city || leadSource.area || '',
+        city: resolvedCity,
         leadSource: leadSource.source,
         pageUrl: pageUrl || '',
         formName: formName || '',
