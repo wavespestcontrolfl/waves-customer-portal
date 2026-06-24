@@ -7,7 +7,7 @@ const logger = require('./logger');
 // rather than the prior `+${digits}` fabrication, which silently
 // produced invalid E.164 strings on bad input.
 const { normalizePhone } = require('../utils/phone');
-const { startOfETMonth } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString } = require('../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
 // 1. attributeInboundContact
@@ -237,11 +237,14 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
   const conversions = wonLeads.length;
   const conversionRate = totalLeads > 0 ? (conversions / totalLeads * 100) : 0;
 
-  // Costs from lead_source_costs
+  // Costs from lead_source_costs. `month` is a DATE (first of the month), so bound
+  // it by ET calendar dates — comparing it to the startOfETMonth() TIMESTAMP
+  // (midnight ET = 04:00 UTC) would drop the current month's row, which sits at
+  // midnight UTC, and report $0 cost / inflated ROI. Leads/revenue keep timestamp bounds.
   const costs = await db('lead_source_costs')
     .where('lead_source_id', leadSourceId)
-    .where('month', '>=', start)
-    .where('month', '<=', end);
+    .where('month', '>=', etDateString(start))
+    .where('month', '<=', etDateString(end));
 
   let totalCost = costs.reduce((sum, c) => sum + parseFloat(c.cost_amount || 0), 0);
 
@@ -387,9 +390,10 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
 // passes includeInactive: true to also list inactive sources with their ROI.
 // A shared claim set de-dupes each invoice/service row across sources.
 async function calculateAllSourceROI(startDate, endDate, { includeInactive = false } = {}) {
-  const query = db('lead_sources').orderBy('name');
-  if (!includeInactive) query.where('is_active', true);
-  const sources = await query;
+  // ALL sources (active + inactive) — the winner map must be built from every
+  // source so attribution is identical whether or not the caller displays
+  // inactive ones. Only the RETURNED rows are filtered by is_active below.
+  const allSources = await db('lead_sources').orderBy('name');
 
   // Resolve the window once (ET month default, matching calculateSourceROI and
   // /sources) so the attribution query and every per-source call use the same bounds.
@@ -399,15 +403,17 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
   // Global revenue attribution: credit each customer's revenue to the source of
   // their EARLIEST conversion in the window, so a customer won under two sources
   // is counted once and the credit follows conversion time, not source name.
+  // COALESCE(converted_at, start) mirrors calculateSourceROI's per-lead cutoff, so
+  // a legacy won lead with no converted_at sorts as converted at the window start.
   const revenueSourceByCustomer = new Map();
-  if (sources.length) {
+  if (allSources.length) {
     const wonLeads = await db('leads')
-      .whereIn('lead_source_id', sources.map((s) => s.id))
+      .whereIn('lead_source_id', allSources.map((s) => s.id))
       .where('status', 'won')
       .where('first_contact_at', '>=', start)
       .where('first_contact_at', '<=', end)
       .whereNotNull('customer_id')
-      .orderBy('converted_at', 'asc') // PG sorts NULL converted_at last → real conversions win
+      .orderByRaw('COALESCE(converted_at, ?) ASC', [start])
       .select('lead_source_id', 'customer_id', 'converted_at');
     for (const l of wonLeads) {
       if (!revenueSourceByCustomer.has(l.customer_id)) {
@@ -416,8 +422,9 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
     }
   }
 
+  const sourcesToReturn = includeInactive ? allSources : allSources.filter((s) => s.is_active);
   const results = [];
-  for (const source of sources) {
+  for (const source of sourcesToReturn) {
     const roi = await calculateSourceROI(source.id, start, end, { revenueSourceByCustomer });
     if (roi) results.push(roi);
   }

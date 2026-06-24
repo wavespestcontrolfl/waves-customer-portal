@@ -908,16 +908,10 @@ export function LeadsSection() {
           body: formData,
         });
         loadSources();
-        // Cost/ROI columns render from the analytics payload — refresh it too so
-        // the just-logged cost is reflected immediately, not after a tab reload.
+        // Cost/ROI columns AND the expanded detail row both render from this
+        // attributed payload now, so refreshing it reflects the just-logged cost
+        // immediately (no tab reload, no separate /sources/:id refresh needed).
         loadSourceROI();
-        // The expanded detail row renders from `sourceROI` (/sources/:id); refresh
-        // it too so it doesn't show the pre-cost Total Cost/ROI until re-expanded.
-        if (expandedSource === formData.sourceId) {
-          adminFetch(`/admin/leads/sources/${formData.sourceId}`)
-            .then((detail) => setSourceROI(detail))
-            .catch(() => {});
-        }
       }
       setShowModal(null);
       setFormData({});
@@ -2752,6 +2746,10 @@ export function LeadsSection() {
                 // when the source had no cost AND no revenue in range.
                 const hasRoiSignal =
                   !!r && (r.totalCost > 0 || r.totalRevenue > 0);
+                // Expanded-row totals come from the globally-attributed table row
+                // (r) so they agree with the row above; /sources/:id (sourceROI)
+                // has no winner map and would show un-attributed revenue.
+                const detail = r || sourceROI;
                 const isExp = expandedSource === src.id;
 
                 return (
@@ -2876,7 +2874,7 @@ export function LeadsSection() {
                         {hasRoiSignal ? fmtPct(roi) : "--"}
                       </td>{" "}
                     </tr>
-                    {isExp && sourceROI && (
+                    {isExp && detail && (
                       <tr>
                         <td colSpan={10} style={{ padding: 0 }}>
                           {" "}
@@ -2902,7 +2900,7 @@ export function LeadsSection() {
                                   Total Leads:{" "}
                                 </span>
                                 <span style={{ color: C.heading, ...mono }}>
-                                  {sourceROI.totalLeads}
+                                  {detail.totalLeads}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2910,7 +2908,7 @@ export function LeadsSection() {
                                   Conversions:{" "}
                                 </span>
                                 <span style={{ color: C.green, ...mono }}>
-                                  {sourceROI.conversions}
+                                  {detail.conversions}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2918,7 +2916,7 @@ export function LeadsSection() {
                                   Total Cost:{" "}
                                 </span>
                                 <span style={{ color: C.text, ...mono }}>
-                                  {fmtMoney(sourceROI.totalCost)}
+                                  {fmtMoney(detail.totalCost)}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2926,7 +2924,7 @@ export function LeadsSection() {
                                   Total Revenue:{" "}
                                 </span>
                                 <span style={{ color: C.green, ...mono }}>
-                                  {fmtMoney(sourceROI.totalRevenue)}
+                                  {fmtMoney(detail.totalRevenue)}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2936,10 +2934,10 @@ export function LeadsSection() {
                                 <span
                                   style={{
                                     ...mono,
-                                    color: roiColor(sourceROI.roi),
+                                    color: roiColor(detail.roi),
                                   }}
                                 >
-                                  {fmtPct(sourceROI.roi)}
+                                  {fmtPct(detail.roi)}
                                 </span>
                               </div>{" "}
                               <div>
@@ -2947,7 +2945,7 @@ export function LeadsSection() {
                                   Avg Response:{" "}
                                 </span>
                                 <span style={{ color: C.text, ...mono }}>
-                                  {fmtTime(sourceROI.avgResponseTime)}
+                                  {fmtTime(detail.avgResponseTime)}
                                 </span>
                               </div>{" "}
                             </div>{" "}

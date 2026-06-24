@@ -182,4 +182,18 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     });
     expect(res.totalRevenue).toBe(200);
   });
+
+  test('bounds lead_source_costs by an ET date string, not the month-start timestamp', async () => {
+    setup({ costs: [{ cost_amount: 5 }], leads: [] });
+    await calculateSourceROI('src-1', start, end);
+
+    const costLower = mockWhereCalls.find(
+      (c) => c[0] === 'lead_source_costs' && c[1] === 'month' && c[2] === '>=',
+    );
+    expect(costLower).toBeDefined();
+    // A 'YYYY-MM-DD' string (date column), not a Date/timestamp — otherwise the
+    // ET month-start timestamp (04:00 UTC) would drop the current month's DATE row.
+    expect(typeof costLower[3]).toBe('string');
+    expect(costLower[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
 });
