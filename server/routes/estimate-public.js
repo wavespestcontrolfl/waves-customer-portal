@@ -389,6 +389,33 @@ const BRAND = {
 
 const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
 
+// App-store links — set these env vars on Railway once the listings are live to
+// turn the (currently non-clickable) badges into real download links. No code
+// change needed; empty = "coming soon" preview treatment.
+const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || '';
+const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || '';
+
+// Self-contained inline-SVG store badges (no hosted assets / no broken images).
+function appStoreBadgeSvg() {
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="132" height="40" viewBox="0 0 132 40" role="img" aria-label="Download on the App Store"><rect width="132" height="40" rx="7" fill="#000"/><rect x="0.75" y="0.75" width="130.5" height="38.5" rx="6.25" fill="none" stroke="#5A5A5A"/><path fill="#fff" transform="translate(12 8.5) scale(0.92)" d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/><text x="40" y="17" fill="#fff" font-family="Inter,Helvetica,Arial,sans-serif" font-size="7.5" letter-spacing="0.2">Download on the</text><text x="39" y="31" fill="#fff" font-family="Inter,Helvetica,Arial,sans-serif" font-size="16.5" font-weight="600">App Store</text></svg>';
+}
+function googlePlayBadgeSvg() {
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="135" height="40" viewBox="0 0 135 40" role="img" aria-label="Get it on Google Play"><rect width="135" height="40" rx="7" fill="#000"/><rect x="0.75" y="0.75" width="133.5" height="38.5" rx="6.25" fill="none" stroke="#5A5A5A"/><g transform="translate(11 9) scale(0.92)"><path fill="#00C3FF" d="M4 3 13 12 4 21Z"/><path fill="#00E676" d="M4 3 16.5 9.8 13 12Z"/><path fill="#FFD500" d="M16.5 9.8 20.5 12 16.5 14.2Z"/><path fill="#FF3D00" d="M13 12 16.5 14.2 4 21Z"/></g><text x="40" y="17" fill="#fff" font-family="Inter,Helvetica,Arial,sans-serif" font-size="7.5" letter-spacing="0.6">GET IT ON</text><text x="39.5" y="31" fill="#fff" font-family="Inter,Helvetica,Arial,sans-serif" font-size="16" font-weight="600">Google Play</text></svg>';
+}
+function appBadge(svg, url, label) {
+  return url
+    ? `<a class="app-badge" href="${escapeHtml(url)}" target="_blank" rel="noopener" aria-label="${escapeHtml(label)}">${svg}</a>`
+    : `<span class="app-badge" role="img" aria-label="${escapeHtml(label)} — coming soon">${svg}</span>`;
+}
+
+// Feather-style stroke icons for the Waves-app feature chips (inherit currentColor).
+const ICON_PIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-6.3 7-11a7 7 0 1 0-14 0c0 4.7 7 11 7 11z"/><circle cx="12" cy="10" r="2.6"/></svg>';
+const ICON_CHAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8 8 0 0 1-11.5 7.2L4 20.5l1.8-4.4A8 8 0 1 1 21 11.5z"/></svg>';
+const ICON_CAL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg>';
+const ICON_DOC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 13h6M9 17h4"/></svg>';
+const ICON_FAMILY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.2 19.2c0-3.4 2.8-5.6 5.8-5.6s5.8 2.2 5.8 5.6"/><path d="M16.2 5.4a3 3 0 0 1 0 5.8"/><path d="M17.4 13.8c2.6.4 4.4 2.4 4.4 5.4"/></svg>';
+const ICON_CARD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M3 10h18M6.5 14.5h4"/></svg>';
+
 // SSR top bar — phone on the LEFT, full Waves logo on the RIGHT. The
 // logo is /waves-logo.png served from client/public so the static and
 // React surfaces share the exact same artwork (and cache line).
@@ -3989,6 +4016,29 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   @media(max-width:640px){.perks-list{grid-template-columns:1fr}}
   .perks-list li{background:#fff;border:1px solid #E7E2D7;border-radius:12px;padding:14px 16px 14px 40px;position:relative;font:500 14px/1.4 Inter,system-ui,sans-serif;color:#1B2C5B;box-shadow:0 3px 10px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.05)}
   .perks-list li::before{content:'✓';position:absolute;left:14px;top:14px;color:${BRAND.green};font-weight:700;font-size:14px;line-height:1.4}
+  .app-shots{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:4px 0 18px}
+  @media(max-width:560px){.app-shots{grid-template-columns:1fr 1fr;gap:18px}}
+  @media(max-width:340px){.app-shots{grid-template-columns:1fr}}
+  .app-shot{margin:0;display:flex;flex-direction:column}
+  .app-shot .phone{background:#1B2C5B;border-radius:22px;padding:5px;box-shadow:0 12px 26px rgba(15,23,42,.20),0 3px 8px rgba(15,23,42,.12)}
+  .app-shot .phone img{display:block;width:100%;height:auto;border-radius:17px;background:#fff}
+  .app-shot figcaption{margin-top:11px}
+  .app-shot figcaption strong{display:block;font:700 14px/1.2 Inter,system-ui,sans-serif;color:#1B2C5B}
+  .app-shot figcaption span{display:block;margin-top:2px;font:500 12.5px/1.35 Inter,system-ui,sans-serif;color:#3F4A65}
+  .app-promo{margin-top:16px;padding:16px;border-radius:12px;background:${BRAND.blueLight};border:1px solid #CDEBFA}
+  .app-promo-head strong{display:block;font:700 15px/1.3 Inter,system-ui,sans-serif;color:#1B2C5B}
+  .app-promo-head span{display:block;margin-top:2px;font:500 13px/1.45 Inter,system-ui,sans-serif;color:#3F4A65}
+  .app-features{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0 14px}
+  @media(max-width:560px){.app-features{grid-template-columns:repeat(2,1fr)}}
+  .app-feature{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #DCEAF3;border-radius:10px;padding:10px 11px}
+  .af-ico{flex:0 0 auto;width:28px;height:28px;border-radius:7px;background:${BRAND.blueLight};color:${BRAND.blueDark};display:flex;align-items:center;justify-content:center}
+  .af-ico svg{width:17px;height:17px}
+  .app-feature>span{font:600 12.5px/1.25 Inter,system-ui,sans-serif;color:#1B2C5B}
+  .app-badges{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:2px}
+  .app-badges.is-coming-soon{opacity:.92}
+  .app-badge{display:inline-flex;line-height:0;border-radius:7px}
+  .app-badge svg{display:block;height:40px;width:auto}
+  .app-badge-caption{flex-basis:100%;margin-top:-2px;font:600 12px/1 Inter,system-ui,sans-serif;color:${BRAND.blueDark};letter-spacing:.02em}
   .review-carousel{background:transparent;border:0;padding:0;position:relative}
   .review-track{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;transition:opacity .3s}
   @media(max-width:760px){.review-track{grid-template-columns:1fr}}
@@ -4185,6 +4235,45 @@ ${shellTopBar()}
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
+
+  <div class="card transparency-card">
+    <h2>Watch every visit &mdash; right from your phone</h2>
+    <p class="ai-blurb">Live GPS, visit reports, and alerts you control &mdash; the Waves app keeps you in the loop from booking to done.</p>
+    <div class="app-shots">
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-tracking.webp" width="760" height="1647" loading="lazy" alt="Waves app visit screen with a live-GPS tech-en-route update before arrival"></div>
+        <figcaption><strong>See your tech coming</strong><span>Live GPS, the hour before arrival</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-visits.webp" width="760" height="1647" loading="lazy" alt="Waves app Visits screen listing upcoming and completed service visits"></div>
+        <figcaption><strong>Every visit &amp; report</strong><span>Upcoming, past, and what we did</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-alerts.webp" width="760" height="1647" loading="lazy" alt="Waves app notification settings, with each alert set to text, email, or both"></div>
+        <figcaption><strong>Alerts you control</strong><span>Text, email, or both</span></figcaption>
+      </figure>
+      <figure class="app-shot">
+        <div class="phone"><img src="/images/app/app-contacts.webp" width="760" height="1647" loading="lazy" alt="Waves app on-location contacts screen to add a spouse, tenant, or property manager"></div>
+        <figcaption><strong>Loop in your family</strong><span>Spouse, tenant, or property manager</span></figcaption>
+      </figure>
+    </div>
+    <div class="app-promo">
+      <span class="app-promo-head"><strong>It&rsquo;s all in the Waves app</strong><span>One login for your whole household &mdash; everything in one place.</span></span>
+      <div class="app-features">
+        <div class="app-feature"><span class="af-ico">${ICON_PIN}</span><span>Live tech tracking</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CHAT}</span><span>Text your tech</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_DOC}</span><span>Photo &amp; video reports</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_FAMILY}</span><span>Add family to alerts</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CARD}</span><span>Billing &amp; autopay</span></div>
+        <div class="app-feature"><span class="af-ico">${ICON_CAL}</span><span>Reschedule &amp; history</span></div>
+      </div>
+      <span class="app-badges${APP_STORE_URL || PLAY_STORE_URL ? '' : ' is-coming-soon'}">
+        ${appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store')}
+        ${appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play')}
+        ${APP_STORE_URL || PLAY_STORE_URL ? '' : '<span class="app-badge-caption">Coming soon to iPhone &amp; Android</span>'}
+      </span>
+    </div>
+  </div>
 
   <div class="card">
     <h2>Customer reviews</h2>
