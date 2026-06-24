@@ -39,6 +39,22 @@ const TOKEN_SKEW_MS = 60 * 1000; // refresh a minute before expiry
 // Stay under the published 0.5 req/s usage plan (≈2.1s spacing) so a 25-product run
 // can't burn the burst and turn the tail into 429s. Override via env if Amazon raises it.
 const MIN_INTERVAL_MS = Number(process.env.AMAZON_BUSINESS_MIN_INTERVAL_MS) || 2100;
+// Cap each HTTP call so a stalled endpoint can't wedge the weekly scan under its lock
+// (the browser adapters cap navigations at ~20s — match that).
+const HTTP_TIMEOUT_MS = Number(process.env.AMAZON_BUSINESS_HTTP_TIMEOUT_MS) || 20000;
+
+// fetch with an abort timeout. Clears the timer on completion so no handle dangles.
+// deps.fetch injectable for tests.
+async function timedFetch(url, init, deps = {}) {
+  const fetchImpl = deps.fetch || fetch;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new Error(`amazon http timeout after ${HTTP_TIMEOUT_MS}ms`)), HTTP_TIMEOUT_MS);
+  try {
+    return await fetchImpl(url, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function creds() {
   return {
@@ -75,7 +91,6 @@ async function throttle(deps = {}) {
 // Throws on a non-OK response WITHOUT logging the body — LWA error bodies can echo the
 // client_id. deps.fetch / deps.now injectable for tests.
 async function getAccessToken(deps = {}) {
-  const fetchImpl = deps.fetch || fetch;
   const now = deps.now || Date.now;
   if (cachedToken && cachedToken.expiresAt - TOKEN_SKEW_MS > now()) return cachedToken.value;
   const c = creds();
@@ -85,11 +100,11 @@ async function getAccessToken(deps = {}) {
     client_id: c.clientId,
     client_secret: c.clientSecret,
   });
-  const res = await fetchImpl(LWA_TOKEN_URL, {
+  const res = await timedFetch(LWA_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: body.toString(),
-  });
+  }, deps);
   if (!res.ok) throw new Error(`LWA token ${res.status}`);
   const json = await res.json();
   if (!json || !json.access_token) throw new Error('LWA token: no access_token in response');
@@ -123,6 +138,9 @@ function hasBuyingRestriction(node) {
   if (Array.isArray(r) && r.length) return true;
   if (r && typeof r === 'object' && Object.keys(r).length) return true;
   if (String(node.buyingGuidance || '').toUpperCase() === 'BLOCKED') return true;
+  // Current guided-buying shape: buyingGuidanceV2.buyingGuidance[].type === 'BLOCKED'.
+  const v2 = node.buyingGuidanceV2 && node.buyingGuidanceV2.buyingGuidance;
+  if (Array.isArray(v2) && v2.some((g) => String(g && g.type).toUpperCase() === 'BLOCKED')) return true;
   return node.purchasable === false || node.buyable === false;
 }
 // True unless the offer/product is explicitly a NON-new condition (used, refurbished,
@@ -134,10 +152,13 @@ function isNewCondition(node) {
   const c = node.productCondition
     || (node.condition && (node.condition.conditionValue || node.condition.value)) || node.condition
     || node.conditionValue;
-  if (!c) return true;
-  // Detect NON-new markers rather than the presence of "new" — "Used - Like New" must
-  // NOT count as new just because it contains the word "new".
-  return !/used|refurb|renew|collectible|open[\s-]?box|pre[\s-]?owned/i.test(String(c));
+  if (!c) return true; // unspecified -> new (Amazon search defaults to new inventory)
+  const s = String(c).trim().toLowerCase();
+  // Reject every non-new value — used/refurbished/renewed/collectible/open-box AND the
+  // ambiguous OTHER/UNKNOWN enums — so ONLY explicit new inventory is compared against
+  // SiteOne's new pricing. "Used - Like New" is correctly rejected by the used marker.
+  if (/used|refurb|renew|collectible|open[\s-]?box|pre[\s-]?owned|other|unknown/i.test(s)) return false;
+  return s === 'new' || s.startsWith('new');
 }
 // Price object -> { amount, currency }. Documented shape nests the amount at
 // price.value.amount (currency at price.value.currencyCode); flatter fallbacks cover a
@@ -214,7 +235,6 @@ function candidateFromProduct(product, vendor) {
 // non-OK response so the scanner records a retryable fetch_error (never logs the body —
 // it can carry the account email).
 async function searchProducts(keywords, deps = {}) {
-  const fetchImpl = deps.fetch || fetch;
   const token = await getAccessToken(deps);
   const c = creds();
   const qs = new URLSearchParams({
@@ -225,7 +245,7 @@ async function searchProducts(keywords, deps = {}) {
   });
   const url = `${API_HOST}/products/${API_VERSION}/products?${qs.toString()}`;
   await throttle(deps);
-  const res = await fetchImpl(url, {
+  const res = await timedFetch(url, {
     method: 'GET',
     headers: {
       // Amazon Business expects the LWA token in x-amz-access-token. Authorization is
@@ -235,7 +255,7 @@ async function searchProducts(keywords, deps = {}) {
       'x-amz-user-email': c.userEmail,
       Accept: 'application/json',
     },
-  });
+  }, deps);
   if (!res.ok) throw new Error(`amazon products ${res.status}`);
   return res.json();
 }

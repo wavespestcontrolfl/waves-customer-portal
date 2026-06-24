@@ -93,6 +93,7 @@ describe('amazon-business adapter', () => {
       expect(url).toContain('facets=OFFERS');
       expect(call[1].headers['x-amz-access-token']).toBe('ATK'); // Amazon Business auth header
       expect(call[1].headers['x-amz-user-email']).toBe('buyer@wavespestcontrol.com');
+      expect(call[1].signal).toBeTruthy(); // abort timeout wired
     });
     test('reads the documented nested OFFER price (offers[].price.value.amount) (#2)', async () => {
       setCreds();
@@ -106,14 +107,23 @@ describe('amazon-business adapter', () => {
       const mk = (offer) => ({ asin: 'B0X', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [offer] } });
       const cases = [
         mk({ price, buyingRestrictions: ['PROFESSIONAL_USE'] }), // restricted
-        mk({ price, buyingGuidance: 'BLOCKED' }), // guided-buying blocked
-        mk({ price, productCondition: 'Used - Like New' }), // non-new
+        mk({ price, buyingGuidance: 'BLOCKED' }), // guided-buying blocked (flat/deprecated)
+        mk({ price, buyingGuidanceV2: { buyingGuidance: [{ type: 'BLOCKED' }] } }), // guided-buying v2
+        mk({ price, productCondition: 'Used - Like New' }), // non-new (contains "New")
+        mk({ price, productCondition: 'OTHER' }), // ambiguous enum -> non-new
+        mk({ price, productCondition: 'UNKNOWN' }), // ambiguous enum -> non-new
       ];
       for (const p of cases) {
         // eslint-disable-next-line no-await-in-loop
         const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [p] })));
         expect(cand).toBeNull();
       }
+    });
+    test('an explicit NEW offer is accepted', async () => {
+      setCreds();
+      const p = { asin: 'B0N', title: 'Talstar P Professional Insecticide 96 oz', includedDataTypes: { OFFERS: [{ price: { value: { amount: 40, currencyCode: 'USD' } }, productCondition: 'New' }] } };
+      const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [p] })));
+      expect(cand).toMatchObject({ price: 40, currency: 'USD' });
     });
     test('throws on an HTTP error so the scan records a retryable fetch_error', async () => {
       setCreds();
@@ -139,6 +149,7 @@ describe('amazon-business adapter', () => {
       expect(amazon.hasBuyingRestriction({ buyingRestrictions: ['X'] })).toBe(true);
       expect(amazon.hasBuyingRestriction({ purchasable: false })).toBe(true);
       expect(amazon.hasBuyingRestriction({ buyingGuidance: 'BLOCKED' })).toBe(true);
+      expect(amazon.hasBuyingRestriction({ buyingGuidanceV2: { buyingGuidance: [{ type: 'BLOCKED' }] } })).toBe(true);
       expect(amazon.hasBuyingRestriction({})).toBe(false);
     });
     test('availabilityOf maps stock signals; unknown stays unknown', () => {

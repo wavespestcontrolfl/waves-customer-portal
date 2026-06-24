@@ -180,10 +180,12 @@ async function runScanMany(specs, opts = {}) {
   if (needBrowser) {
     const { chromium } = require('playwright');
     browser = await chromium.launch({ headless: opts.headless !== false });
-    context = await browser.newContext({ userAgent: opts.userAgent || DESKTOP_UA });
   }
   const results = [];
   try {
+    // Create the context INSIDE the try so a newContext() failure still closes the
+    // launched browser via finally (otherwise Chromium leaks across retries).
+    if (browser) context = await browser.newContext({ userAgent: opts.userAgent || DESKTOP_UA });
     // API-only adapters (or any adapter when no browser was launched) run with a null
     // page — they make HTTP calls and never touch Chromium.
     const fetchCandidate = async (adapter, vendor, prod) => {
