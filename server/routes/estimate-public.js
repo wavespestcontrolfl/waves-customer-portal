@@ -719,12 +719,30 @@ function buildEstimateInvoiceModeDraft({
       pricingBundle,
       oneTimeList,
     });
+    // Itemize when the accepted one-time list covers more than one billable service
+    // (e.g. a pest visit plus a Bora-Care add-on) so each charge is visible on the
+    // invoice instead of being hidden inside a single "One-Time Pest Control" line.
+    // Only itemize when the rows reconcile to the billed amount; else keep one line.
+    const billableRows = (Array.isArray(oneTimeList) ? oneTimeList : [])
+      .map((row) => ({
+        description: String(row?.label || row?.name || '').trim(),
+        unit_price: roundInvoiceAmount(row?.price),
+      }))
+      .filter((row) => row.description && Number(row.unit_price) > 0);
+    const rowsTotal = billableRows.reduce((sum, row) => Math.round((sum + row.unit_price) * 100) / 100, 0);
+    const itemize = billableRows.length > 1 && Math.abs(rowsTotal - amount) < 0.01;
+    const lineItems = itemize
+      ? billableRows.map((row) => ({ description: row.description, quantity: 1, unit_price: row.unit_price }))
+      : [{ description: serviceLabel, quantity: 1, unit_price: amount }];
+    const title = itemize
+      ? `${billableRows.map((row) => row.description).join(' + ')} — one-time service`
+      : `${serviceLabel} — one-time service`;
     return {
       invoiceKind: 'one_time',
       serviceLabel,
       amount,
-      title: `${serviceLabel} — one-time service`,
-      lineItems: [{ description: serviceLabel, quantity: 1, unit_price: amount }],
+      title,
+      lineItems,
       notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode one-time).`,
     };
   }
@@ -7913,7 +7931,13 @@ function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null
   });
 }
 
-function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}, manualDiscount = null) {
+// One-time rows that ride alongside the selected one-time pest visit and must be
+// preserved on it: pest specialties (roach cleanout, etc.) AND separately-billed
+// Bora-Care add-ons. Both are billed regardless of the recurring-vs-one-time pest
+// choice, so dropping them under-bills the customer. The manual one-time discount
+// is applied ONCE across the combined set, so a fixed one-time slice isn't
+// distributed twice (which separate per-category calls would do).
+function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount = null) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const rows = items.map((item) => {
     if (!item || typeof item !== 'object') return null;
@@ -7921,19 +7945,42 @@ function preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown = {}, manualDi
     if (isWaveGuardSetupOneTimeItem(item)) return null;
     if (isOneTimePestChoiceItem(item)) return null;
     if (String(item.service || '').toLowerCase() === 'one_time_adjustment') return null;
-    if (!oneTimeItemLooksPestSpecialty(item)) return null;
+    const isBoraCare = isBoraCareOneTimeItem(item);
+    if (!oneTimeItemLooksPestSpecialty(item) && !isBoraCare) return null;
     const amount = oneTimeItemAmount(item);
     if (!Number.isFinite(amount) || amount <= 0) return null;
-    const label = item.label || item.name || 'Pest treatment';
+    let label = item.label || item.name || 'Pest treatment';
+    let name = item.name || label;
+    // A name-less engine Bora-Care row carries the raw service key as its label;
+    // surface the friendly category label instead.
+    if (isBoraCare && (label === 'Pest treatment' || label.toLowerCase() === String(item.service || '').toLowerCase())) {
+      label = oneTimeInvoiceLabelForCategory('bora_care');
+      name = label;
+    }
     return {
       service: item.service || null,
-      name: item.name || label,
+      name,
       label,
       price: Math.round(amount * 100) / 100,
       detail: item.detail || null,
     };
   }).filter(Boolean);
   return applyManualOneTimeDiscountToChoiceRows(rows, manualDiscount);
+}
+
+// The manual one-time discount to apply when preserving add-on rows for a choice.
+// finalizePricingBundle() already aligns the bundle into a net choice breakdown
+// (the discount applied once, baked into the add-on rows, and a synthetic
+// "One-Time Pest Control" row present). When the accept path re-runs this over
+// that already-net breakdown, re-applying the discount would subtract the slice a
+// second time — so return null in that case and only apply it on the raw breakdown.
+function manualDiscountForChoiceBreakdown(breakdown = {}, estData = {}) {
+  // Only the aligned choice breakdown built by oneTimeChoiceBreakdownForEstimate is
+  // already net of the manual one-time discount — detect it by its explicit marker,
+  // NOT the mere presence of a one_time_pest row (a raw/admin-saved estimate can
+  // carry that row, and there the discount must still be applied to the add-ons).
+  if (breakdown && breakdown.choiceAligned === true) return null;
+  return normalizeManualDiscountSummary(estData);
 }
 
 function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
@@ -7944,9 +7991,9 @@ function oneTimeChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBund
   if (category === 'pest_control') {
     const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
     if (!pestChoiceAmount) return null;
-    const specialtyTotal = preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))
+    const addOnTotal = preservedOneTimeAddOnRowsFromBreakdown(breakdown, manualDiscountForChoiceBreakdown(breakdown, estData))
       .reduce((sum, item) => Math.round((sum + Number(item.price || 0)) * 100) / 100, 0);
-    return Math.round((pestChoiceAmount + specialtyTotal) * 100) / 100;
+    return Math.round((pestChoiceAmount + addOnTotal) * 100) / 100;
   }
   return oneTimeChoiceAmountFromBreakdown(breakdown, category);
 }
@@ -7965,7 +8012,7 @@ function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, prici
     name: 'One-Time Pest Control',
     label: 'One-Time Pest Control',
     price: Math.round(amount * 100) / 100,
-  }, ...preservedPestSpecialtyOneTimeRowsFromBreakdown(breakdown, normalizeManualDiscountSummary(estData))];
+  }, ...preservedOneTimeAddOnRowsFromBreakdown(breakdown, manualDiscountForChoiceBreakdown(breakdown, estData))];
 }
 
 function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingBundle = null, choicePrice = null) {
@@ -7989,6 +8036,9 @@ function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingB
     total: Math.round(total * 100) / 100,
     quoteRequired: false,
     quoteRequiredItems: [],
+    // Marks this as the aligned choice breakdown whose add-on rows are already net
+    // of the manual one-time discount, so the accept path doesn't re-apply it.
+    choiceAligned: true,
   };
 }
 
