@@ -107,9 +107,15 @@ const PDF_BODY = '#3F4A65';
 const PDF_MUTED = '#6B7280';
 const PDF_RULE = '#E7E2D7';
 
-// Rate-limit public report access to deter token brute-forcing.
-function isReportEventRequest(req) {
-  return req.method === 'POST' && /^\/[a-f0-9]{32}\/events$/i.test(req.path || '');
+// Rate-limit public report access to deter token brute-forcing. Two surfaces are
+// exempt: report-interaction event posts, and recap-video playback (Safari/iOS issues
+// many byte-range sub-requests when the customer scrubs the MP4, which would otherwise
+// trip the 20/min limit). Both still require a valid 32-hex token.
+function isReportLimiterExempt(req) {
+  const path = req.path || '';
+  if (req.method === 'POST' && /^\/[a-f0-9]{32}\/events$/i.test(path)) return true;
+  if (req.method === 'GET' && /^\/[a-f0-9]{32}\/recap\/video\/?$/i.test(path)) return true;
+  return false;
 }
 
 const reportLimiter = rateLimit({
@@ -117,7 +123,7 @@ const reportLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: isReportEventRequest,
+  skip: isReportLimiterExempt,
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
@@ -562,6 +568,8 @@ router.get('/:token/recap/video', async (req, res, next) => {
     // no-store (not no-cache): a tokenized recap can show the customer's home — don't
     // let shared-device browsers persist it, matching the other tokenized report assets.
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     // 206 with Content-Range when the browser asked for a byte range (iOS/Safari MP4
     // seeking); otherwise a full 200. obj.size is the partial length for a range hit.
     if (range && obj.contentRange) {

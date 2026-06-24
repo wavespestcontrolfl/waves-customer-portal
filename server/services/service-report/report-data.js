@@ -2363,7 +2363,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           const s = new Date(d); s.setDate(s.getDate() - 6);
           const fmt = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
           const daily = await getAreaDailyRainfall(waterSnapshot.area_id, fmt(s), fmt(d), knex).catch(() => []);
-          if (Array.isArray(daily) && daily.length) {
+          // Only render the 7-day chart with a COMPLETE window — a partial sync would
+          // show a misleading chart with missing/zero days (mirrors getAreaRainfall,
+          // which now returns unknown for an incomplete window).
+          const rainDays = new Set((daily || []).map((r) => (r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10)))).size;
+          if (Array.isArray(daily) && rainDays >= 7) {
             areaRain7d = daily.map((r) => {
               // r.date is a DATE — anchor at noon so the ET weekday label doesn't
               // shift a day back from a UTC-midnight instant.
