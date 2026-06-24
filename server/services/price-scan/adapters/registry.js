@@ -12,10 +12,13 @@ const HOST_MAP = [
   { test: /veseris\.com|veseris/i, key: 'veseris' },
 ];
 
-// Amazon Business hosts. Anchored to a PARSED hostname (like Shopify) — not a raw
-// substring — so a vendor with website notamazon.com or amazon.com.evil.com can't be
-// misrouted to the Amazon adapter and have an Amazon Business price attributed to it.
-const AMAZON_HOSTS = ['amazon.com', 'amazonbusiness.com', 'business.amazon.com'];
+// Amazon hosts. Anchored to a PARSED hostname (like Shopify) — not a raw substring — so a
+// vendor with website notamazon.com or amazon.com.evil.com can't be misrouted to the Amazon
+// adapter. Just amazon.com (its subdomains — www.amazon.com, business.amazon.com — match via
+// the dot-suffix rule); the vendor row + curated product URLs all live on amazon.com, so
+// isOnHost in weekly-scan validates curated URLs correctly. The API host (na.business-api)
+// is fixed in the adapter and never used for routing.
+const AMAZON_HOSTS = ['amazon.com'];
 function isAmazonVendor(vendor) {
   return [vendor.host, vendor.url, vendor.website].some((src) => {
     const h = hostOf(src);

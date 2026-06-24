@@ -46,6 +46,7 @@ const SHIPPING_POSTAL_CODE = process.env.AMAZON_BUSINESS_SHIPPING_POSTAL_CODE !=
 // against SiteOne's new pricing. Flip this env true only if first-live testing shows the
 // OFFERS facet legitimately omits condition for new items.
 const ALLOW_UNSPECIFIED_CONDITION = process.env.AMAZON_BUSINESS_ALLOW_UNSPECIFIED_CONDITION === 'true';
+const USER_AGENT = process.env.AMAZON_BUSINESS_USER_AGENT || 'WavesPriceScan/1.0 (Language=Node.js)';
 const MAX_CANDIDATES = 5; // top relevance-ranked results to verify
 const TOKEN_SKEW_MS = 60 * 1000; // refresh a minute before expiry
 // Stay under the published 0.5 req/s usage plan (≈2.1s spacing) so a 25-product run
@@ -251,35 +252,70 @@ function candidateFromProduct(product, vendor) {
   };
 }
 
-// GET the keyword search, returning the parsed JSON. Sends the REQUIRED productRegion +
-// locale params and requests the OFFERS facet. Throttled to the usage plan. Throws on a
+// ISO 8601 basic UTC timestamp (e.g. 20260624T060000Z) for the required x-amz-date header.
+function amzDate(deps = {}) {
+  const now = deps.now ? new Date(deps.now()) : new Date();
+  return now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+// Headers for Amazon Business API calls (NOT the LWA token exchange). Per the request-header
+// docs: x-amz-access-token is THE auth header (no Authorization — the docs don't use one and
+// an unexpected Authorization can 401), plus the required x-amz-date and a user-agent.
+// x-amz-user-email is required by the Product Search API specifically.
+function businessHeaders(token, deps = {}) {
+  return {
+    'x-amz-access-token': token,
+    'x-amz-date': amzDate(deps),
+    'x-amz-user-email': creds().userEmail,
+    'user-agent': USER_AGENT,
+    Accept: 'application/json',
+  };
+}
+// Shared query params for product calls (region/locale/facets/ship-to are REQUIRED or
+// strongly-recommended on both the keyword search and the by-ASIN retrieval).
+function baseProductQuery(extra = {}) {
+  const qs = new URLSearchParams({ productRegion: PRODUCT_REGION, locale: LOCALE, facets: FACETS, ...extra });
+  if (SHIPPING_POSTAL_CODE) qs.set('shippingPostalCode', SHIPPING_POSTAL_CODE);
+  return qs;
+}
+
+// GET the keyword search, returning parsed JSON. Throttled to the usage plan. Throws on a
 // non-OK response so the scanner records a retryable fetch_error (never logs the body —
 // it can carry the account email).
 async function searchProducts(keywords, deps = {}) {
   const token = await getAccessToken(deps);
-  const c = creds();
-  const qs = new URLSearchParams({
-    keywords,
-    productRegion: PRODUCT_REGION,
-    locale: LOCALE,
-    facets: FACETS, // request the OFFERS facet so account pricing comes back
-  });
-  if (SHIPPING_POSTAL_CODE) qs.set('shippingPostalCode', SHIPPING_POSTAL_CODE);
-  const url = `${API_HOST}/products/${API_VERSION}/products?${qs.toString()}`;
+  const url = `${API_HOST}/products/${API_VERSION}/products?${baseProductQuery({ keywords }).toString()}`;
   await throttle(deps);
-  const res = await timedFetch(url, {
-    method: 'GET',
-    headers: {
-      // Amazon Business expects the LWA token in x-amz-access-token. Authorization is
-      // kept as a harmless fallback (trim after the first authorized call confirms).
-      'x-amz-access-token': token,
-      Authorization: `Bearer ${token}`,
-      'x-amz-user-email': c.userEmail,
-      Accept: 'application/json',
-    },
-  }, deps);
+  const res = await timedFetch(url, { method: 'GET', headers: businessHeaders(token, deps) }, deps);
   if (!res.ok) throw new Error(`amazon products ${res.status}`);
   return res.json();
+}
+
+// EXACT retrieval of one product by ASIN (the precise lookup for a curated vendor URL).
+// Throws on a non-OK response (retryable fetch_error); a 404 means the ASIN isn't found.
+async function getProductByAsin(asin, deps = {}) {
+  const token = await getAccessToken(deps);
+  const url = `${API_HOST}/products/${API_VERSION}/products/${encodeURIComponent(asin)}?${baseProductQuery().toString()}`;
+  await throttle(deps);
+  const res = await timedFetch(url, { method: 'GET', headers: businessHeaders(token, deps) }, deps);
+  if (res.status === 404) return null; // ASIN not found -> caller falls back to keyword search
+  if (!res.ok) throw new Error(`amazon product ${res.status}`);
+  return res.json();
+}
+
+// Resolve the candidate product list: a curated ASIN (from the vendor's approved product
+// URL) via the EXACT by-ASIN endpoint first, then keyword search — either as the fallback
+// when there's no curated URL, or after an exact-ASIN miss.
+async function resolveProducts(vendor, product, deps = {}) {
+  const asin = asinFromUrl(vendor && vendor.url);
+  if (asin) {
+    const j = await getProductByAsin(asin, deps);
+    let arr = productsFromResponse(j);
+    if (!arr.length && j && (j.asin || j.title || j.includedDataTypes)) arr = [j]; // single-product response
+    if (arr.length) return arr;
+  }
+  const q = searchQuery(product);
+  if (!q) return [];
+  return productsFromResponse(await searchProducts(q, deps));
 }
 
 // Search Amazon Business for `product` and return the best verified business-priced
@@ -289,25 +325,21 @@ async function searchProducts(keywords, deps = {}) {
 async function fetchCandidate(page, vendor, product, opts = {}) {
   if (!isConfigured()) return null; // belt-and-suspenders; scrapableVendors also gates this
   const deps = opts.amazonDeps || {};
-  // Prefer a curated ASIN (from an approved vendor product URL) as the precise lookup —
-  // searching by ASIN returns the exact product — before falling back to keyword search.
-  const q = asinFromUrl(vendor && vendor.url) || searchQuery(product);
-  if (!q) return null;
 
   const targetOz = product.packSizeValue != null && product.packSizeUnit
     ? convertToOz(product.packSizeValue, product.packSizeUnit)
     : quantityToOz(product.quantity);
 
-  let json;
+  let products;
   try {
-    json = await searchProducts(q, deps);
+    products = await resolveProducts(vendor, product, deps); // by-ASIN (curated URL) then keyword
   } catch (err) {
     // Token/HTTP failure — surface as a retryable fetch_error, not a clean miss.
-    logger.warn(`[price-scan] amazon search failed: ${err.message}`);
+    logger.warn(`[price-scan] amazon lookup failed: ${err.message}`);
     throw err;
   }
-
-  const products = productsFromResponse(json).slice(0, MAX_CANDIDATES);
+  if (!products.length) return null;
+  products = products.slice(0, MAX_CANDIDATES);
   const wantsEpa = !!(product && product.epaReg);
   let firstBuyable = null;
   let firstUnbuyable = null;
@@ -338,6 +370,9 @@ module.exports = {
   // exposed for unit tests
   getAccessToken,
   searchProducts,
+  getProductByAsin,
+  resolveProducts,
+  asinFromUrl,
   candidateFromProduct,
   priceOf,
   titleOf,

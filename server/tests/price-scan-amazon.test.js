@@ -12,13 +12,17 @@ const setCreds = () => {
 const clearCreds = () => CRED_KEYS.forEach((k) => delete process.env[k]);
 const noSleep = () => Promise.resolve(); // skip the real throttle delay in tests
 
-// fetch stub routing the LWA token URL vs the products URL.
-function makeFetch({ products = [], tokenStatus = 200, productsStatus = 200 } = {}) {
+// fetch stub routing the LWA token URL, the by-ASIN endpoint, and the keyword search.
+function makeFetch({ products = [], byAsinProduct = null, tokenStatus = 200, productsStatus = 200, byAsinStatus = 200 } = {}) {
   return jest.fn(async (url) => {
-    if (String(url).includes('api.amazon.com/auth/o2/token')) {
+    const s = String(url);
+    if (s.includes('api.amazon.com/auth/o2/token')) {
       return { ok: tokenStatus < 400, status: tokenStatus, json: async () => ({ access_token: 'ATK', expires_in: 3600 }) };
     }
-    return { ok: productsStatus < 400, status: productsStatus, json: async () => ({ products }) };
+    if (/\/products\/2020-08-26\/products\/[^?]+/.test(s)) { // by-ASIN retrieval
+      return { ok: byAsinStatus < 400, status: byAsinStatus, json: async () => (byAsinProduct || {}) };
+    }
+    return { ok: productsStatus < 400, status: productsStatus, json: async () => ({ products }) }; // keyword search
   });
 }
 const deps = (fetchImpl) => ({ amazonDeps: { fetch: fetchImpl, sleep: noSleep } });
@@ -94,6 +98,9 @@ describe('amazon-business adapter', () => {
       expect(url).toContain('facets=OFFERS');
       expect(url).toContain('shippingPostalCode=34211'); // delivery region
       expect(call[1].headers['x-amz-access-token']).toBe('ATK'); // Amazon Business auth header
+      expect(call[1].headers['x-amz-date']).toMatch(/^\d{8}T\d{6}Z$/); // required ISO-basic UTC
+      expect(call[1].headers['user-agent']).toBeTruthy();
+      expect(call[1].headers.Authorization).toBeUndefined(); // Bearer fallback dropped
       expect(call[1].headers['x-amz-user-email']).toBe('buyer@wavespestcontrol.com');
       expect(call[1].signal).toBeTruthy(); // abort timeout wired
     });
@@ -128,13 +135,23 @@ describe('amazon-business adapter', () => {
       const cand = await amazon.fetchCandidate(null, vendor, talstar, deps(makeFetch({ products: [p] })));
       expect(cand).toMatchObject({ price: 40, currency: 'USD' });
     });
-    test('a curated Amazon product URL is searched by ASIN (precise lookup before keyword)', async () => {
+    test('a curated Amazon product URL uses the exact by-ASIN endpoint, not keyword search', async () => {
       setCreds();
-      const f = makeFetch({ products: [talstarFlat] });
+      const f = makeFetch({ byAsinProduct: { ...talstarFlat, asin: 'B07XYZ1234' } });
       const curated = { ...vendor, url: 'https://www.amazon.com/dp/B07XYZ1234?ref=foo' };
-      await amazon.fetchCandidate(null, curated, talstar, deps(f));
-      const url = String(f.mock.calls.find((c) => String(c[0]).includes('/products/'))[0]);
-      expect(url).toContain('keywords=B07XYZ1234'); // ASIN used as the keyword, not the product name
+      const cand = await amazon.fetchCandidate(null, curated, talstar, deps(f));
+      const calls = f.mock.calls.map((c) => String(c[0]));
+      expect(calls.some((u) => /\/products\/2020-08-26\/products\/B07XYZ1234/.test(u))).toBe(true); // by-ASIN endpoint hit
+      expect(calls.some((u) => u.includes('keywords='))).toBe(false); // no keyword fallback needed
+      expect(cand).toMatchObject({ price: 44.5 });
+    });
+    test('an exact-ASIN miss (404) falls back to keyword search', async () => {
+      setCreds();
+      const f = makeFetch({ byAsinStatus: 404, products: [talstarFlat] });
+      const curated = { ...vendor, url: 'https://www.amazon.com/dp/B0MISS1234' };
+      const cand = await amazon.fetchCandidate(null, curated, talstar, deps(f));
+      expect(f.mock.calls.map((c) => String(c[0])).some((u) => u.includes('keywords='))).toBe(true); // fell back
+      expect(cand).toMatchObject({ price: 44.5 });
     });
     test('throws on an HTTP error so the scan records a retryable fetch_error', async () => {
       setCreds();
