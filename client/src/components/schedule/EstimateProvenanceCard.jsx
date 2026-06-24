@@ -34,7 +34,15 @@ function money(n) {
 }
 
 // Resolve the single deposit row: label, value, and a small sub-note. Returns
-// null when there's nothing meaningful to show (no deposit posture at all).
+// null when there's nothing meaningful to show.
+//
+// Paid deposits are always surfaced (the ledger is authoritative). The
+// would-be / per-policy projection and any exemption label are shown ONLY when
+// deposits are actually enforced (ESTIMATE_DEPOSIT_REQUIRED on). While the flag
+// is dark the projection can't be resolved reliably — existing-plan / prepay
+// exemptions and customer-chosen one-time amounts aren't recoverable
+// post-accept — so we deliberately show nothing rather than a figure that
+// could send an operator chasing money that isn't owed.
 function depositRow(deposit) {
   if (!deposit) return null;
   const paid = Number(deposit.paid) || 0;
@@ -52,6 +60,8 @@ function depositRow(deposit) {
       tone: 'paid',
     };
   }
+  // Dark flag: only ledger-backed deposits are trustworthy — suppress the rest.
+  if (!deposit.enforced) return null;
   if (exempt) {
     return {
       label: 'Deposit',
@@ -63,9 +73,9 @@ function depositRow(deposit) {
   if (policyAmount > 0) {
     const klass = deposit.oneTime ? 'one-time job' : 'recurring plan';
     return {
-      label: deposit.enforced ? 'Deposit due' : 'Deposit (per policy)',
+      label: 'Deposit due',
       value: money(policyAmount),
-      sub: deposit.enforced ? klass : `${klass} · not yet collected`,
+      sub: klass,
       tone: 'muted',
     };
   }
