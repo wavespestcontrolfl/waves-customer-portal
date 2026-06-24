@@ -1523,7 +1523,7 @@ const SOURCE_ICON = {
 // search is also time-bounded: if the row never renders (deleted/stale id) the
 // hook gives up instead of polling the DOM forever. Returns the id to highlight
 // while active.
-function useEstimateDeepLinkHighlight({ targetId, token, rows, resetView }) {
+function useEstimateDeepLinkHighlight({ targetId, token, loading, rows, resetView }) {
   const [activeId, setActiveId] = useState(null);
   // Per-navigation state: which token we're resolving, whether we've already
   // cleared filters once, and whether the search is finished (found or gave up).
@@ -1555,16 +1555,18 @@ function useEstimateDeepLinkHighlight({ targetId, token, rows, resetView }) {
     }
   }, [token, targetId, rows, resetView]);
 
-  // Bound the search: once a navigation starts, give the list a few seconds to
-  // render the target; if it never shows (deleted / stale / typo'd id), mark the
-  // nav done so the effect above stops querying the DOM on every later render.
+  // Bound the search: once the list has finished loading, give it a few seconds
+  // to render the target; if it never shows (deleted / stale / typo'd id), mark
+  // the nav done so the effect above stops querying the DOM on every later
+  // render. Gated on !loading so a slow/cold fetch (>6s) can't trip the timer
+  // before any rows render — the timer (re)starts each time loading settles.
   useEffect(() => {
-    if (!targetId) return undefined;
+    if (!targetId || loading) return undefined;
     const t = setTimeout(() => {
       if (navRef.current.token === token) navRef.current.done = true;
     }, 6000);
     return () => clearTimeout(t);
-  }, [token, targetId]);
+  }, [token, targetId, loading]);
 
   // Fade the highlight a few seconds after it activates.
   useEffect(() => {
@@ -1866,6 +1868,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
+    loading,
     rows: filtered,
     resetView: resetDeepLinkView,
   });
@@ -3582,6 +3585,7 @@ function EstimatesMobileListView({
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
+    loading,
     rows: flat,
     resetView: resetDeepLinkView,
   });
@@ -3851,6 +3855,16 @@ export default function EstimatesPageV2() {
       setSearchParams(stripped, { replace: true });
     }
   }, [searchParams, setSearchParams, readLeadPrefill]);
+
+  // One-shot the deep link: once the operator leaves the Estimates tab, drop the
+  // captured target. The list unmounts/remounts across tab switches, so without
+  // this a stale notification's estimate would re-scroll/re-highlight every time
+  // they returned to the tab. A fresh ?estimateId re-populates it (new token).
+  useEffect(() => {
+    if (activeTab !== "estimates" && deepLink.id) {
+      setDeepLink((prev) => ({ id: null, token: prev.token }));
+    }
+  }, [activeTab, deepLink.id]);
 
   // Drop lead/customer prefill once the operator leaves the Create Estimate
   // tab, so the next blank "Create Estimate" doesn't reopen seeded with the
