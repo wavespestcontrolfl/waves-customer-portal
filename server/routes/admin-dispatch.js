@@ -4213,7 +4213,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       try {
         const CardHolds = require('../services/estimate-card-holds');
         const holdCharge = await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: invoice.id });
-        if (holdCharge?.charged) {
+        // covered_by_credit means the charge call found the invoice already
+        // settled by account credit (marked prepaid, hold released) — treat it
+        // the same as a paid completion so we don't send a pay-link SMS.
+        if (holdCharge?.charged || holdCharge?.reason === 'covered_by_credit') {
           alreadyPaid = true;
           invoiceCreated = false;
           const fresh = await db('invoices').where({ id: invoice.id }).first('status', 'paid_at');

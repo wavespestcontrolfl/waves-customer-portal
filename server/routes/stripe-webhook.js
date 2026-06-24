@@ -769,6 +769,14 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     return;
   }
 
+  // One-time card-hold no-show / late-cancel fees are recorded inline at charge
+  // time and have no invoice — return so they aren't treated as orphaned
+  // invoice payments and pollute the orphan-charge reconciliation queue.
+  if (paymentIntent.metadata?.purpose === 'card_hold_no_show_fee') {
+    logger.info(`[stripe-webhook] card-hold no-show fee PI succeeded: ${piId}`);
+    return;
+  }
+
   const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
   const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
   const details = await paymentDetailsFromIntent(paymentIntent);

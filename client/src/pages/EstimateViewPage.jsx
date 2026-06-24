@@ -1710,6 +1710,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '6px 0 14px' }}>
           We won&rsquo;t charge you today. Your card is charged the final total after your visit is completed.
           A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home.
+          {' '}Credit cards add a small processing fee; debit and bank cards don&rsquo;t.
         </div>
         <div ref={mountRef} />
         {error ? (
@@ -2123,8 +2124,16 @@ export default function EstimateViewPage() {
       if (piFromRedirect && params.get('redirect_status') === 'succeeded') {
         depositPaymentIntentIdRef.current = piFromRedirect;
       }
-      if (piFromRedirect) {
-        ['payment_intent', 'payment_intent_client_secret', 'redirect_status'].forEach((k) => params.delete(k));
+      // confirmSetup (one-time card hold, 3DS cards) returns with
+      // ?setup_intent=...&redirect_status=succeeded — carry it forward so the
+      // captured card isn't lost on the redirect and we don't re-mint a hold.
+      const siFromRedirect = params.get('setup_intent');
+      if (siFromRedirect && params.get('redirect_status') === 'succeeded') {
+        cardHoldSetupIntentIdRef.current = siFromRedirect;
+      }
+      if (piFromRedirect || siFromRedirect) {
+        ['payment_intent', 'payment_intent_client_secret', 'setup_intent', 'setup_intent_client_secret', 'redirect_status']
+          .forEach((k) => params.delete(k));
         const qs = params.toString();
         window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
       }
@@ -2654,7 +2663,7 @@ export default function EstimateViewPage() {
             invoiceMode={!!estimate.billByInvoice}
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
-              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home.`
+              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
               : (data?.depositPolicy?.required && paymentPreference !== 'prepay_annual'
                 ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
                 : null)}

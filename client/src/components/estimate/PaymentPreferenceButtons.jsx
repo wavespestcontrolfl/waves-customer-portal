@@ -199,7 +199,7 @@ export default function PaymentPreferenceButtons({
 
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
           {holdRequired
-            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home.`
+            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
             : fineprint}
         </div>
       </div>

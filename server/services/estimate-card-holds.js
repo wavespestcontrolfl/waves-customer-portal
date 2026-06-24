@@ -212,8 +212,15 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
 // attachCardHoldPaymentMethod; the pm id is stored here either way so charges
 // can resolve it.
 async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, trx = db }) {
-  const noShowFee = cardHoldNoShowFee();
-  const windowHours = cardHoldCancelWindowHours();
+  // Preserve the terms the customer was SHOWN — frozen on the pending row when
+  // /card-hold-intent minted it. Only fall back to live config if that row is
+  // somehow absent, so a pricing_config change between modal-open and accept
+  // never moves the fee the customer consented to.
+  const existing = await trx('estimate_card_holds')
+    .where({ stripe_setup_intent_id: setupIntentId })
+    .first('no_show_fee_amount', 'cancel_window_hours');
+  const noShowFee = existing?.no_show_fee_amount != null ? Number(existing.no_show_fee_amount) : cardHoldNoShowFee();
+  const windowHours = existing?.cancel_window_hours != null ? Number(existing.cancel_window_hours) : cardHoldCancelWindowHours();
   const fields = {
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId || null,
@@ -382,14 +389,17 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show' }) {
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
 
   if (!(await claimHoldForCharge(hold.id))) return { charged: false, reason: 'not_held' };
+
+  // Charge FIRST (separately from the row write) so a post-charge DB failure is
+  // never confused with a pre-charge failure.
+  let paymentIntent;
   try {
     // Self-heal: if the post-accept attach missed, the saved card isn't on the
     // Stripe customer yet and an off-session charge would fail forever — attach
     // it first (idempotent). The completion path gets this via
-    // resolveHoldPaymentMethodRowId; the fee path charges the pm id directly,
-    // so it must attach explicitly.
+    // resolveHoldPaymentMethodRowId; the fee path charges the pm id directly.
     await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
-    const paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
+    paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
       customerId: hold.customer_id,
       paymentMethodId: hold.stripe_payment_method_id,
       amountDollars: feeAmount,
@@ -402,6 +412,20 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show' }) {
       },
       idempotencyKey: `card_hold_no_show_${hold.id}`,
     });
+  } catch (err) {
+    // The charge itself failed (decline / pre-charge error) — no money moved,
+    // so it is safe to reopen for a later retry.
+    await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
+      .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
+    logger.error('[estimate-card-holds] no-show fee charge FAILED (no charge)', { scheduledServiceId, error: err.message });
+    return { charged: false, reason: 'charge_failed', error: err.message };
+  }
+
+  // PI succeeded. A DB-write failure here must NOT reopen to 'held': Stripe's
+  // idempotency cache expires (~24h), so a later retry would charge a SECOND
+  // fee. Park terminal in charge_review like the completion path, keeping the
+  // PI pointer.
+  try {
     await db('estimate_card_holds').where({ id: hold.id }).update({
       status: 'charged_no_show',
       no_show_payment_intent_id: paymentIntent?.id || null,
@@ -409,14 +433,20 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show' }) {
       charged_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
-    logger.info('[estimate-card-holds] no-show fee charged', { scheduledServiceId, feeAmount, reason });
-    return { charged: true, amount: feeAmount };
-  } catch (err) {
+  } catch (writeErr) {
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
-      .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
-    logger.error('[estimate-card-holds] no-show fee charge FAILED', { scheduledServiceId, error: err.message });
-    return { charged: false, reason: 'charge_failed', error: err.message };
+      .update({
+        status: 'charge_review',
+        no_show_payment_intent_id: paymentIntent?.id || null,
+        charged_amount: feeAmount,
+        charged_at: db.fn.now(),
+        updated_at: db.fn.now(),
+      }).catch(() => {});
+    logger.error('[estimate-card-holds] no-show fee CHARGED but DB write failed — parked charge_review (NOT retryable)', { scheduledServiceId, paymentIntentId: paymentIntent?.id });
+    return { charged: true, amount: feeAmount, reason: 'charge_review_write_failed' };
   }
+  logger.info('[estimate-card-holds] no-show fee charged', { scheduledServiceId, feeAmount, reason });
+  return { charged: true, amount: feeAmount };
 }
 
 // Release a hold with NO charge (cancel outside the window, reschedule, admin

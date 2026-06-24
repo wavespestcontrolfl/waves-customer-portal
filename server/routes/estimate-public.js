@@ -6730,8 +6730,16 @@ router.put('/:token/accept', async (req, res, next) => {
       // completion + no-show charges can resolve it; the card is attached to
       // the customer post-commit (retryable). Pinned to the just-committed
       // appointment so the charge triggers find it.
-      if (cardHoldPolicy.required && cardHoldVerification?.ok && customerId && reservationCommitted) {
+      if (cardHoldPolicy.required && cardHoldVerification?.ok) {
+        // A required hold MUST land on a committed appointment + customer, or
+        // completion/no-show charging has nothing to resolve. Fail closed (roll
+        // the accept back) rather than commit a holdless one-time booking — e.g.
+        // an email-only lead where customerId never resolved and the slot commit
+        // was skipped.
         const heldAppointmentId = acceptedAppointmentsToRegister[0]?.id || null;
+        if (!customerId || !reservationCommitted || !heldAppointmentId) {
+          throw estimateAcceptError('Could not hold your appointment — please pick a time and try again');
+        }
         await CardHolds.recordCardHoldHeld({
           estimateId: estimate.id,
           customerId,
