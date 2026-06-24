@@ -1616,9 +1616,6 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <div className="section-eyebrow">Service report{serviceLabel ? ` · ${serviceLabel}` : ''}</div>
         <h1 className="sr-title">Hey {firstName}, {smartStatus.heading}</h1>
         {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
-        {(data.customerPhone || data.customerEmail) && (
-          <div className="service-meta-contact">{[data.customerPhone, data.customerEmail].filter(Boolean).join(' · ')}</div>
-        )}
       </div>
       <div className="service-status-card">
         <div className="service-status-main">

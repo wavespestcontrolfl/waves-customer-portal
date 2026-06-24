@@ -6650,6 +6650,7 @@ router.post('/:serviceId/recap-media/:mediaId/confirm', async (req, res, next) =
     const result = await recapMedia.confirmUpload(req.params.mediaId, { scheduledServiceId: req.params.serviceId, durationMs: req.body?.durationMs });
     if (!result.ok) {
       if (result.reason === 'too_large') return res.status(413).json({ error: 'Clip too large — keep it under ~20 seconds.' });
+      if (result.reason === 'bad_duration') return res.status(422).json({ error: 'Couldn’t read the clip length — re-record a short clip and try again.' });
       if (result.reason === 'not_uploaded') return res.status(409).json({ error: 'Upload not found — try again.' });
       return res.status(404).json({ error: 'media not found' });
     }

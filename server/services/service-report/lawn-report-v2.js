@@ -96,7 +96,10 @@ const round1 = (v) => (v == null ? '' : String(Number(Number(v).toFixed(1))));
 
 function monthLabel(date) {
   if (!date) return '';
-  const d = new Date(date);
+  // Date-only values (DB DATE / 'YYYY-MM-DD') must anchor at noon so the ET label
+  // doesn't shift a day back from a UTC-midnight instant.
+  const ymd = date instanceof Date ? date.toISOString().slice(0, 10) : String(date).slice(0, 10);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? new Date(`${ymd}T12:00:00`) : new Date(date);
   if (Number.isNaN(d.getTime())) return String(date);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 }

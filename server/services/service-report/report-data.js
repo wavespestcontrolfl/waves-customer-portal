@@ -2402,7 +2402,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           const nextRow = await knex('scheduled_services')
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>', afterIso)
-            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'rescheduled'])
             .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
             .orderBy('scheduled_date', 'asc')
             .first('scheduled_date')
@@ -2464,8 +2464,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-    customerPhone: formatPhoneDisplay(service.phone),
-    customerEmail: service.email ? String(service.email).trim() : null,
+    // customerPhone/customerEmail intentionally NOT in the public report payload —
+    // the report token is a shareable bearer credential, so contact PII must not
+    // ride it. (Recap SMS loads the phone server-side via its own query.)
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while

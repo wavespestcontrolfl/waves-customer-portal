@@ -114,10 +114,16 @@ async function confirmUpload(mediaId, { scheduledServiceId = null, durationMs = 
   }
   if (realBytes == null) { await deleteMedia(mediaId, { scheduledServiceId }, knex); return { ok: false, reason: 'not_uploaded' }; }
 
-  const dur = Number(durationMs) || 0;
-  if (realBytes > RECAP_MAX_BYTES || dur > RECAP_MAX_DURATION_MS) {
+  // Video must report a finite, in-range duration — a missing/null duration can't
+  // be trusted as "short" (it would let an arbitrarily long clip under the byte cap
+  // through to the renderer). Images carry no duration.
+  const dur = Number(durationMs);
+  const tooBig = realBytes > RECAP_MAX_BYTES;
+  const badVideoDuration = row.media_type === 'video'
+    && (!Number.isFinite(dur) || dur <= 0 || dur > RECAP_MAX_DURATION_MS);
+  if (tooBig || badVideoDuration) {
     await deleteMedia(mediaId, { scheduledServiceId }, knex);
-    return { ok: false, reason: 'too_large' };
+    return { ok: false, reason: (badVideoDuration && !tooBig) ? 'bad_duration' : 'too_large' };
   }
 
   const [updated] = await knex('service_media').where({ id: row.id }).update({
