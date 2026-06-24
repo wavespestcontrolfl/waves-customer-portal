@@ -1521,9 +1521,9 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         .orderBy('accepted_at', 'desc')
         .orderBy('created_at', 'desc')
         .select(
-          'id', 'status', 'token', 'service_interest', 'estimate_data',
+          'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'created_at', 'accepted_at',
+          'bill_by_invoice', 'created_at', 'accepted_at',
         ),
       db('services')
         .where({ is_active: true })
@@ -1550,32 +1550,46 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
     }
 
     const serviceIndex = indexServicesForSchedule(serviceRows);
-    res.json({
-      estimates: estimates.map((estimate) => {
-        const lines = scheduleLinesFromEstimate(estimate, serviceIndex);
-        const linked = linkedByEstimate.get(estimate.id) || null;
-        return {
-          id: estimate.id,
-          token: estimate.token,
-          status: estimate.status,
-          serviceInterest: estimate.service_interest,
-          acceptedAt: estimate.accepted_at,
-          createdAt: estimate.created_at,
-          monthlyTotal: estimate.monthly_total != null ? Number(estimate.monthly_total) : null,
-          annualTotal: estimate.annual_total != null ? Number(estimate.annual_total) : null,
-          onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
-          waveguardTier: estimate.waveguard_tier,
-          lines,
-          linkedAppointment: linked ? {
-            id: linked.id,
-            scheduledDate: linked.scheduled_date,
-            windowStart: linked.window_start,
-            serviceType: linked.service_type,
-            status: linked.status,
-          } : null,
-        };
-      }),
-    });
+    const { summarizeEstimateDeposit } = require('../services/estimate-deposits');
+    const out = await Promise.all(estimates.map(async (estimate) => {
+      const lines = scheduleLinesFromEstimate(estimate, serviceIndex);
+      const linked = linkedByEstimate.get(estimate.id) || null;
+      const monthlyTotal = estimate.monthly_total != null ? Number(estimate.monthly_total) : null;
+      const annualTotal = estimate.annual_total != null ? Number(estimate.annual_total) : null;
+      const onetimeTotal = estimate.onetime_total != null ? Number(estimate.onetime_total) : null;
+      // quotedTotal mirrors the appointment detail card (monthly + annual +
+      // one-time), so the scheduling surfaces compare against the same number.
+      const quotedTotal = (monthlyTotal || 0) + (annualTotal || 0) + (onetimeTotal || 0);
+      // Deposit read is fail-soft inside summarizeEstimateDeposit, but guard
+      // the await too so one bad estimate can't 500 the whole list.
+      let deposit = null;
+      try {
+        deposit = await summarizeEstimateDeposit(estimate);
+      } catch { deposit = null; }
+      return {
+        id: estimate.id,
+        token: estimate.token,
+        status: estimate.status,
+        serviceInterest: estimate.service_interest,
+        acceptedAt: estimate.accepted_at,
+        createdAt: estimate.created_at,
+        monthlyTotal,
+        annualTotal,
+        onetimeTotal,
+        quotedTotal,
+        waveguardTier: estimate.waveguard_tier,
+        lines,
+        deposit,
+        linkedAppointment: linked ? {
+          id: linked.id,
+          scheduledDate: linked.scheduled_date,
+          windowStart: linked.window_start,
+          serviceType: linked.service_type,
+          status: linked.status,
+        } : null,
+      };
+    }));
+    res.json({ estimates: out });
   } catch (err) { next(err); }
 });
 

@@ -173,6 +173,71 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
   return policy;
 }
 
+// Scheduling-surface summary: everything the New Appointment / appointment
+// detail card needs to show "does this estimate carry a deposit, how much was
+// paid, and what's the credit toward the first invoice". Read-only and
+// fail-soft — a deposit read must never block scheduling, so every branch
+// degrades to zeros rather than throwing. `policyAmount` is the flat amount
+// this estimate's service class CALLS FOR ($49 recurring / $99 one-time),
+// computed independent of the enforcement flag so the owner can see the
+// would-be deposit even while ESTIMATE_DEPOSIT_REQUIRED is dark; `required`
+// reflects whether it is actually enforced + non-exempt right now.
+async function summarizeEstimateDeposit(estimate) {
+  const summary = {
+    enforced: isDepositEnforced(),
+    oneTime: false,
+    policyAmount: 0,
+    required: false,
+    exemptReason: null,
+    paid: 0,
+    creditRemaining: 0,
+  };
+  if (!estimate?.id) return summary;
+
+  try {
+    summary.paid = await receivedDepositTotal(estimate.id);
+    const credit = await pendingDepositCredit(estimate.id);
+    summary.creditRemaining = credit ? credit.amount : 0;
+  } catch (err) {
+    logger.warn('[estimate-deposits] schedule summary ledger read failed', { error: err.message });
+  }
+
+  // Structural one-time classification drives the service class ($99 vs $49).
+  // Prefer the canonical gate; fall back to the totals shape if it can't load.
+  let oneTime;
+  try {
+    const gates = require('../routes/estimate-public');
+    const estData = parseEstimateDataBlob(estimate);
+    oneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'
+      ? !!gates.isStructuralOneTimeOnlyEstimate(estData, estimate)
+      : null;
+  } catch {
+    oneTime = null;
+  }
+  if (oneTime == null) {
+    oneTime = Number(estimate.onetime_total || 0) > 0
+      && !Number(estimate.monthly_total || 0)
+      && !Number(estimate.annual_total || 0);
+  }
+  summary.oneTime = oneTime;
+  summary.policyAmount = computeDepositAmount({ oneTime });
+
+  try {
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate,
+      oneTime,
+      oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
+    });
+    summary.required = !!policy.required;
+    summary.exemptReason = policy.exemptReason || null;
+    if (policy.required && policy.amount) summary.policyAmount = policy.amount;
+  } catch (err) {
+    logger.warn('[estimate-deposits] schedule deposit policy summary failed', { error: err.message });
+  }
+
+  return summary;
+}
+
 // Money the customer has paid and still holds with us: received/credited
 // rows MINUS any partial refunds already returned (a dashboard refund of
 // half a deposit must not keep satisfying the accept gate at full value).
@@ -1098,6 +1163,7 @@ module.exports = {
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
+  summarizeEstimateDeposit,
   linkedScheduledServiceId,
   restoreDepositCreditForVoidedInvoice,
   sweepTerminalEstimateDeposits,

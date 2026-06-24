@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom';
 import { TIMEZONE } from '../../lib/timezone';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
+import EstimateProvenanceCard from './EstimateProvenanceCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -430,27 +431,15 @@ export default function MobileAppointmentDetailSheet({
           </div>
         </section>
 
-        {/* Estimate provenance */}
+        {/* Estimate provenance — quoted vs current, plus deposit posture and
+            the balance to charge once any paid deposit is credited. */}
         {estimateSource && (
-          <section className="mt-4">
-            <div
-              className="flex items-center gap-2 px-3 py-2.5 rounded-sm"
-              style={{ background: '#F0F9FF', border: '1px solid #BAE6FD' }}
-            >
-              <span className="text-11 uppercase tracking-label font-medium" style={{ color: '#0369A1' }}>
-                From Estimate
-              </span>
-              <span className="flex-1" />
-              <span className="u-nums text-12 font-medium" style={{ color: '#0369A1' }}>
-                Quoted ${estimateSource.quotedTotal?.toFixed(2)}
-              </span>
-            </div>
-            {estimateSource.quotedTotal > 0 && price > 0 && Math.abs(estimateSource.quotedTotal - price) > 0.01 && (
-              <div className="text-11 text-ink-secondary mt-1 px-1">
-                Current price ${price.toFixed(2)} ({price > estimateSource.quotedTotal ? '+' : ''}{((price - estimateSource.quotedTotal) / estimateSource.quotedTotal * 100).toFixed(0)}% vs quoted)
-              </div>
-            )}
-          </section>
+          <EstimateProvenanceCard
+            quotedTotal={estimateSource.quotedTotal}
+            currentPrice={price}
+            deposit={estimateSource.deposit}
+            style={{ marginTop: 16 }}
+          />
         )}
 
         {/* Date and time */}

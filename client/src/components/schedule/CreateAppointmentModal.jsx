@@ -30,6 +30,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
+import EstimateProvenanceCard from './EstimateProvenanceCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1422,18 +1423,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     ))}
                   </select>
                   {linkedEstimate && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
-                      <span style={{ minWidth: 0 }}>
-                        Linked to estimate #{String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setLinkedEstimate(null)}
-                        style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', padding: '4px 0' }}
-                      >
-                        Unlink
-                      </button>
-                    </div>
+                    <>
+                      {/* Quoted vs current charge, deposit posture, and the
+                          balance to collect at the visit once any paid deposit
+                          is credited — same card the appointment detail sheet
+                          shows at checkout. */}
+                      <EstimateProvenanceCard
+                        quotedTotal={linkedEstimate.quotedTotal}
+                        currentPrice={netSubtotal}
+                        deposit={linkedEstimate.deposit}
+                        style={{ marginTop: 10 }}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
+                        <span style={{ minWidth: 0 }}>
+                          Linked to estimate #{String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setLinkedEstimate(null)}
+                          style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', padding: '4px 0' }}
+                        >
+                          Unlink
+                        </button>
+                      </div>
+                    </>
                   )}
                 </>
               ) : (
