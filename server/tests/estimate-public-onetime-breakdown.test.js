@@ -1421,6 +1421,29 @@ describe('public estimate one-time breakdown', () => {
     expect(withBora.durationMinutes).toBe(150);
   });
 
+  test('one-time slot duration uses the raw service key, the termite key, and a 60-min default', () => {
+    const mk = (estimate) => estimateSlotAvailability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+
+    // Pest visit (60) + a German-roach cleanout specialty priced by its raw key (75,
+    // not the broad pest 60) = 135.
+    expect(mk({
+      show_one_time_option: true,
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 500 }] } } },
+    }).durationMinutes).toBe(135);
+
+    // A standalone Termite Inspection (service 'termite') reserves 90, not the default.
+    expect(mk({
+      estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'termite', name: 'Termite Inspection', price: 175 }] } } },
+    }).durationMinutes).toBe(90);
+
+    // An unknown/residual row (positive "Other one-time services" adjustment) keeps
+    // the 60-minute default rather than being under-reserved: pest 60 + adjustment 60.
+    expect(mk({
+      show_one_time_option: true,
+      estimate_data: { result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] }, oneTime: { total: 400, items: [] } } },
+    }).durationMinutes).toBe(120);
+  });
+
   test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-mosquito-recurring-test',

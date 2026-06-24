@@ -486,12 +486,16 @@ const ONE_TIME_SERVICE_DURATION_MINUTES = {
   one_time_mosquito: 45,
   lawn_care: 60,
   tree_shrub: 60,
+  termite: 90,
   termite_bait: 90,
   termite_trenching: 90,
   pre_slab_termiticide: 90,
   rodent: 60,
 };
-const DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES = 45;
+// Unknown/residual billable one-time rows (e.g. the positive "Other one-time
+// services" adjustment) keep the standard one-time length so they aren't
+// under-reserved — matches the prior DEFAULT_OPTS.durationMinutes fallback.
+const DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES = 60;
 function oneTimeServiceDurationMinutes(service) {
   return ONE_TIME_SERVICE_DURATION_MINUTES[String(service || '').toLowerCase()]
     || DEFAULT_ONE_TIME_SERVICE_DURATION_MINUTES;
@@ -515,12 +519,16 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
 
   const rows = [];
   const seen = new Set();
-  const add = (service, label) => {
+  // `service` is the category (used for the row's service field + label dedup) and
+  // `durationKey` is the raw service key for the duration lookup — a pest specialty
+  // classifies as the broad `pest_control` category but should keep its own duration
+  // (e.g. german_roach → 75, not the 60 of a plain pest visit).
+  const add = (service, label, durationKey) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
     seen.add(key);
-    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: oneTimeServiceDurationMinutes(service) });
+    rows.push({ service, label: clean, visitsPerYear: null, durationMinutes: oneTimeServiceDurationMinutes(durationKey || service) });
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)
@@ -561,7 +569,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     if (!label || label.toLowerCase() === service) {
       label = (category && labelForCategory(category)) || label;
     }
-    add(category || service || 'one_time_service', label);
+    add(category || service || 'one_time_service', label, service || category);
   }
   return rows;
 }
