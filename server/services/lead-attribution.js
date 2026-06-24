@@ -7,6 +7,7 @@ const logger = require('./logger');
 // rather than the prior `+${digits}` fabrication, which silently
 // produced invalid E.164 strings on bad input.
 const { normalizePhone } = require('../utils/phone');
+const { startOfETMonth } = require('../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
 // 1. attributeInboundContact
@@ -211,12 +212,18 @@ async function logSourceTouch(sourceId, customerId, type) {
 // claimedInvoiceIds / claimedServiceIds: optional shared Sets so calculateAllSourceROI
 // can de-dupe a customer's invoice/service rows ACROSS sources (a customer with
 // won leads under two sources must not have the same invoice credited to both).
-// Omitted for a standalone single-source call, which only needs within-source dedup.
-async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInvoiceIds, claimedServiceIds, billedCustomers } = {}) {
+// revenueSourceByCustomer (optional, set by calculateAllSourceROI): customer_id →
+// the source id of that customer's EARLIEST conversion in the window. A customer
+// won under two sources has their revenue credited only to that one source, so
+// the all-source totals never double-count and the credit follows conversion
+// time, not source name. Omitted for a standalone single-source call.
+async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSourceByCustomer } = {}) {
   const source = await db('lead_sources').where('id', leadSourceId).first();
   if (!source) return null;
 
-  const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  // Default to the ET month (matches /sources' startOfETMonth) so a row's cost/ROI
+  // describes the same month as its lead/conversion counts, even at the UTC boundary.
+  const start = startDate || startOfETMonth();
   const end = endDate || new Date();
 
   // Leads in date range
@@ -284,19 +291,26 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInv
   }
 
   const windowEnd = new Date(end);
-  const usedInvoiceIds = claimedInvoiceIds || new Set();
-  const usedServiceIds = claimedServiceIds || new Set();
-  // Shared across the all-source run: once any source counts a customer's real
-  // billing, no later source may add the captured-value fallback for that same
-  // customer (the shared invoice/service claim sets already prevent re-counting
-  // the rows themselves).
-  const customersWithBilling = billedCustomers || new Set();
-  // Earliest conversion first, so it claims a customer's shared invoice rows.
+  // Within THIS source: a customer's invoice/service row is counted once even
+  // across their multiple won leads, and the fallback never re-bills a customer
+  // who already had billing here. Cross-source de-dup is handled separately by
+  // revenueSourceByCustomer (only the winning source attributes the customer).
+  const usedInvoiceIds = new Set();
+  const usedServiceIds = new Set();
+  const customersWithBilling = new Set();
+  // Earliest conversion first, so it claims a customer's invoice rows here.
   const orderedWonLeads = [...wonLeads].sort(
     (a, b) => new Date(a.converted_at || start) - new Date(b.converted_at || start),
   );
 
   for (const lead of orderedWonLeads) {
+    // Cross-source attribution: credit a customer's revenue only to the source of
+    // their earliest conversion. Other sources still count the conversion, not the
+    // revenue — so no double-count, and the credit follows conversion time.
+    if (revenueSourceByCustomer && lead.customer_id
+        && revenueSourceByCustomer.get(lead.customer_id) !== leadSourceId) {
+      continue;
+    }
     const convertedAt = new Date(lead.converted_at || start);
     let leadRevenue = 0;
 
@@ -318,7 +332,6 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInv
           leadRevenue = leadServices.reduce((sum, r) => sum + parseFloat(r.price || 0), 0);
         }
       }
-      if (leadRevenue > 0) customersWithBilling.add(lead.customer_id);
     }
 
     // Captured-value fallback — only when this customer has no billing in range
@@ -334,6 +347,9 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { claimedInv
       }
     }
 
+    // Mark billed AFTER the fallback too, so a customer's second won lead in this
+    // same source can't re-bill them (via invoices already claimed or the estimate).
+    if (leadRevenue > 0 && lead.customer_id) customersWithBilling.add(lead.customer_id);
     totalRevenue += leadRevenue;
   }
 
@@ -374,12 +390,35 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
   const query = db('lead_sources').orderBy('name');
   if (!includeInactive) query.where('is_active', true);
   const sources = await query;
-  const claimedInvoiceIds = new Set();
-  const claimedServiceIds = new Set();
-  const billedCustomers = new Set();
+
+  // Resolve the window once (ET month default, matching calculateSourceROI and
+  // /sources) so the attribution query and every per-source call use the same bounds.
+  const start = startDate || startOfETMonth();
+  const end = endDate || new Date();
+
+  // Global revenue attribution: credit each customer's revenue to the source of
+  // their EARLIEST conversion in the window, so a customer won under two sources
+  // is counted once and the credit follows conversion time, not source name.
+  const revenueSourceByCustomer = new Map();
+  if (sources.length) {
+    const wonLeads = await db('leads')
+      .whereIn('lead_source_id', sources.map((s) => s.id))
+      .where('status', 'won')
+      .where('first_contact_at', '>=', start)
+      .where('first_contact_at', '<=', end)
+      .whereNotNull('customer_id')
+      .orderBy('converted_at', 'asc') // PG sorts NULL converted_at last → real conversions win
+      .select('lead_source_id', 'customer_id', 'converted_at');
+    for (const l of wonLeads) {
+      if (!revenueSourceByCustomer.has(l.customer_id)) {
+        revenueSourceByCustomer.set(l.customer_id, l.lead_source_id);
+      }
+    }
+  }
+
   const results = [];
   for (const source of sources) {
-    const roi = await calculateSourceROI(source.id, startDate, endDate, { claimedInvoiceIds, claimedServiceIds, billedCustomers });
+    const roi = await calculateSourceROI(source.id, start, end, { revenueSourceByCustomer });
     if (roi) results.push(roi);
   }
   return results;

@@ -911,6 +911,13 @@ export function LeadsSection() {
         // Cost/ROI columns render from the analytics payload — refresh it too so
         // the just-logged cost is reflected immediately, not after a tab reload.
         loadSourceROI();
+        // The expanded detail row renders from `sourceROI` (/sources/:id); refresh
+        // it too so it doesn't show the pre-cost Total Cost/ROI until re-expanded.
+        if (expandedSource === formData.sourceId) {
+          adminFetch(`/admin/leads/sources/${formData.sourceId}`)
+            .then((detail) => setSourceROI(detail))
+            .catch(() => {});
+        }
       }
       setShowModal(null);
       setFormData({});
