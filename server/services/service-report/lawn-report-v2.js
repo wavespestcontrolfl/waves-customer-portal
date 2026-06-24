@@ -168,7 +168,12 @@ const SNAP_STATUS = { low: 'low', high: 'high', balanced: 'balanced', unknown: '
 // reading; otherwise fall back to the live irrigation-advice water context.
 function mapWater(waterContext, waterSnapshot = null) {
   const grassLabel = 'lawn';
-  if (waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown') {
+  // Only prefer the area snapshot when its inputs are actually known. status can read
+  // low/high from irrigation-only totals while rain is unsynced (interpretation =
+  // 'rain_unknown'); in that case fall back to the live irrigation-advice context
+  // rather than show misleading water totals.
+  if (waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+    && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
     return {
       rainInches: num(rain),
@@ -387,6 +392,25 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     waterStatus: effectiveWaterStatus,
     grassLabel,
   });
+
+  // ── Season-aware dormancy guard ────────────────────────────────────────────
+  // Applied to `categories` BEFORE the diagnosis/insights/snapshot derive, so a
+  // cool-stretch low-color reading is framed as seasonal EVERYWHERE — not surfaced
+  // as a needs-attention hero/insight that contradicts the "seasonal" card copy.
+  const assessMonth = lawnAssessment.assessmentDate ? (new Date(lawnAssessment.assessmentDate).getMonth() + 1) : null;
+  const dormancy = dormancyLikely({ colorHealth: scores.colorHealth, stressDamage: scores.stressDamage, month: assessMonth });
+  if (dormancy.likely) {
+    const colorCat = categories.find((c) => c.key === 'color_vigor');
+    if (colorCat && (colorCat.status === 'watch' || colorCat.status === 'needs_attention')) {
+      // Seasonally-expected low color is not a problem — demote it out of the issue
+      // set and reframe the copy. (Raw color score is unchanged, so the overall
+      // score stays honest.)
+      colorCat.status = 'healthy';
+      colorCat.seasonal = true;
+      colorCat.customerExplanation = 'Color is a little muted right now, which is normal for this cooler stretch — your lawn should green back up as it warms.';
+    }
+  }
+
   // Client VisualDiagnosisCards reads `explanation`; keep customerExplanation too.
   const diagnosis = categories.map((c) => ({ ...c, explanation: c.customerExplanation }));
 
@@ -481,19 +505,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     noActionNeeded: !realCustomerAction,
   };
 
-  // ── Season-aware guards ────────────────────────────────────────────────────
-  // Dormancy: a low color reading in a cool stretch is seasonal, not a problem — so
-  // reframe the Color & Vigor copy instead of implying decline.
-  const assessMonth = lawnAssessment.assessmentDate ? (new Date(lawnAssessment.assessmentDate).getMonth() + 1) : null;
-  const dormancy = dormancyLikely({ colorHealth: scores.colorHealth, stressDamage: scores.stressDamage, month: assessMonth });
-  if (dormancy.likely) {
-    const colorCat = diagnosis.find((c) => c.key === 'color_vigor');
-    if (colorCat && (colorCat.status === 'watch' || colorCat.status === 'needs_attention')) {
-      colorCat.seasonal = true;
-      colorCat.customerExplanation = 'Color is a little muted right now, which is normal for this cooler stretch — your lawn should green back up as it warms.';
-      colorCat.explanation = colorCat.customerExplanation;
-    }
-  }
+  // (Season-aware dormancy guard is applied above — before diagnosis/insights/snapshot
+  // derive — so the seasonal reframing reaches the hero + insights, not just the card.)
 
   const smsSummary = buildSmsSummary(snapshot, grassLabel);
   const beforeAfter = buildBeforeAfter(lawnAssessment);

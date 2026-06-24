@@ -4360,6 +4360,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
             const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
             lawnReportSmsSummary = gate.smsSummary || null;
+            // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
+            // fold the frozen synthesis back in so the later sending/sent writes (which
+            // spread recordStructuredNotes) don't clobber it.
+            if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
           } catch { /* best-effort — render-time reconciliation still applies */ }
         }
         const serviceReportV1SmsContext = serviceReportV1Delivery
@@ -4374,11 +4378,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           : null;
         if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
           sentSmsType = serviceReportV1SmsContext.smsType;
-          const body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
-            workflow: 'dispatch_service_complete',
-            entity_type: 'service_record',
-            entity_id: record.id,
-          });
+          // The DB service_report_v1 template carries no {summary_line}; when the
+          // write-gate froze a V2 lead, send the prebuilt body (which leads with that
+          // synthesis) so the customer sees it instead of the generic "report is
+          // ready" line. Otherwise keep the editable DB template.
+          let body;
+          if (lawnReportSmsSummary && serviceReportV1SmsContext.body) {
+            body = serviceReportV1SmsContext.body;
+          } else {
+            body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+              workflow: 'dispatch_service_complete',
+              entity_type: 'service_record',
+              entity_id: record.id,
+            });
+          }
           if (!body) throw new Error(`SMS template ${sentSmsType} is missing or inactive`);
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;

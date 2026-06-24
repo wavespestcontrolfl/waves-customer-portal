@@ -34,17 +34,23 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
   if (serviceLine !== 'lawn') return empty;
 
   try {
-    const { buildLawnAssessmentReportData } = require('./report-data');
-    const { buildLawnReportV2 } = require('./lawn-report-v2');
+    const { buildReportV1Data } = require('./report-data');
     const { reconcileLawnReport } = require('./report-consistency');
+    const { loadServiceRecordForPdf, ensureReportToken } = require('./pdf-queue');
 
-    const lawnAssessment = await buildLawnAssessmentReportData(service, 'lawn', knex).catch(() => null);
-    if (!lawnAssessment) return empty;
-
-    const reportV2 = buildLawnReportV2({ lawnAssessment, applications: [], actions: [] });
+    // Freeze the SAME reportV2 the customer report renders — built from the full
+    // inputs (applications, actions, mowing, customer concern, water snapshot) on a
+    // customer-JOINED record (lat/lng for area weather) — so the frozen SMS line
+    // can't diverge from the report the link opens. (gated on LAWN_REPORT_V2 by the
+    // caller; buildReportV1Data only emits reportV2 under that flag.)
+    const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
+    const record = joined || service;
+    const token = await ensureReportToken(service.id, knex);
+    const data = await buildReportV1Data(record, token, knex).catch(() => null);
+    const reportV2 = data && data.reportV2;
     if (!reportV2) return empty;
 
-    const fix = reconcileLawnReport({ data: { lawnAssessment }, reportV2 }) || { warnings: [] };
+    const fix = reconcileLawnReport({ data, reportV2 }) || { warnings: [] };
     const warnings = fix.warnings || [];
 
     // Surface contradictions to the office without blocking completion.
@@ -65,7 +71,7 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     const merged = { ...existing, lawnReportV2: frozen };
     await knex('service_records').where({ id: service.id }).update({ structured_notes: JSON.stringify(merged) });
 
-    return { smsSummary: frozen.smsSummary, warnings, persisted: true };
+    return { smsSummary: frozen.smsSummary, frozen, warnings, persisted: true };
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);
     return empty;
