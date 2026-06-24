@@ -267,6 +267,9 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
   `/api/public/estimates/:token/ask`,
   `/api/public/estimates/:token/find-slots`, `/api/reports/:token/*`,
+  the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
+  only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
+  same noindex/no-referrer/no-store headers as `/report/:token`),
   `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
   `/api/sendgrid-webhook`, `/api/lead-webhook`,
   `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,

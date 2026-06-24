@@ -1,4 +1,5 @@
 const { getServiceLineConfig } = require('./service-line-configs');
+const { frozenSmsSummary } = require('./lawn-report-write-gate');
 
 function normalizeName(value) {
   return String(value || '').trim().split(/\s+/)[0] || '';
@@ -65,6 +66,7 @@ function buildServiceReportV1Sms({
   advisory,
   fallbackAdvisory,
   payUrl,
+  summaryLine,
 } = {}) {
   const url = String(reportUrl || '').trim();
   if (!url) return '';
@@ -75,9 +77,12 @@ function buildServiceReportV1Sms({
   const exterior = normalizeMinutes(mergedAdvisory.exterior_reentry_min);
   const interior = normalizeMinutes(mergedAdvisory.interior_reentry_min);
 
-  const lines = [
-    `${greeting} your Waves service report is ready: ${url}`,
-  ];
+  // Prefer the frozen V2 synthesis line so the text matches the report's lead;
+  // fall back to the generic line when there's no synthesized summary.
+  const summary = String(summaryLine || '').trim();
+  const lines = summary
+    ? [`${greeting} ${summary.charAt(0).toLowerCase()}${summary.slice(1)}`, url]
+    : [`${greeting} your Waves service report is ready: ${url}`];
 
   if (exterior !== null && interior !== null) {
     lines.push(`Re-entry: ${exterior} min outside, ${interior} min inside.`);
@@ -130,6 +135,7 @@ function buildServiceReportV1DeliveryContext({
   reportUrl,
   smsReportUrl,
   payUrl,
+  summaryLine: summaryLineParam,
 } = {}) {
   if (!shouldSendServiceReportV1Delivery(record)) {
     return { enabled: false, body: '', smsType: null, metadata: {} };
@@ -139,6 +145,9 @@ function buildServiceReportV1DeliveryContext({
   const hasInvoiceLink = !!String(payUrl || '').trim();
   const progress = typedProgressContext(record);
   const smsType = serviceReportV1SmsType({ hasInvoiceLink, isProgress: progress.isProgress });
+  // Frozen V2 synthesis line (write-gate) — keeps the text on-message with the report.
+  // Not used for progress SMS (those lead with the progress headline).
+  const summaryLine = smsType === 'service_report_v1_progress' ? null : (summaryLineParam || frozenSmsSummary(record));
   const vars = buildServiceReportV1SmsVars({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
@@ -146,6 +155,7 @@ function buildServiceReportV1DeliveryContext({
     fallbackAdvisory: config.advisoryDefaults,
     payUrl,
   });
+  if (summaryLine) vars.summary_line = summaryLine;
   if (smsType === 'service_report_v1_progress') {
     vars.progress_headline = progress.headline;
   }
@@ -155,6 +165,7 @@ function buildServiceReportV1DeliveryContext({
     advisory: record.advisory,
     fallbackAdvisory: config.advisoryDefaults,
     payUrl,
+    summaryLine,
   });
 
   return {

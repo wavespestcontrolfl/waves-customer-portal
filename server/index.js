@@ -577,6 +577,7 @@ if (config.nodeEnv === 'production') {
     next();
   });
   app.get(/^\/report\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
+  app.get(/^\/recap\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
 
   app.use(express.static(clientBuild, {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year

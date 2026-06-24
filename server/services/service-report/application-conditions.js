@@ -237,10 +237,49 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   }
 }
 
+// Lowest recent overnight temp (°F) for dormancy reasoning — the min of the daily
+// temperature_2m_min over the trailing window. Returns null on any miss so callers
+// fall back to the calendar season. Best-effort, cached with the rain cache TTL.
+async function fetchRecentMinTempF({ latitude, longitude, pastDays = 7 } = {}) {
+  const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
+  const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
+  if (lat == null || lon == null) return null;
+  const key = `mintemp:${lat.toFixed(3)},${lon.toFixed(3)}:${pastDays}`;
+  const cached = _rainCache.get(key);
+  if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
+
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.searchParams.set('latitude', String(lat));
+  url.searchParams.set('longitude', String(lon));
+  url.searchParams.set('daily', 'temperature_2m_min');
+  url.searchParams.set('past_days', String(Math.max(1, Math.min(14, pastDays))));
+  url.searchParams.set('forecast_days', '1');
+  url.searchParams.set('temperature_unit', 'fahrenheit');
+  url.searchParams.set('timezone', 'America/New_York');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const mins = (payload?.daily?.temperature_2m_min || []).map(Number).filter((n) => Number.isFinite(n));
+    const value = mins.length ? Math.min(...mins) : null;
+    _rainCache.set(key, { at: Date.now(), value });
+    return value;
+  } catch (err) {
+    logger.warn(`[application-conditions] recent min temp fetch failed: ${err.message}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 module.exports = {
   fetchApplicationConditions,
   fetchOpenMeteoConditions,
   fetchServiceWeekWeather,
+  fetchRecentMinTempF,
   sumPrecipInches,
   et0SumToInches,
   rainWindowEndingOn,

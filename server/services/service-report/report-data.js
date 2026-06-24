@@ -8,6 +8,8 @@ const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
+const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -210,6 +212,14 @@ async function attachApprovedReportProductFacts(knex, products = []) {
   });
 }
 
+function formatPhoneDisplay(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return null;
+  const d = digits.length === 11 && digits[0] === '1' ? digits.slice(1) : digits;
+  if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  return String(raw).trim();
+}
+
 function numberOrNull(value) {
   // Nullish/empty must be null, not 0 — otherwise firstNumber() short-circuits
   // on a null first arg (Number(null) === 0) and never reaches its fallbacks,
@@ -249,14 +259,17 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
   const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
+  // PORTAL ENTRY WINS: what the customer enters in the portal is what the report
+  // shows. The customer's own schedule takes priority over turf/assessment readings.
   const irrigationInchesPerWeek = firstNumber(
+    prefsIrrigationInches,
     turfIrrigationInches,
     assessmentIrrigationInches,
-    prefsIrrigationInches,
   );
-  // The portal irrigation toggle (property_preferences.irrigation_system, which
-  // is backfilled to false) only governs a portal-sourced value. A higher-
-  // priority turf/assessment reading must NOT be suppressed by it.
+  // The portal irrigation toggle (property_preferences.irrigation_system, backfilled
+  // to false) only suppresses a value the customer DIDN'T enter — i.e. when the only
+  // available reading is the prefs one. An entered portal schedule (which wins above)
+  // is shown as-is; a turf/assessment reading is never suppressed by the toggle.
   const irrigationInchesFromPrefsOnly =
     turfIrrigationInches == null && assessmentIrrigationInches == null && prefsIrrigationInches != null;
   const irrigationInchesPerDay = irrigationInchesPerWeek == null ? null : irrigationInchesPerWeek / 7;
@@ -2318,8 +2331,131 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? reportWaveGuardTier
     : null;
 
+  // Lawn Report V2 — visual-insight payload (flag-gated, additive). Deterministic
+  // structure (diagnosis / water / mowing / treatment / trends) from the data already
+  // computed for V1; optional LLM narrative overlay (VOICE) varies the prose per visit
+  // and falls back to the deterministic copy field-by-field. Never blocks the report.
+  let reportV2 = null;
+  if (serviceLine === 'lawn' && process.env.LAWN_REPORT_V2 === 'true' && lawnAssessment) {
+    try {
+      // Phase 2: prefer the stored area water-intake snapshot (computed at
+      // completion); compute + persist on the fly if absent so a permanent report
+      // token self-heals. Also pull the area's 7-day rainfall for the rain chart.
+      let waterSnapshot = null;
+      let areaRain7d = null;
+      try {
+        const { computeLawnWaterIntakeSnapshot, getAreaDailyRainfall } = require('../lawn-water-area');
+        const snapDate = lawnAssessment.assessmentDate || service.service_date || null;
+        waterSnapshot = await knex('lawn_water_intake_snapshots').where({ service_record_id: service.id }).first().catch(() => null);
+        if (!waterSnapshot) {
+          waterSnapshot = await computeLawnWaterIntakeSnapshot({
+            customerId: service.customer_id,
+            serviceId: service.service_id || null,
+            serviceRecordId: service.id,
+            serviceDate: snapDate,
+            irrigationInchesPerWeek: lawnAssessment.waterContext?.irrigationInchesPerWeek,
+            targetWaterInchesPerWeek: lawnAssessment.waterContext?.targetInchesPerWeek,
+            signals: { overwatering: !!lawnAssessment.overwateringSignal },
+          }, knex).catch(() => null);
+        }
+        if (waterSnapshot && waterSnapshot.area_id && snapDate) {
+          const d = new Date(snapDate);
+          const s = new Date(d); s.setDate(s.getDate() - 6);
+          const fmt = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+          const daily = await getAreaDailyRainfall(waterSnapshot.area_id, fmt(s), fmt(d), knex).catch(() => []);
+          // Only render the 7-day chart with a COMPLETE window — a partial sync would
+          // show a misleading chart with missing/zero days (mirrors getAreaRainfall,
+          // which now returns unknown for an incomplete window).
+          const rainDays = new Set((daily || []).map((r) => (r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10)))).size;
+          if (Array.isArray(daily) && rainDays >= 7) {
+            areaRain7d = daily.map((r) => {
+              // r.date is a DATE — anchor at noon so the ET weekday label doesn't
+              // shift a day back from a UTC-midnight instant.
+              const ymd = r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10);
+              return {
+                d: new Date(`${ymd}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' }),
+                in: r.rain,
+              };
+            });
+          }
+        }
+      } catch { /* area calibration optional (tables may be unmigrated/unseeded) */ }
+
+      reportV2 = buildLawnReportV2({
+        lawnAssessment,
+        mowingHeight,
+        applications,
+        actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
+        customerConcern: structured.customerConcern || structured.customer_concern || '',
+        waterSnapshot,
+      });
+      if (reportV2 && areaRain7d && areaRain7d.length) reportV2.rain7d = areaRain7d;
+
+      // Next scheduled lawn visit. Honest-precision rule: a CONFIDENT date only from
+      // a real upcoming scheduled_services row (same allow-list as context-aggregator);
+      // otherwise a clearly-labeled cadence ESTIMATE from the service frequency; else
+      // omitted entirely. Never invent a precise date the data can't back.
+      if (reportV2) {
+        try {
+          const svcRaw = service.service_date;
+          const svcIso = svcRaw ? (svcRaw instanceof Date ? svcRaw.toISOString().slice(0, 10) : String(svcRaw).slice(0, 10)) : '';
+          const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          const afterIso = svcIso && svcIso > todayIso ? svcIso : todayIso;
+          const fmtDate = (iso) => new Date(`${String(iso).slice(0, 10)}T12:00:00Z`)
+            .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+          const nextRow = await knex('scheduled_services')
+            .where('customer_id', service.customer_id)
+            .andWhere('scheduled_date', '>', afterIso)
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'rescheduled'])
+            .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
+            .orderBy('scheduled_date', 'asc')
+            .first('scheduled_date')
+            .catch(() => null);
+          let nextVisit = null;
+          if (nextRow && nextRow.scheduled_date) {
+            nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
+          } else if (svcIso) {
+            const t = String(service.service_type || '').toLowerCase();
+            const m = t.match(/every\s+(\d+)\s+week/);
+            let weeks = m ? Number(m[1]) : null;
+            if (weeks == null) {
+              if (/bi-?weekly/.test(t)) weeks = 2;
+              else if (/bi-?monthly/.test(t)) weeks = 8;
+              else if (/monthly/.test(t)) weeks = 4;
+              else if (/quarterly/.test(t)) weeks = 13;
+              else if (/weekly/.test(t)) weeks = 1;
+            }
+            if (weeks) {
+              const est = new Date(`${svcIso}T12:00:00Z`);
+              est.setUTCDate(est.getUTCDate() + weeks * 7);
+              // Report tokens are permanent — only surface an ESTIMATED next visit when
+              // it's still in the future; reopening an old report must not show a past
+              // date as the "next visit".
+              if (est.getTime() > Date.now()) {
+                nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
+              }
+            }
+          }
+          if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;
+        } catch { /* next-visit lookup is best-effort */ }
+      }
+
+      if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
+        reportV2 = await applyLawnReportNarrative(reportV2, {
+          grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
+          observations: lawnAssessment?.observations || '',
+          customerConcern: structured.customerConcern || structured.customer_concern || '',
+        }).catch(() => reportV2);
+      }
+    } catch {
+      // Best-effort + additive: a V2 build hiccup must never break the report.
+      reportV2 = null;
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
+    reportV2,
     token,
     serviceRecordId: service.id,
     serviceType: service.service_type,
@@ -2337,6 +2473,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
+    // customerPhone/customerEmail intentionally NOT in the public report payload —
+    // the report token is a shareable bearer credential, so contact PII must not
+    // ride it. (Recap SMS loads the phone server-side via its own query.)
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     // Membership tier for this visit (see reportWaveGuardTier above). Consumed by the
     // report viewer to suppress the per-visit "Time on site" duration for members while
