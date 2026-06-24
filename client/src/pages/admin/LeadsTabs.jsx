@@ -629,8 +629,15 @@ export function LeadsSection() {
   const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
       if (!silent) setLoadError(null);
-      const data = await adminFetch("/admin/leads/sources");
+      // Pull the real revenue-based ROI alongside the source list so the Sources
+      // table shows the SAME numbers as Analytics (Channel/Matrix/Phone) instead
+      // of a placeholder — without waiting for the Analytics tab to be opened.
+      const [data, bs] = await Promise.all([
+        adminFetch("/admin/leads/sources"),
+        adminFetch("/admin/leads/analytics/by-source"),
+      ]);
       setSources(data.sources || []);
+      setBySource(bs.sources || []);
     } catch (e) {
       console.error("loadSources", e);
       if (!silent) setLoadError(e);
@@ -2607,6 +2614,9 @@ export function LeadsSection() {
   };
 
   const renderSources = () => {
+    // Real revenue-based ROI per source from /analytics/by-source (same backend
+    // as Channel Comparison / ROI Matrix / Phone Number ROI), keyed by id.
+    const roiBySourceId = new Map(bySource.map((b) => [b.source?.id, b]));
     return (
       <>
         {" "}
@@ -2692,15 +2702,25 @@ export function LeadsSection() {
                 const convRate =
                   monthLeads > 0 ? (monthConv / monthLeads) * 100 : 0;
                 const mc = parseFloat(src.monthly_cost || 0);
-                const cpl = monthLeads > 0 ? mc / monthLeads : 0;
-                const cpa = monthConv > 0 ? mc / monthConv : 0;
-                // Rough ROI: just show indicator based on conversion cost
-                const roi =
-                  mc > 0 && monthConv > 0
-                    ? ((monthConv * 150 - mc) / mc) * 100
-                    : monthConv > 0
-                      ? 9999
-                      : 0;
+                // Real revenue-based cost + ROI from the analytics backend when
+                // the source is active; fall back to the configured monthly cost
+                // for inactive sources that have no ROI row.
+                const r = roiBySourceId.get(src.id);
+                const cpl = r
+                  ? r.costPerLead
+                  : monthLeads > 0
+                    ? mc / monthLeads
+                    : 0;
+                const cpa = r
+                  ? r.costPerAcquisition
+                  : monthConv > 0
+                    ? mc / monthConv
+                    : 0;
+                const roi = r ? r.roi : null;
+                // Negative ROI (spend, no revenue) is meaningful — only blank it
+                // when the source had no cost AND no revenue in range.
+                const hasRoiSignal =
+                  !!r && (r.totalCost > 0 || r.totalRevenue > 0);
                 const isExp = expandedSource === src.id;
 
                 return (
@@ -2819,10 +2839,10 @@ export function LeadsSection() {
                           ...mono,
                           fontSize: 13,
                           fontWeight: 600,
-                          color: roiColor(roi),
+                          color: roiColor(roi || 0),
                         }}
                       >
-                        {roi > 0 ? fmtPct(roi) : "--"}
+                        {hasRoiSignal ? fmtPct(roi) : "--"}
                       </td>{" "}
                     </tr>
                     {isExp && sourceROI && (

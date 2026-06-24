@@ -240,54 +240,70 @@ async function calculateSourceROI(leadSourceId, startDate, endDate) {
     totalCost = parseFloat(source.monthly_cost) * months;
   }
 
-  // Revenue from converted leads
+  // Revenue attributable to THIS source's conversions — computed PER won-lead
+  // and strictly bounded:
+  //   • window-bounded [start, end]. The old query was `created_at >= start`
+  //     with NO upper bound, so revenue leaked in from AFTER the period while
+  //     leads and costs were windowed — inflating ROI.
+  //   • conversion-bounded. Only revenue dated at/after the lead's converted_at
+  //     counts, so a customer's PRE-conversion billing history is never credited
+  //     to the source that won them.
+  // Per-lead fallback chain: invoices → service_records → the monthly_value /
+  // initial_service_value captured at conversion (for a won customer not yet
+  // billed in range).
   let totalRevenue = 0;
-  const customerIds = wonLeads.map(l => l.customer_id).filter(Boolean);
+  const wonCustomerIds = [...new Set(wonLeads.map(l => l.customer_id).filter(Boolean))];
 
-  if (customerIds.length > 0) {
-    // Try invoices table for actual revenue
+  let invoiceRows = [];
+  let serviceRows = [];
+  if (wonCustomerIds.length > 0) {
     try {
-      const invoiceRevenue = await db('invoices')
-        .whereIn('customer_id', customerIds)
+      invoiceRows = await db('invoices')
+        .whereIn('customer_id', wonCustomerIds)
         .where('created_at', '>=', start)
-        .sum('total as total')
-        .first();
-      if (invoiceRevenue && parseFloat(invoiceRevenue.total) > 0) {
-        totalRevenue = parseFloat(invoiceRevenue.total);
-      }
+        .where('created_at', '<=', end)
+        .select('customer_id', 'total', 'created_at');
     } catch (e) {
-      // invoices table may not exist or have different schema
+      invoiceRows = []; // invoices table may not exist / differ — fall through
     }
+    try {
+      serviceRows = await db('service_records')
+        .whereIn('customer_id', wonCustomerIds)
+        .where('service_date', '>=', start)
+        .where('service_date', '<=', end)
+        .select('customer_id', 'price', 'service_date');
+    } catch (e) {
+      serviceRows = [];
+    }
+  }
 
-    // Fallback: try service_records
-    if (totalRevenue === 0) {
-      try {
-        const serviceRevenue = await db('service_records')
-          .whereIn('customer_id', customerIds)
-          .where('service_date', '>=', start)
-          .sum('price as total')
-          .first();
-        if (serviceRevenue && parseFloat(serviceRevenue.total) > 0) {
-          totalRevenue = parseFloat(serviceRevenue.total);
-        }
-      } catch (e) {
-        // fallback to monthly_value estimate
+  for (const lead of wonLeads) {
+    const convertedAt = new Date(lead.converted_at || lead.updated_at || start);
+    let leadRevenue = 0;
+
+    if (lead.customer_id) {
+      leadRevenue = invoiceRows
+        .filter(r => r.customer_id === lead.customer_id && new Date(r.created_at) >= convertedAt)
+        .reduce((sum, r) => sum + parseFloat(r.total || 0), 0);
+      if (leadRevenue === 0) {
+        leadRevenue = serviceRows
+          .filter(r => r.customer_id === lead.customer_id && new Date(r.service_date) >= convertedAt)
+          .reduce((sum, r) => sum + parseFloat(r.price || 0), 0);
       }
     }
 
-    // Final fallback: monthly_value * months since conversion
-    if (totalRevenue === 0) {
-      for (const lead of wonLeads) {
-        if (lead.monthly_value) {
-          const convertedAt = lead.converted_at || lead.updated_at;
-          const monthsSince = Math.max(1, Math.ceil((new Date(end) - new Date(convertedAt)) / (30 * 86400000)));
-          totalRevenue += parseFloat(lead.monthly_value) * monthsSince;
-        }
-        if (lead.initial_service_value) {
-          totalRevenue += parseFloat(lead.initial_service_value);
-        }
+    if (leadRevenue === 0) {
+      // Not billed in range yet — estimate from the values captured at conversion.
+      if (lead.monthly_value) {
+        const monthsSince = Math.max(1, Math.ceil((new Date(end) - convertedAt) / (30 * 86400000)));
+        leadRevenue += parseFloat(lead.monthly_value) * monthsSince;
+      }
+      if (lead.initial_service_value) {
+        leadRevenue += parseFloat(lead.initial_service_value);
       }
     }
+
+    totalRevenue += leadRevenue;
   }
 
   const costPerLead = totalLeads > 0 ? totalCost / totalLeads : 0;
