@@ -2917,8 +2917,42 @@ describe('public estimate one-time breakdown', () => {
     const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, null, 199);
     expect(list).not.toBeNull();
     expect(list[0]).toEqual(expect.objectContaining({ service: 'one_time_pest', label: 'One-Time Pest Control' }));
-    // The accepted one-time choice is the pest visit, NOT the Bora-Care add-on.
-    expect(list.some((row) => row.service === 'bora_care')).toBe(false);
+    // The selected one-time pest visit is the lead item, and the Bora-Care add-on
+    // rides alongside it (billed in the one-time path, not just the recurring one).
+    const bora = list.find((row) => row.service === 'bora_care');
+    expect(bora).toEqual(expect.objectContaining({ label: 'Bora-Care', price: 1051 }));
+    // Amount = pest visit + the preserved Bora-Care add-on, and matches the list.
+    const listTotal = Math.round(list.reduce((sum, row) => sum + Number(row.price || 0), 0) * 100) / 100;
+    expect(listTotal).toBeGreaterThanOrEqual(1051);
+    expect(oneTimeChoiceAmountForEstimate(estimate, estData)).toBe(listTotal);
+  });
+
+  test('a fixed manual one-time discount is applied once across the pest add-ons, not per category', () => {
+    // A roach-cleanout specialty + a Bora-Care add-on with a $100 one-time manual
+    // discount slice: the slice must be distributed once across BOTH rows, never
+    // applied separately to each (which would double the discount).
+    const estimate = { show_one_time_option: true };
+    const estData = {
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50, perTreatment: 120 }] },
+        oneTime: {
+          total: 1551,
+          items: [
+            { service: 'german_roach', name: 'German Roach Cleanout', price: 500, detail: '3 visit program' },
+            { service: 'bora_care', name: 'Bora-Care', price: 1051 },
+          ],
+        },
+        manualDiscount: { type: 'FIXED', amount: 100, oneTimeAmount: 100 },
+      },
+    };
+
+    const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, null, 199);
+    const addOns = list.filter((row) => row.service === 'german_roach' || row.service === 'bora_care');
+    const totalDiscount = addOns.reduce((sum, row) => sum + Number(row.manualDiscountApplied || 0), 0);
+    expect(Math.round(totalDiscount * 100) / 100).toBe(100);
+    // Net add-on total = 500 + 1051 - 100 (slice applied exactly once).
+    const addOnNet = addOns.reduce((sum, row) => sum + Number(row.price || 0), 0);
+    expect(Math.round(addOnNet * 100) / 100).toBe(1451);
   });
 
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
