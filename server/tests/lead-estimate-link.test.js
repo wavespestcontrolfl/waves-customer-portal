@@ -300,6 +300,14 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
           if (table === 'leads' && clause && 'estimate_id' in clause) {
             return Promise.resolve(opts.leadsByEstimate || []);
           }
+          // customerHasWonLead: .where({ customer_id, status: 'won' }).first('id')
+          if (table === 'leads' && clause && 'customer_id' in clause && 'status' in clause) {
+            return { first: async () => opts.customerWonLead || null };
+          }
+          // findOpenLeadsForCustomer: .where({ customer_id }).whereNotIn('status', [...])
+          if (table === 'leads' && clause && 'customer_id' in clause) {
+            return { whereNotIn: () => Promise.resolve(opts.customerOpenLeads || []) };
+          }
           return Promise.resolve([]);
         },
         whereNotIn() {
@@ -474,5 +482,115 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
 
     expect(result).toMatchObject({ converted: true, count: 2, leadIds: ['L1', 'L2'] });
     expect(markConverted).toHaveBeenCalledTimes(2);
+  });
+
+  // Tier 2 — customer-link match (the Holly case): an open lead already carrying
+  // a customer_id, which the contact fallback (customer_id IS NULL) can't see.
+  test('converts a customer-linked open lead on the customer FIRST close', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      // Originating, and an ET-vs-UTC boundary case: first contacted 8:30pm EDT on
+      // Jun 1 (= Jun 2 00:30 UTC) — the SAME ET day the customer became one. A UTC
+      // day comparison would mis-bucket it to Jun 2 and wrongly skip; ET must convert.
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-06-01' },
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', first_contact_at: '2026-06-02T00:30:00Z' }],
+      customerWonLead: null, // no prior won lead
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'service_completed',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toMatchObject({ converted: true, leadIds: ['L9'] });
+    expect(markConverted).toHaveBeenCalledTimes(1);
+  });
+
+  test('does NOT convert an add-on lead created AFTER the customer became a customer', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      // Established customer (member_since long ago); the open lead is a later
+      // add-on inquiry (first contacted well after) — must not be swept.
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2025-01-01' },
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', first_contact_at: '2026-06-15' }],
+      customerWonLead: null, // no won lead, yet still established by tenure
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'invoice_sent',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'customer_link_not_originating' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('for an estimate-scoped event, does NOT convert a lead tied to a DIFFERENT estimate', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      estimate: { id: 'estA', customer_id: 'c1' }, // deposit paid on estimate A
+      leadsByEstimate: [], // no lead FK-linked to estimate A
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-06-01' },
+      // The customer's only open lead is linked to a DIFFERENT estimate (B).
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1', estimate_id: 'estB', first_contact_at: '2026-05-20T12:00:00Z' }],
+      customerWonLead: null,
+      contactLeads: [],
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'deposit_paid',
+      estimateId: 'estA',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'no_open_lead' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('does NOT convert when the customer already has a won lead (established → add-on not swept)', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100' },
+      customerOpenLeads: [{ id: 'L9', status: 'new', customer_id: 'c1' }],
+      customerWonLead: { id: 'Lold' }, // already closed a deal → L9 is an add-on
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'invoice_sent',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'customer_link_established' });
+    expect(markConverted).not.toHaveBeenCalled();
+  });
+
+  test('skips when the customer has 2+ open leads (ambiguous which one closed)', async () => {
+    const markConverted = jest.fn().mockResolvedValue();
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100' },
+      customerOpenLeads: [
+        { id: 'L9', status: 'new', customer_id: 'c1' },
+        { id: 'L10', status: 'contacted', customer_id: 'c1' },
+      ],
+      customerWonLead: null,
+    });
+
+    const result = await convertLeadFromEvent({
+      source: 'service_completed',
+      customerId: 'c1',
+      database,
+      leadAttributionService: { markConverted },
+    });
+
+    expect(result).toEqual({ converted: false, reason: 'ambiguous_customer_link' });
+    expect(markConverted).not.toHaveBeenCalled();
   });
 });

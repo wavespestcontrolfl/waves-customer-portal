@@ -1,8 +1,17 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
+const { etDateString } = require('../utils/datetime-et');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
+
+// A DATE column comes back as a 'YYYY-MM-DD' string or a UTC-midnight Date — take
+// its calendar day directly, without shifting it through a timezone.
+function dateOnly(v) {
+  if (v == null) return null;
+  if (typeof v === 'string') return v.slice(0, 10);
+  return new Date(v).toISOString().slice(0, 10);
+}
 
 function normalizePhone(value) {
   const digits = String(value || '').replace(/\D/g, '');
@@ -281,6 +290,62 @@ async function findUnconvertedLeadsByContact(database, phone, email) {
     });
 }
 
+// Customer-link match — an OPEN lead already attached to the EXACT customer the
+// event is about. Tighter than the contact fallback above: the lead is
+// explicitly tied to this customer (e.g. its `customer_id` was stamped when the
+// customer record was created), not merely sharing a phone/email. The contact
+// fallback can't see these (its `customer_id IS NULL` guard), which is why an
+// originating lead that already carries a `customer_id` while still open never
+// auto-converts. convertLeadFromEvent gates this (single open lead + the
+// customer's FIRST close) so it can't sweep an established customer's add-on.
+async function findOpenLeadsForCustomer(database, customerId) {
+  if (!customerId) return [];
+  return database('leads')
+    .where({ customer_id: customerId })
+    .whereNotIn('status', [...CLOSED_LEAD_STATUSES]);
+}
+
+// First-close guard: if this customer already has a WON lead, a separate open
+// lead is an add-on inquiry — not the originating deal — so it must not
+// auto-convert on a routine invoice/visit. A genuinely-won add-on still
+// converts through the authoritative estimate-link path when its estimate is
+// accepted.
+async function customerHasWonLead(database, customerId) {
+  if (!customerId) return false;
+  const won = await database('leads')
+    .where({ customer_id: customerId, status: 'won' })
+    .first('id');
+  return !!won;
+}
+
+// Originating-lead test — the real first-close signal. A `status='won'` lead is
+// NOT a reliable "established customer" marker: customers can be active (booked,
+// invoiced, completed services) with no won lead at all, and add-on inquiry
+// leads are stamped with `customer_id`. So gate on TIMING instead: the open lead
+// is the originating deal only if it was first contacted on/before the customer
+// became a customer; a lead created AFTER that is a later add-on. `member_since`
+// (else the customer's created date) is the same "became a customer" date the
+// KPI conversion windows use (server/services/customer-stages.js). Fail-closed:
+// if either date is unknown, treat the lead as NOT originating (don't convert).
+async function isOriginatingLead(database, customerId, lead) {
+  const leadStart = lead.first_contact_at || lead.created_at;
+  if (!leadStart) return false;
+  const customer = await database('customers')
+    .where({ id: customerId })
+    .first('member_since', 'created_at');
+  if (!customer) return false;
+  // Compare ET calendar days — the same conversion date customer-stages.js uses.
+  // first_contact_at/created_at are timestamps → convert via the ET helper (a UTC
+  // day would mis-bucket an evening-ET contact as the next day and wrongly skip).
+  // member_since is a DATE column (already an ET calendar day) → read as-is.
+  const leadDay = etDateString(new Date(leadStart));
+  const becameDay = customer.member_since != null
+    ? dateOnly(customer.member_since)
+    : (customer.created_at != null ? etDateString(new Date(customer.created_at)) : null);
+  if (!becameDay) return false;
+  return leadDay <= becameDay;
+}
+
 async function convertLeadFromEvent({
   source,
   estimateId = null,
@@ -317,16 +382,16 @@ async function convertLeadFromEvent({
       }
     }
 
-    // Resolve the originating lead:
-    //  1. estimate link (`leads.estimate_id`) — authoritative.
-    //  2. contact match among UNCONVERTED leads — the originating lead that was
-    //     never linked. We do NOT match every open lead on the customer; see
-    //     findUnconvertedLeadsByContact for why.
+    // Resolve the originating lead, most-authoritative first:
+    //  1. estimate link (`leads.estimate_id`) — authoritative, convert all.
+    //  2. customer-link — an open lead tied to the EXACT customer of this event,
+    //     gated to the customer's FIRST close + a single open lead.
+    //  3. contact fallback — an open, never-linked lead matched by phone/email.
     let candidates = [];
-    let viaEstimateLink = false;
+    let resolution = null; // 'estimate' | 'customer_link' | 'contact'
     if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
-      if (candidates.length) viaEstimateLink = true;
+      if (candidates.length) resolution = 'estimate';
     }
     if (!candidates.length) {
       if (!resolvedPhone && !resolvedEmail && resolvedCustomerId) {
@@ -334,19 +399,56 @@ async function convertLeadFromEvent({
         resolvedPhone = customer?.phone || null;
         resolvedEmail = customer?.email || null;
       }
-      if (resolvedPhone || resolvedEmail) {
+
+      // Tier 2 — customer-link. Catches an originating lead that already carries
+      // a `customer_id` (so the contact fallback can't see it). Convert ONLY the
+      // customer's first close: exactly one open lead, no prior won lead, AND
+      // that lead is the originating deal (first contacted on/before they became
+      // a customer). Anything else is an add-on for an established customer —
+      // skip rather than guess which deal the event closed.
+      if (resolvedCustomerId) {
+        let linked = await findOpenLeadsForCustomer(database, resolvedCustomerId);
+        // For an estimate-scoped event (deposit_paid), a lead tied to a DIFFERENT
+        // estimate belongs to that deal — exclude it so we never convert it or
+        // misattribute this estimate's value hints. (Tier 1 already handled a
+        // lead linked to THIS estimate.)
+        if (estimateId) {
+          linked = linked.filter((l) => !l.estimate_id || l.estimate_id === estimateId);
+        }
+        if (linked.length) {
+          if (linked.length > 1) {
+            logger.warn(`[lead-trigger] ${source} customer-link skip — ${linked.length} open leads (ambiguous)`, {
+              source, customerId: resolvedCustomerId, leadIds: linked.map((l) => l.id),
+            });
+            return { converted: false, reason: 'ambiguous_customer_link' };
+          }
+          const established = await customerHasWonLead(database, resolvedCustomerId);
+          const originating = await isOriginatingLead(database, resolvedCustomerId, linked[0]);
+          if (established || !originating) {
+            logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {
+              source, customerId: resolvedCustomerId, leadIds: linked.map((l) => l.id),
+            });
+            return { converted: false, reason: established ? 'customer_link_established' : 'customer_link_not_originating' };
+          }
+          candidates = linked;
+          resolution = 'customer_link';
+        }
+      }
+
+      // Tier 3 — contact fallback (never-linked, customer_id IS NULL).
+      if (!candidates.length && (resolvedPhone || resolvedEmail)) {
         candidates = await findUnconvertedLeadsByContact(database, resolvedPhone, resolvedEmail);
+        if (candidates.length) resolution = 'contact';
       }
     }
 
     const open = (candidates || []).filter((lead) => lead && !CLOSED_LEAD_STATUSES.has(lead.status));
     if (!open.length) return { converted: false, reason: 'no_open_lead' };
     // FK-linked leads are authoritatively tied to THIS estimate, so convert them
-    // all. Contact-fallback matches are fuzzy — 2+ open leads on one phone/email
-    // can be distinct deals, and an event-driven trigger only proves ONE closed.
-    // Skip the ambiguous case rather than mass-converting unrelated leads, exactly
-    // as markLinkedLeadEstimateAccepted's standalone-estimate path does.
-    if (!viaEstimateLink && open.length > 1) {
+    // all; tier 2 already enforced a single first-close lead. Only the fuzzy
+    // contact fallback needs the ambiguity guard — 2+ open leads on one
+    // phone/email can be distinct deals, and an event proves only ONE closed.
+    if (resolution === 'contact' && open.length > 1) {
       logger.warn(`[lead-trigger] ${source} ambiguous contact match (${open.length} open leads) — skipping`, {
         source,
         estimateId,
