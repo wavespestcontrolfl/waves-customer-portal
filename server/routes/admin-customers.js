@@ -19,6 +19,7 @@ const CustomerCredit = require('../services/customer-credit');
 const {
   normalizeContactName,
   normalizeContactPhone,
+  normalizeContactEmail,
   normalizeContactStreet,
   normalizeContactCity,
   normalizeContactZip,
@@ -970,11 +971,15 @@ async function ensureCustomerAccount(trx, input) {
   const existing = await findAccountByContact(trx, input);
   if (existing?.accountId) return existing;
 
+  // Canonical-format the account row here so callers that pass raw lead data
+  // (e.g. admin-leads lead→customer conversion) still create a normalized
+  // account, matching the linked customer row. Idempotent for callers that
+  // already normalized their input (admin create / quick-add).
   const [account] = await trx('customer_accounts').insert({
-    first_name: input.firstName,
-    last_name: input.lastName,
-    phone: input.phone || null,
-    email: input.email ? String(input.email).trim().toLowerCase() : null,
+    first_name: normalizeContactName(input.firstName),
+    last_name: normalizeContactName(input.lastName),
+    phone: normalizeContactPhone(input.phone) || null,
+    email: input.email ? normalizeContactEmail(input.email) : null,
     company_name: input.companyName || null,
   }).returning('*');
 

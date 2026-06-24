@@ -15,7 +15,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
-const { normalizeWebsiteQuoteContact, applyContactNormalization } = require('../utils/intake-normalize');
+const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -348,8 +348,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const quoteFullAddress = normalizedAddress.fullAddress || [quoteAddress, quoteCity, [quoteState, quoteZip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
 
     const contact = normalizeWebsiteQuoteContact({ firstName, lastName, email, phone });
-    const contactFirstName = contact.firstName;
-    const contactLastName = contact.lastName;
+    // Proper-case here (normalizeWebsiteQuoteContact only trims) so the leads
+    // row written earlier in this request and the customer row are both
+    // canonical — otherwise every quote like "CHARLES SANTIAGO" reintroduces raw
+    // lead data after the backfill.
+    const contactFirstName = normalizeContactName(contact.firstName);
+    const contactLastName = normalizeContactName(contact.lastName);
     const contactEmail = contact.email;
     const contactPhone = contact.phoneForStorage;
     const normalizedPhone = contact.phoneE164;

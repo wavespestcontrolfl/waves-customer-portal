@@ -53,7 +53,10 @@ const LEAD_FIELDS = {
   last_name: normalizeContactName,
   email: normalizeContactEmail,
   phone: normalizeContactPhone,
-  address: normalizeContactStreet,
+  // NOTE: leads.address holds a FULL address ("123 Main Street, Port Charlotte,
+  // FL 33948"), not just a street line. Running street-line normalization on it
+  // would corrupt the state casing ("FL" -> "Fl") and leave the suffix
+  // un-abbreviated, so the full-address column is intentionally left untouched.
   city: normalizeContactCity,
   zip: normalizeContactZip,
 };
@@ -132,6 +135,17 @@ async function backfillTable(knex, table, fieldMap, idCol = 'id') {
 
   console.log(`[backfill-contact-normalization] ${table}: updated=${updated} collisions=${collisions}`);
 }
+
+// Run OUTSIDE knex's default per-migration transaction. The whole point of the
+// catch/retry below is to tolerate a UNIQUE email/phone violation from a
+// pre-existing duplicate — but inside a transaction, Postgres aborts the entire
+// transaction on the first failed statement, so the retry (and every later row)
+// would fail with "current transaction is aborted". With no wrapping
+// transaction each UPDATE is autonomous; a violation fails only that statement.
+// Safe because the backfill is idempotent and re-runnable, so a mid-run crash
+// simply resumes (knex won't mark the migration done) and re-normalizes
+// already-clean rows as no-ops.
+exports.config = { transaction: false };
 
 exports.up = async function up(knex) {
   await backfillTable(knex, 'customers', CUSTOMER_FIELDS);
