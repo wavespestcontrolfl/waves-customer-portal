@@ -126,7 +126,10 @@ router.get('/analytics/overview', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
     const start = start_date ? new Date(start_date) : startOfETMonth();
-    const end = end_date ? new Date(end_date) : new Date();
+    // parseInclusiveEnd → end-of-ET-day, so a date-only end_date matches the
+    // by-source / by-channel windows the ROI aggregation below reconciles with
+    // (raw new Date('2026-06-30') is midnight UTC = June 29 ET, dropping a day).
+    const end = end_date ? parseInclusiveEnd(end_date) : new Date();
 
     const leads = await db('leads')
       .where('first_contact_at', '>=', start)
@@ -175,8 +178,12 @@ router.get('/analytics/overview', async (req, res, next) => {
     const sourceRoi = await leadAttribution.calculateAllSourceROI(start, end);
     const revenue = sourceRoi.reduce((s, r) => s + parseFloat(r.totalRevenue || 0), 0);
     const costTotal = sourceRoi.reduce((s, r) => s + parseFloat(r.totalCost || 0), 0);
+    // CPA divides by the SAME attributed cohort as cost/revenue (sourced
+    // conversions), not the all-leads `won` count — otherwise active-source cost
+    // over all wins (incl. unattributed / inactive-source) understates CPA.
+    const attributedConversions = sourceRoi.reduce((s, r) => s + (r.conversions || 0), 0);
 
-    const cpa = won > 0 ? Math.round(costTotal / won * 100) / 100 : 0;
+    const cpa = attributedConversions > 0 ? Math.round(costTotal / attributedConversions * 100) / 100 : 0;
     const roi = costTotal > 0 ? Math.round((revenue - costTotal) / costTotal * 1000) / 10 : 0;
 
     res.json({
