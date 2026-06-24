@@ -10,6 +10,7 @@ const {
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
+const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { autopayActivePredicate } = require('../services/autopay-eligibility');
 
@@ -1079,14 +1080,50 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
     const totalLeads = rows.reduce((acc, r) => acc + parseInt(r.leads), 0);
     const totalBooked = rows.reduce((acc, r) => acc + parseInt(r.booked), 0);
 
+    // Enrich each source with real-invoice revenue / cost / ROI — the same
+    // per-won-lead, conversion-bounded, de-duped attribution the Leads workspace
+    // uses (calculateAllSourceROI). Mapped by source NAME and aggregated by name
+    // (names aren't unique) to match how the client merges rows. Best-effort:
+    // a failure must not blank the panel, so revenue falls back to null.
+    //
+    // win.from / win.to are ET date strings (inclusive of the `to` day); feed
+    // the helper matching ET-day Date bounds so its revenue window lines up with
+    // the leads window above (applyETTimestampWindow), not a UTC-shifted one.
+    const roiByName = new Map();
+    let totalRevenue = null;
+    try {
+      const roiStart = parseETDateTime(`${win.from}T00:00`);
+      const roiEnd = parseETDateTime(`${win.to}T23:59:59.999`);
+      const roiRows = await leadAttribution.calculateAllSourceROI(roiStart, roiEnd, { includeInactive: true });
+      totalRevenue = roiRows.reduce((acc, r) => acc + (r.totalRevenue || 0), 0);
+      for (const r of roiRows) {
+        const ex = roiByName.get(r.source.name);
+        if (ex) {
+          ex.revenue += r.totalRevenue || 0;
+          ex.cost += r.totalCost || 0;
+        } else {
+          roiByName.set(r.source.name, { revenue: r.totalRevenue || 0, cost: r.totalCost || 0 });
+        }
+      }
+      for (const v of roiByName.values()) {
+        v.roi = v.cost > 0
+          ? Math.round(((v.revenue - v.cost) / v.cost) * 1000) / 10
+          : (v.revenue > 0 ? 9999 : 0);
+      }
+    } catch (err) {
+      logger.error(`[admin-dashboard] /leads-by-source ROI enrich failed: ${err.message}`);
+    }
+
     res.json({
       period: win,
       total_leads: totalLeads,
       total_booked: totalBooked,
+      total_revenue: totalRevenue,
       overall_conversion_pct: totalLeads > 0 ? Math.round((totalBooked / totalLeads) * 1000) / 10 : null,
       sources: rows.map((r) => {
         const leads = parseInt(r.leads);
         const booked = parseInt(r.booked);
+        const ro = roiByName.get(r.name);
         return {
           name: r.name,
           sourceType: r.source_type || 'unattributed',
@@ -1096,6 +1133,9 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
           convertedToCustomer: parseInt(r.converted_to_customer),
           monthlyValue: parseFloat(r.monthly_value || 0),
           conversionPct: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
+          revenue: ro ? ro.revenue : null,
+          cost: ro ? ro.cost : null,
+          roi: ro ? ro.roi : null,
         };
       }),
       excluded_internal_customers: INTERNAL_TEST_CUSTOMERS,

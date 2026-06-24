@@ -644,8 +644,12 @@ function mergeAttributionRows(calls, leads) {
         leads: 0,
         booked: 0,
         conversionPct: null,
+        revenue: null,
+        cost: null,
+        roi: null,
         hasCalls: false,
         hasLeads: false,
+        hasRevenue: false,
       });
     }
     return byName.get(name);
@@ -672,6 +676,15 @@ function mergeAttributionRows(calls, leads) {
     row.hasLeads = true;
     if (row.channel == null) row.channel = l.channel || null;
     if (row.sourceType == null) row.sourceType = l.sourceType ?? null;
+    // Revenue/cost/ROI are already aggregated by source NAME server-side, so the
+    // same value rides on every duplicate-named lead row — SET (not add) to avoid
+    // double-counting when the client also merges those rows by name.
+    if (l.revenue != null) {
+      row.revenue = l.revenue;
+      row.hasRevenue = true;
+    }
+    if (l.cost != null) row.cost = l.cost;
+    if (l.roi != null) row.roi = l.roi;
   }
   // Recompute conversion from aggregated totals (a per-row pct can't be summed);
   // null for sources with no leads so the cell shows "—" and sorts as absent.
@@ -689,7 +702,8 @@ function mergeAttributionRows(calls, leads) {
 function attributionMetric(row, key) {
   if ((key === 'calls' || key === 'uniqueCallers') && !row.hasCalls) return null;
   if ((key === 'leads' || key === 'booked' || key === 'conversionPct') && !row.hasLeads) return null;
-  return row[key];
+  if (key === 'revenue' && !row.hasRevenue) return null;
+  return row[key]; // roi is already null when absent
 }
 
 const SCORECARD_COLUMNS = [
@@ -698,6 +712,8 @@ const SCORECARD_COLUMNS = [
   { key: 'leads', label: 'Leads' },
   { key: 'booked', label: 'Booked' },
   { key: 'conversionPct', label: 'Conv' },
+  { key: 'revenue', label: 'Revenue' },
+  { key: 'roi', label: 'ROI' },
 ];
 
 function sortAttributionRows(rows, key, dir) {
@@ -715,11 +731,12 @@ function sortAttributionRows(rows, key, dir) {
   });
 }
 
-function FunnelStat({ label, value, accent }) {
+function FunnelStat({ label, value, accent, money }) {
+  const display = value == null ? '—' : money ? fmtMoneyCompact(value) : value.toLocaleString();
   return (
     <div className="flex-1 min-w-0">
       <div className={cn('u-nums text-22 leading-none text-ink-primary', accent && 'font-medium')}>
-        {value != null ? value.toLocaleString() : '—'}
+        {display}
       </div>
       <div className="u-label text-ink-tertiary mt-1">{label}</div>
     </div>
@@ -770,7 +787,8 @@ function ChannelMixBar({ channels }) {
   );
 }
 
-const SCORECARD_GRID = 'grid-cols-[minmax(0,1fr)_3.25rem_3.25rem_3.25rem_3.25rem_3rem]';
+const SCORECARD_GRID =
+  'grid-cols-[minmax(0,1fr)_3rem_3rem_3rem_3rem_3rem_4.25rem_3.75rem]';
 
 export function AttributionScorecard({ callsBySource, leadsBySource, channelMix, loading, error }) {
   const [sortKey, setSortKey] = useState('leads');
@@ -785,7 +803,7 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
   const sorted = sortAttributionRows(rows, sortKey, sortDir);
   // The faint in-row bar tracks the sorted column (falls back to leads for the
   // name / conversion sorts), so visual weight always matches the ranking.
-  const barKey = ['calls', 'uniqueCallers', 'leads', 'booked'].includes(sortKey) ? sortKey : 'leads';
+  const barKey = ['calls', 'uniqueCallers', 'leads', 'booked', 'revenue'].includes(sortKey) ? sortKey : 'leads';
   const barMax = Math.max(...sorted.map((r) => r[barKey] || 0), 1);
 
   const onSort = (key) => {
@@ -807,11 +825,13 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
         <FunnelArrow />
         <FunnelStat label="Leads" value={leadsBySource?.total_leads ?? null} />
         <FunnelArrow pct={leadsBySource?.overall_conversion_pct ?? null} pctLabel="booked" />
-        <FunnelStat label="Booked" value={leadsBySource?.total_booked ?? null} accent />
+        <FunnelStat label="Booked" value={leadsBySource?.total_booked ?? null} />
+        <FunnelArrow />
+        <FunnelStat label="Won rev" value={leadsBySource?.total_revenue ?? null} money accent />
       </div>
 
       <div className="overflow-x-auto">
-        <div className="min-w-[460px]">
+        <div className="min-w-[600px]">
           <div className={cn('grid gap-x-2 pb-2 text-ink-tertiary', SCORECARD_GRID)}>
             <button type="button" onClick={() => onSort('name')} className="u-label text-left hover:text-ink-secondary">
               Source{arrow('name')}
@@ -855,6 +875,12 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
                 <span className="relative text-right u-nums text-ink-secondary">{cell(r.hasLeads, r.booked)}</span>
                 <span className={cn('relative text-right u-nums', lowConv ? 'text-alert-fg font-medium' : 'text-ink-tertiary')}>
                   {r.conversionPct != null ? `${r.conversionPct}%` : <span className="text-ink-disabled">—</span>}
+                </span>
+                <span className="relative text-right u-nums">
+                  {r.hasRevenue ? fmtMoneyCompact(r.revenue) : <span className="text-ink-disabled">—</span>}
+                </span>
+                <span className="relative text-right u-nums text-ink-tertiary">
+                  {r.roi != null ? `${Math.round(r.roi).toLocaleString()}%` : <span className="text-ink-disabled">—</span>}
                 </span>
               </div>
             );
