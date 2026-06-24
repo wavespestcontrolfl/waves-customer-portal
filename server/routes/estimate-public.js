@@ -5893,6 +5893,10 @@ async function handleEstimateView(req, res, next) {
     }
     await reconcileFrozenMembershipSnapshot(estimate);
 
+    // Parsed once here (post-reconcile) so the V2 gate's one-time check below
+    // can read it; reused by the rest of the handler.
+    const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+
     // V2 gate — when this estimate's row has use_v2_view=true, or when it
     // uses customer options only implemented in the React view, skip the
     // server-HTML pipeline entirely and let the request fall through to
@@ -5902,8 +5906,17 @@ async function handleEstimateView(req, res, next) {
     // show_one_time_option is now handled inline by the rich server-HTML
     // via the recurring/one-time mode toggle (see canChooseOneTime branch
     // in renderPage). It no longer routes to the React V2 view.
+    // One-time card-on-file hold lives ONLY in the React view's capture UI.
+    // When the flag is on, route any one-time-eligible estimate to React so the
+    // card hold can be captured — otherwise the legacy server-HTML page would
+    // accept without a hold and the server would reject with CARD_HOLD_REQUIRED.
+    // Dark by default: isCardHoldEnabled() is false until ONE_TIME_CARD_HOLD.
+    const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
+      && estimate.bill_by_invoice !== true
+      && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
     const shouldUseReactEstimateView = estimate.use_v2_view === true
-      || estimate.bill_by_invoice === true;
+      || estimate.bill_by_invoice === true
+      || cardHoldForcesReactView;
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
@@ -5964,7 +5977,6 @@ async function handleEstimateView(req, res, next) {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData);
     let pricingBundleForView = null;
     try {
@@ -6261,6 +6273,13 @@ router.put('/:token/accept', async (req, res, next) => {
       // resolver re-derive an unrelated linked appointment when this is null.
       useLinkedFallback: false,
     });
+    // Card hold supersedes the one-time deposit: a required card hold means NO
+    // money is taken at booking, so don't ALSO require/charge a deposit when
+    // both rollout flags happen to be on (ONE_TIME_CARD_HOLD + the deposit).
+    if (cardHoldPolicy.required && depositPolicy.required) {
+      depositPolicy.required = false;
+      depositPolicy.exemptReason = 'card_hold_supersedes';
+    }
     if (depositPolicy.slotRequired && !slotId && !existingAppointmentId) {
       return res.status(400).json({
         error: 'Please pick your first appointment to confirm this service',
@@ -10971,6 +10990,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       oneTime: depositStructuralOneTime,
       oneTimeUninvoiced: depositStructuralOneTime && estimate.bill_by_invoice !== true,
     });
+    // One-time card-on-file hold policy ("as if one-time") for the React
+    // capture UI — the page only enforces it once serviceMode is one_time.
+    // Inert ({enforced:false}) while ONE_TIME_CARD_HOLD is off.
+    const cardHoldOneTimePolicyForData = CardHolds.resolveCardHoldPolicy({
+      treatAsOneTime: true,
+      billByInvoice: estimate.bill_by_invoice === true,
+      paymentMethodPreference: null,
+    });
 
     // "Show your work" trust payload for the React estimate view. The key
     // only exists while the estimateShowYourWork gate is on, so gate-off
@@ -10993,6 +11020,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         recurringAmount: depositPolicy.enforced ? computeDepositAmount({ oneTime: false }) : null,
         oneTimeAmount: depositPolicy.enforced ? computeDepositAmount({ oneTime: true }) : null,
       },
+      cardHoldPolicy: cardHoldOneTimePolicyForData.enforced ? {
+        enforced: true,
+        requiredForOneTime: cardHoldOneTimePolicyForData.required,
+        noShowFeeAmount: cardHoldOneTimePolicyForData.noShowFeeAmount || CardHolds.cardHoldNoShowFee(),
+        cancelWindowHours: cardHoldOneTimePolicyForData.cancelWindowHours || CardHolds.cardHoldCancelWindowHours(),
+      } : { enforced: false, requiredForOneTime: false },
       estimate: {
         id: estimate.id,
         token: estimate.token,

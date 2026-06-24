@@ -2653,10 +2653,10 @@ export default function EstimateViewPage() {
             onCancel={handleReviewCancel}
             invoiceMode={!!estimate.billByInvoice}
             serviceMode={serviceMode}
-            depositNote={data?.depositPolicy?.required && paymentPreference !== 'prepay_annual'
-              ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
-              : (serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
-                ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home.`
+            depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
+              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home.`
+              : (data?.depositPolicy?.required && paymentPreference !== 'prepay_annual'
+                ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
                 : null)}
           />
           {depositIntent ? (

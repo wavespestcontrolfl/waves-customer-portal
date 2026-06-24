@@ -42,13 +42,18 @@ afterEach(() => {
   delete process.env.ONE_TIME_CARD_HOLD;
 });
 
-// Minimal chainable db stub — supports the .where(...).first(...) shape
-// hasHeldCard uses. Resolves .first() to `firstRow`.
-function stubDb(firstRow) {
+// Chainable db stub. Each db() call returns a fresh chain; terminal .first()
+// calls consume `firstResults` in order (so hasHeldCard's lookup and the
+// webhook-pending fallback lookup can return different rows).
+function stubDb(firstResults) {
+  const queue = Array.isArray(firstResults) ? [...firstResults] : [firstResults];
   mockDbHandler = () => {
     const chain = {};
-    chain.where = jest.fn(() => chain);
-    chain.first = jest.fn(() => Promise.resolve(firstRow));
+    for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
+      chain[m] = jest.fn(() => chain);
+    }
+    chain.first = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : null));
+    chain.update = jest.fn(() => Promise.resolve(1));
     return chain;
   };
 }
@@ -168,8 +173,18 @@ describe('verifyCardHoldIntent — accept gate', () => {
     expect(r.reason).toBe('intent_mismatch');
   });
   it('rejects when no setup intent is supplied and nothing is held', async () => {
-    stubDb(null);
+    stubDb([null, null]); // hasHeldCard miss, then no webhook-captured pending row
     const r = await verifyCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: '' });
     expect(r).toEqual(expect.objectContaining({ ok: false, reason: 'no_setup_intent' }));
+  });
+  it('falls back to a webhook-captured pending row when the client sent no id', async () => {
+    // hasHeldCard miss, then a pending row the webhook stamped with the pm.
+    stubDb([null, { stripe_setup_intent_id: 'si_wh' }]);
+    mockRetrieveSetupIntent.mockResolvedValue({
+      id: 'si_wh', status: 'succeeded', payment_method: 'pm_wh',
+      metadata: { purpose: 'estimate_card_hold', estimate_id: 'EST' },
+    });
+    const r = await verifyCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: '' });
+    expect(r).toEqual(expect.objectContaining({ ok: true, paymentMethodId: 'pm_wh', setupIntentId: 'si_wh' }));
   });
 });

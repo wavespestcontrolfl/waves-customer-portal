@@ -179,10 +179,22 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
       alreadyHeld: true,
     };
   }
-  if (!setupIntentId) return { ok: false, reason: 'no_setup_intent' };
+  let effectiveSetupIntentId = setupIntentId;
+  if (!effectiveSetupIntentId) {
+    // A redirect/reload after confirmSetup can land the webhook (which records
+    // the captured pm on the pending row) BEFORE the client echoes the id back.
+    // Fall back to that webhook-captured pending row and re-verify it live.
+    const pendingCaptured = await db('estimate_card_holds')
+      .where({ estimate_id: estimate.id, status: 'pending' })
+      .whereNotNull('stripe_payment_method_id')
+      .orderBy('updated_at', 'desc')
+      .first('stripe_setup_intent_id');
+    if (pendingCaptured?.stripe_setup_intent_id) effectiveSetupIntentId = pendingCaptured.stripe_setup_intent_id;
+  }
+  if (!effectiveSetupIntentId) return { ok: false, reason: 'no_setup_intent' };
   let setupIntent = null;
   try {
-    setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+    setupIntent = await StripeService.retrieveSetupIntent(effectiveSetupIntentId);
   } catch (err) {
     logger.warn('[estimate-card-holds] live SetupIntent verification failed', { error: err.message });
     return { ok: false, reason: 'verification_failed' };
@@ -316,9 +328,17 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
     const pmRowId = await resolveHoldPaymentMethodRowId(hold);
     if (!pmRowId) throw new Error('hold card not attached to customer');
     const payment = await StripeService.chargeInvoiceWithSavedCard(invoiceId, pmRowId);
+    // Account credit fully covered the invoice inside the charge call — no card
+    // was charged; release the hold cleanly rather than claim a phantom charge.
+    if (payment?.covered_by_credit) {
+      await db('estimate_card_holds').where({ id: hold.id })
+        .update({ status: 'released', charged_amount: 0, charged_at: db.fn.now(), updated_at: db.fn.now() });
+      return { charged: false, reason: 'covered_by_credit' };
+    }
     await db('estimate_card_holds').where({ id: hold.id }).update({
       status: 'charged_completion',
-      completion_payment_intent_id: payment?.stripe_payment_intent_id || null,
+      // chargeInvoiceWithSavedCard returns the Stripe id as `paymentIntentId`.
+      completion_payment_intent_id: payment?.paymentIntentId || null,
       charged_amount: payment?.amount != null ? payment.amount : Number(invoice.total),
       charged_at: db.fn.now(),
       updated_at: db.fn.now(),
@@ -326,6 +346,24 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
     logger.info('[estimate-card-holds] completion charge succeeded', { scheduledServiceId, invoiceId });
     return { charged: true };
   } catch (err) {
+    // STRIPE_CHARGED_DB_FAILED: Stripe COLLECTED the money but our DB write
+    // failed (already recorded as a stripe_orphan_charge). Reopening to 'held'
+    // would let a retry charge the SAME invoice again — and chargeInvoiceWith-
+    // SavedCard's idempotency key is minute-bucketed, so a later retry mints a
+    // SECOND PaymentIntent. Park it terminal for manual reconciliation instead.
+    if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+      await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
+        .update({
+          status: 'charge_review',
+          completion_payment_intent_id: err.stripePaymentIntentId || null,
+          charged_amount: err.amount != null ? err.amount : null,
+          charged_at: db.fn.now(),
+          updated_at: db.fn.now(),
+        }).catch(() => {});
+      logger.error('[estimate-card-holds] completion charge hit STRIPE_CHARGED_DB_FAILED — parked charge_review, NOT retryable', { scheduledServiceId, paymentIntentId: err.stripePaymentIntentId });
+      return { charged: false, reason: 'charge_review', error: err.message };
+    }
+    // Genuine pre-charge failure (no money moved) — safe to retry later.
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
       .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
     logger.error('[estimate-card-holds] completion charge FAILED — hold left for retry', { scheduledServiceId, error: err.message });
@@ -345,6 +383,12 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show' }) {
 
   if (!(await claimHoldForCharge(hold.id))) return { charged: false, reason: 'not_held' };
   try {
+    // Self-heal: if the post-accept attach missed, the saved card isn't on the
+    // Stripe customer yet and an off-session charge would fail forever — attach
+    // it first (idempotent). The completion path gets this via
+    // resolveHoldPaymentMethodRowId; the fee path charges the pm id directly,
+    // so it must attach explicitly.
+    await attachCardHoldPaymentMethod({ customerId: hold.customer_id, paymentMethodId: hold.stripe_payment_method_id });
     const paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
       customerId: hold.customer_id,
       paymentMethodId: hold.stripe_payment_method_id,
