@@ -59,6 +59,9 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
 async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db } = {}) {
   const recap = await getRecap(scheduledServiceId, knex);
   if (!recap) return { ok: false, error: 'not_found' };
+  // Already approved but the SMS never went out → idempotent OK so the caller can
+  // retry sendRecap (which re-claims sent_at).
+  if (recap.status === 'approved' && !recap.sent_at) return { ok: true, recap };
   if (recap.status !== 'ready') return { ok: false, error: `not_ready (${recap.status})` };
   const [updated] = await knex('service_recaps').where({ id: recap.id }).update({
     status: 'approved', approved_at: new Date(), approved_by: approvedBy, updated_at: new Date(),

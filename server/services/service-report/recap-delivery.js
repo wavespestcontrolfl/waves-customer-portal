@@ -75,9 +75,11 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
     return { ok: false, reason: err.message };
   }
 
-  if (msg && msg.ok === false) {
+  // sendCustomerMessage signals success only as { sent: true }; holds/failures
+  // return { sent: false, blocked|code, reason } and validation errors { ok: false }.
+  if (!msg || msg.sent !== true) {
     await releaseClaim();
-    return { ok: false, reason: msg.reason || 'send_blocked' };
+    return { ok: false, reason: msg?.reason || msg?.code || 'send_failed' };
   }
   return { ok: true, url };
 }

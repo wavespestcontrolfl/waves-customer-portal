@@ -3993,7 +3993,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       try {
         const { enqueueRecap } = require('../services/service-report/recap-pipeline');
         // Keyed on the scheduled-service id so pre-completion captures match the render.
-        await enqueueRecap(record.scheduled_service_id);
+        // force=true re-renders even if a pre-completion Generate already failed (no
+        // service_records row existed yet) — now it does.
+        await enqueueRecap(record.scheduled_service_id, { force: true });
       } catch (err) {
         logger.warn(`[dispatch] recap render queue failed for ${record.id}: ${err.message}`);
       }
