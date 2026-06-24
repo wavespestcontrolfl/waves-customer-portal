@@ -12,6 +12,7 @@ jest.mock('../models/db', () => {
     const builder = {
       where(...args) { mockWhereCalls.push([table, ...args]); return builder; },
       whereIn(...args) { mockWhereCalls.push([table, 'whereIn', args[0]]); return builder; },
+      whereNotIn(...args) { mockWhereCalls.push([table, 'whereNotIn', ...args]); return builder; },
       first: async () => (Array.isArray(rows) ? (rows[0] ?? null) : (rows ?? null)),
       select: async () => (Array.isArray(rows) ? rows : []),
       then(resolve, reject) {
@@ -202,7 +203,7 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
       costs: [{ cost_amount: 3 }],
       leads: [{ id: 'L1', status: 'won', customer_id: 'c1', converted_at: new Date('2026-06-05T00:00:00Z') }],
       invoices: [],
-      services: [{ id: 's1', customer_id: 'c1', revenue: '90', service_date: '2026-06-10' }],
+      services: [{ id: 's1', customer_id: 'c1', revenue: '90', service_date: '2026-06-10', status: 'completed' }],
     });
 
     const res = await calculateSourceROI('src-1', start, end);
@@ -215,5 +216,27 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(svcLower).toBeDefined();
     expect(typeof svcLower[3]).toBe('string');
     expect(svcLower[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('filters to billed invoices and completed services (status guards)', async () => {
+    // A won lead with a customer makes the invoice/service queries run.
+    setup({
+      costs: [{ cost_amount: 3 }],
+      leads: [{ id: 'L1', status: 'won', customer_id: 'c1', converted_at: start }],
+      invoices: [],
+      services: [],
+    });
+    await calculateSourceROI('src-1', start, end);
+
+    const invStatus = mockWhereCalls.find(
+      (c) => c[0] === 'invoices' && c[1] === 'whereNotIn' && c[2] === 'status',
+    );
+    expect(invStatus).toBeDefined();
+    expect(invStatus[3]).toEqual(expect.arrayContaining(['void', 'cancelled', 'draft']));
+
+    const svcStatus = mockWhereCalls.find(
+      (c) => c[0] === 'service_records' && c[1] === 'status' && c[2] === 'completed',
+    );
+    expect(svcStatus).toBeDefined();
   });
 });

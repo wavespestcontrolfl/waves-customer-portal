@@ -276,6 +276,10 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     try {
       invoiceRows = await db('invoices')
         .whereIn('customer_id', wonCustomerIds)
+        // Only billed invoices count as revenue — exclude draft (never issued),
+        // void and cancelled (the codebase's canonical revenue exclusion model,
+        // see mrr-breakdown.js / admin-dashboard.js).
+        .whereNotIn('status', ['void', 'cancelled', 'draft'])
         .where('created_at', '>=', start)
         .where('created_at', '<=', end)
         .select('id', 'customer_id', 'total', 'created_at');
@@ -285,6 +289,10 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     try {
       serviceRows = await db('service_records')
         .whereIn('customer_id', wonCustomerIds)
+        // Only completed services are realized revenue (same guard as
+        // revenue-tools.js / tax-tools.js) — an incomplete/cancelled record
+        // carrying revenue must not inflate ROI.
+        .where('status', 'completed')
         // service_date is a DATE column — bound by ET date strings (like
         // lead_source_costs.month), or the 04:00-UTC ET month-start timestamp
         // would drop services on the first ET day of the month.
