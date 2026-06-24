@@ -1514,33 +1514,57 @@ const SOURCE_ICON = {
 // view, so the highlight is the "you're here" cue. Shared by the desktop and
 // mobile estimate lists.
 //
-// `targetId` is the deep-link id (captured + one-shotted by the page, so it
-// never goes stale). `rows` is the currently rendered list — passed only so the
-// effect re-checks as the list loads/filters settle. `resetView` clears any
-// status/search/date filter that could be hiding the row. The hook never "gives
-// up": if the row isn't rendered yet it clears the obstructing filters and waits
-// for it to appear, so a target hidden behind Archived / a search term / an
-// in-flight (or retried) fetch still resolves. A genuinely absent id simply
-// never highlights, harmlessly. Returns the id to highlight while active.
-function useEstimateDeepLinkHighlight({ targetId, rows, resetView }) {
+// `targetId` is the deep-link id; `token` bumps once per navigation (captured +
+// one-shotted by the page) so clicking the same notification again re-arms the
+// cue. `rows` is the rendered list — passed only so the effect re-checks as the
+// list loads/filters settle. `resetView` clears any status/search/date filter
+// that could be hiding the row; it's called at most ONCE per navigation, so a
+// missing target never fights the operator's own filter/search input. The
+// search is also time-bounded: if the row never renders (deleted/stale id) the
+// hook gives up instead of polling the DOM forever. Returns the id to highlight
+// while active.
+function useEstimateDeepLinkHighlight({ targetId, token, rows, resetView }) {
   const [activeId, setActiveId] = useState(null);
-  const settledRef = useRef(null);
+  // Per-navigation state: which token we're resolving, whether we've already
+  // cleared filters once, and whether the search is finished (found or gave up).
+  const navRef = useRef({ token: null, didReset: false, done: false });
 
   useEffect(() => {
-    if (!targetId || settledRef.current === targetId) return;
+    if (!targetId) return;
+    if (navRef.current.token !== token) {
+      navRef.current = { token, didReset: false, done: false };
+      setActiveId(null);
+    }
+    const nav = navRef.current;
+    if (nav.done) return;
+
     const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
     const node = document.querySelector(`[data-estimate-id="${sel}"]`);
     if (node) {
-      settledRef.current = targetId;
+      nav.done = true;
       node.scrollIntoView({ behavior: "smooth", block: "center" });
       setActiveId(targetId);
       return;
     }
-    // Not rendered yet — clear any filter/search/date that could be hiding it,
-    // then wait (a rows change re-runs this). resetView no-ops when already at
-    // defaults, so this can't loop.
-    resetView();
-  }, [targetId, rows, resetView]);
+    // Not rendered yet — clear a hiding filter/search/date ONCE, then wait for
+    // a rows change to re-run this. Resetting only once is what keeps a missing
+    // target from clobbering filter changes the operator makes afterwards.
+    if (!nav.didReset) {
+      nav.didReset = true;
+      resetView();
+    }
+  }, [token, targetId, rows, resetView]);
+
+  // Bound the search: once a navigation starts, give the list a few seconds to
+  // render the target; if it never shows (deleted / stale / typo'd id), mark the
+  // nav done so the effect above stops querying the DOM on every later render.
+  useEffect(() => {
+    if (!targetId) return undefined;
+    const t = setTimeout(() => {
+      if (navRef.current.token === token) navRef.current.done = true;
+    }, 6000);
+    return () => clearTimeout(t);
+  }, [token, targetId]);
 
   // Fade the highlight a few seconds after it activates.
   useEffect(() => {
@@ -1552,7 +1576,7 @@ function useEstimateDeepLinkHighlight({ targetId, rows, resetView }) {
   return activeId;
 }
 
-function EstimatePipelineViewV2({ deepLinkEstimateId = null }) {
+function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }) {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
@@ -1841,6 +1865,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null }) {
 
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
+    token: deepLinkToken,
     rows: filtered,
     resetView: resetDeepLinkView,
   });
@@ -3274,7 +3299,11 @@ function MobileEstimateRow({
 // 1:1 on data + endpoint (GET /admin/estimates). The Leads, Create Estimate,
 // and Pricing Logic tabs render their own sections under the shared
 // PipelineCommandHeader, which now drives all four tabs on mobile too.
-function EstimatesMobileListView({ onCreateFromAddress, deepLinkEstimateId = null }) {
+function EstimatesMobileListView({
+  onCreateFromAddress,
+  deepLinkEstimateId = null,
+  deepLinkToken = 0,
+}) {
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3552,6 +3581,7 @@ function EstimatesMobileListView({ onCreateFromAddress, deepLinkEstimateId = nul
 
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
+    token: deepLinkToken,
     rows: flat,
     resetView: resetDeepLinkView,
   });
@@ -3769,10 +3799,10 @@ export default function EstimatesPageV2() {
   // The deep-link target for the Estimates list. Captured into state (and
   // stripped from the URL by the effect below) so it's consumed exactly once —
   // a stale ?estimateId left in the URL can't snap later tab changes back to
-  // Estimates, and the list highlights it regardless of current filter/search.
-  const [deepLinkEstimateId, setDeepLinkEstimateId] = useState(
-    () => searchParams.get("estimateId") || null,
-  );
+  // Estimates. `token` bumps on every consume so clicking the same notification
+  // again still re-highlights. The effect is the sole consumer (keeps it to a
+  // single arming per navigation).
+  const [deepLink, setDeepLink] = useState({ id: null, token: 0 });
 
   // Watch URL params for incoming prefill. Two cases this needs to handle:
   //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
@@ -3809,7 +3839,7 @@ export default function EstimatesPageV2() {
     } else if (estimateId) {
       setActiveTab("estimates");
     }
-    if (estimateId) setDeepLinkEstimateId(estimateId);
+    if (estimateId) setDeepLink((prev) => ({ id: estimateId, token: prev.token + 1 }));
     // Strip one-shot params so a later tab change / refresh doesn't re-snap.
     if (hasIncoming || estimateId) {
       const stripped = new URLSearchParams(searchParams);
@@ -3864,7 +3894,8 @@ export default function EstimatesPageV2() {
         // own filters/sort; desktop gets the full table/board pipeline view.
         (isMobile ? (
           <EstimatesMobileListView
-            deepLinkEstimateId={deepLinkEstimateId}
+            deepLinkEstimateId={deepLink.id}
+            deepLinkToken={deepLink.token}
             onCreateFromAddress={(addr) => {
               setPrefill({
                 leadId: "",
@@ -3879,7 +3910,10 @@ export default function EstimatesPageV2() {
             }}
           />
         ) : (
-          <EstimatePipelineViewV2 deepLinkEstimateId={deepLinkEstimateId} />
+          <EstimatePipelineViewV2
+            deepLinkEstimateId={deepLink.id}
+            deepLinkToken={deepLink.token}
+          />
         ))}
       {activeTab === "new" && (
         <EstimateToolViewV2
