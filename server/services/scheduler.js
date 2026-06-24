@@ -1547,6 +1547,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:40AM ET — Sync area rainfall (Open-Meteo) for Lawn Report V2 water
+  // areas. Only runs when the feature is on; idempotent 7-day backfill upsert so
+  // the report's water bar / 7-day chart have complete, current rainfall.
+  // =========================================================================
+  cron.schedule('40 4 * * *', async () => {
+    if (process.env.LAWN_REPORT_V2 !== 'true') return;
+    try {
+      const { runLawnAreaWeatherSync } = require('../scripts/sync-lawn-area-weather');
+      const result = await runLawnAreaWeatherSync({ pastDays: 7 });
+      logger.info(`Lawn area weather sync: ${JSON.stringify(result || {})}`);
+    } catch (err) {
+      logger.error(`Lawn area weather sync cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Retry queued service report PDF renders
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
