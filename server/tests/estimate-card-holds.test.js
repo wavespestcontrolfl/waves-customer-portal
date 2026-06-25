@@ -7,9 +7,23 @@ jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
+  mock.transaction = jest.fn((cb) => cb(mock)); // run the txn body against the same mock
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+// No-show fee settlement dependencies (lazy-required inside the service).
+const mockInvoiceCreate = jest.fn(async () => ({ id: 'inv1', token: 'tok1' }));
+jest.mock('../services/invoice', () => ({ create: (...a) => mockInvoiceCreate(...a) }));
+const mockSendSMS = jest.fn();
+jest.mock('../services/twilio', () => ({ sendSMS: (...a) => mockSendSMS(...a) }));
+const mockSendReceiptEmail = jest.fn();
+jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: (...a) => mockSendReceiptEmail(...a) }));
+const mockNotifyAdmin = jest.fn();
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
+jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
+jest.mock('../utils/datetime-et', () => ({ etDateString: jest.fn(() => '2026-06-25'), addETDays: jest.fn() }));
 
 const mockRetrieveSetupIntent = jest.fn();
 const mockCreateSetupIntent = jest.fn();
@@ -31,6 +45,7 @@ const {
   resolveCardHoldPolicy,
   verifyCardHoldIntent,
   isWithinCancelWindow,
+  settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
 } = require('../services/estimate-card-holds');
 
@@ -54,6 +69,7 @@ function stubDb(firstResults) {
     }
     chain.first = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : null));
     chain.update = jest.fn(() => Promise.resolve(1));
+    chain.insert = jest.fn(() => Promise.resolve([{}]));
     return chain;
   };
 }
@@ -186,5 +202,60 @@ describe('verifyCardHoldIntent — accept gate', () => {
     });
     const r = await verifyCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: '' });
     expect(r).toEqual(expect.objectContaining({ ok: true, paymentMethodId: 'pm_wh', setupIntentId: 'si_wh' }));
+  });
+});
+
+describe('settleNoShowFee — refundable fee invoice + receipt', () => {
+  const pi = (over = {}) => ({
+    id: 'pi_fee', amount_received: 4900, latest_charge: 'ch_1',
+    metadata: { waves_customer_id: 'cust1', estimate_id: 'EST', scheduled_service_id: 'ss1', reason: 'no_show' },
+    ...over,
+  });
+
+  it('no-ops on a missing customer', async () => {
+    const r = await settleNoShowFee({ id: 'pi_x', metadata: {} });
+    expect(r).toEqual({ settled: false, reason: 'missing_pi_or_customer' });
+  });
+
+  it('is idempotent — a payment row for the PI = replay', async () => {
+    stubDb([{ id: 'pay_existing' }]); // first payments lookup returns a row
+    const r = await settleNoShowFee(pi());
+    expect(r).toEqual({ settled: false, replay: true });
+    expect(mockInvoiceCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates a face-value PAID fee invoice and sends a receipt', async () => {
+    // first() queue: payments(none) → scheduled_service(appt) → customer → prefs
+    stubDb([null, { scheduled_date: '2026-06-24', service_type: 'pest' }, { first_name: 'Sam', phone: '+19415550100' }, { sms_enabled: true, email_enabled: true }]);
+    const r = await settleNoShowFee(pi());
+    expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
+    // Fee invoice is face value with NO tax.
+    expect(mockInvoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust1',
+      taxRate: 0,
+      lineItems: [expect.objectContaining({ unit_price: 49, amount: 49 })],
+    }));
+    // Customer receipt + office notify fired.
+    expect(mockSendSMS).toHaveBeenCalledTimes(1);
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('labels a late-cancel distinctly and skips SMS when sms is disabled', async () => {
+    stubDb([null, null, { first_name: 'Sam', phone: '+19415550100' }, { sms_enabled: false, email_enabled: true }]);
+    const r = await settleNoShowFee(pi({ metadata: { waves_customer_id: 'cust1', reason: 'late_cancel' } }));
+    expect(r.settled).toBe(true);
+    expect(mockInvoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/late-cancellation fee/i),
+    }));
+    expect(mockSendSMS).not.toHaveBeenCalled(); // sms disabled
+    expect(mockSendReceiptEmail).toHaveBeenCalled(); // email still attempted
+  });
+
+  it('still settles (durable money) even if the receipt send throws', async () => {
+    stubDb([null, null, { first_name: 'Sam', phone: '+1' }, { sms_enabled: true }]);
+    mockSendSMS.mockRejectedValueOnce(new Error('twilio down'));
+    const r = await settleNoShowFee(pi());
+    expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
   });
 });

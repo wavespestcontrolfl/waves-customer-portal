@@ -34,6 +34,7 @@ const logger = require('./logger');
 const StripeService = require('./stripe');
 const { CARD_HOLD } = require('./pricing-engine/constants');
 const { isInvoiceCollectibleStatus } = require('./invoice-helpers');
+const { etDateString } = require('../utils/datetime-et');
 
 function isCardHoldEnabled() {
   const flag = process.env.ONE_TIME_CARD_HOLD;
@@ -533,6 +534,139 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   return releaseCardHold({ scheduledServiceId, reason: 'cancel_outside_window' });
 }
 
+// ── No-show fee settlement: refundable invoice + customer receipt ─────────
+// The no-show / late-cancel fee is charged face-value via a raw off-session PI
+// (chargeNoShowFee). This turns that bare charge into a first-class billing
+// object: a PAID fee invoice (so it gets the customer receipt page + invoice-
+// based revenue reporting) with the payments-ledger row linked to it, then
+// sends the customer a receipt and gives the office a heads-up. Refundability
+// comes free via the payments row + the existing /refund flow. Driven from the
+// card_hold_no_show_fee webhook (the settlement signal); idempotent on the PI.
+async function settleNoShowFee(paymentIntent) {
+  const piId = paymentIntent?.id;
+  const customerId = paymentIntent?.metadata?.waves_customer_id || null;
+  if (!piId || !customerId) return { settled: false, reason: 'missing_pi_or_customer' };
+
+  // Idempotency: a payments row for this PI means we already settled it.
+  const existingPayment = await db('payments').where({ stripe_payment_intent_id: piId }).first('id');
+  if (existingPayment) return { settled: false, replay: true };
+
+  const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
+  const reason = paymentIntent.metadata?.reason || 'no_show';
+  const estimateId = paymentIntent.metadata?.estimate_id || null;
+  const scheduledServiceId = paymentIntent.metadata?.scheduled_service_id || null;
+  const feeLabel = reason === 'late_cancel' ? 'Late-cancellation fee' : 'No-show fee';
+
+  let appt = null;
+  if (scheduledServiceId) {
+    appt = await db('scheduled_services').where({ id: scheduledServiceId })
+      .first('scheduled_date', 'service_type').catch(() => null);
+  }
+
+  // Invoice + paid-mark + ledger row land atomically so a webhook retry can
+  // never leave a created invoice without its payment (which would re-create a
+  // second invoice on the next delivery).
+  const InvoiceService = require('./invoice');
+  const description = `One-time visit — ${feeLabel.toLowerCase()}`;
+  const invoice = await db.transaction(async (trx) => {
+    // Face value, NO tax: the fee must equal the amount disclosed + charged.
+    const inv = await InvoiceService.create({
+      database: trx,
+      customerId,
+      title: description,
+      lineItems: [{ description: `${feeLabel} — one-time visit`, quantity: 1, unit_price: amount, amount }],
+      taxRate: 0,
+      dueDate: etDateString(),
+      skipAccrual: true,
+    });
+    await trx('invoices').where({ id: inv.id }).update({
+      status: 'paid',
+      paid_at: trx.fn.now(),
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      updated_at: trx.fn.now(),
+    });
+    // payments has no invoice_id column — link via metadata.invoice_id +
+    // invoices.stripe_payment_intent_id (same as the completion path). This is
+    // the row the existing /refund flow acts on.
+    await trx('payments').insert({
+      customer_id: customerId,
+      processor: 'stripe',
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payment_date: etDateString(),
+      amount,
+      status: 'paid',
+      description,
+      metadata: JSON.stringify({
+        purpose: 'card_hold_no_show_fee',
+        invoice_id: inv.id,
+        estimate_id: estimateId,
+        scheduled_service_id: scheduledServiceId,
+        reason,
+      }),
+    });
+    return inv;
+  });
+  logger.info('[estimate-card-holds] no-show fee settled as paid invoice', { invoiceId: invoice.id, customerId, reason });
+
+  // Receipt to the customer + heads-up to the office. Best-effort: the money +
+  // invoice are durable, so a comms hiccup must NOT throw (that would make
+  // Stripe retry and double-create the invoice).
+  try {
+    await sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason, appt });
+  } catch (err) {
+    logger.warn('[estimate-card-holds] no-show fee receipt/notify failed (non-fatal)', { error: err.message });
+  }
+  return { settled: true, invoiceId: invoice.id };
+}
+
+// Customer receipt (SMS honoring the sms preference + emailed PDF receipt) and
+// a low-key office notification for the just-settled fee. Each leg is isolated
+// so one failing channel doesn't drop the others.
+async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason, appt }) {
+  const customer = await db('customers').where({ id: customerId }).first('first_name', 'phone').catch(() => null);
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  const first = customer?.first_name || 'there';
+  const feeText = amount % 1 ? `$${amount.toFixed(2)}` : `$${amount}`;
+  const whenPhrase = (() => {
+    const d = appt?.scheduled_date;
+    if (!d) return 'your recent one-time visit';
+    const s = typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10);
+    const [, m, day] = s.split('-');
+    return (m && day) ? `your ${Number(m)}/${Number(day)} one-time visit` : 'your recent one-time visit';
+  })();
+  const parenthetical = reason === 'late_cancel' ? 'cancelled within 24 hours' : 'no one was home';
+
+  // SMS — gated on the customer's sms preference.
+  if ((prefs?.sms_enabled !== false) && customer?.phone) {
+    let receiptUrl = `${require('../utils/portal-url').publicPortalUrl()}/receipt/${invoice.token}`;
+    try {
+      const { shortenOrPassthrough } = require('./short-url');
+      receiptUrl = await shortenOrPassthrough(receiptUrl, { kind: 'receipt', entityType: 'invoices', entityId: invoice.id, customerId });
+    } catch { /* fall back to the long url */ }
+    const body = `Hi ${first} — per the terms you approved at booking, we charged a ${feeText} ${feeLabel.toLowerCase()} for ${whenPhrase} (${parenthetical}). Receipt: ${receiptUrl}. If this looks wrong, reply here and we’ll take a look.`;
+    try {
+      await require('./twilio').sendSMS(customer.phone, body, { messageType: 'no_show_fee_receipt' });
+    } catch (e) { logger.warn('[estimate-card-holds] no-show fee SMS failed', { error: e.message }); }
+  }
+
+  // Emailed PDF receipt — self-gates on the email preference + paid status.
+  try {
+    await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
+  } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
+
+  // Office heads-up so a "what's this charge?" call isn't a surprise.
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      `${feeLabel} charged`,
+      `${first} — ${feeText} ${feeLabel.toLowerCase()} on a one-time visit.`,
+      { link: `/admin/customers/${customerId}`, metadata: { invoiceId: invoice.id, reason } },
+    );
+  } catch (e) { logger.warn('[estimate-card-holds] no-show fee admin notify failed', { error: e.message }); }
+}
+
 module.exports = {
   isCardHoldEnabled,
   cardHoldNoShowFee,
@@ -550,9 +684,11 @@ module.exports = {
   releaseCardHold,
   handleCardHoldCancellation,
   isWithinCancelWindow,
+  settleNoShowFee,
   _private: {
     cardHoldIntentMatchesEstimate,
     holdGeneration,
     resolveHoldPaymentMethodRowId,
+    sendNoShowFeeReceipt,
   },
 };
