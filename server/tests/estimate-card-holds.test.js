@@ -212,26 +212,21 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
     expect(r).toEqual({ charged: false, reason: 'no_service_record' });
   });
 
-  it('mints the completion invoice (residential → no tax) and charges the held card', async () => {
-    // queue: held(recap) → invoice-by-SR(none) → invoice-by-SS(none) →
-    // scheduled_service → customer(property_type) → held(charge) → invoice → pm row
-    stubDb([HELD, null, null, { service_type: 'Pest Control', prepaid_amount: null, customer_id: 'cust1' }, { property_type: 'residential' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+  it('mints the completion invoice and charges the held card, OMITTING taxRate so create() auto-computes (commercial+business)', async () => {
+    // queue: held(recap) → scheduled_service(prepaid check) → invoice-by-SR(none)
+    // → invoice-by-SS(none) → held(charge) → invoice → pm row
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
-    expect(mockCreateFromService).toHaveBeenCalledWith('sr1', expect.objectContaining({ taxRate: 0, useScheduledReplay: true }));
+    const arg = mockCreateFromService.mock.calls[0][1];
+    expect(arg.useScheduledReplay).toBe(true);
+    expect(arg.taxRate).toBeUndefined(); // let create() compute county-aware tax (handles 'business')
     expect(r).toEqual({ charged: true });
   });
 
-  it('reads property_type from CUSTOMERS (commercial → 7% tax), not scheduled_services', async () => {
-    stubDb([HELD, null, null, { service_type: 'Pest Control', prepaid_amount: null, customer_id: 'cust1' }, { property_type: 'commercial' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
-    mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
-    await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
-    expect(mockCreateFromService).toHaveBeenCalledWith('sr1', expect.objectContaining({ taxRate: 0.07 }));
-  });
-
   it('reuses an existing invoice (by service_record_id) instead of minting a duplicate', async () => {
-    // held(recap) → invoice-by-SR FOUND → held(charge) → invoice → pm row
-    stubDb([HELD, { id: 'inv_recap' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    // held → scheduled_service(prepaid check) → invoice-by-SR FOUND → held(charge) → invoice → pm
+    stubDb([HELD, { prepaid_amount: null }, { id: 'inv_recap' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(mockCreateFromService).not.toHaveBeenCalled();
@@ -239,25 +234,33 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('reuses a pre-mint invoice linked only by scheduled_service_id (back-links it)', async () => {
-    // held → invoice-by-SR(none) → invoice-by-SS FOUND (no SR link) → held(charge) → invoice → pm
-    stubDb([HELD, null, { id: 'inv_premint', service_record_id: null }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    // held → scheduled_service(prepaid check) → invoice-by-SR(none) → invoice-by-SS FOUND → held → invoice → pm
+    stubDb([HELD, { prepaid_amount: null }, null, { id: 'inv_premint', service_record_id: null }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(mockCreateFromService).not.toHaveBeenCalled();
     expect(r).toEqual({ charged: true });
   });
 
-  it('bails (no double-charge) + alerts when the visit was prepaid in the field', async () => {
-    // held → invoice-by-SR(none) → invoice-by-SS(none) → scheduled_service(prepaid)
-    stubDb([HELD, null, null, { service_type: 'Pest Control', prepaid_amount: 75, customer_id: 'cust1' }]);
+  it('bails (no double-charge) + alerts on a prepaid visit BEFORE any invoice lookup', async () => {
+    // queue: held → scheduled_service(prepaid > 0). No invoice lookup runs.
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: 75 }]);
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(r).toEqual({ charged: false, reason: 'prepaid_visit_manual' });
     expect(mockCreateFromService).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  it('alerts the office when invoice creation fails', async () => {
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null]);
+    mockCreateFromService.mockRejectedValueOnce(new Error('createFromService boom'));
+    const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
+    expect(r.reason).toBe('invoice_create_failed');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   it('alerts the office when the card charge fails (stranded draft, no pay-link UI)', async () => {
-    stubDb([HELD, null, null, { service_type: 'Pest Control', prepaid_amount: null, customer_id: 'cust1' }, { property_type: 'residential' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('card_declined'), { type: 'StripeCardError', payment_intent: { id: 'pi_x' } }));
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(r.reason).toBe('charge_failed');
