@@ -277,13 +277,20 @@ const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 // (no-answer/busy/failed), Twilio invokes the action and the caller drops to
 // the Waves voicemail — never dead air, never a trapped call. Only called once
 // decideVoiceRoute has confirmed a non-empty agentEndpoint.
-function appendAgentHandoff(twiml, config) {
-  const dial = twiml.dial({
+function appendAgentHandoff(twiml, config, opts = {}) {
+  const dialOpts = {
     answerOnBridge: true,
     timeout: Math.max(5, Number(config?.agentTimeoutSec) || 10),
     action: AGENT_FALLBACK_ACTION,
     method: 'POST',
-  });
+  };
+  // Pass the original caller's number through as the caller ID so the agent —
+  // and the lead it captures — see the real customer, not the Waves line that
+  // dialed out. Only set when we have it; otherwise Twilio uses the dialing
+  // number and the agent confirms the callback number verbally (prompt does).
+  const callerId = toE164(opts.callerId || '');
+  if (callerId) dialOpts.callerId = callerId;
+  const dial = twiml.dial(dialOpts);
   const endpoint = String(config?.agentEndpoint || '').trim();
   if (/^sips?:/i.test(endpoint)) dial.sip(endpoint);
   else dial.number(endpoint);
@@ -429,7 +436,7 @@ router.post('/voice', async (req, res) => {
           logger.info(`[voice] AI answers-first (${decision.reason}) for ${maskSid(CallSid)}`);
           const agentTwiml = new VoiceResponse();
           agentTwiml.play(greetingUrl); // FL §934.03 disclosure before the agent leg
-          appendAgentHandoff(agentTwiml, routingConfig);
+          appendAgentHandoff(agentTwiml, routingConfig, { callerId: From });
           await db('call_log').where('twilio_call_sid', CallSid)
             .update({ answered_by: 'ai_agent', updated_at: new Date() })
             .catch(() => {});
@@ -570,7 +577,7 @@ router.post('/call-complete', async (req, res) => {
           });
           if (decision.action === 'agent') {
             logger.info(`[call-complete] AI backstop (${decision.reason}) for ${maskSid(CallSid)}`);
-            appendAgentHandoff(twiml, routingConfig);
+            appendAgentHandoff(twiml, routingConfig, { callerId: req.body?.From });
             handedToAgent = true;
           }
         }
