@@ -229,6 +229,14 @@ function durationForService(row = {}, estData = {}) {
   if (key === 'termite_bait') return 45;
   if (key === 'palm_injection') return 30;
   if (key === 'rodent_bait') return 45;
+  if (key === 'foam_recurring') {
+    // Drill-and-foam visits run the full labor (1.0–3.0 hrs by point tier), so
+    // size the slot from the tier duration carried on the row, not the generic
+    // 45-min fallback. Default to ~1.5 hr (Moderate) when it wasn't carried.
+    const explicit = firstPositiveNumber(row.estimatedDurationMinutes, row.estimated_duration_minutes, row.durationMinutes);
+    if (explicit) return Math.min(MAX_ESTIMATE_SLOT_DURATION_MINUTES, Math.max(60, Math.round(explicit)));
+    return 90;
+  }
   if (homeSqFt || lotSqFt) return 45;
   return 30;
 }

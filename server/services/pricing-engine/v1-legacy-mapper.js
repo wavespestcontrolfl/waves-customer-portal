@@ -613,6 +613,9 @@ function mapV1ToLegacyShape(v1Result) {
       service: 'foam_recurring',
       cadence: foamRecLI.cadence || null,
       detail: foamRecLI.detail || null,
+      // Carry the tier labor duration so slot-availability sizes the booking
+      // window from the foam tier instead of the generic 45-min fallback.
+      estimatedDurationMinutes: foamRecLI.estimatedDurationMinutes || null,
       discountable: false,
       discountEligible: false,
       waveGuardDiscountEligible: false,

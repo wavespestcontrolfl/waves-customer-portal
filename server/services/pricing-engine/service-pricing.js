@@ -6042,6 +6042,11 @@ function priceRecurringFoam(points = 5, options = {}) {
     perTreatment: perVisit,
     visitsPerYear: visits,
     cadence,
+    // Drill-and-foam labor hours by tier (1.0–3.0h) → slot duration, so
+    // self-booking reserves a long-enough window (estimate-slot-availability
+    // durationForService) instead of the generic 45-min fallback.
+    laborHours: tier.laborHrs,
+    estimatedDurationMinutes: Math.round(tier.laborHrs * 60),
     // Owner directive: the cadence multiplier is foam_recurring's ONLY discount.
     // This flag keeps the annual-prepay calculator (estimate-converter
     // isNonDiscountableRecurringLine) from stacking the generic prepay % on top.
