@@ -397,9 +397,9 @@ const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
 
 // App-store links — the iOS app is live, so the Apple badge links to the
 // listing by default (env var still overrides). Android isn't published yet,
-// so the Google Play badge stays a non-clickable preview until
-// WAVES_ANDROID_APP_URL is set. Once both are empty the card falls back to the
-// "coming soon" treatment.
+// so the Google Play badge is hidden entirely until WAVES_ANDROID_APP_URL is
+// set (no dead/non-clickable badge once one store is live). Only when BOTH are
+// empty does the card fall back to the "coming soon" preview with both badges.
 const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || '';
 
@@ -4463,8 +4463,8 @@ ${shellTopBar()}
         <div class="app-feature"><span class="af-ico">${ICON_CAL}</span><span>Reschedule &amp; history</span></div>
       </div>
       <span class="app-badges${APP_STORE_URL || PLAY_STORE_URL ? '' : ' is-coming-soon'}">
-        ${appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store')}
-        ${appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play')}
+        ${APP_STORE_URL || !PLAY_STORE_URL ? appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store') : ''}
+        ${PLAY_STORE_URL || !APP_STORE_URL ? appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play') : ''}
         ${APP_STORE_URL || PLAY_STORE_URL ? '' : '<span class="app-badge-caption">Coming soon to iPhone &amp; Android</span>'}
       </span>
     </div>
