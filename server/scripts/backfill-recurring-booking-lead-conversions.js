@@ -9,18 +9,32 @@
  *
  * Unlike the contact-targeted backfill (backfill-lead-acceptance-triggers.js),
  * this one DISCOVERS its own targets: every customer that has at least one
- * recurring scheduled service (or an active WaveGuard plan). For each it reuses
- * the shared `convertLeadFromEvent` so the conversion is identical to the live
- * `recurring_service_booked` trigger — single unambiguous open ORIGINATING lead
- * only, never an established customer's add-on, idempotent. Already-won leads
- * and ambiguous matches are skipped, not guessed.
+ * recurring scheduled service. Recurring rows are the precise population for the
+ * `recurring_service_booked` trigger; we deliberately do NOT key off the
+ * WaveGuard tier, because tier values like `One-Time`/`None`/`N/A` are NOT plan
+ * members (see waveguard-existing-services.js NON_MEMBERSHIP_TIER_KEYS) and a
+ * one-time buyer must not be swept in. Legacy recurring rows may carry a cadence
+ * in `recurring_pattern`/`recurring_parent_id` without ever stamping the
+ * `is_recurring` boolean, so detection matches the same OR the cleanup scripts
+ * use (cleanup-one-time-placeholder-recurring.js).
+ *
+ * For each customer it reuses the shared `convertLeadFromEvent` with
+ * `enforceOriginating: true`, so the conversion is identical to the live
+ * `recurring_service_booked` trigger PLUS a backfill-only guard: because this
+ * runs long after the booking, the fuzzy contact fallback is restricted to the
+ * customer's ORIGINATING lead (first contacted on/before they became a
+ * customer) and can never mark a later add-on inquiry as won. Single
+ * unambiguous open lead only, never an established customer's add-on,
+ * idempotent.
  *
  *   node server/scripts/backfill-recurring-booking-lead-conversions.js
  *   node server/scripts/backfill-recurring-booking-lead-conversions.js --commit
  *
- * SAFE BY DEFAULT: dry-run unless `--commit` is passed. This writes to whatever
- * DATABASE_URL points at, so run it deliberately (break-glass on prod, per the
- * waves-db policy).
+ * SAFE BY DEFAULT: dry-run unless `--commit` is passed. Dry-run runs the EXACT
+ * resolution the commit path would (inside a transaction that is rolled back),
+ * so the preview is an accurate list of the leads --commit will convert. This
+ * writes to whatever DATABASE_URL points at, so run it deliberately (break-glass
+ * on prod, per the waves-db policy).
  */
 require('dotenv').config();
 const db = require('../models/db');
@@ -30,30 +44,22 @@ const { convertLeadFromEvent } = require('../services/lead-estimate-link');
 const COMMIT = process.argv.includes('--commit');
 
 // Customers whose deal a recurring booking closed: at least one recurring
-// scheduled service that isn't cancelled, OR an active WaveGuard plan. UNION
-// dedupes; either signal alone is enough to mirror the live trigger.
+// scheduled service that isn't cancelled/rescheduled. `is_recurring` was not
+// always stamped on legacy rows, so also accept a row that carries a cadence via
+// recurring_pattern or rides a recurring parent — the same fallback the cleanup
+// scripts use. Columns are feature-detected in case a schema predates them.
 async function discoverCustomerIds() {
-  const fromRecurring = await db('scheduled_services')
+  const cols = await db('scheduled_services').columnInfo();
+  const rows = await db('scheduled_services')
     .distinct('customer_id')
-    .where('is_recurring', true)
     .whereNotNull('customer_id')
-    .whereNotIn('status', ['cancelled', 'rescheduled']);
-
-  const ids = new Set(fromRecurring.map((r) => r.customer_id));
-
-  // WaveGuard plan as a secondary signal — guard the column in case the schema
-  // predates it on some environment.
-  try {
-    const fromPlan = await db('customers')
-      .distinct('id')
-      .whereNotNull('waveguard_tier')
-      .whereNotIn('waveguard_tier', ['none', 'onetime']);
-    for (const row of fromPlan) ids.add(row.id);
-  } catch (err) {
-    logger.warn(`[backfill-recurring-leads] waveguard_tier discovery skipped: ${err.message}`);
-  }
-
-  return Array.from(ids);
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .where((q) => {
+      q.where('is_recurring', true);
+      if (cols.recurring_pattern) q.orWhereNotNull('recurring_pattern');
+      if (cols.recurring_parent_id) q.orWhereNotNull('recurring_parent_id');
+    });
+  return rows.map((r) => r.customer_id);
 }
 
 async function run() {
@@ -64,29 +70,34 @@ async function run() {
   let skipped = 0;
 
   for (const customerId of customerIds) {
-    if (!COMMIT) {
-      // Dry-run still resolves so the operator can see what WOULD convert,
-      // but passes no source side-effects: convertLeadFromEvent has no
-      // write-free preview mode, so we only report the candidate here.
-      const open = await db('leads')
-        .where('customer_id', customerId)
-        .whereNotIn('status', ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
-      if (open.length) {
-        logger.info(`[backfill-recurring-leads] DRY-RUN customer ${customerId}: ${open.length} open lead(s) candidate`);
-      }
-      continue;
-    }
+    // Run the real resolution inside a transaction so dry-run mirrors commit
+    // exactly: same convertLeadFromEvent, same enforceOriginating guard, same
+    // ambiguity/first-close checks. Dry-run rolls the transaction back so the
+    // preview lists precisely what --commit would convert, with zero writes.
+    let result;
+    await db.transaction(async (trx) => {
+      result = await convertLeadFromEvent({
+        source: 'recurring_service_booked',
+        customerId,
+        enforceOriginating: true,
+        database: trx,
+      });
+      // Throwing rolls the transaction back (knex) — dry-run discards every
+      // write while keeping `result` so the preview reflects the real resolution.
+      if (!COMMIT) throw new Error('dry-run rollback');
+    }).catch((err) => {
+      if (!/dry-run rollback/.test(err.message)) throw err;
+    });
 
-    const result = await convertLeadFromEvent({ source: 'recurring_service_booked', customerId });
-    if (result.converted) {
+    if (result && result.converted) {
       converted += result.count;
-      logger.info(`[backfill-recurring-leads] converted ${result.count} lead(s) for customer ${customerId}: ${result.leadIds.join(', ')}`);
+      logger.info(`[backfill-recurring-leads] ${COMMIT ? 'converted' : 'DRY-RUN would convert'} ${result.count} lead(s) for customer ${customerId}: ${result.leadIds.join(', ')}`);
     } else {
       skipped += 1;
     }
   }
 
-  logger.info(`[backfill-recurring-leads] done — converted=${converted} skipped=${skipped}${COMMIT ? '' : ' (dry-run, no writes)'}`);
+  logger.info(`[backfill-recurring-leads] done — ${COMMIT ? 'converted' : 'would convert'}=${converted} skipped=${skipped}${COMMIT ? '' : ' (dry-run, no writes)'}`);
 }
 
 run()
