@@ -224,28 +224,14 @@ async function recordCardHoldNoShowFeePayment(paymentIntent) {
     await recordOrphanSucceededPaymentIntent(paymentIntent, amount, 'card_hold_no_show_fee_no_customer');
     return;
   }
+  // Settle as a paid fee invoice (refundable + customer receipt + office
+  // notify), idempotent on the PI. Throw on failure so Stripe retries — a
+  // charged fee must not silently miss the ledger.
   try {
-    const existing = await db('payments').where({ stripe_payment_intent_id: piId }).first('id');
-    if (existing) return; // webhook replay
-    await db('payments').insert({
-      customer_id: customerId,
-      processor: 'stripe',
-      stripe_payment_intent_id: piId,
-      stripe_charge_id: paymentIntent.latest_charge || null,
-      payment_date: etDateString(),
-      amount,
-      status: 'paid',
-      description: 'One-time visit — no-show / late-cancellation fee',
-      metadata: JSON.stringify({
-        purpose: 'card_hold_no_show_fee',
-        estimate_id: paymentIntent.metadata?.estimate_id || null,
-        scheduled_service_id: paymentIntent.metadata?.scheduled_service_id || null,
-      }),
-    });
-    logger.info(`[stripe-webhook] recorded card-hold no-show fee payment for customer ${customerId}: ${piId}`);
+    const CardHolds = require('../services/estimate-card-holds');
+    await CardHolds.settleNoShowFee(paymentIntent);
   } catch (err) {
-    // Throw so Stripe retries — a charged fee must not silently miss the ledger.
-    logger.error(`[stripe-webhook] failed to record card-hold no-show fee payment ${piId}: ${err.message}`);
+    logger.error(`[stripe-webhook] failed to settle card-hold no-show fee ${piId}: ${err.message}`);
     throw err;
   }
 }
