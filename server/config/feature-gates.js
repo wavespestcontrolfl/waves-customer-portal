@@ -8,6 +8,7 @@
  * Set these as environment variables on Railway:
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
+ *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -45,6 +46,15 @@ const gates = {
 
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,
+
+  // Bilingual AI Voice Agent — backstops UNANSWERED inbound calls (no-answer,
+  // or the opt-in "answers first" override) with a Spanish/English auto-detect
+  // agent instead of dumb voicemail. Customer-facing AND sits on the live call
+  // path, so it is explicit opt-in in EVERY environment (off in dev too, unlike
+  // twilioVoice): with the gate off, decideVoiceRoute is never consulted and
+  // calls route exactly as they do today. Behaviour is further tuned (and can be
+  // disabled live with no deploy) via the `call_routing` system_settings row.
+  voiceAiAgent: process.env.GATE_VOICE_AI_AGENT === 'true',
 
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,

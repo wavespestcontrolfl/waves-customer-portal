@@ -18,6 +18,13 @@ const {
   VISIT_TIMELINE_CONFIG_KEY,
   mergeVisitTimelineConfig,
 } = require('../services/service-report/visit-timeline');
+const {
+  CALL_ROUTING_CONFIG_KEY,
+  DEFAULT_CALL_ROUTING_CONFIG,
+  mergeCallRoutingConfig,
+} = require('../services/call-routing-config');
+const { isEnabled } = require('../config/feature-gates');
+const { decideVoiceRoute } = require('../services/voice-route-decision');
 
 // Each pending OAuth attempt is its own row keyed by `${PREFIX}${stateNonce}`,
 // so connecting several locations in a row (or two admins/tabs at once) can't
@@ -439,6 +446,142 @@ router.post('/visit-timeline/reset', adminAuthenticate, requireAdmin, async (req
       resource_type: 'system_setting',
       metadata: {
         key: VISIT_TIMELINE_CONFIG_KEY,
+        beforeJson: beforeConfig,
+        afterJson: afterConfig,
+      },
+      ip_address: req.ip,
+      user_agent: req.get('user-agent'),
+    });
+
+    res.json({ success: true, config: afterConfig });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// Communications — Inbound Call Routing (AI voice backstop) configuration
+//
+// The `voiceAiAgent` env gate is the hard master switch; this row only tunes
+// behaviour WHEN the gate is on. With the gate off (default) none of these
+// values are consulted and calls route exactly as they do today.
+// =========================================================================
+
+// Live "what would a call do right now" indicator for the admin tab.
+router.get('/call-routing/status', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const row = await db('system_settings').where({ key: CALL_ROUTING_CONFIG_KEY }).first();
+    const config = mergeCallRoutingConfig(row?.value);
+    const gateEnabled = isEnabled('voiceAiAgent');
+    const agentConfigured = !!config.agentEndpoint;
+    // What an inbound call would do RIGHT NOW, before staff are dialed.
+    const initial = decideVoiceRoute({ phase: 'initial', gateEnabled, config, now: new Date() });
+
+    let effectiveMode;
+    if (!gateEnabled) effectiveMode = 'disabled';
+    else if (!agentConfigured) effectiveMode = 'no_endpoint';
+    else if (initial.action === 'agent') effectiveMode = 'answers_first';
+    else if (config.noAnswerBackstopEnabled) effectiveMode = 'backstop_on_no_answer';
+    else effectiveMode = 'normal_only';
+
+    res.json({
+      gateEnabled,
+      agentConfigured,
+      effectiveMode,
+      answersFirstActiveNow: initial.action === 'agent',
+      answersFirstReason: initial.reason,
+      noAnswerBackstopEnabled: config.noAnswerBackstopEnabled,
+      ringTimeoutSec: config.ringTimeoutSec,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/call-routing', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const row = await db('system_settings').where({ key: CALL_ROUTING_CONFIG_KEY }).first();
+    res.json({
+      config: mergeCallRoutingConfig(row?.value),
+      defaults: DEFAULT_CALL_ROUTING_CONFIG,
+      gateEnabled: isEnabled('voiceAiAgent'),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put('/call-routing', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const beforeRow = await db('system_settings').where({ key: CALL_ROUTING_CONFIG_KEY }).first();
+    const beforeConfig = mergeCallRoutingConfig(beforeRow?.value);
+    const afterConfig = mergeCallRoutingConfig(req.body?.config || req.body || {});
+
+    await db('system_settings')
+      .insert({
+        key: CALL_ROUTING_CONFIG_KEY,
+        value: JSON.stringify(afterConfig),
+        category: 'communications',
+        description: 'Inbound call routing — AI voice backstop configuration',
+        updated_at: new Date(),
+      })
+      .onConflict('key')
+      .merge({
+        value: JSON.stringify(afterConfig),
+        category: 'communications',
+        description: 'Inbound call routing — AI voice backstop configuration',
+        updated_at: new Date(),
+      });
+
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: req.technicianId,
+      action: 'communications.call_routing.update',
+      resource_type: 'system_setting',
+      metadata: {
+        key: CALL_ROUTING_CONFIG_KEY,
+        beforeJson: beforeConfig,
+        afterJson: afterConfig,
+      },
+      ip_address: req.ip,
+      user_agent: req.get('user-agent'),
+    });
+
+    res.json({ success: true, config: afterConfig });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/call-routing/reset', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const beforeRow = await db('system_settings').where({ key: CALL_ROUTING_CONFIG_KEY }).first();
+    const beforeConfig = mergeCallRoutingConfig(beforeRow?.value);
+    const afterConfig = mergeCallRoutingConfig(DEFAULT_CALL_ROUTING_CONFIG);
+
+    await db('system_settings')
+      .insert({
+        key: CALL_ROUTING_CONFIG_KEY,
+        value: JSON.stringify(afterConfig),
+        category: 'communications',
+        description: 'Inbound call routing — AI voice backstop configuration',
+        updated_at: new Date(),
+      })
+      .onConflict('key')
+      .merge({
+        value: JSON.stringify(afterConfig),
+        category: 'communications',
+        description: 'Inbound call routing — AI voice backstop configuration',
+        updated_at: new Date(),
+      });
+
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: req.technicianId,
+      action: 'communications.call_routing.reset',
+      resource_type: 'system_setting',
+      metadata: {
+        key: CALL_ROUTING_CONFIG_KEY,
         beforeJson: beforeConfig,
         afterJson: afterConfig,
       },
