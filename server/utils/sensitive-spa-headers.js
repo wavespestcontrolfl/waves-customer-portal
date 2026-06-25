@@ -1,3 +1,5 @@
+const SERVICE_ESTIMATE_SLUGS = require('../config/service-estimate-slugs');
+
 function isServiceOutlinePath(reqPath = '') {
   return /^\/service-outlines\/[A-Za-z0-9_-]{43}\/?$/.test(String(reqPath || ''));
 }
@@ -19,15 +21,21 @@ function isServiceReportPath(reqPath = '') {
     || /^\/recap\/[a-f0-9]{32}\/?$/i.test(value);
 }
 
-// Public tokenized customer estimate page — 32-hex token (randomBytes(16) in
-// admin-estimate-persistence). The token is a bearer credential in the URL and
-// the page renders the customer's address + quoted pricing, so the React-served
-// estimate must carry the same noindex the legacy server-HTML page set via its
-// <meta name="robots" content="noindex">. The short marketing service-slug
-// quote pages (/estimate/pest-control etc., routed to QuotePage) are NOT 32-hex
-// and intentionally stay indexable.
+// Public tokenized customer estimate page. The token is a bearer credential in
+// the URL and the page renders the customer's address + quoted pricing, so the
+// React-served estimate must carry the same noindex the legacy server-HTML page
+// set via its <meta name="robots" content="noindex">. Estimate tokens come in
+// multiple formats — 32-hex (randomBytes(16), admin) AND slug-style
+// `${nameSlug}-${shortId}` (SMS/lead intake) — so matching a token SHAPE would
+// miss formats and leak. Instead, treat ANY single-segment /estimate/<x> as a
+// sensitive customer quote EXCEPT the known public marketing service slugs
+// (routed to QuotePage). Over-noindexing a marketing page is a minor SEO cost;
+// under-noindexing a real estimate leaks address + pricing, so default to
+// noindex.
 function isEstimatePath(reqPath = '') {
-  return /^\/estimate\/[a-f0-9]{32}\/?$/i.test(String(reqPath || ''));
+  const match = /^\/estimate\/([^/]+)\/?$/.exec(String(reqPath || ''));
+  if (!match) return false;
+  return !SERVICE_ESTIMATE_SLUGS.has(match[1].toLowerCase());
 }
 
 function applySensitiveSpaHeaders(reqPath, res) {
