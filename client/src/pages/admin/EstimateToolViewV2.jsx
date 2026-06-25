@@ -1506,7 +1506,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
   const intervalSavings = Math.max(0, Math.round((intervalBase - intervalTotal) * 100) / 100);
   const waveGuardTier = E.recurring?.waveGuardTier || E.recurring?.tier || "Bronze";
   const firstVisitFees = firstVisitFeesForCustomerPreview(E, pestTier);
-  const dayPrice = monthlyTotal > 0 ? Math.round((monthlyTotal / 30) * 100) / 100 : 0;
+  const dayPrice = monthlyTotal > 0 ? Math.round((monthlyTotal * 12 / 365) * 100) / 100 : 0;
   const serviceLabel = previewServiceLabel(E, R, form);
   const propertyLine = propertyLineForPreview(E, R);
   const oneTimeStandaloneTotal = Number(E.oneTime?.total || 0);

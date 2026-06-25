@@ -105,7 +105,8 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
   const anchorPrice = Number(frequency.perVisit || 0);
   const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
-  const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) / 30) * 100) / 100;
+  // True daily rate: annual cost / 365 (monthly * 12 / 365).
+  const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
   const manualDiscount = frequency.manualDiscount && Number(frequency.manualDiscount.amount) > 0
     ? frequency.manualDiscount
     : null;
