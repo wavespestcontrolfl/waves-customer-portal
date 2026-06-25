@@ -68,7 +68,7 @@ function depositRow(deposit) {
       return {
         label: 'Deposit paid',
         value: money(paid),
-        sub: 'on file · not credited (billed to third party)',
+        sub: 'Already paid — not applied here (third party is billed)',
         tone: 'paid',
       };
     }
@@ -76,8 +76,8 @@ function depositRow(deposit) {
       label: 'Deposit paid',
       value: money(paid),
       sub: creditRemaining > 0
-        ? `${money(creditRemaining)} credit · applied to first invoice`
-        : 'credited to first invoice',
+        ? `Already paid — ${money(creditRemaining)} comes off the first invoice`
+        : 'Already paid — comes off the first invoice',
       tone: 'paid',
     };
   }
