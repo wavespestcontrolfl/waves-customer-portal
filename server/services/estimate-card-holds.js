@@ -547,10 +547,6 @@ async function settleNoShowFee(paymentIntent) {
   const customerId = paymentIntent?.metadata?.waves_customer_id || null;
   if (!piId || !customerId) return { settled: false, reason: 'missing_pi_or_customer' };
 
-  // Idempotency: a payments row for this PI means we already settled it.
-  const existingPayment = await db('payments').where({ stripe_payment_intent_id: piId }).first('id');
-  if (existingPayment) return { settled: false, replay: true };
-
   const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
   const reason = paymentIntent.metadata?.reason || 'no_show';
   const estimateId = paymentIntent.metadata?.estimate_id || null;
@@ -563,12 +559,18 @@ async function settleNoShowFee(paymentIntent) {
       .first('scheduled_date', 'service_type').catch(() => null);
   }
 
-  // Invoice + paid-mark + ledger row land atomically so a webhook retry can
-  // never leave a created invoice without its payment (which would re-create a
-  // second invoice on the next delivery).
+  // Invoice + paid-mark + ledger row land atomically. A transaction-scoped
+  // advisory lock keyed on the PI serializes concurrent settlements for the same
+  // charge — payments.stripe_payment_intent_id has no unique constraint, so two
+  // webhook deliveries (or workers) could otherwise both pass a pre-txn replay
+  // check and each create an invoice. The replay check runs INSIDE the lock.
   const InvoiceService = require('./invoice');
   const description = `One-time visit — ${feeLabel.toLowerCase()}`;
-  const invoice = await db.transaction(async (trx) => {
+  const result = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`card_hold_no_show_fee:${piId}`]);
+    const existing = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
+    if (existing) return { replay: true };
+
     // Face value, NO tax: the fee must equal the amount disclosed + charged.
     const inv = await InvoiceService.create({
       database: trx,
@@ -579,11 +581,19 @@ async function settleNoShowFee(paymentIntent) {
       dueDate: etDateString(),
       skipAccrual: true,
     });
+    // SELF-PAY: this fee was charged to the HOMEOWNER's saved card, so it must
+    // never route to a third-party payer (create() resolves the customer's
+    // default payer + stamps payer_id/payer_snapshot, and the receipt email then
+    // routes to the payer's AP inbox). Clear the payer so the receipt + AR stay
+    // with the customer who was actually charged (skipAccrual already prevents
+    // statement accrual).
     await trx('invoices').where({ id: inv.id }).update({
       status: 'paid',
       paid_at: trx.fn.now(),
       stripe_payment_intent_id: piId,
       stripe_charge_id: paymentIntent.latest_charge || null,
+      payer_id: null,
+      payer_snapshot: null,
       updated_at: trx.fn.now(),
     });
     // payments has no invoice_id column — link via metadata.invoice_id +
@@ -606,8 +616,10 @@ async function settleNoShowFee(paymentIntent) {
         reason,
       }),
     });
-    return inv;
+    return { invoice: inv };
   });
+  if (result.replay) return { settled: false, replay: true };
+  const invoice = result.invoice;
   logger.info('[estimate-card-holds] no-show fee settled as paid invoice', { invoiceId: invoice.id, customerId, reason });
 
   // Receipt to the customer + heads-up to the office. Best-effort: the money +
@@ -638,8 +650,12 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   })();
   const parenthetical = reason === 'late_cancel' ? 'cancelled within 24 hours' : 'no one was home';
 
-  // SMS — gated on the customer's sms preference.
-  if ((prefs?.sms_enabled !== false) && customer?.phone) {
+  // SMS receipt via the customer messaging wrapper — NOT a raw sendSMS. The
+  // wrapper enforces the per-purpose `payment_receipt` opt-out + messaging
+  // policy AND resolves the customer's per-location Twilio number (a raw send
+  // honors neither). It blocks/no-ops on opt-out, so there's no manual pref gate
+  // here.
+  if (customer?.phone) {
     let receiptUrl = `${require('../utils/portal-url').publicPortalUrl()}/receipt/${invoice.token}`;
     try {
       const { shortenOrPassthrough } = require('./short-url');
@@ -647,14 +663,30 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
     } catch { /* fall back to the long url */ }
     const body = `Hi ${first} — per the terms you approved at booking, we charged a ${feeText} ${feeLabel.toLowerCase()} for ${whenPhrase} (${parenthetical}). Receipt: ${receiptUrl}. If this looks wrong, reply here and we’ll take a look.`;
     try {
-      await require('./twilio').sendSMS(customer.phone, body, { messageType: 'no_show_fee_receipt' });
+      const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      await sendCustomerMessage({
+        to: customer.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'payment_receipt',
+        customerId,
+        invoiceId: invoice.id,
+        identityTrustLevel: 'admin_operator',
+        entryPoint: 'no_show_fee_receipt_sms',
+        metadata: { original_message_type: 'no_show_fee_receipt' },
+      });
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee SMS failed', { error: e.message }); }
   }
 
-  // Emailed PDF receipt — self-gates on the email preference + paid status.
-  try {
-    await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
-  } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
+  // Emailed PDF receipt — gate on the email preference (sendReceiptEmail's
+  // recipient resolver delegates to the billing recipient and does NOT itself
+  // check email_enabled).
+  if (prefs?.email_enabled !== false) {
+    try {
+      await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
+    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
+  }
 
   // Office heads-up so a "what's this charge?" call isn't a surprise.
   try {

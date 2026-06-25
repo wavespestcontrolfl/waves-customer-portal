@@ -17,6 +17,8 @@ const mockInvoiceCreate = jest.fn(async () => ({ id: 'inv1', token: 'tok1' }));
 jest.mock('../services/invoice', () => ({ create: (...a) => mockInvoiceCreate(...a) }));
 const mockSendSMS = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: (...a) => mockSendSMS(...a) }));
+const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 const mockSendReceiptEmail = jest.fn();
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: (...a) => mockSendReceiptEmail(...a) }));
 const mockNotifyAdmin = jest.fn();
@@ -217,16 +219,17 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(r).toEqual({ settled: false, reason: 'missing_pi_or_customer' });
   });
 
-  it('is idempotent — a payment row for the PI = replay', async () => {
-    stubDb([{ id: 'pay_existing' }]); // first payments lookup returns a row
+  it('is idempotent — an existing payment row (checked in-txn) = replay', async () => {
+    // first() queue: appt lookup → in-txn existence check (row found)
+    stubDb([null, { id: 'pay_existing' }]);
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: false, replay: true });
     expect(mockInvoiceCreate).not.toHaveBeenCalled();
   });
 
-  it('creates a face-value PAID fee invoice and sends a receipt', async () => {
-    // first() queue: payments(none) → scheduled_service(appt) → customer → prefs
-    stubDb([null, { scheduled_date: '2026-06-24', service_type: 'pest' }, { first_name: 'Sam', phone: '+19415550100' }, { sms_enabled: true, email_enabled: true }]);
+  it('creates a face-value, self-pay PAID fee invoice and sends a receipt via the messaging wrapper', async () => {
+    // first() queue: scheduled_service(appt) → in-txn existence(none) → customer → prefs
+    stubDb([{ scheduled_date: '2026-06-24', service_type: 'pest' }, null, { first_name: 'Sam', phone: '+19415550100' }, { email_enabled: true }]);
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
     // Fee invoice is face value with NO tax.
@@ -235,26 +238,30 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
       taxRate: 0,
       lineItems: [expect.objectContaining({ unit_price: 49, amount: 49 })],
     }));
-    // Customer receipt + office notify fired.
-    expect(mockSendSMS).toHaveBeenCalledTimes(1);
+    // SMS routes through the customer messaging wrapper with the payment_receipt
+    // purpose (per-location number + per-purpose opt-out), NOT a raw sendSMS.
+    expect(mockSendSMS).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: 'payment_receipt', customerId: 'cust1', channel: 'sms',
+    }));
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'no_show_fee_receipt:inv1' }));
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  it('labels a late-cancel distinctly and skips SMS when sms is disabled', async () => {
-    stubDb([null, null, { first_name: 'Sam', phone: '+19415550100' }, { sms_enabled: false, email_enabled: true }]);
-    const r = await settleNoShowFee(pi({ metadata: { waves_customer_id: 'cust1', reason: 'late_cancel' } }));
+  it('labels a late-cancel distinctly and skips the email receipt when email is disabled', async () => {
+    stubDb([null, null, { first_name: 'Sam', phone: '+19415550100' }, { email_enabled: false }]);
+    const r = await settleNoShowFee(pi({ metadata: { waves_customer_id: 'cust1', reason: 'late_cancel', scheduled_service_id: 'ss1' } }));
     expect(r.settled).toBe(true);
     expect(mockInvoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
       title: expect.stringMatching(/late-cancellation fee/i),
     }));
-    expect(mockSendSMS).not.toHaveBeenCalled(); // sms disabled
-    expect(mockSendReceiptEmail).toHaveBeenCalled(); // email still attempted
+    expect(mockSendReceiptEmail).not.toHaveBeenCalled(); // email opted out
+    expect(mockSendCustomerMessage).toHaveBeenCalled(); // SMS wrapper still attempted (it enforces its own opt-out)
   });
 
   it('still settles (durable money) even if the receipt send throws', async () => {
-    stubDb([null, null, { first_name: 'Sam', phone: '+1' }, { sms_enabled: true }]);
-    mockSendSMS.mockRejectedValueOnce(new Error('twilio down'));
+    stubDb([null, null, { first_name: 'Sam', phone: '+1' }, { email_enabled: true }]);
+    mockSendCustomerMessage.mockRejectedValueOnce(new Error('twilio down'));
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
   });
