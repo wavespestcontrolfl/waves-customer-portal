@@ -17,8 +17,7 @@ const voiceRouter = require('../routes/twilio-voice-webhook');
 
 describe('twilio voice inbound caller announcement', () => {
   const {
-    forwardScreenAnnouncement,
-    screenAnnouncementFromCallRow,
+    connectingAnnouncement,
     spokenCallerName,
     spokenPhoneDigits,
   } = voiceRouter._test;
@@ -53,9 +52,14 @@ describe('twilio voice inbound caller announcement', () => {
       expect(spokenPhoneDigits('+19415551234')).toBe('941. 555. 1234.');
     });
 
-    test('does NOT read an international (non-NANP) number as a US number', () => {
-      // UK number — must not be announced as "201. 234. 5678."
+    test('does NOT read a UK international number as a US number', () => {
+      // Must not be announced as "201. 234. 5678."
       expect(spokenPhoneDigits('+442012345678')).toBe('');
+    });
+
+    test('does NOT read a +-prefixed non-US number that happens to have 10 digits', () => {
+      // +4930123456 strips to 10 digits but is a German number — not NANP.
+      expect(spokenPhoneDigits('+4930123456')).toBe('');
     });
 
     test('returns empty string for non-NANP input', () => {
@@ -64,49 +68,30 @@ describe('twilio voice inbound caller announcement', () => {
     });
   });
 
-  describe('screenAnnouncementFromCallRow', () => {
+  describe('connectingAnnouncement (spoken only after press-1)', () => {
     test('reads a matched customer by name from jsonb metadata', () => {
       const row = { metadata: { screen_caller_name: 'John Doe' }, from_phone: '+19415551234' };
-      expect(screenAnnouncementFromCallRow(row))
-        .toBe('Waves call from John Doe. Press 1 to connect.');
+      expect(connectingAnnouncement(row)).toBe('Connecting your call from John Doe.');
     });
 
     test('parses metadata when stored as a JSON string', () => {
-      const row = { metadata: JSON.stringify({ screen_caller_name: 'John Doe' }), from_phone: '+19415551234' };
-      expect(screenAnnouncementFromCallRow(row))
-        .toBe('Waves call from John Doe. Press 1 to connect.');
+      const row = { metadata: JSON.stringify({ screen_caller_name: 'José O’Brien' }), from_phone: '+19415551234' };
+      expect(connectingAnnouncement(row)).toBe('Connecting your call from José O’Brien.');
     });
 
     test('falls back to the stored from_phone when there is no matched name', () => {
       const row = { metadata: { screen_caller_name: null }, from_phone: '+19415551234' };
-      expect(screenAnnouncementFromCallRow(row))
-        .toBe('Waves call from an unknown number. 941. 555. 1234. Press 1 to connect.');
+      expect(connectingAnnouncement(row))
+        .toBe('Connecting your call from an unknown number. 941. 555. 1234.');
     });
 
-    test('falls back to plain unknown when the row is missing entirely', () => {
-      expect(screenAnnouncementFromCallRow(null))
-        .toBe('Waves call from an unknown number. Press 1 to connect.');
-    });
-  });
-
-  describe('forwardScreenAnnouncement', () => {
-    test('reads a matched caller by name', () => {
-      expect(forwardScreenAnnouncement({ caller: 'John Doe' }))
-        .toBe('Waves call from John Doe. Press 1 to connect.');
+    test('falls back to a generic confirmation when the row is missing entirely', () => {
+      expect(connectingAnnouncement(null)).toBe('Connecting your call.');
     });
 
-    test('reads an unmatched caller by number', () => {
-      expect(forwardScreenAnnouncement({ callerNum: '+19415551234' }))
-        .toBe('Waves call from an unknown number. 941. 555. 1234. Press 1 to connect.');
-    });
-
-    test('falls back to plain unknown when nothing is passed', () => {
-      expect(forwardScreenAnnouncement({}))
-        .toBe('Waves call from an unknown number. Press 1 to connect.');
-    });
-
-    test('keeps the business prefix so staff can tell it is a Waves call', () => {
-      expect(forwardScreenAnnouncement({ caller: 'John Doe' })).toContain('Waves call from');
+    test('falls back to generic for an international caller with no matched name', () => {
+      const row = { metadata: {}, from_phone: '+442012345678' };
+      expect(connectingAnnouncement(row)).toBe('Connecting your call.');
     });
   });
 });

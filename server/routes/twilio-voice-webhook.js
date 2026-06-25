@@ -72,10 +72,11 @@ async function findSingleCustomerByPhone(dbLike, phone) {
   return null;
 }
 
-// Caller announcement on the staff screening leg. A matched customer/lead is
-// read by name; an unmatched caller (or a number shared by 2+ records, which
-// findSingleCustomerByPhone deliberately returns null for) is read by number so
-// staff can decide whether to pick up. Mirrors the sanitize-and-cap pattern
+// Builds the spoken caller name stamped into call_log at /voice time and read
+// back in the post-accept connect announcement. A matched customer/lead yields a
+// name; an unmatched caller (or a number shared by 2+ records, which
+// findSingleCustomerByPhone deliberately returns null for) yields null and the
+// announcement falls back to the number. Mirrors the sanitize-and-cap pattern
 // used by /outbound-admin-prompt and /lead-alert-announce.
 function spokenCallerName(customer) {
   if (!customer) return null;
@@ -89,39 +90,39 @@ function spokenCallerName(customer) {
   return name || null;
 }
 
-// Read a number aloud only when it is a North American (NANP) 10-digit or
-// 1+10-digit number. International callers (e.g. +44…) are NOT reformatted as
-// U.S. numbers — they fall back to the plain "unknown number" announcement so
-// staff are never read a misleading number.
+// Read a number aloud only when it is a genuine North American (NANP) number.
+// A '+'-prefixed value carries an explicit country code, so only +1 followed by
+// 10 digits qualifies; other international callers (e.g. +49…/+44…) fall back to
+// the generic confirmation so staff are never read a misleading U.S.-style
+// number. Bare (no '+') 10-digit or 1+10-digit values are treated as US.
 function spokenPhoneDigits(raw) {
-  const digits = String(raw || '').replace(/\D/g, '');
-  const nanp = digits.length === 10
-    ? digits
-    : (digits.length === 11 && digits.startsWith('1')) ? digits.slice(1) : null;
+  const str = String(raw || '').trim();
+  const digits = str.replace(/\D/g, '');
+  let nanp = null;
+  if (str.startsWith('+')) {
+    if (digits.length === 11 && digits.startsWith('1')) nanp = digits.slice(1);
+  } else if (digits.length === 10) {
+    nanp = digits;
+  } else if (digits.length === 11 && digits.startsWith('1')) {
+    nanp = digits.slice(1);
+  }
   if (!nanp) return '';
   return `${nanp.slice(0, 3)}. ${nanp.slice(3, 6)}. ${nanp.slice(6)}.`;
 }
 
-function forwardScreenAnnouncement({ caller, callerNum }) {
-  const name = String(caller || '')
+// Spoken to the staff member AFTER they press 1 to accept — by which point a
+// human, never carrier voicemail, is on the line — so it is safe to read caller
+// identity here. Derived from the persisted call_log row (name stamped into
+// metadata by /voice; number from the from_phone column), never from a URL.
+function connectingAnnouncement(row) {
+  const name = String(parseJsonObject(row?.metadata).screen_caller_name || '')
     .replace(/[^\p{L}\p{N}\s.'’-]/gu, '')
     .trim()
     .slice(0, 60);
-  if (name) return `Waves call from ${name}. Press 1 to connect.`;
-  const spoken = spokenPhoneDigits(callerNum);
-  if (spoken) return `Waves call from an unknown number. ${spoken} Press 1 to connect.`;
-  return 'Waves call from an unknown number. Press 1 to connect.';
-}
-
-// Derive the screening-leg announcement from the persisted call_log row rather
-// than from the callback URL, so no caller name/number is ever placed in a URL
-// query string (those pass through the global morgan request logger). The /voice
-// handler stamps the spoken name into metadata at insert time; the number falls
-// back to the already-stored from_phone column.
-function screenAnnouncementFromCallRow(row) {
-  const caller = parseJsonObject(row?.metadata).screen_caller_name || null;
-  const callerNum = caller ? null : (row?.from_phone || null);
-  return forwardScreenAnnouncement({ caller, callerNum });
+  if (name) return `Connecting your call from ${name}.`;
+  const spoken = spokenPhoneDigits(row?.from_phone);
+  if (spoken) return `Connecting your call from an unknown number. ${spoken}`;
+  return 'Connecting your call.';
 }
 
 async function fetchTwilioCall(callSid) {
@@ -397,8 +398,8 @@ router.post('/voice', async (req, res) => {
         location: numberConfig?.label || 'unknown',
         numberType: numberConfig?.type || 'unknown',
         domain: numberConfig?.domain || null,
-        // Spoken on the staff screening leg (see screenAnnouncementFromCallRow).
-        // Stored server-side so the caller's name never enters a callback URL.
+        // Read back after press-1 by connectingAnnouncement(). Stored server-side
+        // so the caller's name never enters a callback URL (request-logger safe).
         screen_caller_name: spokenCallerName(customer),
       }),
     });
@@ -593,20 +594,14 @@ router.post('/voicemail-complete', (req, res) => {
 // A human must press 1; voicemail systems time out and hang up, allowing the
 // parent <Dial> to continue or fall through to the Waves-owned voicemail path.
 // =========================================================================
-router.post('/inbound-forward-screen', async (req, res) => {
+router.post('/inbound-forward-screen', (req, res) => {
   try {
-    // Look the caller up from the persisted parent call_log row rather than the
-    // URL, so no name/number is logged by the global request logger.
-    const parentCallSid = req.body?.ParentCallSid || req.body?.CallSid || null;
-    let callRow = null;
-    if (parentCallSid) {
-      callRow = await db('call_log')
-        .where('twilio_call_sid', parentCallSid)
-        .select('metadata', 'from_phone')
-        .first();
-    }
-    const announcement = screenAnnouncementFromCallRow(callRow);
-
+    // Generic prompt only — the caller's identity is announced after press-1 (in
+    // /inbound-forward-accept), never here. Carrier voicemail commonly answers
+    // this leg before timing out, and would record whatever is spoken, so no
+    // caller name/number may be read until a human has accepted. "Waves" still
+    // signals a business call vs a personal one. No DB lookup here, so a database
+    // hiccup can never stop the screening prompt from playing.
     const twiml = new VoiceResponse();
     const gather = twiml.gather({
       numDigits: 1,
@@ -615,7 +610,7 @@ router.post('/inbound-forward-screen', async (req, res) => {
       timeout: 7,
     });
 
-    gather.say({ voice: 'Polly.Joanna' }, announcement);
+    gather.say({ voice: 'Polly.Joanna' }, 'Waves call. Press 1 to connect.');
     twiml.say({ voice: 'Polly.Joanna' }, 'No input received. Goodbye.');
     twiml.hangup();
 
@@ -635,12 +630,27 @@ router.post('/inbound-forward-accept', async (req, res) => {
     const twiml = new VoiceResponse();
 
     if (digits === '1') {
+      const parentCallSid = req.body?.ParentCallSid || null;
       await rememberForwardAccept({
-        parentCallSid: req.body?.ParentCallSid,
+        parentCallSid,
         dialCallSid: req.body?.CallSid,
         answeredByNumber: req.body?.To || req.body?.Called,
       });
-      twiml.say({ voice: 'Polly.Joanna' }, 'Connecting.');
+      // Announce who's calling now that a human has accepted. This is enrichment
+      // only — a lookup failure must never break the connect, so fall back to a
+      // generic confirmation on any error.
+      let callRow = null;
+      if (parentCallSid) {
+        try {
+          callRow = await db('call_log')
+            .where('twilio_call_sid', parentCallSid)
+            .select('metadata', 'from_phone')
+            .first();
+        } catch (lookupErr) {
+          logger.warn(`[voice] forward-accept caller lookup failed for ${maskSid(parentCallSid)}: ${lookupErr.message}`);
+        }
+      }
+      twiml.say({ voice: 'Polly.Joanna' }, connectingAnnouncement(callRow));
     } else {
       twiml.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
       twiml.hangup();
@@ -1120,13 +1130,12 @@ router.post('/call-status', async (req, res) => {
 });
 
 router._test = {
+  connectingAnnouncement,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
-  forwardScreenAnnouncement,
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
-  screenAnnouncementFromCallRow,
   spokenCallerName,
   spokenPhoneDigits,
   rememberForwardAccept,
