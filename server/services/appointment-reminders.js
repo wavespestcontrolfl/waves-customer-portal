@@ -20,6 +20,15 @@ const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateStri
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 
+// Service states for which a reminder must never fire. A reminder row can be
+// armed (cancelled=false) while its underlying scheduled_service was later
+// cancelled/rescheduled/completed through a path that didn't flip the row's
+// cancelled flag — recurring-series cancels, bulk status edits, the
+// customer-portal reschedule-request flow, etc. The cron re-checks the live
+// service status at send time and self-heals such rows so no phantom reminder
+// goes out. Lowercased before lookup; covers the 'canceled' spelling too.
+const TERMINAL_SERVICE_STATUSES = new Set(['cancelled', 'canceled', 'rescheduled', 'completed']);
+
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
 // carrier-undeliverable / no mobile / blocked) we send the same information by
@@ -973,6 +982,29 @@ const AppointmentReminders = {
         .select('*');
 
       for (const r of reminders) {
+        // Live-status guard. The reminder row carries its own cancelled flag, but
+        // that flag is only as good as the cancel path that should have set it.
+        // Re-read the source-of-truth service status here so a job that was
+        // cancelled/rescheduled/completed after its reminder was armed can never
+        // text the customer, and self-heal the stale row so we don't re-check it.
+        if (r.scheduled_service_id) {
+          const svc = await db('scheduled_services')
+            .where({ id: r.scheduled_service_id })
+            .first('status');
+          const svcStatus = String(svc?.status || '').toLowerCase();
+          if (TERMINAL_SERVICE_STATUSES.has(svcStatus)) {
+            await db('appointment_reminders')
+              .where({ id: r.id })
+              .update({ cancelled: true, updated_at: new Date() });
+            logger.info(
+              `[appt-remind] Skipping reminders for ${r.scheduled_service_id} — ` +
+              `service status '${svcStatus}'; marked reminder cancelled`,
+            );
+            results.skipped++;
+            continue;
+          }
+        }
+
         const apptTime = new Date(r.appointment_time);
         const msUntil = apptTime.getTime() - now.getTime();
         const hoursUntil = msUntil / 3600000;

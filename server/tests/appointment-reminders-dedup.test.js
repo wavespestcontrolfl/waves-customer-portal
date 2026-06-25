@@ -609,4 +609,46 @@ describe('appointment reminder cron delivery windows', () => {
       reminder_24h_sent_at: expect.any(Date),
     }));
   });
+
+  test('skips and self-cancels a reminder whose service was cancelled after arming', async () => {
+    // Armed row (cancelled=false), due tomorrow — but the underlying service was
+    // cancelled through a path that never flipped the row's cancelled flag. The
+    // live-status guard must suppress the text and mark the stale row cancelled.
+    const reminder = {
+      id: 'reminder-stale',
+      scheduled_service_id: 'svc-cancelled',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-07T13:00:00.000Z'), // 9:00 AM ET tomorrow
+      created_at: new Date('2026-05-01T13:45:00.000Z'),
+      service_type: 'Lawn Care Service',
+      cancelled: false,
+      confirmation_sent: true,
+      reminder_72h_sent: true,
+      reminder_24h_sent: false,
+    };
+
+    const strandedConfirmations = chain({ select: jest.fn().mockResolvedValue([]) });
+    const reminderList = chain({ select: jest.fn().mockResolvedValue([reminder]) });
+    const statusQuery = chain({ first: jest.fn().mockResolvedValue({ status: 'cancelled' }) });
+    const markCancelled = chain();
+
+    const appointmentReminderQueries = [strandedConfirmations, reminderList, markCancelled];
+
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return appointmentReminderQueries.shift();
+      if (table === 'scheduled_services') return statusQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(result.sent24h).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(statusQuery.where).toHaveBeenCalledWith({ id: 'svc-cancelled' });
+    expect(markCancelled.where).toHaveBeenCalledWith({ id: 'reminder-stale' });
+    expect(markCancelled.update).toHaveBeenCalledWith(expect.objectContaining({
+      cancelled: true,
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });
