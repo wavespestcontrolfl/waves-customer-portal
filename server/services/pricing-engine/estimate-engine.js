@@ -998,8 +998,12 @@ function generateEstimate(input) {
   // Recurring spot-foam termite program. Standalone recurring line: priced by
   // cadence multiplier, NOT added to activeServiceKeys (no WaveGuard tier) and
   // excluded from the bundle % discount via WAVEGUARD.excludedFromPercentDiscount.
+  // Owner directive (2026-06-25): unlike other commercial services (which route
+  // to a manual quote via the safety gate), recurring foam is auto-priced at the
+  // cadence rate for commercial too — the feature was requested by commercial
+  // clients, so it bypasses useCommercialManualQuote intentionally.
   const foamRecurringService = services.foamRecurring || services.foam_recurring;
-  if (foamRecurringService && !useCommercialManualQuote(foamRecurringService, 'pest_control')) {
+  if (foamRecurringService) {
     const foamRecOptions = serviceOptions(foamRecurringService);
     const result = priceRecurringFoam(
       Object.prototype.hasOwnProperty.call(foamRecOptions, 'points') ? foamRecOptions.points : undefined,

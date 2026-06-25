@@ -572,9 +572,20 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   return recurringMixHasMembershipFeeService(recurring);
 }
 
+// Annual amount of a recurring line, tolerant of both the raw engine lineItem
+// shape (annual/ann) and the mapped recurring.services shape (mo/monthly only —
+// saved estimates persist the mapped blob, which has no annual field).
+function recurringLineAnnualAmount(item = {}) {
+  const direct = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const monthly = Number(item.mo ?? item.monthly ?? 0);
+  if (Number.isFinite(monthly) && monthly > 0) return Math.round(monthly * 12 * 100) / 100;
+  return 0;
+}
+
 function isNonDiscountableRecurringLine(item = {}) {
-  const annual = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
   if (recurringServiceKey(item) === 'lawn_care') return false;
+  const annual = recurringLineAnnualAmount(item);
   return annual > 0 && (
     item.discountable === false ||
     item.discount?.discountable === false ||
@@ -583,12 +594,20 @@ function isNonDiscountableRecurringLine(item = {}) {
 }
 
 function nonDiscountableRecurringAnnualFloor(estimateData = {}) {
-  return Math.round(estimateLineItemsFromData(estimateData)
+  // Saved estimates persist recurring lines under recurring.services (the mapped
+  // shape), NOT lineItems — so scan both and dedupe by service key, otherwise a
+  // non-discountable recurring service (e.g. foam_recurring) is invisible to the
+  // floor and the annual-prepay calculator discounts it anyway.
+  const lineItems = estimateLineItemsFromData(estimateData).filter(isNonDiscountableRecurringLine);
+  const seen = new Set(lineItems.map((i) => recurringServiceKey(i)).filter(Boolean));
+  const serviceRows = recurringServicesFromEstimateData(estimateData)
     .filter(isNonDiscountableRecurringLine)
-    .reduce((sum, item) => {
-      const amount = Number(item.annualAfterDiscount ?? item.annualAfterCredits ?? item.annual ?? item.ann ?? 0);
-      return sum + (Number.isFinite(amount) && amount > 0 ? amount : 0);
-    }, 0) * 100) / 100;
+    .filter((svc) => {
+      const key = recurringServiceKey(svc);
+      return !key || !seen.has(key);
+    });
+  return Math.round([...lineItems, ...serviceRows]
+    .reduce((sum, item) => sum + recurringLineAnnualAmount(item), 0) * 100) / 100;
 }
 
 function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, monthlyRate } = {}) {
@@ -751,7 +770,12 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
-  return key === 'pest_control' && pattern === 'quarterly';
+  if (key === 'pest_control') return pattern === 'quarterly';
+  // Recurring foam is offered on all three cadences (quarterly/bimonthly/
+  // monthly), so seed follow-ups for whichever pattern the customer accepted —
+  // otherwise the accepted plan would stop after the first visit.
+  if (key === 'foam_recurring') return ['quarterly', 'bimonthly', 'monthly'].includes(pattern);
+  return false;
 }
 
 function scheduledDateOnly(value) {

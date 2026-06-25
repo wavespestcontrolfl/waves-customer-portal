@@ -13,7 +13,7 @@ const SERVICE_LINE_LABELS = {
 const SERVICE_LINE_PATTERNS = [
   ['commercial_pest', /commercial.*pest|pest.*commercial|commercial_pest/],
   ['commercial_lawn', /commercial.*lawn|commercial.*turf|lawn.*commercial|commercial_lawn/],
-  ['termite', /termite|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
+  ['termite', /termite|foam|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
   ['mosquito', /mosquito/],
   ['rodent', /rodent|rat|mouse|mice/],
   ['palm_injection', /\bpalm\s*injection\b|\bpalm\s*treatment\b|\blethal\s*bronzing\b|\bpalms?\b/],

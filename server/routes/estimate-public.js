@@ -934,6 +934,21 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this plan.",
     },
   },
+  foam_recurring: {
+    headline: "Hey {first}, choose your recurring foam treatment option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your foam treatment scope before pricing this plan',
+    aiBody: 'We reviewed the drill points and treatment areas before pricing this recurring foam plan.',
+    askChips: [
+      'What does each visit cover?',
+      'How often do you come out?',
+      'Can I prepay annually?',
+      'What about active termites?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
   termite_trenching: {
     headline: "Hey {first}, here's your termite trenching quote.",
     aiEyebrow: 'Waves AI',
@@ -1864,6 +1879,7 @@ function recurringServiceDisplayName(key) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito';
     case 'termite_bait': return 'Termite Bait';
+    case 'foam_recurring': return 'Recurring Foam Treatment';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
@@ -9256,6 +9272,7 @@ function categoryForRecurringServiceKey(key) {
     case 'tree_shrub': return 'tree_shrub';
     case 'mosquito': return 'mosquito';
     case 'termite_bait': return 'termite_bait';
+    case 'foam_recurring': return 'foam_recurring';
     case 'pre_slab_termiticide': return 'pre_slab_termiticide';
     case 'rodent': return 'rodent';
     case 'rodent_bait': return 'rodent';
@@ -9272,6 +9289,7 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait Stations';
+    case 'foam_recurring': return 'Recurring Foam Treatment';
     case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
     case 'bora_care': return 'Bora-Care Wood Treatment';
     case 'termite_trenching': return 'Termite Trenching';

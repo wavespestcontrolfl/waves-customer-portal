@@ -2292,7 +2292,9 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Recurring Foam Treatment (standalone, no WaveGuard) ──── */
-  if (svcFoamRecurring && !isCommercial) {
+  // Auto-priced for commercial too (owner directive) — bypasses the commercial
+  // manual-quote path that gates other services, matching the server engine.
+  if (svcFoamRecurring) {
     hasRec = true;
     const FM_CAN = 39.08, FM_BITS = 8;
     const FOAM_REC_MULT = { quarterly: 0.90, bimonthly: 0.85, monthly: 0.80 };
