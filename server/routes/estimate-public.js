@@ -6635,7 +6635,7 @@ router.put('/:token/accept', async (req, res, next) => {
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
-        .whereNotIn('status', ['accepted', 'declined', 'expired'])
+        .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update(acceptedUpdates);
       if (!acceptedCount) {
@@ -7489,7 +7489,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
     // bail if the row was accepted/locked in the meantime.
     const tierUpdateCount = await db('estimates')
       .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
       .update(writes);
     if (!tierUpdateCount) {
@@ -7600,7 +7600,7 @@ router.put('/:token/preferences', async (req, res, next) => {
     // totals here would overwrite the frozen accepted price.
     const prefUpdateCount = await db('estimates')
       .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
       .update({
         estimate_data: JSON.stringify(parsedData),
@@ -7685,7 +7685,7 @@ router.put('/:token/decline', async (req, res, next) => {
 
     const declinedCount = await db('estimates')
       .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
       .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
     if (!declinedCount) {
@@ -8761,9 +8761,43 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
   throw err;
 }
 
+// Statuses that mean the estimate hasn't been published to the customer yet —
+// a leaked bearer URL for one of these is the same exposure class as a draft.
+// All six estimate insert paths create rows as status='draft'; an operator-
+// scheduled send is status='scheduled' (with a future expiry) until the send
+// claim flips it to 'sending'. 'sending'/'sent'/'viewed' ARE published (the
+// customer link is out, possibly mid-send before expires_at is written), so
+// they are intentionally NOT here.
+const UNPUBLISHED_ESTIMATE_STATUSES = ['draft', 'scheduled'];
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
+  // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
+  // acceptable through the public link. The legacy server-HTML page short-
+  // circuited these to the expired page, but the React accept flow reaches this
+  // guard instead. Status (not a null expiry) is the signal, so a mid-send
+  // 'sending' row whose expiry isn't written yet stays acceptable.
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
+  return true;
+}
+
+// Whether the public React estimate page may receive this estimate's full
+// payload (quote + customer PII). The SPA fetches GET /:token/data for ANY
+// token, so — unlike the legacy server-HTML page, which rendered the
+// expired/not-found shell before building any payload — this must gate the
+// data endpoint explicitly. Accepted/declined are legitimate terminal views
+// the customer can reopen (legacy rendered them in full); a draft/scheduled
+// (unpublished) or expired/send_failed estimate must not be exposed; everything
+// else (sending/sent/viewed) is gated only by a real, past expiry — a missing
+// expiry during the brief mid-send window does NOT 404. Admin previews bypass
+// this at the call site so staff can still review drafts.
+function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
+  if (!estimate || estimate.archived_at) return false;
+  if (['accepted', 'declined'].includes(estimate.status)) return true;
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (['expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
 }
@@ -10962,11 +10996,27 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
 
+    const ip = extractRequestIp(req);
+
+    // Security gate: the React SPA fetches this for ANY token, so an expired
+    // link, an unpublished draft/scheduled-send, or a send-failed estimate must
+    // NOT return the full quote + customer phone/email/address/notes. The legacy
+    // server-HTML page short-circuited these to the expired/not-found shell
+    // before building any payload; the data endpoint owns that guard for the
+    // React path. Non-viewable → 404 (the SPA renders its "this link may have
+    // expired or isn't valid" screen). No admin bypass: this fetch carries no
+    // current-session credential (the public page sends no admin Bearer token),
+    // and the `waves_admin` marker cookie is a 2-year, logout-persistent
+    // view-count signal — not authorization — so previewing a draft/expired
+    // estimate goes through an authenticated admin surface, never this endpoint.
+    if (!isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
     // (filtered by shouldCountView). Defensive try/catch because schema
     // drift on estimate_views or a locked row shouldn't break the
     // customer-facing endpoint.
-    const ip = extractRequestIp(req);
     if (shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
@@ -11280,6 +11330,7 @@ module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
 module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
+module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
