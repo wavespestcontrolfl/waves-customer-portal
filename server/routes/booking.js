@@ -1104,13 +1104,14 @@ router.post('/confirm', async (req, res, next) => {
 
     // A self-booked recurring series (quarterly pest follow-ups seeded above) is
     // the deal closing — convert the originating lead to won now rather than
-    // waiting for the first visit to complete. Same convertLeadFromEvent guards
-    // as the admin recurring-booking and service_completed triggers: single
-    // unambiguous open originating lead only, idempotent. Best-effort.
+    // waiting for the first visit to complete. enforceOriginating keeps the fuzzy
+    // contact fallback from winning a later unlinked add-on lead sharing the
+    // customer's phone/email; only a lead first contacted on/before the customer
+    // signed up converts. Single unambiguous open lead only, idempotent.
     if (followUpRows.length > 0) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: custId });
+        await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: custId, enforceOriginating: true });
       } catch (err) {
         logger.warn(`[lead-trigger] self-booking recurring conversion failed for customer=${custId}: ${err.message}`);
       }

@@ -31,10 +31,13 @@
  *   node server/scripts/backfill-recurring-booking-lead-conversions.js --commit
  *
  * SAFE BY DEFAULT: dry-run unless `--commit` is passed. Dry-run runs the EXACT
- * resolution the commit path would (inside a transaction that is rolled back),
- * so the preview is an accurate list of the leads --commit will convert. This
- * writes to whatever DATABASE_URL points at, so run it deliberately (break-glass
- * on prod, per the waves-db policy).
+ * resolution the commit path would, but swaps in a no-op attribution service so
+ * the terminal markConverted writes nothing — the preview is an accurate list of
+ * the leads --commit will convert, with zero database writes. (markConverted
+ * writes through its own module-level connection, so a wrapping transaction
+ * would NOT make it rollback-safe — the stub is what guarantees a clean
+ * dry-run.) --commit writes to whatever DATABASE_URL points at, so run it
+ * deliberately (break-glass on prod, per the waves-db policy).
  */
 require('dotenv').config();
 const db = require('../models/db');
@@ -66,27 +69,24 @@ async function run() {
   const customerIds = await discoverCustomerIds();
   logger.info(`[backfill-recurring-leads] starting (${COMMIT ? 'COMMIT' : 'DRY-RUN'}) — ${customerIds.length} customer(s) with a recurring booking`);
 
+  // Dry-run runs the EXACT same resolution as commit — convertLeadFromEvent's
+  // only write is the terminal markConverted (it otherwise just reads), and
+  // markConverted writes through its own module-level db connection (NOT any
+  // transaction we could wrap), so a no-op attribution stub is the only true
+  // preview: every tier, the enforceOriginating guard, and the ambiguity/first-
+  // close checks all run and the returned leadIds are exactly what --commit
+  // would convert, with zero writes. Commit uses the real attribution service.
+  const previewAttribution = { markConverted: async () => {} };
+
   let converted = 0;
   let skipped = 0;
 
   for (const customerId of customerIds) {
-    // Run the real resolution inside a transaction so dry-run mirrors commit
-    // exactly: same convertLeadFromEvent, same enforceOriginating guard, same
-    // ambiguity/first-close checks. Dry-run rolls the transaction back so the
-    // preview lists precisely what --commit would convert, with zero writes.
-    let result;
-    await db.transaction(async (trx) => {
-      result = await convertLeadFromEvent({
-        source: 'recurring_service_booked',
-        customerId,
-        enforceOriginating: true,
-        database: trx,
-      });
-      // Throwing rolls the transaction back (knex) — dry-run discards every
-      // write while keeping `result` so the preview reflects the real resolution.
-      if (!COMMIT) throw new Error('dry-run rollback');
-    }).catch((err) => {
-      if (!/dry-run rollback/.test(err.message)) throw err;
+    const result = await convertLeadFromEvent({
+      source: 'recurring_service_booked',
+      customerId,
+      enforceOriginating: true,
+      ...(COMMIT ? {} : { leadAttributionService: previewAttribution }),
     });
 
     if (result && result.converted) {
