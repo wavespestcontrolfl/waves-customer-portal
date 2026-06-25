@@ -20,6 +20,7 @@ import {
   KpiRing,
   KpiSparklineTile,
   MrrTrendChart,
+  RevenueByCity,
   RevenueTrendArea,
   ServiceMixDonut,
   TechLeaderboardBars,
@@ -84,6 +85,7 @@ export default function DashboardPageV2() {
   const [leadsBySource, setLeadsBySource] = useState(null);
   const [channelMix, setChannelMix] = useState(null);
   const [mix, setMix] = useState(null);
+  const [revenueByCity, setRevenueByCity] = useState(null);
   const [today, setToday] = useState(null);
   const [billing, setBilling] = useState(null);
   const [alerts, setAlerts] = useState([]);
@@ -144,13 +146,18 @@ export default function DashboardPageV2() {
         track("/aging", adminFetch("/admin/dashboard/aging")),
         track("/mrr-trend", adminFetch("/admin/dashboard/mrr-trend?months=12")),
         track("/service-mix", adminFetch("/admin/dashboard/service-mix")),
+        track(
+          "/revenue-by-city",
+          adminFetch("/admin/dashboard/revenue-by-city"),
+        ),
       ]);
       if (cancelled) return;
-      const [fnl, ag, mrr, mx] = wave2;
+      const [fnl, ag, mrr, mx, rbc] = wave2;
       setFunnel(fnl);
       setAging(ag);
       setMrrTrend(mrr);
       setMix(mx);
+      setRevenueByCity(rbc);
     }
     loadAll();
     return () => {
@@ -443,6 +450,22 @@ export default function DashboardPageV2() {
           />{" "}
         </ChartCard>{" "}
       </div>
+      {/* Revenue by city — ServiceTitan-style geo cut of MTD completed revenue */}
+      {revenueByCity && (
+        <div className="mb-5">
+          {" "}
+          <ChartCard
+            title="Revenue by City"
+            sub={`${fmtMoney(revenueByCity.total || 0)} · MTD`}
+          >
+            {" "}
+            <RevenueByCity
+              cities={revenueByCity.cities || []}
+              total={revenueByCity.total || 0}
+            />{" "}
+          </ChartCard>{" "}
+        </div>
+      )}
       {/* AR aging — full width, the 90+ bucket is the only place alert-fg */}
       <div className="mb-5">
         {" "}
