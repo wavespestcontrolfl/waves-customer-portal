@@ -6583,11 +6583,15 @@ router.put('/:token/accept', async (req, res, next) => {
       const acceptedUpdates = {
         status: 'accepted',
         accepted_at: trx.fn.now(),
-        // Persist the mode the customer actually booked ('recurring' | 'one_time')
-        // so a later reopen of the accepted estimate recaps the right plan — the
-        // React page otherwise derives mode and would show a mixed estimate's
-        // recurring plan for a one-time acceptance.
-        accepted_service_mode: serviceMode,
+        // Persist what the customer actually booked so a later reopen recaps the
+        // right plan — the React page otherwise derives mode + frequency and
+        // would show a mixed estimate's recurring plan for a one-time accept, or
+        // the default frequency card for a non-default recurring choice.
+        // Use the RESOLVED mode (treatAsOneTime), not the raw request value: a
+        // structurally one-time estimate commits as one_time even when the body
+        // omits serviceMode.
+        accepted_service_mode: treatAsOneTime ? 'one_time' : serviceMode,
+        accepted_frequency_key: treatAsOneTime ? null : (acceptedFrequencyKey || null),
         // Acceptance is where money commits — freeze the price. The frequency
         // rung selected below is the one legitimate accept-time re-derive; it is
         // written into this same atomic update, so derive→lock cannot race or
@@ -11049,8 +11053,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // customer-facing endpoint. The React page re-fetches /data after
     // preference/slot/accept actions (and tags those `?refresh=1`); only the
     // initial open counts, so internal refreshes don't inflate view_count the
-    // way the single legacy HTML page load never did.
-    const isInternalRefresh = req.query.refresh === '1';
+    // way the single legacy HTML page load never did. `refresh` is a public
+    // query param, so honor it ONLY once a first view is already recorded
+    // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
+    // suppress the very first "viewed" count + admin notification.
+    const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
     if (!isInternalRefresh && shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
@@ -11232,10 +11239,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         showOneTimeOption: !!estimate.show_one_time_option,
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
-        // The mode the customer booked (set at accept). Null for legacy accepts
-        // + any non-accepted estimate; the accepted recap falls back to the
-        // derived mode when null.
+        // What the customer booked (set at accept). Null for legacy accepts +
+        // any non-accepted estimate; the accepted recap falls back to the
+        // derived mode/frequency when null.
         acceptedServiceMode: estimate.accepted_service_mode || null,
+        acceptedFrequencyKey: estimate.accepted_frequency_key || null,
         billByInvoice: !!estimate.bill_by_invoice,
         serviceCategory,
         acceptance,

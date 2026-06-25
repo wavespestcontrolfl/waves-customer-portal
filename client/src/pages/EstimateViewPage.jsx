@@ -2189,7 +2189,21 @@ export default function EstimateViewPage() {
       return defaultServiceMode === 'one_time' ? 'one_time' : 'recurring';
     });
     const nextServices = pricingServices(body?.pricing);
-    const nextSelected = defaultSelectedForServices(nextServices, selectedRef.current, preserveSelection);
+    let nextSelected = defaultSelectedForServices(nextServices, selectedRef.current, preserveSelection);
+    // For a reopened ACCEPTED estimate, pin the recurring frequency to the one
+    // booked (acceptedFrequencyKey) so the read-only recap shows the agreed plan
+    // and price, not the section default (quarterly). selectedFrequency and the
+    // combined price both derive from `selected`, so seeding it here propagates
+    // through the whole recap. Only set for accepted rows (null otherwise).
+    const acceptedFreqKey = body?.estimate?.acceptedFrequencyKey;
+    if (acceptedFreqKey) {
+      nextSelected = { ...nextSelected };
+      for (const section of nextServices) {
+        if ((section.frequencies || []).some((f) => f.key === acceptedFreqKey)) {
+          nextSelected[section.key] = acceptedFreqKey;
+        }
+      }
+    }
     setSelected(nextSelected);
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
   }, [token]);
