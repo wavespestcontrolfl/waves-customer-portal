@@ -16,9 +16,11 @@
  * existing customer when one unambiguously matches but never creates a
  * customer — the lead is the capture artifact; conversion stays a human step.
  *
- * Best-effort + non-throwing: like the voicemail path's lead block (wrapped
- * non-blocking), failures here are logged and swallowed so a lead-write problem
- * never breaks the agent webhook's 200 to the vendor.
+ * Core lead writes PROPAGATE on failure (the caller — the agent webhook —
+ * returns 5xx so ElevenLabs retries). Unlike the voicemail path there is no
+ * persisted recording/transcript to replay, so a swallowed DB error would
+ * silently lose the only copy of the lead. Secondary writes (customer language
+ * hint, activity log) stay best-effort.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -27,6 +29,15 @@ const { properCase } = require('../utils/name-case');
 const isEmpty = (v) => v === null || v === undefined || v === '';
 const phoneDigits = (v) => String(v || '').replace(/\D/g, '');
 const nameCase = (v) => (v && String(v).trim() ? properCase(String(v).trim()) : null);
+
+// Mirror call-recording-processor's lead-creation guard: only these lifecycle
+// stages may be (re)opened as a lead from a call. Active/won/churned customers
+// are NOT reopened as fresh leads from an ordinary support call.
+const LEAD_PIPELINE_STAGES = new Set([
+  'new_lead', 'contacted', 'qualified', 'estimate_needed', 'estimate_draft',
+  'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating',
+]);
+const isLeadStage = (stage) => LEAD_PIPELINE_STAGES.has(String(stage || '').toLowerCase());
 
 function maskPhone(value) {
   const d = phoneDigits(value);
@@ -101,98 +112,103 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let leadId = null;
   let created = false;
 
-  try {
-    const customer = await findCustomerByPhone(phone);
-    customerId = customer?.id || null;
+  const customer = await findCustomerByPhone(phone);
+  customerId = customer?.id || null;
 
-    const existingLead = phone
-      ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first()
-      : null;
+  // Non-routing language hint on the matched customer — applied even if the lead
+  // is skipped below. Best-effort; only fills when empty so a prior preference
+  // is never clobbered. (Routing never reads this column.)
+  if (language && customerId) {
+    await db('customers')
+      .where({ id: customerId })
+      .whereRaw("COALESCE(preferred_language, '') = ''")
+      .update({ preferred_language: language })
+      .catch((e) => logger.warn(`[voice-agent-lead] customer language hint failed (non-blocking): ${e.message}`));
+  }
 
-    if (existingLead) {
-      leadId = existingLead.id;
-    } else {
-      const leadSourceId = await resolveLeadSourceId(opts.toPhone);
-      const insert = {
-        lead_source_id: leadSourceId,
-        customer_id: customerId,
-        phone,
-        first_name: nameCase(extracted.first_name),
-        last_name: nameCase(extracted.last_name) || '',
-        email: extracted.email || null,
-        lead_type: 'inbound_call',
-        first_contact_at: new Date(),
-        first_contact_channel: 'call',
-        status: 'new',
-      };
-      if (opts.callSid) insert.twilio_call_sid = opts.callSid;
-      if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
-      const [newLead] = await db('leads').insert(insert).returning('*');
-      leadId = newLead.id;
-      created = true;
-      // Log IDs/masked phone only — `service` is caller-provided free text and
-      // can contain names/addresses; it belongs in the row, not plain logs.
-      logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)}`);
-    }
+  const existingLead = phone
+    ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first()
+    : null;
 
-    if (leadId) {
-      const current = existingLead || (await db('leads').where({ id: leadId }).first());
-      const leadUpdates = {};
-      if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = nameCase(extracted.first_name);
-      if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = nameCase(extracted.last_name);
-      if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
-      if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
-      if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
-      if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
-      if (service && isEmpty(current?.service_interest)) leadUpdates.service_interest = service;
+  // Mirror the voicemail processor's guard: don't reopen an active/won/churned
+  // lifecycle customer as a fresh lead from an ordinary call. Brand-new callers
+  // (no customer match) and customers already in a lead stage are still captured.
+  if (!existingLead && customer && !isLeadStage(customer.pipeline_stage)) {
+    logger.info(`[voice-agent-lead] Skipping new lead for ${maskPhone(phone)} — existing ${customer.pipeline_stage || 'lifecycle'} customer`);
+    return { leadId: null, customerId, created: false };
+  }
 
-      // Urgency: upgrade-only (mirror voicemail path) — hot promotes to urgent,
-      // otherwise only fill if still empty so a cold follow-up never downgrades.
-      if (extracted.lead_quality === 'hot') leadUpdates.urgency = 'urgent';
-      else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
+  if (existingLead) {
+    leadId = existingLead.id;
+  } else {
+    const leadSourceId = await resolveLeadSourceId(opts.toPhone);
+    const insert = {
+      lead_source_id: leadSourceId,
+      customer_id: customerId,
+      phone,
+      first_name: nameCase(extracted.first_name),
+      last_name: nameCase(extracted.last_name) || '',
+      email: extracted.email || null,
+      lead_type: 'inbound_call',
+      first_contact_at: new Date(),
+      first_contact_channel: 'call',
+      status: 'new',
+    };
+    if (opts.callSid) insert.twilio_call_sid = opts.callSid;
+    if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
+    const [newLead] = await db('leads').insert(insert).returning('*');
+    leadId = newLead.id;
+    created = true;
+    // Log IDs/masked phone only — `service` is caller-provided free text and
+    // can contain names/addresses; it belongs in the row, not plain logs.
+    logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)}`);
+  }
 
-      if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
-      leadUpdates.extracted_data = JSON.stringify({
+  if (leadId) {
+    const current = existingLead || (await db('leads').where({ id: leadId }).first());
+    const leadUpdates = {};
+    if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = nameCase(extracted.first_name);
+    if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = nameCase(extracted.last_name);
+    if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
+    if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
+    if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
+    if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
+    if (service && isEmpty(current?.service_interest)) leadUpdates.service_interest = service;
+
+    // Urgency: upgrade-only (mirror voicemail path) — hot promotes to urgent,
+    // otherwise only fill if still empty so a cold follow-up never downgrades.
+    if (extracted.lead_quality === 'hot') leadUpdates.urgency = 'urgent';
+    else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
+
+    if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+    leadUpdates.extracted_data = JSON.stringify({
+      pain_points: extracted.pain_points,
+      preferred_date_time: extracted.preferred_date_time,
+      source: 'voice_agent',
+      language,
+    });
+    // Only touch is_qualified when the agent sent a recognized quality, so a
+    // later quality-less payload can't demote a previously qualified lead.
+    if (extracted.lead_quality) leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
+    if (language) leadUpdates.preferred_language = language;
+    // Only (re)link a customer when one was unambiguously resolved — never
+    // null out an existing lead's customer_id on a no-match/ambiguous lookup.
+    if (customerId) leadUpdates.customer_id = customerId;
+    leadUpdates.updated_at = new Date();
+    await db('leads').where({ id: leadId }).update(leadUpdates);
+
+    await db('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'ai_triage',
+      description: `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
+      performed_by: 'AI Voice Agent',
+      metadata: JSON.stringify({
+        call_summary: extracted.call_summary,
         pain_points: extracted.pain_points,
-        preferred_date_time: extracted.preferred_date_time,
-        source: 'voice_agent',
         language,
-      });
-      // Only touch is_qualified when the agent sent a recognized quality, so a
-      // later quality-less payload can't demote a previously qualified lead.
-      if (extracted.lead_quality) leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
-      if (language) leadUpdates.preferred_language = language;
-      // Only (re)link a customer when one was unambiguously resolved — never
-      // null out an existing lead's customer_id on a no-match/ambiguous lookup.
-      if (customerId) leadUpdates.customer_id = customerId;
-      leadUpdates.updated_at = new Date();
-      await db('leads').where({ id: leadId }).update(leadUpdates);
-
-      await db('lead_activities').insert({
-        lead_id: leadId,
-        activity_type: 'ai_triage',
-        description: `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
-        performed_by: 'AI Voice Agent',
-        metadata: JSON.stringify({
-          call_summary: extracted.call_summary,
-          pain_points: extracted.pain_points,
-          language,
-          source: 'voice_agent',
-        }),
-      }).catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
-    }
-
-    // Non-routing language hint: only fill when the customer has none, so we
-    // never clobber a prior preference. (Routing never reads this column.)
-    if (language && customerId) {
-      await db('customers')
-        .where({ id: customerId })
-        .whereRaw("COALESCE(preferred_language, '') = ''")
-        .update({ preferred_language: language })
-        .catch((e) => logger.warn(`[voice-agent-lead] customer language hint failed (non-blocking): ${e.message}`));
-    }
-  } catch (err) {
-    logger.error(`[voice-agent-lead] createLeadFromExtraction failed (non-blocking): ${err.message}`);
+        source: 'voice_agent',
+      }),
+    }).catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
   }
 
   return { leadId, customerId, created };

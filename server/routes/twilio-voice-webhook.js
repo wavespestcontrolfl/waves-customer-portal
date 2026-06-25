@@ -626,23 +626,25 @@ router.post('/voicemail-complete', (req, res) => {
 // =========================================================================
 router.post('/agent-fallback', async (req, res) => {
   const twiml = new VoiceResponse();
-  const status = String(req.body?.DialCallStatus || '').toLowerCase();
+  const dialStatus = String(req.body?.DialCallStatus || '').toLowerCase();
   const callSid = req.body?.CallSid;
+  const agentDuration = parseInt(req.body?.DialCallDuration || 0, 10) || 0;
   try {
-    if (status === 'completed') {
-      // Agent answered & handled the call — reconcile the row so a successful
-      // AI conversation isn't left classified as voicemail (after-dial backstop
-      // pre-marks it) or stuck on a stale ai_agent mark (answers-first).
+    if (dialStatus === 'completed') {
+      // Agent answered & handled the call — reconcile status/outcome AND the
+      // agent-leg duration so logs/metrics reflect the real AI conversation
+      // instead of the prior staff-leg status ('ringing' answers-first, or
+      // 'no-answer'/30s after-dial backstop).
       if (callSid) {
         await db('call_log').where('twilio_call_sid', callSid)
-          .update({ answered_by: 'ai_agent', call_outcome: 'ai_handled', updated_at: new Date() })
+          .update({ status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled', duration_seconds: agentDuration, updated_at: new Date() })
           .catch((e) => logger.warn(`[agent-fallback] call_log update failed: ${e.message}`));
       }
     } else {
-      // Agent unreachable → fall open to voicemail and reflect that on the row.
+      // Agent unreachable → fall open to voicemail; reflect the agent-leg status.
       if (callSid) {
         await db('call_log').where('twilio_call_sid', callSid)
-          .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+          .update({ status: dialStatus || 'no-answer', answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
           .catch((e) => logger.warn(`[agent-fallback] call_log update failed: ${e.message}`));
       }
       appendVoicemailRecording(twiml);
