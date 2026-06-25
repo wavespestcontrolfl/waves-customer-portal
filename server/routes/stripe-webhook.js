@@ -210,6 +210,46 @@ function centsToDollars(cents) {
   return Math.round((n / 100) * 100) / 100;
 }
 
+// Ledger row for a one-time card-hold no-show / late-cancel fee. These PIs have
+// no invoice (the inline charge only touches estimate_card_holds), so without
+// this they'd be charged in Stripe but absent from payments history + revenue/
+// tax reports. Idempotent on the PI id; the waves_customer_id is stamped by
+// chargeSavedPaymentMethodOffSession.
+async function recordCardHoldNoShowFeePayment(paymentIntent) {
+  const piId = paymentIntent.id;
+  const amount = (paymentIntent.amount_received || paymentIntent.amount || 0) / 100;
+  const customerId = paymentIntent.metadata?.waves_customer_id || null;
+  if (!customerId) {
+    logger.warn(`[stripe-webhook] card-hold no-show fee PI ${piId} missing waves_customer_id — recording orphan`);
+    await recordOrphanSucceededPaymentIntent(paymentIntent, amount, 'card_hold_no_show_fee_no_customer');
+    return;
+  }
+  try {
+    const existing = await db('payments').where({ stripe_payment_intent_id: piId }).first('id');
+    if (existing) return; // webhook replay
+    await db('payments').insert({
+      customer_id: customerId,
+      processor: 'stripe',
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payment_date: etDateString(),
+      amount,
+      status: 'paid',
+      description: 'One-time visit — no-show / late-cancellation fee',
+      metadata: JSON.stringify({
+        purpose: 'card_hold_no_show_fee',
+        estimate_id: paymentIntent.metadata?.estimate_id || null,
+        scheduled_service_id: paymentIntent.metadata?.scheduled_service_id || null,
+      }),
+    });
+    logger.info(`[stripe-webhook] recorded card-hold no-show fee payment for customer ${customerId}: ${piId}`);
+  } catch (err) {
+    // Throw so Stripe retries — a charged fee must not silently miss the ledger.
+    logger.error(`[stripe-webhook] failed to record card-hold no-show fee payment ${piId}: ${err.message}`);
+    throw err;
+  }
+}
+
 async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason) {
   const latestCharge = paymentIntent.latest_charge;
   const stripeChargeId = typeof latestCharge === 'string'
@@ -769,11 +809,12 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     return;
   }
 
-  // One-time card-hold no-show / late-cancel fees are recorded inline at charge
-  // time and have no invoice — return so they aren't treated as orphaned
-  // invoice payments and pollute the orphan-charge reconciliation queue.
+  // One-time card-hold no-show / late-cancel fees have no invoice, but they
+  // ARE real revenue — record a payments-ledger row (idempotent) so customer
+  // history + admin/tax revenue reports include them, then return before the
+  // invoice/tender logic (and the orphan-charge fallback).
   if (paymentIntent.metadata?.purpose === 'card_hold_no_show_fee') {
-    logger.info(`[stripe-webhook] card-hold no-show fee PI succeeded: ${piId}`);
+    await recordCardHoldNoShowFeePayment(paymentIntent);
     return;
   }
 

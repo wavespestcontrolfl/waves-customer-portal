@@ -2324,6 +2324,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // Void any still-open invoice pre-minted for this visit so
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
             await voidOpenInvoicesForCancelledService(id);
+            // One-time card-on-file hold: charge in-window late-cancel fee or
+            // release outside it — same as the single-cancel paths. Dark until
+            // ONE_TIME_CARD_HOLD; no-op when no hold exists. Best-effort.
+            try {
+              const CardHolds = require('../services/estimate-card-holds');
+              await CardHolds.handleCardHoldCancellation({ scheduledServiceId: id });
+            } catch (e) { logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`); }
             break;
           }
           case 'mark_prepaid': {

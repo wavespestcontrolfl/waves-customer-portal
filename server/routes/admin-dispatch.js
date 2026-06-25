@@ -4202,14 +4202,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // One-time card-on-file hold: charge the saved card the residual amount due
-    // on the completed-visit invoice (dark until ONE_TIME_CARD_HOLD; no-op when
-    // no hold exists or the bill was already settled by prepay / account
-    // credit). On success, mark the invoice already-paid so the completion SMS
-    // sends a receipt rather than a pay link for money we just collected.
-    // Best-effort — a charge failure leaves the hold for retry, never blocks
-    // completion.
-    if (invoice?.id && !alreadyPaid && !invoice.payer_id) {
+    // One-time card-on-file hold: resolve the hold on completion (dark until
+    // ONE_TIME_CARD_HOLD; no-op when no hold exists). chargeCardHoldOnCompletion
+    // CHARGES the residual when the invoice is collectible, or RELEASES the hold
+    // when it's already settled (prepaid / account credit) or payer-billed — so
+    // it's called whenever an invoice exists, even if alreadyPaid/payer, to
+    // avoid leaving a completed job's hold stuck in 'held'. On a real charge it
+    // marks the invoice already-paid so the completion SMS sends a receipt, not
+    // a pay link. Best-effort — never blocks completion.
+    if (invoice?.id) {
       try {
         const CardHolds = require('../services/estimate-card-holds');
         const holdCharge = await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: invoice.id });
