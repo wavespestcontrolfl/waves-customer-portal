@@ -6042,6 +6042,10 @@ function priceRecurringFoam(points = 5, options = {}) {
     perTreatment: perVisit,
     visitsPerYear: visits,
     cadence,
+    // Owner directive: the cadence multiplier is foam_recurring's ONLY discount.
+    // This flag keeps the annual-prepay calculator (estimate-converter
+    // isNonDiscountableRecurringLine) from stacking the generic prepay % on top.
+    discountable: false,
     oneTimePerVisit,
     discountVsOneTime,
     detail: `${tierLabel} | ${tier.cans} can${tier.cans > 1 ? 's' : ''} | ${visits} visits/yr | ${discountVsOneTime}% off one-time`,
