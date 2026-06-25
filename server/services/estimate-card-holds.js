@@ -549,19 +549,25 @@ async function settleNoShowFee(paymentIntent) {
 
   // Pre-settlement refund guard: an immediate dashboard refund can deliver
   // charge.refunded BEFORE this succeeded event — and since no invoice/payment
-  // exists yet, that refund handler finds nothing to mark. Re-check the LIVE
-  // charge; if the money's already refunded, don't create a paid invoice +
-  // receipt for it. (Fail-open only on a retrieve error — confirmed-refunded
-  // skips.)
+  // exists yet, that handler finds nothing to mark. Re-check the LIVE charge:
+  // a FULL refund skips settlement entirely; a PARTIAL refund still settles (so
+  // the net-kept money lands in revenue) but records the refunded slice on the
+  // payment row. (Fail-open on a retrieve error.)
+  let preRefundedCents = 0;
   try {
     const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
     const ch = live?.latest_charge;
-    if (ch && typeof ch === 'object' && (ch.refunded === true || Number(ch.amount_refunded) > 0)) {
-      logger.warn('[estimate-card-holds] no-show fee already refunded before settlement — skipping', { piId });
-      return { settled: false, reason: 'refunded_pre_settlement' };
+    if (ch && typeof ch === 'object') {
+      const chargedCents = Math.round(Number(ch.amount || 0));
+      preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
+      if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
+        logger.warn('[estimate-card-holds] no-show fee fully refunded before settlement — skipping', { piId });
+        return { settled: false, reason: 'refunded_pre_settlement' };
+      }
     }
   } catch (err) {
     logger.warn('[estimate-card-holds] pre-settlement refund check failed — proceeding', { error: err.message });
+    preRefundedCents = 0;
   }
 
   const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
@@ -617,6 +623,10 @@ async function settleNoShowFee(paymentIntent) {
       stripe_charge_id: paymentIntent.latest_charge || null,
       payment_date: etDateString(),
       amount,
+      // A partial pre-settlement refund is recorded here so net revenue + the
+      // refund ledger are correct (status stays 'paid' — only a full refund is
+      // terminal, and that path skipped settlement above).
+      refund_amount: preRefundedCents > 0 ? preRefundedCents / 100 : 0,
       status: 'paid',
       description,
       metadata: JSON.stringify({
@@ -629,7 +639,22 @@ async function settleNoShowFee(paymentIntent) {
     });
     return { invoice: inv };
   });
-  if (result.replay) return { settled: false, replay: true };
+  if (result.replay) {
+    // A crash after the settle txn committed but before the receipt sent (or
+    // before Stripe marked the event processed) lands here on retry. Re-attempt
+    // the receipt — idempotent via invoices.receipt_sent_at — so a settled fee
+    // never ends up with no customer receipt.
+    try {
+      const inv = await db('invoices').where({ stripe_payment_intent_id: piId })
+        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'token', 'receipt_sent_at');
+      if (inv?.id && !inv.receipt_sent_at) {
+        await sendNoShowFeeReceipt({ invoice: inv, customerId, amount, feeLabel, reason });
+      }
+    } catch (err) {
+      logger.warn('[estimate-card-holds] replay receipt recovery failed (non-fatal)', { error: err.message });
+    }
+    return { settled: false, replay: true };
+  }
   const invoice = result.invoice;
   logger.info('[estimate-card-holds] no-show fee settled as paid invoice', { invoiceId: invoice.id, customerId, reason });
 
@@ -667,6 +692,11 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   if (!receiptOptOut && (channel === 'email' || channel === 'both') && prefs?.email_enabled !== false) {
     try {
       await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
+      // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
+      // does) — so on an email-only channel, stamp it here or the paid fee
+      // invoice stays in the admin "needs receipt" filter and gets batch-resent.
+      await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+        .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
   }
 

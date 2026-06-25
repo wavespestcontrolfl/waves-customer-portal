@@ -222,19 +222,28 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(r).toEqual({ settled: false, reason: 'missing_pi_or_customer' });
   });
 
-  it('skips settlement when the charge was already refunded before this event', async () => {
+  it('skips settlement when the charge was FULLY refunded before this event', async () => {
     mockRetrievePaymentIntent.mockResolvedValueOnce({ latest_charge: { refunded: true, amount_refunded: 4900 } });
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: false, reason: 'refunded_pre_settlement' });
     expect(mockInvoiceCreate).not.toHaveBeenCalled();
   });
 
-  it('is idempotent — an existing payment row (checked in-txn) = replay', async () => {
-    // first() queue: in-txn existence check (row found) — no appt lookup anymore
-    stubDb([{ id: 'pay_existing' }]);
+  it('still settles a PARTIAL pre-settlement refund (net revenue + refund ledger correct)', async () => {
+    mockRetrievePaymentIntent.mockResolvedValueOnce({ latest_charge: { amount: 4900, refunded: false, amount_refunded: 2000 } });
+    stubDb([null, { payment_receipt_channel: 'sms' }, { first_name: 'Sam' }]);
+    const r = await settleNoShowFee(pi());
+    expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
+    expect(mockInvoiceCreate).toHaveBeenCalled(); // settles, doesn't skip
+  });
+
+  it('is idempotent — an existing payment row (checked in-txn) = replay; re-attempts receipt only if unsent', async () => {
+    // queue: in-txn existence(row) → replay-recovery invoice lookup (receipt already sent)
+    stubDb([{ id: 'pay_existing' }, { id: 'inv1', receipt_sent_at: '2026-06-25' }]);
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: false, replay: true });
     expect(mockInvoiceCreate).not.toHaveBeenCalled();
+    expect(mockSendReceipt).not.toHaveBeenCalled(); // receipt already sent → no re-send
   });
 
   it('creates a face-value, self-pay PAID fee invoice and sends the receipt via the CANONICAL path (default sms channel)', async () => {
