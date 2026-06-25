@@ -881,25 +881,45 @@ router.get('/service-mix', dashboardCache, async (req, res, next) => {
 // Archived estimates are excluded so a cleaned-up row can't skew the rate.
 router.get('/sales-capture', dashboardCache, async (req, res, next) => {
   try {
-    const monthStart = startOfMonth(); // ET date string, e.g. '2026-06-01'
-    const valueSum = 'COALESCE(SUM(COALESCE(monthly_total, 0) * 12 + COALESCE(onetime_total, 0)), 0)';
+    const cutoff = etDayStart(startOfMonth()); // ET month start; ET-midnight-bound below
+    const valueSum = 'COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)), 0)';
+
+    // estimates `e` + customers `c` so the internal/test-account exclusion
+    // (Adam Martinez et al.) matches the funnel's excludeInternalEstimates — a
+    // test estimate accepted/declined this month must not skew the hero totals.
+    const base = () => {
+      const qb = db('estimates as e')
+        .leftJoin('customers as c', 'e.customer_id', 'c.id')
+        .whereNull('e.archived_at');
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        qb.whereNotIn(db.raw("LOWER(COALESCE(e.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)
+          .whereNotIn(
+            db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+            INTERNAL_TEST_CUSTOMERS,
+          );
+      }
+      return qb;
+    };
 
     const [capturedRow, missedRow] = await Promise.all([
-      db('estimates')
-        .whereNull('archived_at')
-        .where('status', 'accepted')
-        // accepted_at is timestamptz; bind ET-midnight so the cutoff doesn't
-        // drift at the UTC boundary on Railway (UTC) — same ET_MIDNIGHT_TS
-        // pattern the retention/AR windows use.
-        .whereRaw(`accepted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(monthStart)])
+      // Won = accepted, resolved this month. Resolution date matches
+      // estimate-winloss.resolutionDate: accepted_at, else created_at. Bound
+      // ET-midnight so the cutoff doesn't drift at the UTC boundary on Railway.
+      base()
+        .where('e.status', 'accepted')
+        .whereRaw(`COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS}`, [cutoff])
         .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
         .first(),
-      db('estimates')
-        .whereNull('archived_at')
-        .whereIn('status', ['declined', 'expired'])
-        // Resolution date = declined_at for declines, else expires_at for
-        // expiries — COALESCE picks whichever applies to the row's status.
-        .whereRaw(`COALESCE(declined_at, expires_at) >= ${ET_MIDNIGHT_TS}`, [etDayStart(monthStart)])
+      // Missed = declined/expired, resolved this month. declined → declined_at,
+      // expired → expires_at, then updated_at, else created_at — matching
+      // resolutionDate so AGE-expired rows (status set by the worker, no
+      // expires_at) still count instead of dropping to NULL.
+      base()
+        .whereIn('e.status', ['declined', 'expired'])
+        .whereRaw(
+          `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS}`,
+          [cutoff],
+        )
         .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
         .first(),
     ]);
@@ -910,7 +930,9 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
     res.json({
       captured,
       missed,
-      captureRate: denom > 0 ? Math.round((captured / denom) * 100) : 0,
+      // null (not 0) when nothing resolved this month — the gauge renders its
+      // "unavailable" state instead of a misleading red 0% capture failure.
+      captureRate: denom > 0 ? Math.round((captured / denom) * 100) : null,
       wonCount: parseInt(capturedRow?.cnt || 0),
       lostCount: parseInt(missedRow?.cnt || 0),
       period: { label: 'Month to Date' },
