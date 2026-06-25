@@ -8758,18 +8758,25 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
   throw err;
 }
 
+// Statuses that mean the estimate hasn't been published to the customer yet —
+// a leaked bearer URL for one of these is the same exposure class as a draft.
+// All six estimate insert paths create rows as status='draft'; an operator-
+// scheduled send is status='scheduled' (with a future expiry) until the send
+// claim flips it to 'sending'. 'sending'/'sent'/'viewed' ARE published (the
+// customer link is out, possibly mid-send before expires_at is written), so
+// they are intentionally NOT here.
+const UNPUBLISHED_ESTIMATE_STATUSES = ['draft', 'scheduled'];
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
-  // An unreviewed draft must never be acceptable through the public link. The
-  // legacy server-HTML page short-circuited drafts (and any past/missing expiry)
-  // to the expired page, but the React accept flow reaches this guard instead.
-  if (estimate.status === 'draft') return false;
-  // Treat a missing expiry as already-expired (legacy relied on
-  // `new Date(null) < now` being true). Without this, a no-expiry draft/lead
-  // estimate would read as active and be acceptable from a leaked bearer URL.
-  if (!estimate.expires_at) return false;
-  if (new Date(estimate.expires_at) < now) return false;
+  // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
+  // acceptable through the public link. The legacy server-HTML page short-
+  // circuited these to the expired page, but the React accept flow reaches this
+  // guard instead. Status (not a null expiry) is the signal, so a mid-send
+  // 'sending' row whose expiry isn't written yet stays acceptable.
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
 }
 
@@ -8778,16 +8785,17 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
 // token, so — unlike the legacy server-HTML page, which rendered the
 // expired/not-found shell before building any payload — this must gate the
 // data endpoint explicitly. Accepted/declined are legitimate terminal views
-// the customer can reopen (legacy rendered them in full); everything else must
-// be a published (non-draft) estimate with a real, unexpired expiry. Admin
-// previews bypass this at the call site so staff can still review drafts.
+// the customer can reopen (legacy rendered them in full); a draft/scheduled
+// (unpublished) or expired/send_failed estimate must not be exposed; everything
+// else (sending/sent/viewed) is gated only by a real, past expiry — a missing
+// expiry during the brief mid-send window does NOT 404. Admin previews bypass
+// this at the call site so staff can still review drafts.
 function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
-  if (estimate.status === 'draft') return false;
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
-  if (!estimate.expires_at) return false;
-  if (new Date(estimate.expires_at) < now) return false;
+  if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
 }
 
@@ -10988,7 +10996,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const ip = extractRequestIp(req);
 
     // Security gate: the React SPA fetches this for ANY token, so an expired
-    // link, a never-published / no-expiry draft, or a send-failed estimate must
+    // link, an unpublished draft/scheduled-send, or a send-failed estimate must
     // NOT return the full quote + customer phone/email/address/notes. The legacy
     // server-HTML page short-circuited these to the expired/not-found shell
     // before building any payload; the data endpoint owns that guard for the

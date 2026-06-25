@@ -13,13 +13,20 @@ describe('isEstimateCustomerViewable (React /:token/data security gate)', () => 
     expect(isEstimateCustomerViewable({ status: 'sending', expires_at: FUTURE })).toBe(true);
   });
 
-  it('withholds an unreviewed draft, including a no-expiry draft', () => {
-    expect(isEstimateCustomerViewable({ status: 'draft', expires_at: FUTURE })).toBe(false);
-    expect(isEstimateCustomerViewable({ status: 'draft', expires_at: null })).toBe(false);
+  it('serves a mid-send row whose expiry is not written yet (sending, null expiry)', () => {
+    // sendEstimateNow texts the link before the final expires_at write, so a
+    // freshly claimed 'sending' row can momentarily have a null expiry.
+    expect(isEstimateCustomerViewable({ status: 'sending', expires_at: null })).toBe(true);
   });
 
-  it('withholds a sent estimate with a missing or past expiry', () => {
-    expect(isEstimateCustomerViewable({ status: 'sent', expires_at: null })).toBe(false);
+  it('withholds unpublished estimates: drafts and scheduled sends', () => {
+    expect(isEstimateCustomerViewable({ status: 'draft', expires_at: FUTURE })).toBe(false);
+    expect(isEstimateCustomerViewable({ status: 'draft', expires_at: null })).toBe(false);
+    // Scheduled sends carry a FUTURE expiry but haven't gone out yet.
+    expect(isEstimateCustomerViewable({ status: 'scheduled', expires_at: FUTURE })).toBe(false);
+  });
+
+  it('withholds a published estimate whose expiry has passed', () => {
     expect(isEstimateCustomerViewable({ status: 'sent', expires_at: PAST })).toBe(false);
   });
 
@@ -35,10 +42,10 @@ describe('isEstimateCustomerViewable (React /:token/data security gate)', () => 
   });
 });
 
-describe('isEstimateAcceptActive — draft/expiry hardening', () => {
-  it('rejects an unreviewed draft and a no-expiry estimate', () => {
+describe('isEstimateAcceptActive — unpublished/expiry hardening', () => {
+  it('rejects unpublished estimates (draft and scheduled)', () => {
     expect(isEstimateAcceptActive({ status: 'draft', expires_at: FUTURE })).toBe(false);
-    expect(isEstimateAcceptActive({ status: 'sent', expires_at: null })).toBe(false);
+    expect(isEstimateAcceptActive({ status: 'scheduled', expires_at: FUTURE })).toBe(false);
   });
 
   it('rejects expired and already-terminal estimates', () => {
@@ -47,8 +54,10 @@ describe('isEstimateAcceptActive — draft/expiry hardening', () => {
     expect(isEstimateAcceptActive({ status: 'declined', expires_at: FUTURE })).toBe(false);
   });
 
-  it('accepts a published, unexpired estimate', () => {
+  it('accepts published estimates, incl. a mid-send row with no expiry yet', () => {
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE })).toBe(true);
     expect(isEstimateAcceptActive({ status: 'viewed', expires_at: FUTURE })).toBe(true);
+    // Preserves the existing onetime-breakdown expectation (viewed + null expiry).
+    expect(isEstimateAcceptActive({ status: 'viewed', expires_at: null })).toBe(true);
   });
 });
