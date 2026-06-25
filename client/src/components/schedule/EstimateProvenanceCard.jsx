@@ -20,10 +20,14 @@
 //                          shown as an estimate-level note on the deposit row.
 //   deposit      object  — summarizeEstimateDeposit() payload from the server:
 //                          { enforced, oneTime, policyAmount, required,
-//                            exemptReason, paid, creditRemaining }
+//                            exemptReason, paid, creditRemaining, payerBilled }
 //   style        object  — optional outer wrapper style (margins, etc.)
 
 const BLUE = { bg: '#F0F9FF', border: '#BAE6FD', ink: '#0369A1' };
+// Amber caution used for the "billed to a third party — don't collect from the
+// customer" banner. Deliberately NOT the admin alert red: this is an
+// operational heads-up, not a system error.
+const WARN = { bg: '#FFFBEB', border: '#FDE68A', ink: '#92400E' };
 const MUTED = '#64748B';
 const INK = '#0F172A';
 const GREEN = '#166534';
@@ -64,7 +68,7 @@ function depositRow(deposit) {
       return {
         label: 'Deposit paid',
         value: money(paid),
-        sub: 'on file · not credited (billed to third party)',
+        sub: 'Already paid — not applied here (third party is billed)',
         tone: 'paid',
       };
     }
@@ -72,8 +76,8 @@ function depositRow(deposit) {
       label: 'Deposit paid',
       value: money(paid),
       sub: creditRemaining > 0
-        ? `${money(creditRemaining)} credit · applied to first invoice`
-        : 'credited to first invoice',
+        ? `Already paid — ${money(creditRemaining)} comes off the first invoice`
+        : 'Already paid — comes off the first invoice',
       tone: 'paid',
     };
   }
@@ -103,6 +107,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   const quoted = Number(quotedTotal) || 0;
   const price = currentPrice != null ? Number(currentPrice) : null;
   const dep = depositRow(deposit);
+  // Whole-visit third-party billing: surfaced as its own prominent banner so a
+  // tech scanning on a phone can't miss it and ask the homeowner for money.
+  // Backed by summary.payerBilled (always resolved, gate-independent); fall back
+  // to the deposit exemptReason for older payloads.
+  const payerBilled = !!(deposit && (deposit.payerBilled || deposit.exemptReason === 'payer_billed'));
   const showVsQuoted = price != null && quoted > 0 && price > 0 && Math.abs(quoted - price) > 0.01;
   const deltaPct = showVsQuoted ? Math.round(((price - quoted) / quoted) * 100) : 0;
 
@@ -127,6 +136,32 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
             Quoted {money(quoted)}
           </span>
         </div>
+
+        {payerBilled && (
+          <div
+            role="alert"
+            style={{
+              marginTop: 8,
+              background: WARN.bg,
+              border: `1px solid ${WARN.border}`,
+              borderRadius: 4,
+              padding: '8px 10px',
+              display: 'flex',
+              gap: 8,
+              alignItems: 'flex-start',
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 14, lineHeight: '18px' }}>⚠</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: WARN.ink }}>
+                Billed to a third party
+              </div>
+              <div style={{ fontSize: 12, color: WARN.ink, marginTop: 1 }}>
+                Do not collect payment from the customer — this visit invoices to the billing party on file.
+              </div>
+            </div>
+          </div>
+        )}
 
         {dep && (
           <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>

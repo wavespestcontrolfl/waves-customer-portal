@@ -338,7 +338,14 @@ async function computeCoreKpis(period = 'mtd') {
       ).first();
     const svcTotal = parseInt(svcAgg?.total || 0);
     const svcCompleted = parseInt(svcAgg?.completed || 0);
-    const completionRate = svcTotal > 0 ? Math.round((svcCompleted / svcTotal) * 100) : null;
+    const svcCancelled = parseInt(svcAgg?.cancelled || 0);
+    // Completion rate excludes cancelled jobs from the denominator — a cancelled
+    // visit isn't a failed completion. Of the jobs that WEREN'T cancelled, how
+    // many got marked completed. (Jobs scheduled by today but still open —
+    // pending/confirmed/on_site/en_route not closed out — correctly count against
+    // it; a chronically low rate flags a closeout-lag, not a denominator bug.)
+    const svcDenom = svcTotal - svcCancelled;
+    const completionRate = svcDenom > 0 ? Math.round((svcCompleted / svcDenom) * 100) : null;
 
     // Callback rate — service_records.is_callback in window
     const cbAgg = await db('service_records')
@@ -440,7 +447,10 @@ async function computeCoreKpis(period = 'mtd') {
       ).select(
           db.raw("COUNT(*) as total"),
           db.raw("COUNT(*) FILTER (WHERE status = 'won') as booked"),
-          db.raw("AVG(response_time_minutes) FILTER (WHERE response_time_minutes IS NOT NULL) as avg_resp")
+          // MEDIAN (P50), not AVG — a handful of stale/abandoned leads with a
+          // huge or never-stamped response made the mean read ~17h when the
+          // typical response is ~25m. PERCENTILE_CONT ignores NULLs natively.
+          db.raw("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY response_time_minutes) as median_resp")
         ).first();
       const leads = parseInt(leadAgg?.total || 0);
       const booked = parseInt(leadAgg?.booked || 0);
@@ -448,7 +458,9 @@ async function computeCoreKpis(period = 'mtd') {
         leads,
         booked,
         conversion: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
-        avgResponseMin: leadAgg?.avg_resp ? Math.round(parseFloat(leadAgg.avg_resp)) : null,
+        // Keyed avgResponseMin for the client/snapshot, but it's the MEDIAN now
+        // (!= null, not truthy, so a legit 0-minute median isn't dropped).
+        avgResponseMin: leadAgg?.median_resp != null ? Math.round(parseFloat(leadAgg.median_resp)) : null,
         error: null,
       };
     } catch (err) {
@@ -738,7 +750,7 @@ async function computeCoreKpis(period = 'mtd') {
       periodLabel: { today: 'Today', wtd: 'Week to Date', mtd: 'Month to Date', ytd: 'Year to Date' }[period] || 'Month to Date',
       service: {
         completionRate,
-        scheduled: svcTotal,
+        scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
         completed: svcCompleted,
         callbackRate,
         callbacks,
@@ -853,6 +865,141 @@ router.get('/service-mix', dashboardCache, async (req, res, next) => {
     if (result?.error) return res.status(500).json({ error: result.error });
     res.json(result);
   } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/sales-capture — ServiceTitan-style "captured vs
+// missed" hero gauge: won estimate value vs lost estimate value for the
+// current ET month, bounded on the RESOLUTION date (when the estimate was
+// won/lost), not when it was created.
+//
+// Won = status 'accepted' resolved this month (accepted_at). Missed = status
+// 'declined' or 'expired' resolved this month (declined_at, else expires_at).
+// This mirrors estimate-winloss.js's RESOLVED_STATUSES/resolutionDate
+// semantics (won=accepted, lost=declined-or-expired), restricted here to the
+// current month's resolutions. Value = annualized recurring + one-time, the
+// same monthly_total*12 + onetime_total basis the funnel's accepted-value uses.
+// Archived estimates are excluded so a cleaned-up row can't skew the rate.
+router.get('/sales-capture', dashboardCache, async (req, res, next) => {
+  try {
+    const cutoff = etDayStart(startOfMonth()); // ET month start; ET-midnight-bound below
+    const valueSum = 'COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)), 0)';
+
+    // estimates `e` + customers `c` so the internal/test-account exclusion
+    // (Adam Martinez et al.) matches the funnel's excludeInternalEstimates — a
+    // test estimate accepted/declined this month must not skew the hero totals.
+    const base = () => {
+      const qb = db('estimates as e')
+        .leftJoin('customers as c', 'e.customer_id', 'c.id')
+        .whereNull('e.archived_at');
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        qb.whereNotIn(db.raw("LOWER(COALESCE(e.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)
+          .whereNotIn(
+            db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+            INTERNAL_TEST_CUSTOMERS,
+          );
+      }
+      return qb;
+    };
+
+    const [capturedRow, missedRow] = await Promise.all([
+      // Won = accepted, resolved this month. Resolution date matches
+      // estimate-winloss.resolutionDate: accepted_at, else created_at. Bound
+      // ET-midnight so the cutoff doesn't drift at the UTC boundary on Railway.
+      base()
+        .where('e.status', 'accepted')
+        .whereRaw(`COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS}`, [cutoff])
+        .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
+        .first(),
+      // Missed = declined/expired, resolved this month. declined → declined_at,
+      // expired → expires_at, then updated_at, else created_at — matching
+      // resolutionDate so AGE-expired rows (status set by the worker, no
+      // expires_at) still count instead of dropping to NULL.
+      base()
+        .whereIn('e.status', ['declined', 'expired'])
+        .whereRaw(
+          `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS}`,
+          [cutoff],
+        )
+        .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
+        .first(),
+    ]);
+
+    const captured = parseFloat(capturedRow?.total || 0);
+    const missed = parseFloat(missedRow?.total || 0);
+    const denom = captured + missed;
+    res.json({
+      captured,
+      missed,
+      // null (not 0) when nothing resolved this month — the gauge renders its
+      // "unavailable" state instead of a misleading red 0% capture failure.
+      captureRate: denom > 0 ? Math.round((captured / denom) * 100) : null,
+      wonCount: parseInt(capturedRow?.cnt || 0),
+      lostCount: parseInt(missedRow?.cnt || 0),
+      period: { label: 'Month to Date' },
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /sales-capture failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// GET /api/admin/dashboard/revenue-by-city — completed-service revenue grouped
+// by the customer's city for the current ET month (ServiceTitan-style geo cut).
+// service_date is a DATE column, so a string compare against the ET month-start
+// string is exact. Top 8 cities by revenue; the remainder folds into 'Other'.
+router.get('/revenue-by-city', dashboardCache, async (req, res, next) => {
+  try {
+    const monthStart = startOfMonth(); // ET month-start date string
+    const todayStr = etDateString();   // ET today — upper bound so a future-dated
+                                       // completed/import row can't inflate the MTD cut
+
+    let qb = db('service_records as sr')
+      .join('customers as c', 'sr.customer_id', 'c.id')
+      .where('sr.service_date', '>=', monthStart)
+      .where('sr.service_date', '<=', todayStr)
+      .where('sr.status', 'completed')
+      .whereNotNull('sr.revenue');
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      qb = qb.whereNotIn(
+        db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+
+    const rows = await qb
+      // NULLIF(TRIM(city), '') folds NULL + '' + whitespace-only into ONE group
+      // so missing-city revenue isn't split into duplicate 'Unknown' rows.
+      .select(db.raw("NULLIF(TRIM(c.city), '') as city"))
+      .sum('sr.revenue as revenue')
+      .count('* as jobs')
+      .groupByRaw("NULLIF(TRIM(c.city), '')")
+      .orderBy('revenue', 'desc');
+
+    const all = rows.map((row) => ({
+      city: row.city || 'Unknown',
+      revenue: parseFloat(row.revenue || 0),
+      jobs: parseInt(row.jobs || 0, 10),
+    }));
+
+    const total = all.reduce((s, r) => s + r.revenue, 0);
+
+    let cities = all;
+    if (all.length > 8) {
+      const top = all.slice(0, 8);
+      const rest = all.slice(8);
+      top.push({
+        city: 'Other',
+        revenue: rest.reduce((s, r) => s + r.revenue, 0),
+        jobs: rest.reduce((s, r) => s + r.jobs, 0),
+      });
+      cities = top;
+    }
+
+    res.json({ cities, total, period: { label: 'Month to Date' } });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /revenue-by-city failed: ${err.message}`);
+    next(err);
+  }
 });
 
 // GET /api/admin/dashboard/compare?period=this_month&against=last_month

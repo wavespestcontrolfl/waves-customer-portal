@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -4502,6 +4503,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
+  // Tree & Shrub V2 adopts the same "lead layout" as lawn V2: the visit timeline +
+  // Ask-Waves + products render up top (under Re-entry), not in the generic non-lawn
+  // slots lower down. `isV2LeadLayout` is the shared gate for that reordering.
+  const isTreeShrubV2 = data.serviceLine === 'tree_shrub' && !!data.reportV2;
+  const isV2LeadLayout = (isLawnReport && !!data.reportV2) || isTreeShrubV2;
   const proofMoments = Array.isArray(data.proofMoments)
     ? data.proofMoments
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
@@ -7236,8 +7242,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        {/* V2: Visit Timeline + Ask Waves render directly under Re-entry. */}
-        {isLawnReport && data.reportV2 && (
+        {/* V2: Visit Timeline + Ask Waves render directly under Re-entry (lawn + tree_shrub). */}
+        {isV2LeadLayout && (
           <>
             <div id="service-timeline">
               <LawnVisitTimeline timeline={data.visitTimeline || normalizedVisitTimeline} />
@@ -7279,14 +7285,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             {data.serviceLine === 'lawn' && data.mowingHeight && !data.reportV2 && (
               <LawnMowingHeight mowing={data.mowingHeight} />
             )}
+            {/* Tree & Shrub Report V2 visual dashboard — the plant-health snapshot,
+                five photo-diagnosis categories, plant groups, and insights. Flag-gated:
+                the payload only exists for a tree_shrub visit with TREE_SHRUB_REPORT_V2
+                on and a tech-confirmed assessment, so this is a no-op everywhere else. */}
+            {data.serviceLine === 'tree_shrub' && data.reportV2 && (
+              <TreeShrubReportV2Section data={data.reportV2} print={mode === 'pdf' || mode === 'static'} />
+            )}
           </section>
         )}
 
-        {/* Lawn reports lead with the factual record — products applied + the
+        {/* Lawn + Tree/Shrub V2 lead with the factual record — products applied + the
             visit timeline — right after the assessment. Other service lines
-            keep these lower (rendered below, gated by !isLawnReport). The
-            program explainer + Ask-Waves move down for lawn. */}
-        {isLawnReport && (
+            keep these lower (rendered below, gated by !isV2LeadLayout). The
+            program explainer + Ask-Waves move down for these. */}
+        {(isLawnReport || isTreeShrubV2) && (
           <>
             <AppliedProductsSection data={data} mode={mode} />
             {/* V2 renders the timeline up top (under Re-entry); legacy keeps it here. */}
@@ -7374,8 +7387,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <LawnProgramOverviewCard context={data.lawnProgramOverview} />
         )}
 
-        {/* V2 (lawn) renders Ask Waves up top (under Re-entry); otherwise keep it here. */}
-        {!(isLawnReport && data.reportV2) && (
+        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here. */}
+        {!isV2LeadLayout && (
           <QuickNavigationAndAsk
             mode={mode}
             token={token}
@@ -7389,9 +7402,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
-        {/* Non-lawn lines keep Timeline + Coverage and Products here; lawn
-            already rendered them up top. */}
-        {!isLawnReport && (
+        {/* Non-lead-layout lines keep Timeline + Coverage and Products here; lawn +
+            tree_shrub V2 already rendered them up top. */}
+        {!isV2LeadLayout && (
           <div id="map">
             <ServiceReportCoverageAndWorkflow
               serviceType={visitTimelineServiceType}
@@ -7411,7 +7424,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        {!isLawnReport && (
+        {!isV2LeadLayout && (
           <AppliedProductsSection
             data={data}
             mode={mode}

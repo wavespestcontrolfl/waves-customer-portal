@@ -448,15 +448,18 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) 
 
 // ─── AR aging stacked bar ─────────────────────────────────────────
 
-// `aging` { current, days_30, days_60, days_90_plus }. We render four
-// stacked segments so the relative weight of the 90+ bucket is visible
-// at a glance — that bucket is the only one drawn in alert red.
+// `aging` { current, days_30, days_60, days_90, days_120, days_120_plus }. Six
+// ST-style stacked segments on a green→red severity ramp so the oldest, least-
+// collectible debt (91–120, 121+) stands out for collections triage; those two
+// oldest buckets render in alert red.
 export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 180 }) {
   const buckets = [
-    { key: 'current',     label: 'Current',  amount: aging.current     || 0, fill: CHART_SUCCESS },
-    { key: 'days_30',     label: '1–30 days', amount: aging.days_30     || 0, fill: CHART_PRIMARY },
-    { key: 'days_60',     label: '31–60 days', amount: aging.days_60     || 0, fill: CHART_WARN },
-    { key: 'days_90_plus',label: '90+ days',  amount: aging.days_90_plus|| 0, fill: CHART_ALERT },
+    { key: 'current',       label: 'Current',     amount: aging.current       || 0, fill: CHART_SUCCESS },
+    { key: 'days_30',       label: '1–30 days',   amount: aging.days_30       || 0, fill: CHART_PRIMARY },
+    { key: 'days_60',       label: '31–60 days',  amount: aging.days_60       || 0, fill: CHART_WARN },
+    { key: 'days_90',       label: '61–90 days',  amount: aging.days_90        || 0, fill: '#FB923C' },
+    { key: 'days_120',      label: '91–120 days', amount: aging.days_120      || 0, fill: '#F87171', severe: true },
+    { key: 'days_120_plus', label: '121+ days',   amount: aging.days_120_plus || 0, fill: CHART_ALERT, severe: true },
   ];
   const total = buckets.reduce((s, b) => s + b.amount, 0);
   if (total === 0) return <EmptyState>No outstanding invoices</EmptyState>;
@@ -479,20 +482,54 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
           <div key={b.key} style={{ width: `${(b.amount / total) * 100}%`, background: b.fill }} />
         ))}
       </div>
-      <ul className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 text-12">
+      <ul className="grid grid-cols-3 md:grid-cols-6 gap-3 mt-4 text-12">
         {buckets.map((b) => (
           <li key={b.key} className="min-w-0">
             <div className="flex items-center gap-2 u-label text-ink-secondary">
               <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: b.fill }} />
               <span className="truncate">{b.label}</span>
             </div>
-            <div className={cn('u-nums mt-1 font-medium', b.key === 'days_90_plus' && b.amount > 0 ? 'text-alert-fg' : 'text-zinc-900')}>
+            <div className={cn('u-nums mt-1 font-medium', b.severe && b.amount > 0 ? 'text-alert-fg' : 'text-zinc-900')}>
               {fmtMoneyCompact(b.amount)}
             </div>
           </li>
         ))}
       </ul>
     </div>
+  );
+}
+
+// ─── Revenue by city (horizontal bar list) ────────────────────────
+//
+// ServiceTitan-style geo cut: where this month's completed-service
+// revenue comes from. Lightweight div-bar list (no Recharts), matching
+// the ChannelMixBar / AgingBar style already in this file.
+
+export function RevenueByCity({ cities = [], total = 0 }) {
+  if (!cities.length) {
+    return <EmptyState>No completed-service revenue this month</EmptyState>;
+  }
+  const maxRevenue = Math.max(...cities.map((c) => c.revenue || 0), 1);
+  return (
+    <ul className="space-y-2.5">
+      {cities.map((c) => (
+        <li key={c.city} className="flex items-center gap-3 text-12">
+          <span className="w-24 flex-shrink-0 truncate text-ink-secondary" title={c.city}>
+            {c.city}
+          </span>
+          <div className="flex-1 h-2 rounded-sm overflow-hidden bg-surface-sunken">
+            <div
+              className="h-full rounded-sm"
+              style={{ width: `${(c.revenue / maxRevenue) * 100}%`, background: CHART_PRIMARY }}
+            />
+          </div>
+          <span className="flex-shrink-0 u-nums text-right whitespace-nowrap">
+            <span className="font-medium text-zinc-900">{fmtMoneyCompact(c.revenue)}</span>
+            <span className="text-ink-tertiary"> · {c.jobs} jobs</span>
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -559,6 +596,136 @@ function Row({ label, value, fill, dim }) {
       <span className={cn('truncate', dim && 'text-ink-tertiary')}>{label}</span>
       <span className="ml-auto u-nums">{value}</span>
     </li>
+  );
+}
+
+// ─── Sales-capture speedometer (semicircle gauge) ─────────────────
+//
+// ServiceTitan-style "captured vs missed" hero gauge: a 180° arc split into
+// three risk zones (red 0–40 / amber 40–70 / green 70–100) with a needle at
+// the capture rate. Pure SVG — no Recharts — matching KpiRing's lightweight,
+// hand-rolled-arc style.
+
+// Map a gauge fraction t∈[0,1] to a point on the semicircle. The arc spans the
+// TOP half: t=0 is the left end (180°), t=1 the right end (0°), so the angle
+// sweeps 180°→0°. SVG y grows downward, so a point above the center has y < cy
+// (we subtract the sin term).
+function gaugePoint(cx, cy, radius, t) {
+  const angle = Math.PI * (1 - t); // 0→π as t goes 1→0; here t→angle = (1−t)π
+  return {
+    x: cx + radius * Math.cos(angle),
+    y: cy - radius * Math.sin(angle),
+  };
+}
+
+// SVG path for the arc segment between two fractions (t0 → t1) along the
+// semicircle. Uses a single arc command (sweep-flag 1 = clockwise across the
+// top from left toward right as t increases).
+function gaugeArcPath(cx, cy, radius, t0, t1) {
+  const a = gaugePoint(cx, cy, radius, t0);
+  const b = gaugePoint(cx, cy, radius, t1);
+  return `M ${a.x.toFixed(2)} ${a.y.toFixed(2)} A ${radius} ${radius} 0 0 1 ${b.x.toFixed(2)} ${b.y.toFixed(2)}`;
+}
+
+// Zone tone for the rate text + needle: <40 red, 40–69 amber, ≥70 green.
+function captureZoneColor(rate) {
+  if (rate == null || !Number.isFinite(rate)) return CHART_PRIOR;
+  if (rate < 40) return CHART_ALERT;
+  if (rate < 70) return CHART_WARN;
+  return CHART_SUCCESS;
+}
+
+export function CaptureGauge({ captureRate, captured = 0, missed = 0, wonCount = 0, lostCount = 0 }) {
+  const present = captureRate != null && Number.isFinite(Number(captureRate));
+  const rate = present ? Math.max(0, Math.min(100, Number(captureRate))) : 0;
+  const t = rate / 100;
+
+  // Geometry: a 220-wide viewBox, center near the bottom so the semicircle
+  // fills the top. Stroke width gives the colored band thickness.
+  const W = 220;
+  const cx = W / 2;
+  const cy = 120;
+  const radius = 92;
+  const band = 16;
+
+  // Three colored zones along the arc (fractions of the 0–100 scale).
+  const zones = [
+    { from: 0, to: 0.4, color: CHART_ALERT },
+    { from: 0.4, to: 0.7, color: CHART_WARN },
+    { from: 0.7, to: 1, color: CHART_SUCCESS },
+  ];
+
+  // Needle: a thin line from the hub to the rim at the current fraction,
+  // pulled slightly inside the band so the tip sits on the colored arc.
+  const needleColor = captureZoneColor(present ? rate : null);
+  const tip = gaugePoint(cx, cy, radius - band - 4, t);
+
+  return (
+    <div className="flex flex-col items-center">
+      <svg
+        viewBox={`0 0 ${W} 140`}
+        width="100%"
+        style={{ maxWidth: 320 }}
+        role="img"
+        aria-label={`Capture rate ${present ? `${Math.round(rate)} percent` : 'unavailable'}`}
+      >
+        {/* Track underlay so the band reads as a continuous arc even at the
+            zone seams. */}
+        <path
+          d={gaugeArcPath(cx, cy, radius, 0, 1)}
+          fill="none"
+          stroke={CHART_GRID}
+          strokeWidth={band}
+          strokeLinecap="round"
+        />
+        {/* Colored risk zones. */}
+        {zones.map((z) => (
+          <path
+            key={z.from}
+            d={gaugeArcPath(cx, cy, radius, z.from, z.to)}
+            fill="none"
+            stroke={present ? z.color : CHART_PRIOR}
+            strokeWidth={band}
+            opacity={present ? 1 : 0.35}
+          />
+        ))}
+        {/* Needle + hub. */}
+        {present && (
+          <>
+            <line
+              x1={cx}
+              y1={cy}
+              x2={tip.x.toFixed(2)}
+              y2={tip.y.toFixed(2)}
+              stroke={needleColor}
+              strokeWidth={3}
+              strokeLinecap="round"
+            />
+            <circle cx={cx} cy={cy} r={5} fill={needleColor} />
+          </>
+        )}
+        {/* Endpoint labels: 0% (left) and 100% (right). */}
+        <text x={cx - radius} y={cy + 16} textAnchor="middle" fill={CHART_TICK} style={{ fontSize: 10, fontWeight: 400 }}>0%</text>
+        <text x={cx + radius} y={cy + 16} textAnchor="middle" fill={CHART_TICK} style={{ fontSize: 10, fontWeight: 400 }}>100%</text>
+      </svg>
+
+      {/* Big rate %, toned by zone, with the captured/missed money + counts. */}
+      <div className="mt-1 text-center">
+        <div
+          className="u-nums leading-none"
+          style={{ fontSize: 40, fontWeight: 500, letterSpacing: '-0.02em', color: present ? needleColor : CHART_PRIOR }}
+        >
+          {present ? `${Math.round(rate)}%` : '—'}
+        </div>
+        <div className="u-label text-ink-tertiary mt-1">Capture rate</div>
+        <div className="text-13 text-ink-secondary mt-2 u-nums">
+          {fmtMoneyCompact(captured)} captured · {fmtMoneyCompact(missed)} missed
+        </div>
+        <div className="text-12 text-ink-tertiary mt-1 u-nums">
+          {fmtInt(wonCount)} won / {fmtInt(lostCount)} lost
+        </div>
+      </div>
+    </div>
   );
 }
 

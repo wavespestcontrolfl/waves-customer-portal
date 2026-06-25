@@ -191,6 +191,7 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
     exemptReason: null,
     paid: 0,
     creditRemaining: 0,
+    payerBilled: false,
   };
   if (!estimate?.id) return summary;
 
@@ -284,24 +285,32 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
     logger.warn('[estimate-deposits] schedule deposit policy summary failed', { error: err.message });
   }
 
-  // Payer-billed scope for UNAPPLIED ledger credit, resolved independently of the
-  // enforcement gate. resolveDepositPolicyForEstimate only runs the payer check
-  // when a deposit is actively required (enforced + non-exempt), so while
-  // ESTIMATE_DEPOSIT_REQUIRED is dark a payer-billed job that still holds an
-  // unapplied homeowner deposit would be reported without exemptReason — and the
-  // card would show the credit as "applied to first invoice" even though payer
-  // invoices skip homeowner deposit credit (invoice.create). Resolve the payer
-  // here too, scoped to the same linked service, so the card can mark the credit
-  // not-applicable. Key this off creditRemaining, NOT paid: a deposit already
-  // fully credited to an earlier (self-pay) invoice has no unapplied credit left
-  // to warn about, and flagging it payer_billed would make the card claim the
-  // already-applied money was "not credited". Fail-soft: a miss leaves
-  // exemptReason as-is.
-  if (summary.creditRemaining > 0 && summary.exemptReason !== 'payer_billed' && estimate?.customer_id) {
+  // Payer-billed scope, resolved ONCE here independent of the enforcement gate
+  // (resolveDepositPolicyForEstimate only runs the payer check when a deposit is
+  // actively required). It drives two distinct things:
+  //   1. summary.payerBilled — an at-a-glance "this visit bills to a third party,
+  //      do NOT collect from the customer" flag the scheduling card surfaces as a
+  //      warning. This must hold even while ESTIMATE_DEPOSIT_REQUIRED is dark and
+  //      even when no deposit was ever paid, so it is set whenever a payer
+  //      resolves, unconditionally.
+  //   2. summary.exemptReason='payer_billed' — the "deposit credit not applicable"
+  //      note. Payer invoices skip homeowner deposit credit (invoice.create), so
+  //      an unapplied homeowner deposit on a payer-billed job can never be applied.
+  //      This is keyed off creditRemaining, NOT paid: a deposit already fully
+  //      credited to an earlier (self-pay) invoice has no unapplied credit left to
+  //      warn about, and flagging it would make the card claim the already-applied
+  //      money was "not credited".
+  // Fail-soft: a miss leaves both as-is (the safe direction).
+  if (estimate?.customer_id) {
     try {
       const PayerService = require('./payer');
       const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId });
-      if (resolved?.payerId) summary.exemptReason = 'payer_billed';
+      if (resolved?.payerId) {
+        summary.payerBilled = true;
+        if (summary.creditRemaining > 0 && summary.exemptReason !== 'payer_billed') {
+          summary.exemptReason = 'payer_billed';
+        }
+      }
     } catch (err) {
       logger.warn('[estimate-deposits] schedule summary payer scope read failed', { error: err.message });
     }

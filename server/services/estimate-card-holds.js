@@ -640,6 +640,194 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   return releaseCardHold({ scheduledServiceId, reason: 'cancel_outside_window' });
 }
 
+// ── No-show fee settlement: refundable invoice + customer receipt ─────────
+// The no-show / late-cancel fee is charged face-value via a raw off-session PI
+// (chargeNoShowFee). This turns that bare charge into a first-class billing
+// object: a PAID fee invoice (so it gets the customer receipt page + invoice-
+// based revenue reporting) with the payments-ledger row linked to it, then
+// sends the customer a receipt and gives the office a heads-up. Refundability
+// comes free via the payments row + the existing /refund flow. Driven from the
+// card_hold_no_show_fee webhook (the settlement signal); idempotent on the PI.
+async function settleNoShowFee(paymentIntent) {
+  const piId = paymentIntent?.id;
+  const customerId = paymentIntent?.metadata?.waves_customer_id || null;
+  if (!piId || !customerId) return { settled: false, reason: 'missing_pi_or_customer' };
+
+  // Pre-settlement refund guard: an immediate dashboard refund can deliver
+  // charge.refunded BEFORE this succeeded event — and since no invoice/payment
+  // exists yet, that handler finds nothing to mark. Re-check the LIVE charge:
+  // a FULL refund skips settlement entirely; a PARTIAL refund still settles (so
+  // the net-kept money lands in revenue) but records the refunded slice on the
+  // payment row. FAIL CLOSED on a retrieve error — throw so the webhook returns
+  // non-200 and Stripe retries until we can observe the real refund state;
+  // settling gross here would book already-refunded money as revenue.
+  let preRefundedCents = 0;
+  try {
+    const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
+    const ch = live?.latest_charge;
+    if (ch && typeof ch === 'object') {
+      const chargedCents = Math.round(Number(ch.amount || 0));
+      preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
+      if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
+        logger.warn('[estimate-card-holds] no-show fee fully refunded before settlement — skipping', { piId });
+        return { settled: false, reason: 'refunded_pre_settlement' };
+      }
+    }
+  } catch (err) {
+    logger.error('[estimate-card-holds] pre-settlement refund check failed — deferring to Stripe retry', { piId, error: err.message });
+    throw err;
+  }
+
+  const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
+  const reason = paymentIntent.metadata?.reason || 'no_show';
+  const estimateId = paymentIntent.metadata?.estimate_id || null;
+  const scheduledServiceId = paymentIntent.metadata?.scheduled_service_id || null;
+  const feeLabel = reason === 'late_cancel' ? 'Late-cancellation fee' : 'No-show fee';
+
+  // Invoice + paid-mark + ledger row land atomically. A transaction-scoped
+  // advisory lock keyed on the PI serializes concurrent settlements for the same
+  // charge — payments.stripe_payment_intent_id has no unique constraint, so two
+  // webhook deliveries (or workers) could otherwise both pass a pre-txn replay
+  // check and each create an invoice. The replay check runs INSIDE the lock.
+  const InvoiceService = require('./invoice');
+  const description = `One-time visit — ${feeLabel.toLowerCase()}`;
+  const result = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`card_hold_no_show_fee:${piId}`]);
+    const existing = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
+    if (existing) return { replay: true };
+
+    // Face value, NO tax: the fee must equal the amount disclosed + charged.
+    const inv = await InvoiceService.create({
+      database: trx,
+      customerId,
+      title: description,
+      lineItems: [{ description: `${feeLabel} — one-time visit`, quantity: 1, unit_price: amount, amount }],
+      taxRate: 0,
+      dueDate: etDateString(),
+      skipAccrual: true,
+    });
+    // SELF-PAY: this fee was charged to the HOMEOWNER's saved card, so it must
+    // never route to a third-party payer (create() resolves the customer's
+    // default payer + stamps payer_id/payer_snapshot, and the receipt email then
+    // routes to the payer's AP inbox). Clear the payer so the receipt + AR stay
+    // with the customer who was actually charged (skipAccrual already prevents
+    // statement accrual).
+    await trx('invoices').where({ id: inv.id }).update({
+      status: 'paid',
+      paid_at: trx.fn.now(),
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payer_id: null,
+      payer_snapshot: null,
+      updated_at: trx.fn.now(),
+    });
+    // payments has no invoice_id column — link via metadata.invoice_id +
+    // invoices.stripe_payment_intent_id (same as the completion path). This is
+    // the row the existing /refund flow acts on.
+    await trx('payments').insert({
+      customer_id: customerId,
+      processor: 'stripe',
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payment_date: etDateString(),
+      amount,
+      // A partial pre-settlement refund is recorded here so net revenue + the
+      // refund ledger are correct (status stays 'paid' — only a full refund is
+      // terminal, and that path skipped settlement above). Any refund recorded
+      // here is partial; admin payment history keys "refunded" off refund_status,
+      // so leaving it null would surface a partial refund as a plain paid charge.
+      refund_amount: preRefundedCents > 0 ? preRefundedCents / 100 : 0,
+      refund_status: preRefundedCents > 0 ? 'partial' : null,
+      status: 'paid',
+      description,
+      metadata: JSON.stringify({
+        purpose: 'card_hold_no_show_fee',
+        invoice_id: inv.id,
+        estimate_id: estimateId,
+        scheduled_service_id: scheduledServiceId,
+        reason,
+      }),
+    });
+    return { invoice: inv };
+  });
+  if (result.replay) {
+    // A crash after the settle txn committed but before the receipt sent (or
+    // before Stripe marked the event processed) lands here on retry. Re-attempt
+    // the receipt — idempotent via invoices.receipt_sent_at — so a settled fee
+    // never ends up with no customer receipt.
+    try {
+      const inv = await db('invoices').where({ stripe_payment_intent_id: piId })
+        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'token', 'receipt_sent_at');
+      if (inv?.id && !inv.receipt_sent_at) {
+        await sendNoShowFeeReceipt({ invoice: inv, customerId, amount, feeLabel, reason });
+      }
+    } catch (err) {
+      logger.warn('[estimate-card-holds] replay receipt recovery failed (non-fatal)', { error: err.message });
+    }
+    return { settled: false, replay: true };
+  }
+  const invoice = result.invoice;
+  logger.info('[estimate-card-holds] no-show fee settled as paid invoice', { invoiceId: invoice.id, customerId, reason });
+
+  // Receipt to the customer + heads-up to the office. Best-effort: the money +
+  // invoice are durable, so a comms hiccup must NOT throw (that would make
+  // Stripe retry and double-create the invoice).
+  try {
+    await sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason });
+  } catch (err) {
+    logger.warn('[estimate-card-holds] no-show fee receipt/notify failed (non-fatal)', { error: err.message });
+  }
+  return { settled: true, invoiceId: invoice.id };
+}
+
+// Customer receipt via the CANONICAL receipt path (dispatched by the customer's
+// payment_receipt channel preference) + a low-key office notification. Using
+// InvoiceService.sendReceipt / sendReceiptEmail rather than a hand-rolled
+// message means the receipt kill switch, the payment_receipt opt-out, the
+// per-location Twilio number, and the invoices.receipt_sent_at stamp (so the
+// admin "needs receipt" filter + batch resend don't double-send) all apply. The
+// fee invoice's title already names the charge, so no custom copy is needed.
+async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason }) {
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  const receiptOptOut = prefs?.payment_receipt === false;
+  const channel = prefs?.payment_receipt_channel || 'sms';
+
+  // SMS receipt — sendReceipt stamps receipt_sent_at + routes through the
+  // payment_receipt template/policy (kill switch, per-location number, opt-out).
+  if (!receiptOptOut && (channel === 'sms' || channel === 'both')) {
+    try {
+      await require('./invoice').sendReceipt(invoice.id);
+    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
+  }
+  // Emailed PDF receipt.
+  if (!receiptOptOut && (channel === 'email' || channel === 'both') && prefs?.email_enabled !== false) {
+    try {
+      const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
+      // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
+      // does) — so on an email-only channel, stamp it here. ONLY on a delivered
+      // or deduped result (both ok:true): a no-recipient / provider failure
+      // returns ok:false WITHOUT throwing, and stamping then would wrongly drop
+      // the paid fee invoice from the admin "needs receipt" retry path.
+      if (emailResult?.ok) {
+        await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+          .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
+      }
+    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
+  }
+
+  // Office heads-up so a "what's this charge?" call isn't a surprise.
+  const first = (await db('customers').where({ id: customerId }).first('first_name').catch(() => null))?.first_name || 'A customer';
+  const feeText = amount % 1 ? `$${amount.toFixed(2)}` : `$${amount}`;
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      `${feeLabel} charged`,
+      `${first} — ${feeText} ${feeLabel.toLowerCase()} on a one-time visit.`,
+      { link: `/admin/customers/${customerId}`, metadata: { invoiceId: invoice.id, reason } },
+    );
+  } catch (e) { logger.warn('[estimate-card-holds] no-show fee admin notify failed', { error: e.message }); }
+}
+
 module.exports = {
   isCardHoldEnabled,
   cardHoldNoShowFee,
@@ -658,9 +846,11 @@ module.exports = {
   releaseCardHold,
   handleCardHoldCancellation,
   isWithinCancelWindow,
+  settleNoShowFee,
   _private: {
     cardHoldIntentMatchesEstimate,
     holdGeneration,
     resolveHoldPaymentMethodRowId,
+    sendNoShowFeeReceipt,
   },
 };
