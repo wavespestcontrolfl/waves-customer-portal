@@ -64,7 +64,11 @@ export default function CallBridgeLink({
         callViaBridge(phone, customerName, fromNumber);
       }}
       className={className}
-      style={{ ...BASE_STYLE, ...(style || {}) }}
+      // BASE_STYLE strips native button chrome for legacy inline tel: links.
+      // When the caller passes a className (e.g. a bordered pill), let those
+      // classes control the visuals — applying BASE_STYLE inline would override
+      // them (inline styles beat utility classes) and flatten the button.
+      style={className ? style : { ...BASE_STYLE, ...(style || {}) }}
       title={
         title || `Call via Waves — rings your phone first, press 1 to connect`
       }

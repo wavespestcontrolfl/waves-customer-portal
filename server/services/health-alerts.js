@@ -3,6 +3,12 @@ const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
+// Display name that drops a missing/null last name so we never render
+// "Sam null" in alert titles, descriptions, or call-task messages.
+function fullName(c) {
+  return [c && c.first_name, c && c.last_name].filter(Boolean).join(' ').trim() || 'Customer';
+}
+
 // ---------------------------------------------------------------------------
 // Alert rule definitions
 // ---------------------------------------------------------------------------
@@ -12,7 +18,7 @@ const ALERT_RULES = [
     severity: 'high',
     check: (data) => data.scoreChange30d !== null && data.scoreChange30d < -15,
     title: (data) => `Health score dropped ${Math.abs(data.scoreChange30d)} points in 30 days`,
-    description: (data) => `${data.customer.first_name} ${data.customer.last_name}'s score fell from ${data.overall + Math.abs(data.scoreChange30d)} to ${data.overall}. Primary drivers: ${(data.churnSignals || []).map(s => s.signal).join(', ') || 'general decline'}.`,
+    description: (data) => `${fullName(data.customer)}'s score fell from ${data.overall + Math.abs(data.scoreChange30d)} to ${data.overall}. Primary drivers: ${(data.churnSignals || []).map(s => String(s.signal || '').replace(/_/g, ' ')).filter(Boolean).join(', ') || 'general decline'}.`,
     actions: [
       { label: 'Send check-in SMS', type: 'sms', template: 'check_in' },
       { label: 'Schedule courtesy call', type: 'call' },
@@ -22,7 +28,7 @@ const ALERT_RULES = [
     type: 'critical_risk',
     severity: 'critical',
     check: (data) => data.churnRisk === 'critical',
-    title: (data) => `Critical churn risk: ${data.customer.first_name} ${data.customer.last_name}`,
+    title: (data) => `Critical churn risk: ${fullName(data.customer)}`,
     description: (data) => `Score ${data.overall} (${data.grade}). Probability of churn: ${Math.round((data.churnProbability || 0) * 100)}%. Estimated ${data.daysUntilChurn || '?'} days until churn.`,
     actions: [
       { label: 'Call immediately', type: 'call' },
@@ -37,7 +43,7 @@ const ALERT_RULES = [
       return days && days > 90;
     },
     title: (data) => `No service in ${data.serviceDetails.daysSinceLastService} days`,
-    description: (data) => `${data.customer.first_name} ${data.customer.last_name} hasn't had a service visit in over ${Math.round(data.serviceDetails.daysSinceLastService / 30)} months.`,
+    description: (data) => `${fullName(data.customer)} hasn't had a service visit in over ${Math.round(data.serviceDetails.daysSinceLastService / 30)} months.`,
     actions: [
       { label: 'Send rebooking SMS', type: 'sms', template: 'rebook' },
       { label: 'Schedule visit', type: 'call' },
@@ -50,7 +56,7 @@ const ALERT_RULES = [
       const details = data.paymentDetails || {};
       return (details.failedCount && details.failedCount >= 2) || data.payment < 30;
     },
-    title: (data) => `Payment issues detected for ${data.customer.first_name} ${data.customer.last_name}`,
+    title: (data) => `Payment issues detected for ${fullName(data.customer)}`,
     description: (data) => `Payment score: ${data.payment}. Failed payments: ${data.paymentDetails?.failedCount || 0}. Late payments: ${data.paymentDetails?.lateCount || 0}.`,
     actions: [
       { label: 'Send payment reminder', type: 'sms', template: 'payment_reminder' },
@@ -64,7 +70,7 @@ const ALERT_RULES = [
       const days = data.engagementDetails?.daysSinceLastContact;
       return days && days > 60 && data.engagement < 35;
     },
-    title: (data) => `Low engagement: ${data.customer.first_name} ${data.customer.last_name}`,
+    title: (data) => `Low engagement: ${fullName(data.customer)}`,
     description: (data) => `No contact in ${data.engagementDetails.daysSinceLastContact} days. Engagement score: ${data.engagement}.`,
     actions: [
       { label: 'Send friendly check-in', type: 'sms', template: 'check_in' },
@@ -74,7 +80,7 @@ const ALERT_RULES = [
     type: 'satisfaction_drop',
     severity: 'high',
     check: (data) => data.satisfaction < 30,
-    title: (data) => `Low satisfaction: ${data.customer.first_name} ${data.customer.last_name}`,
+    title: (data) => `Low satisfaction: ${fullName(data.customer)}`,
     description: (data) => `Satisfaction score: ${data.satisfaction}. Avg rating: ${data.satisfactionDetails?.avgRating || 'N/A'}. Complaints: ${data.satisfactionDetails?.complaintCount || 0}.`,
     actions: [
       { label: 'Call to address concerns', type: 'call' },
@@ -88,7 +94,7 @@ const ALERT_RULES = [
       const months = data.loyaltyDetails?.tenureMonths;
       return months !== undefined && months < 6 && data.overall < 50;
     },
-    title: (data) => `New customer at risk: ${data.customer.first_name} ${data.customer.last_name}`,
+    title: (data) => `New customer at risk: ${fullName(data.customer)}`,
     description: (data) => `Customer joined ${data.loyaltyDetails.tenureMonths} months ago with a score of ${data.overall}. Early intervention recommended.`,
     actions: [
       { label: 'Send welcome follow-up', type: 'sms', template: 'welcome_followup' },
@@ -310,14 +316,14 @@ async function executeAction(alertId, actionIndex) {
         customer_id: customer.id,
         interaction_type: 'scheduled_call',
         status: 'pending',
-        body: action.notes || `Health alert follow-up call for ${customer.first_name} ${customer.last_name}`,
+        body: action.notes || `Health alert follow-up call for ${fullName(customer)}`,
         created_at: new Date(),
       });
-      result = { success: true, message: `Call task created for ${customer.first_name} ${customer.last_name}` };
+      result = { success: true, message: `Call task created for ${fullName(customer)}` };
     } catch (err) {
       // Fallback if table doesn't have expected columns
       logger.debug(`[health-alerts] Call task insert fallback: ${err.message}`);
-      result = { success: true, message: `Call task noted for ${customer.first_name} ${customer.last_name}` };
+      result = { success: true, message: `Call task noted for ${fullName(customer)}` };
     }
   } else if (action.type === 'discount' || action.type === 'save_offer') {
     // Apply retention discount

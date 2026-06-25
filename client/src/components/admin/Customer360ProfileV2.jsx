@@ -524,6 +524,9 @@ function RadarChart({ data }) {
       height={size}
       viewBox={`0 0 ${size} ${size}`}
       className="block mx-auto"
+      // Let axis labels (e.g. "Engagement") paint into the centered side
+      // margin instead of being clipped by the 160px SVG box.
+      style={{ overflow: "visible" }}
     >
       {gridLevels.map((lv) => (
         <polygon
@@ -4246,7 +4249,10 @@ export default function Customer360ProfileV2({
           </div>
         )}
         {/* ZONE 3 — TAB BAR */}
-        <div className="flex bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
+        {/* shrink-0: this is an overflow-x scroll container, so its flex
+            auto-minimum-size is 0 — without it the column flex collapses the
+            bar to ~0px on mobile (tall content), hiding every section tab. */}
+        <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
           {TABS.map((t) => (
             <button
               key={t.key}
@@ -4583,7 +4589,13 @@ export default function Customer360ProfileV2({
                         {score}/100
                       </span>
                       {(hs.churn_risk_level || hs.churn_risk) && (
-                        <span>· {hs.churn_risk_level || hs.churn_risk}</span>
+                        <span>
+                          {" "}
+                          ·{" "}
+                          {String(hs.churn_risk_level || hs.churn_risk)
+                            .replace(/_/g, " ")
+                            .replace(/\b\w/g, (ch) => ch.toUpperCase())}
+                        </span>
                       )}
                     </div>
                   )}
@@ -5606,7 +5618,9 @@ export default function Customer360ProfileV2({
               ))}
             </div>{" "}
           </div>{" "}
-          <div className="max-h-[250px] overflow-y-auto flex flex-col">
+          {/* On mobile the timeline grows inline (panel handles the scroll) so
+              a nested 250px scroll region doesn't trap touch; capped on desktop. */}
+          <div className="md:max-h-[250px] md:overflow-y-auto flex flex-col">
             {filteredTimeline.slice(0, 30).map((item, i) => {
               const TYPE_LABEL = {
                 sms: "SMS",
