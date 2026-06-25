@@ -811,7 +811,10 @@ async function getOutstandingBalances(input) {
   // ET noon to keep the day count stable regardless of the server's TZ.
   const todayET = parseETDateTime(`${etDateString()}T12:00`);
   let total = 0, overdue = 0;
-  const aging = { current: 0, days_30: 0, days_60: 0, days_90_plus: 0 };
+  // Six ST-style buckets so the oldest, least-collectible debt (91-120, 121+) is
+  // visible/chasable on its own instead of lumped into one "90+". days_90_plus is
+  // kept below as a back-compat alias (BillingRecoveryPage still reads it).
+  const aging = { current: 0, days_30: 0, days_60: 0, days_90: 0, days_120: 0, days_120_plus: 0 };
 
   invoices.forEach((row) => {
     const amt = parseFloat(row.amount_due || 0);
@@ -837,8 +840,12 @@ async function getOutstandingBalances(input) {
     if (age <= 0) aging.current += amt;
     else if (age <= 30) aging.days_30 += amt;
     else if (age <= 60) aging.days_60 += amt;
-    else aging.days_90_plus += amt;
+    else if (age <= 90) aging.days_90 += amt;
+    else if (age <= 120) aging.days_120 += amt;
+    else aging.days_120_plus += amt;
   });
+  // Back-compat alias = the old "90+" (now 61+ split into three).
+  aging.days_90_plus = aging.days_90 + aging.days_120 + aging.days_120_plus;
 
   return {
     total_outstanding: total,

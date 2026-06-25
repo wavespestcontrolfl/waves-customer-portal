@@ -448,15 +448,18 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue }) 
 
 // ─── AR aging stacked bar ─────────────────────────────────────────
 
-// `aging` { current, days_30, days_60, days_90_plus }. We render four
-// stacked segments so the relative weight of the 90+ bucket is visible
-// at a glance — that bucket is the only one drawn in alert red.
+// `aging` { current, days_30, days_60, days_90, days_120, days_120_plus }. Six
+// ST-style stacked segments on a green→red severity ramp so the oldest, least-
+// collectible debt (91–120, 121+) stands out for collections triage; those two
+// oldest buckets render in alert red.
 export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 180 }) {
   const buckets = [
-    { key: 'current',     label: 'Current',  amount: aging.current     || 0, fill: CHART_SUCCESS },
-    { key: 'days_30',     label: '1–30 days', amount: aging.days_30     || 0, fill: CHART_PRIMARY },
-    { key: 'days_60',     label: '31–60 days', amount: aging.days_60     || 0, fill: CHART_WARN },
-    { key: 'days_90_plus',label: '90+ days',  amount: aging.days_90_plus|| 0, fill: CHART_ALERT },
+    { key: 'current',       label: 'Current',     amount: aging.current       || 0, fill: CHART_SUCCESS },
+    { key: 'days_30',       label: '1–30 days',   amount: aging.days_30       || 0, fill: CHART_PRIMARY },
+    { key: 'days_60',       label: '31–60 days',  amount: aging.days_60       || 0, fill: CHART_WARN },
+    { key: 'days_90',       label: '61–90 days',  amount: aging.days_90        || 0, fill: '#FB923C' },
+    { key: 'days_120',      label: '91–120 days', amount: aging.days_120      || 0, fill: '#F87171', severe: true },
+    { key: 'days_120_plus', label: '121+ days',   amount: aging.days_120_plus || 0, fill: CHART_ALERT, severe: true },
   ];
   const total = buckets.reduce((s, b) => s + b.amount, 0);
   if (total === 0) return <EmptyState>No outstanding invoices</EmptyState>;
@@ -479,14 +482,14 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
           <div key={b.key} style={{ width: `${(b.amount / total) * 100}%`, background: b.fill }} />
         ))}
       </div>
-      <ul className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 text-12">
+      <ul className="grid grid-cols-3 md:grid-cols-6 gap-3 mt-4 text-12">
         {buckets.map((b) => (
           <li key={b.key} className="min-w-0">
             <div className="flex items-center gap-2 u-label text-ink-secondary">
               <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: b.fill }} />
               <span className="truncate">{b.label}</span>
             </div>
-            <div className={cn('u-nums mt-1 font-medium', b.key === 'days_90_plus' && b.amount > 0 ? 'text-alert-fg' : 'text-zinc-900')}>
+            <div className={cn('u-nums mt-1 font-medium', b.severe && b.amount > 0 ? 'text-alert-fg' : 'text-zinc-900')}>
               {fmtMoneyCompact(b.amount)}
             </div>
           </li>
