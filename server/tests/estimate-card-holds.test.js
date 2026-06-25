@@ -20,7 +20,7 @@ const mockSendSMS = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: (...a) => mockSendSMS(...a) }));
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
-const mockSendReceiptEmail = jest.fn();
+const mockSendReceiptEmail = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: (...a) => mockSendReceiptEmail(...a) }));
 const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
@@ -235,6 +235,12 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
     expect(mockInvoiceCreate).toHaveBeenCalled(); // settles, doesn't skip
+  });
+
+  it('throws (so Stripe retries) when the pre-settlement refund lookup fails — never settles gross', async () => {
+    mockRetrievePaymentIntent.mockRejectedValueOnce(new Error('stripe unavailable'));
+    await expect(settleNoShowFee(pi())).rejects.toThrow('stripe unavailable');
+    expect(mockInvoiceCreate).not.toHaveBeenCalled();
   });
 
   it('is idempotent — an existing payment row (checked in-txn) = replay; re-attempts receipt only if unsent', async () => {

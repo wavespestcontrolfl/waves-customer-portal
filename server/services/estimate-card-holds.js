@@ -552,7 +552,9 @@ async function settleNoShowFee(paymentIntent) {
   // exists yet, that handler finds nothing to mark. Re-check the LIVE charge:
   // a FULL refund skips settlement entirely; a PARTIAL refund still settles (so
   // the net-kept money lands in revenue) but records the refunded slice on the
-  // payment row. (Fail-open on a retrieve error.)
+  // payment row. FAIL CLOSED on a retrieve error — throw so the webhook returns
+  // non-200 and Stripe retries until we can observe the real refund state;
+  // settling gross here would book already-refunded money as revenue.
   let preRefundedCents = 0;
   try {
     const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
@@ -566,8 +568,8 @@ async function settleNoShowFee(paymentIntent) {
       }
     }
   } catch (err) {
-    logger.warn('[estimate-card-holds] pre-settlement refund check failed — proceeding', { error: err.message });
-    preRefundedCents = 0;
+    logger.error('[estimate-card-holds] pre-settlement refund check failed — deferring to Stripe retry', { piId, error: err.message });
+    throw err;
   }
 
   const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
@@ -625,8 +627,11 @@ async function settleNoShowFee(paymentIntent) {
       amount,
       // A partial pre-settlement refund is recorded here so net revenue + the
       // refund ledger are correct (status stays 'paid' — only a full refund is
-      // terminal, and that path skipped settlement above).
+      // terminal, and that path skipped settlement above). Any refund recorded
+      // here is partial; admin payment history keys "refunded" off refund_status,
+      // so leaving it null would surface a partial refund as a plain paid charge.
       refund_amount: preRefundedCents > 0 ? preRefundedCents / 100 : 0,
+      refund_status: preRefundedCents > 0 ? 'partial' : null,
       status: 'paid',
       description,
       metadata: JSON.stringify({
@@ -691,12 +696,16 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // Emailed PDF receipt.
   if (!receiptOptOut && (channel === 'email' || channel === 'both') && prefs?.email_enabled !== false) {
     try {
-      await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
+      const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
       // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
-      // does) — so on an email-only channel, stamp it here or the paid fee
-      // invoice stays in the admin "needs receipt" filter and gets batch-resent.
-      await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
-        .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
+      // does) — so on an email-only channel, stamp it here. ONLY on a delivered
+      // or deduped result (both ok:true): a no-recipient / provider failure
+      // returns ok:false WITHOUT throwing, and stamping then would wrongly drop
+      // the paid fee invoice from the admin "needs receipt" retry path.
+      if (emailResult?.ok) {
+        await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+          .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
+      }
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
   }
 
