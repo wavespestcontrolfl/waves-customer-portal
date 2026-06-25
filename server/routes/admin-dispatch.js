@@ -48,6 +48,7 @@ const {
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance } = require('../services/tree-shrub-closeout');
+const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
@@ -3792,6 +3793,107 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
 
+    // Auto-score the Tree & Shrub visit's photos (dual-vision) and persist a
+    // tree_shrub_assessments row that feeds the customer Tree & Shrub Report V2.
+    // Post-commit + fire-and-forget: it never blocks completion latency or success
+    // (the report self-heals on view). Flag-gated, tree_shrub-only, fully guarded —
+    // a scoring hiccup can't affect any completion. Replays return earlier, so this
+    // runs once on the genuine first completion (no duplicate assessments).
+    if (
+      process.env.TREE_SHRUB_REPORT_V2 === 'true'
+      && reportServiceLine === 'tree_shrub'
+      && !isIncompleteVisit
+      && Array.isArray(completionPhotos) && completionPhotos.length
+    ) {
+      let uploadedRows = Array.isArray(preCommitCompletionPhotoRows) ? preCommitCompletionPhotoRows : [];
+      // Resume recovery: on a post-commit retry the in-memory upload result is empty
+      // even though the photos were already persisted to service_photos. Without this,
+      // scorable would be empty on resume and the V2 report would stay blank. Load the
+      // committed 'after' photo rows for this record so scoring can still proceed.
+      if (!uploadedRows.length && record.id) {
+        uploadedRows = await db('service_photos')
+          .where({ service_record_id: record.id, photo_type: 'after' })
+          .select('s3_key', 'sort_order', 'caption')
+          .orderBy('sort_order', 'asc')
+          .catch(() => []);
+      }
+      // Align uploaded S3 rows to submitted photos by sort_order, NOT by position:
+      // uploadServicePhotoDataUrls drops failed uploads (compacting the array), so a
+      // positional [i] join would pair a photo's vision score / caption with a
+      // DIFFERENT photo's S3 key whenever an upload fails. sort_order is the photo's
+      // original submission index, so the join stays correct with gaps.
+      const rowBySort = new Map(uploadedRows.map((r) => [r.sort_order, r]));
+      const rowFor = (p, i) => rowBySort.get(p && p.sortOrder != null ? p.sortOrder : i) || null;
+      const assessService = {
+        id: record.id,
+        customer_id: svc.customer_id,
+        scheduled_service_id: svc.id,
+        technician_id: svc.technician_id || req.technicianId || null,
+        service_date: svc.scheduled_date || record.service_date || null,
+      };
+      // Only operate on photos that ACTUALLY uploaded — the assessment must never
+      // reference an image the report can't show, and scores must reflect the photos
+      // it displays. submitted = photos with data; scorable = those with an S3 row.
+      const submitted = completionPhotos.filter((p) => p && p.data);
+      const scorable = submitted
+        .map((p, i) => ({ p, row: rowFor(p, i) }))
+        .filter((x) => x.row);
+      const allUploaded = scorable.length > 0 && scorable.length === submitted.length;
+      // Tech-reviewed path: the closeout preview already scored the photos and the
+      // tech confirmed/hid/edited. Trust that aggregate ONLY when every submitted
+      // photo uploaded AND the preview actually scored every one of them (a vision
+      // call may have failed during preview) — otherwise the report could show a photo
+      // that never contributed to the score, so re-score the uploaded set instead.
+      const review = req.body && req.body.treeShrubReview;
+      const previewCoveredAll = review && Number(review.scoredCount) === submitted.length;
+      // Prove the scores + observation + the EXACT photo set came from this server's
+      // /assess-preview — a tampered/stale client (or one that swapped photos at the
+      // same count, or edited the observation copy) can't forge the HMAC, so it falls
+      // back to re-scoring rather than persisting arbitrary client-supplied content.
+      const reviewPhotosHash = treeShrubPhotosHash(submitted.map((p) => p.data));
+      const reviewSigned = review && review.signature
+        && review.signature === treeShrubReviewSignature(review.scores, review.scoredCount, svc.id, reviewPhotosHash, review.observations);
+      let scoringPromise = null;
+      if (review && review.scores && typeof review.scores === 'object' && allUploaded && previewCoveredAll && reviewSigned) {
+        const reviewPhotos = scorable.map(({ p, row }) => ({ s3_key: row.s3_key || null, url: row.url || null, caption: p.caption || null, zone: p.zone || p.zoneId || null }));
+        scoringPromise = storeTreeShrubAssessmentFromReview({
+          service: assessService,
+          scores: review.scores,
+          decisions: Array.isArray(review.decisions) ? review.decisions : (Array.isArray(review.findings) ? review.findings : []),
+          photos: reviewPhotos,
+          observations: typeof review.observations === 'string' ? review.observations : '',
+        });
+      } else {
+        const scorePhotos = scorable.map(({ p, row }) => ({
+          data: p.data,
+          caption: p.caption || null,
+          zone: p.zone || p.zoneId || null,
+          s3Key: row.s3_key || null,
+          url: row.url || null,
+          qualityScore: 60,
+        }));
+        if (scorePhotos.length) {
+          scoringPromise = scoreAndStoreTreeShrubAssessment({
+            service: assessService,
+            photos: scorePhotos,
+            loadImage: (ph) => {
+              const m = String(ph.data || '').match(/^data:([^;,]+)?(?:;base64)?,(.*)$/);
+              return m && m[2] ? { base64: m[2], mimeType: m[1] || 'image/jpeg' } : null;
+            },
+          });
+        }
+      }
+      if (scoringPromise) {
+        const logged = scoringPromise.catch((err) => logger.error(`[tree-shrub] assessment persist failed for service_record ${record.id}: ${err.message}`));
+        // Give the persist a bounded window to land BEFORE the customer artifacts
+        // (report token / PDF / email) are queued below, so they include the V2
+        // section. The reviewed path is a fast insert; the auto-score path runs vision
+        // — cap the wait so a slow/hung model call can't block completion. On timeout
+        // it finishes in the background and the live report self-heals on next view.
+        await Promise.race([logged, new Promise((resolve) => setTimeout(resolve, 12000))]);
+      }
+    }
+
     if (isIncompleteVisit) {
       const responsePayload = {
         success: true,
@@ -5705,6 +5807,59 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     }
     return res.json(options);
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
+// body: { photos: [{ data: <dataURL> }] }
+// Scores the closeout photos with dual-vision (NO persistence) and returns the
+// tech-facing findings the Tree & Shrub closeout summary renders. The tech then
+// confirms/hides/edits and the decisions are submitted with completion.
+router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
+  try {
+    // Server kill-switch + cost guard: the dual-vision scoring is paid, so refuse
+    // (before any model call) unless the feature is rolled out — mirrors the gate on
+    // the completion auto-score hook, so the UI flag alone can't trigger paid calls.
+    if (process.env.TREE_SHRUB_REPORT_V2 !== 'true') {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    // Per-service ownership (same guard as photo-analysis/draft): a tech may only
+    // score photos for a service they're assigned to; admins are unrestricted.
+    if (!(await assertRecapOwnership(req, res))) return;
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'service_type');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (detectServiceLine(svc.service_type) !== 'tree_shrub') {
+      return res.status(409).json({ error: 'Not a tree & shrub service', code: 'not_tree_shrub' });
+    }
+    const { photos } = req.body || {};
+    if (!Array.isArray(photos) || !photos.length) {
+      return res.status(400).json({ error: 'photos array is required', code: 'photos_required' });
+    }
+    if (photos.length > 5) {
+      return res.status(400).json({ error: 'At most 5 photos can be analyzed', code: 'too_many_photos' });
+    }
+    const { decodeDataUrlPhoto, MAX_COMPLETION_PHOTO_DATA_URL_BYTES } = require('../services/service-photos');
+    const result = await previewTreeShrubAssessment({
+      photos,
+      loadImage: (photo) => {
+        try {
+          const decoded = decodeDataUrlPhoto(photo?.data, { maxBytes: MAX_COMPLETION_PHOTO_DATA_URL_BYTES });
+          return { base64: decoded.buffer.toString('base64'), mimeType: decoded.mimeType };
+        } catch { return null; }
+      },
+    });
+    if (!result) {
+      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', status: 'failed' });
+    }
+    // Sign the scores + observation + the EXACT photo set so the completion handler
+    // can verify the review came from this preview for these images.
+    const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
+    result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
+    return res.json({ ...result, status: 'complete' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Tree & shrub assessment preview failed', detail: err.message });
+  }
 });
 
 // POST /api/admin/dispatch/:serviceId/rain-out

@@ -40,6 +40,7 @@ import useSpeechDictation from "../../hooks/useSpeechDictation";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import FastCloseoutSummary from "../../components/tech/FastCloseoutSummary";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
+import TreeShrubCloseoutSummary from "../../components/tech/TreeShrubCloseoutSummary";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -6807,6 +6808,9 @@ export function CompletionPanel({
   const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
   // Phase 3 fast closeout — flag-gated (default off). Existing completion flow is unchanged when off.
   const { enabled: fastCloseoutFlag, ready: fastCloseoutReady } = useFeatureFlagReady("fast-closeout-v2");
+  // Tree & Shrub exception-based closeout — flag-gated (default off). When off the
+  // completion flow is unchanged and the server's post-commit auto-score still runs.
+  const { enabled: treeShrubCloseoutFlag, ready: treeShrubCloseoutReady } = useFeatureFlagReady("tree-shrub-closeout-v2");
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null, overrideReason: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
@@ -6974,6 +6978,13 @@ export function CompletionPanel({
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
+  // Tree & Shrub closeout AI review (flag-gated). treeShrubReview holds the preview
+  // { scores, observations, findings }; decisions live in the summary and are
+  // captured into the ref on Complete + Send so the submit body can carry them.
+  const [treeShrubReview, setTreeShrubReview] = useState(null);
+  const [treeShrubAiStatus, setTreeShrubAiStatus] = useState("idle"); // idle|pending|complete|failed
+  const treeShrubDecisionsRef = useRef(null);
+  const treeShrubScoredKeyRef = useRef("");
   const photoInputRef = useRef(null);
   const recapRequestRef = useRef(0);
   const recapAbortRef = useRef(null);
@@ -7008,6 +7019,49 @@ export function CompletionPanel({
     serviceCategory === "lawn" || serviceCategory === "tree_shrub";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
+  const treeShrubCloseoutOn =
+    treeShrubCloseoutReady && treeShrubCloseoutFlag && serviceLineForCloseout === "tree_shrub";
+
+  // Auto-run the AI photo review once enough closeout photos are captured. The
+  // dual-vision scoring lives server-side (no persistence) and returns the findings
+  // the tech reviews. Keyed by a photo FINGERPRINT (not just count) so swapping a
+  // photo for another at the same count still re-runs. Fully guarded — a failure
+  // just shows "Will finalize after" and the server's auto-score still backstops.
+  useEffect(() => {
+    if (!treeShrubCloseoutOn) return undefined;
+    const photos = (servicePhotos || []).filter((p) => p && p.data);
+    const fingerprint = photos
+      .map((p) => `${p.capturedAt || p.name || ""}:${(p.data || "").length}:${(p.data || "").slice(-24)}`)
+      .join("|");
+    if (photos.length < 2 || fingerprint === treeShrubScoredKeyRef.current) return undefined;
+    treeShrubScoredKeyRef.current = fingerprint;
+    let cancelled = false;
+    // Clear the previous review BEFORE re-scoring: if the new request is still pending
+    // or fails, completing must NOT submit the stale scores (the server's count check
+    // could otherwise persist them against the new photos). Null → server auto-scores.
+    setTreeShrubReview(null);
+    treeShrubDecisionsRef.current = null;
+    setTreeShrubAiStatus("pending");
+    // adminFetch resolves to the parsed JSON (and throws on non-2xx) — consume it
+    // directly; do NOT treat the result as a Response.
+    adminFetch(`/admin/dispatch/${service.id}/tree-shrub/assess-preview`, {
+      method: "POST",
+      body: JSON.stringify({ photos: photos.map((p) => ({ data: p.data })) }),
+    })
+      .then((result) => {
+        if (cancelled) return;
+        if (result && result.scores) {
+          // Tag with the photo fingerprint so the closeout summary resets the tech's
+          // per-finding decisions when a NEW preview (new photos) arrives.
+          setTreeShrubReview({ ...result, _fingerprint: fingerprint });
+          setTreeShrubAiStatus("complete");
+        } else {
+          setTreeShrubAiStatus("failed");
+        }
+      })
+      .catch(() => { if (!cancelled) setTreeShrubAiStatus("failed"); });
+    return () => { cancelled = true; };
+  }, [treeShrubCloseoutOn, servicePhotos, service.id]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -8746,6 +8800,23 @@ export function CompletionPanel({
         observations: reportObservations,
         recommendations: reportRecommendations,
         lawnAssessmentId,
+        // Tree & Shrub tech-reviewed assessment (flag-gated). When the closeout AI
+        // review ran, carry the scores + the tech's confirm/hide/edit decisions so
+        // the server persists THOSE (no re-score). Absent → server auto-scores.
+        treeShrubReview:
+          treeShrubCloseoutOn && treeShrubReview && treeShrubReview.scores
+            ? {
+                scores: treeShrubReview.scores,
+                observations: treeShrubReview.observations || "",
+                // How many photos the preview actually scored — lets the server detect a
+                // preview that skipped a photo (vision failure) and re-score instead.
+                scoredCount: treeShrubReview.scoredCount,
+                // Server HMAC proving these scores came from /assess-preview (anti-tamper).
+                signature: treeShrubReview.signature,
+                decisions: treeShrubDecisionsRef.current
+                  || (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
+              }
+            : undefined,
         completionPhotos: servicePhotos.map((photo, index) => ({
           data: photo.data,
           name: photo.name || `service-photo-${index + 1}.jpg`,
@@ -9317,6 +9388,34 @@ export function CompletionPanel({
                 completing={submitting}
                 onAddIssue={handleFastException}
                 onComplete={handleSubmit}
+              />
+            </div>
+          )}
+          {treeShrubCloseoutOn && (
+            <div style={{ padding: "12px 16px 0" }}>
+              <TreeShrubCloseoutSummary
+                summary={{
+                  productsReady: selectedProducts.length > 0,
+                  protocolReady: true,
+                  photoCount: servicePhotos.length,
+                  areasTreated: (areasServiced || []).join(", "),
+                  smsEnabled: true,
+                  aiAnalysisStatus: treeShrubAiStatus === "idle" ? "pending" : treeShrubAiStatus,
+                  aiSummary: treeShrubReview?.aiSummary || "",
+                  suggestedCustomerAction: treeShrubReview?.suggestedCustomerAction || "",
+                  findings: treeShrubReview?.findings || [],
+                  // Don't advertise one-tap completion while regulatory closeout fields
+                  // (bed sqft, pollinator status, IRAC/FRAC, product actuals) are still
+                  // required — the same gate handleSubmit enforces.
+                  canComplete: !submitting && servicePhotos.length >= 2 && !treeShrubCompletionBlocked,
+                }}
+                reviewKey={treeShrubReview?._fingerprint || ""}
+                completing={submitting}
+                onDecisionsChange={(d) => { treeShrubDecisionsRef.current = d; }}
+                onComplete={(decided) => {
+                  treeShrubDecisionsRef.current = decided?.findings || [];
+                  handleSubmit();
+                }}
               />
             </div>
           )}
