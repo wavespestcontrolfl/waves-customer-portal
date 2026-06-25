@@ -1557,14 +1557,23 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
       const monthlyTotal = estimate.monthly_total != null ? Number(estimate.monthly_total) : null;
       const annualTotal = estimate.annual_total != null ? Number(estimate.annual_total) : null;
       const onetimeTotal = estimate.onetime_total != null ? Number(estimate.onetime_total) : null;
-      // quotedTotal mirrors the appointment detail card (monthly + annual +
-      // one-time), so the scheduling surfaces compare against the same number.
-      const quotedTotal = (monthlyTotal || 0) + (annualTotal || 0) + (onetimeTotal || 0);
+      // Quoted figure compared against a single visit's price: the recurring
+      // period charge (monthly, or annual only when there's no monthly) plus
+      // any one-time. annual_total is the annualized form of monthly_total
+      // (monthly * 12), so summing both would double-count the recurring plan.
+      const quotedTotal = (monthlyTotal || annualTotal || 0) + (onetimeTotal || 0);
       // Deposit read is fail-soft inside summarizeEstimateDeposit, but guard
       // the await too so one bad estimate can't 500 the whole list.
       let deposit = null;
       try {
-        deposit = await summarizeEstimateDeposit(estimate);
+        // Scope the deposit summary to the actual linked appointment (when one
+        // exists) so the payer-billed / prepay_annual scope is recovered even
+        // after the visit leaves the pending/confirmed window that the
+        // linked-upcoming fallback covers.
+        deposit = await summarizeEstimateDeposit(
+          estimate,
+          linked ? { scheduledServiceId: linked.id, useLinkedFallback: false } : {},
+        );
       } catch { deposit = null; }
       return {
         id: estimate.id,

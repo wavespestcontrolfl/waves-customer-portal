@@ -4463,7 +4463,10 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         'bill_by_invoice', 'created_at', 'status',
       );
     if (!est) return res.json({ linked: false });
-    const quotedTotal = Number(est.monthly_total || 0) + Number(est.annual_total || 0) + Number(est.onetime_total || 0);
+    // Recurring period charge (monthly, or annual when there's no monthly) plus
+    // any one-time. annual_total is monthly annualized — summing both would
+    // double-count the recurring plan against a single visit's price.
+    const quotedTotal = (Number(est.monthly_total || 0) || Number(est.annual_total || 0)) + Number(est.onetime_total || 0);
     let deposit = null;
     try {
       const { summarizeEstimateDeposit } = require('../services/estimate-deposits');

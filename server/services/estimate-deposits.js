@@ -231,11 +231,12 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
   // here on the post-accept scheduling summary rather than inside the resolver.
   // Fail-soft: a read miss leaves the preference null (the safe direction — a
   // wrongly-charged deposit still credits forward).
+  let linkedSsId = null;
   let paymentMethodPreference = null;
   try {
-    const ssId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
-    if (ssId) {
-      const ss = await db('scheduled_services').where({ id: ssId }).first('payment_method_preference');
+    linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
+    if (linkedSsId) {
+      const ss = await db('scheduled_services').where({ id: linkedSsId }).first('payment_method_preference');
       paymentMethodPreference = ss?.payment_method_preference || null;
     }
   } catch (err) {
@@ -260,6 +261,25 @@ async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, u
     if (policy.required && policy.amount) summary.policyAmount = policy.amount;
   } catch (err) {
     logger.warn('[estimate-deposits] schedule deposit policy summary failed', { error: err.message });
+  }
+
+  // Payer-billed scope for PAID ledger deposits, resolved independently of the
+  // enforcement gate. resolveDepositPolicyForEstimate only runs the payer check
+  // when a deposit is actively required (enforced + non-exempt), so while
+  // ESTIMATE_DEPOSIT_REQUIRED is dark a payer-billed job that already holds a
+  // received homeowner deposit would be reported without exemptReason — and the
+  // card would show the credit as "applied to first invoice" even though payer
+  // invoices skip homeowner deposit credit (invoice.create). Resolve the payer
+  // here too, scoped to the same linked service, so the card can mark the credit
+  // not-applicable. Fail-soft: a miss leaves exemptReason as-is.
+  if (summary.paid > 0 && summary.exemptReason !== 'payer_billed' && estimate?.customer_id) {
+    try {
+      const PayerService = require('./payer');
+      const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId });
+      if (resolved?.payerId) summary.exemptReason = 'payer_billed';
+    } catch (err) {
+      logger.warn('[estimate-deposits] schedule summary payer scope read failed', { error: err.message });
+    }
   }
 
   return summary;
