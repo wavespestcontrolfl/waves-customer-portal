@@ -1126,19 +1126,22 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
         {topLeadRows.map((r, i) => {
           const won = r.booked > 0;
           return (
-            <div key={`${r.name}-${i}`} className="flex items-center gap-3">
-              <div className="flex items-center gap-2 min-w-0 w-40 shrink-0">
+            <div key={`${r.name}-${i}`} className="flex items-center gap-2 sm:gap-3">
+              {/* Narrower name column on phones so the bar + revenue still fit;
+                  the bar keeps a min width and the revenue column is content-sized
+                  on mobile (sm:w-24 aligns desktop) so neither collapses or clips. */}
+              <div className="flex items-center gap-1.5 min-w-0 w-28 sm:w-40 shrink-0">
                 <span className="truncate text-12 text-ink-secondary">{r.name}</span>
                 <ChannelChip channel={r.channel} />
               </div>
-              <div className="relative flex-1 h-4 rounded-xs overflow-hidden bg-surface-sunken">
+              <div className="relative flex-1 min-w-[16px] h-4 rounded-xs overflow-hidden bg-surface-sunken">
                 <div
                   className="absolute inset-y-0 left-0 rounded-xs"
                   style={{ width: `${(r.leads / maxLeads) * 100}%`, background: CHART_PRIMARY }}
                 />
               </div>
-              <span className="u-nums text-12 text-ink-primary w-8 shrink-0 text-right">{fmtInt(r.leads)}</span>
-              <span className="u-nums text-12 w-24 shrink-0 text-right whitespace-nowrap">
+              <span className="u-nums text-12 text-ink-primary w-7 shrink-0 text-right">{fmtInt(r.leads)}</span>
+              <span className="u-nums text-12 shrink-0 text-right whitespace-nowrap sm:w-24">
                 {won ? (
                   <>
                     <span className="font-medium" style={{ color: CHART_SUCCESS }}>★{r.booked}</span>
