@@ -44,4 +44,14 @@ function toE164(raw) {
   return '+1' + digits.slice(-10);
 }
 
-module.exports = { toE164, normalizePhone: toE164 };
+// toE164 returns the raw input on garbage (e.g. "anonymous", "client:foo"), so
+// callers that must NOT act on a non-phone value (set a Dial callerId, create a
+// lead) should gate on this: optional leading +, then 10–15 digits.
+function isLikelyE164(value) {
+  const s = String(value || '');
+  if (!/^\+?[0-9]/.test(s)) return false;
+  const digits = s.replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 15;
+}
+
+module.exports = { toE164, normalizePhone: toE164, isLikelyE164 };

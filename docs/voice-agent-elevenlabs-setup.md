@@ -129,11 +129,13 @@ the callback number verbally as a backstop.
 2. Railway: set `VOICE_AGENT_WEBHOOK_SECRET` (same value in the tool header).
 3. Portal: Communications → Call Routing → paste the agent endpoint; leave
    **AI answers first OFF**; keep backstop ON @ 30s.
-4. Point ONE throwaway Twilio number at the webhook
-   (`npm run twilio:inbound:set-url --number=...`), then flip
-   `GATE_VOICE_AI_AGENT=true`.
+4. Point ONE throwaway Twilio number at the webhook — dry-run first, then
+   `--apply` (the `--` is required so npm passes the flags to the script):
+   `npm run twilio:inbound:set-url -- --mode=app --number=+1XXXXXXXXXX` then re-run
+   with `--apply` appended. Then flip `GATE_VOICE_AI_AGENT=true`.
 5. Run the fail-open matrix: human answers (unchanged); no answer → agent picks
    up, EN/ES, lead lands in Leads; force the agent endpoint to fail → caller
    drops to voicemail (no dead air); gate off → routes exactly as today.
 6. Promote one real number, watch, then the rest. Rollback any time:
-   `GATE_VOICE_AI_AGENT=false` or `npm run twilio:inbound:set-url --mode=studio`.
+   `GATE_VOICE_AI_AGENT=false`, or point the number back with
+   `npm run twilio:inbound:set-url -- --mode=studio --number=+1XXXXXXXXXX --apply`.

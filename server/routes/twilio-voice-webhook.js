@@ -34,7 +34,7 @@ function scheduleRecordingRecovery(callSid) {
 // implementation is the verbatim toE164 contract that previously lived
 // here: preserve `+`-prefixed country codes for non-NANP callers and
 // fall back to raw on garbage.
-const { toE164 } = require('../utils/phone');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 
 function phoneDigits(value) {
   return String(value || '').replace(/\D/g, '');
@@ -288,8 +288,11 @@ function appendAgentHandoff(twiml, config, opts = {}) {
   // and the lead it captures — see the real customer, not the Waves line that
   // dialed out. Only set when we have it; otherwise Twilio uses the dialing
   // number and the agent confirms the callback number verbally (prompt does).
+  // Only pass a real phone as the Dial callerId — a blocked/anonymous From would
+  // come back from toE164 unchanged and an invalid callerId can fail the agent
+  // Dial; omit it so Twilio uses the default caller ID instead.
   const callerId = toE164(opts.callerId || '');
-  if (callerId) dialOpts.callerId = callerId;
+  if (isLikelyE164(callerId)) dialOpts.callerId = callerId;
   const dial = twiml.dial(dialOpts);
   const endpoint = String(config?.agentEndpoint || '').trim();
   if (/^sips?:/i.test(endpoint)) dial.sip(endpoint);

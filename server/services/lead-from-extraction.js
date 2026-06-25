@@ -155,9 +155,19 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     return { leadId: null, customerId, created: false };
   }
 
-  const existingLead = phone
+  let existingLead = phone
     ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first()
     : null;
+
+  // Don't reuse a lead that belongs to a different person on a shared line: if
+  // the captured name conflicts with the existing lead's name and it isn't our
+  // resolved customer's lead, create a separate unlinked lead instead of
+  // overwriting their rolling fields (transcript_summary, extracted_data, …).
+  if (existingLead && nameConflicts(extracted, existingLead)
+      && !(customerId && existingLead.customer_id === customerId)) {
+    logger.info(`[voice-agent-lead] Existing lead name conflicts on ${maskPhone(phone)}; creating a separate lead`);
+    existingLead = null;
+  }
 
   if (existingLead) {
     leadId = existingLead.id;

@@ -530,7 +530,9 @@ export default function CallLogTabV2() {
     c.answered_by === "voicemail" || c.call_outcome === "voicemail";
   const isReallyMissed = (c) =>
     (!c.answered_by || c.answered_by === "missed") && !hadConversation(c);
-  const answered = calls.filter((c) => c.answered_by === "human").length;
+  const isAiHandled = (c) => c.answered_by === "ai_agent";
+  const isAnswered = (c) => c.answered_by === "human" || isAiHandled(c);
+  const answered = calls.filter(isAnswered).length;
   const voicemail = calls.filter(isVoicemailCall).length;
   const missed = calls.filter(isReallyMissed).length;
   const voicemailCalls = calls.filter(isVoicemailCall);
@@ -558,7 +560,7 @@ export default function CallLogTabV2() {
 
   const filteredCalls = calls.filter((c) => {
     if (callFilter === "all") return true;
-    if (callFilter === "answered") return c.answered_by === "human";
+    if (callFilter === "answered") return isAnswered(c);
     if (callFilter === "voicemail") return isVoicemailCall(c);
     if (callFilter === "missed") return isReallyMissed(c);
     return true;
@@ -978,14 +980,16 @@ export default function CallLogTabV2() {
                 const answeredLabel =
                   c.answered_by === "human"
                     ? "Answered"
-                    : c.answered_by === "voicemail"
-                      ? "Voicemail"
-                      : conversed
-                        ? "Discussion"
-                        : "Missed";
+                    : c.answered_by === "ai_agent"
+                      ? "AI"
+                      : c.answered_by === "voicemail"
+                        ? "Voicemail"
+                        : conversed
+                          ? "Discussion"
+                          : "Missed";
                 const badgeTone = isMissed
                   ? "alert"
-                  : c.answered_by === "human"
+                  : c.answered_by === "human" || c.answered_by === "ai_agent"
                     ? "strong"
                     : conversed
                       ? "strong"

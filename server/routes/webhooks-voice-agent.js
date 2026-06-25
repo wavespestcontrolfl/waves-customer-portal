@@ -15,7 +15,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
-const { toE164 } = require('../utils/phone');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 const { createLeadFromExtraction } = require('../services/lead-from-extraction');
 
 function safeEqual(a, b) {
@@ -49,22 +49,13 @@ function normalizeQuality(value) {
   return ['hot', 'warm', 'cold'].includes(q) ? q : null;
 }
 
-// toE164 returns the raw input on garbage, so guard against non-phone caller IDs
-// (e.g. "anonymous", "client:foo") that would otherwise all merge into one
-// bogus lead. Require a real-looking E.164: optional +, then 10–15 digits.
-function isLikelyPhone(value) {
-  const s = String(value || '');
-  if (!/^\+?[0-9]/.test(s)) return false;
-  const digits = s.replace(/\D/g, '');
-  return digits.length >= 10 && digits.length <= 15;
-}
 
 // POST /api/webhooks/voice-agent/lead
 router.post('/lead', voiceAgentAuth, async (req, res) => {
   try {
     const b = req.body || {};
     const normalized = toE164(b.phone || b.caller_phone || b.from || '');
-    if (!isLikelyPhone(normalized)) return res.status(400).json({ error: 'valid phone required' });
+    if (!isLikelyE164(normalized)) return res.status(400).json({ error: 'valid phone required' });
     const phone = normalized;
 
     const extracted = {
