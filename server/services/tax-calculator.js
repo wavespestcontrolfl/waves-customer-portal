@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
 
 // Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
 function todayET() {
@@ -90,23 +91,11 @@ const TaxCalculator = {
     if (!zip) return null;
     const z = String(zip).substring(0, 5);
 
-    const manatee = ['34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209', '34210',
-      '34211', '34212', '34219', '34221', '34222', '34243', '34250', '34251', '34280', '34281', '34282'];
-    const sarasota = ['34228', '34229', '34230', '34231', '34232', '34233', '34234', '34235', '34236', '34237',
-      '34238', '34239', '34240', '34241', '34242', '34260', '34275', '34276', '34277', '34278', '34286', '34287', '34288', '34289', '34292', '34293'];
-    const charlotte = ['33947', '33948', '33949', '33950', '33952', '33953', '33954', '33955', '33980', '33981', '33982', '33983'];
-    const lee = ['33901', '33903', '33904', '33905', '33907', '33908', '33909', '33912', '33913', '33914',
-      '33916', '33917', '33919', '33920', '33921', '33922', '33924', '33928', '33931', '33936',
-      '33956', '33957', '33965', '33966', '33967', '33971', '33972', '33973', '33974', '33976',
-      '33990', '33991', '33993', '34134', '34135'];
-    const collier = ['34102', '34103', '34104', '34105', '34108', '34109', '34110', '34112', '34113', '34114',
-      '34116', '34117', '34119', '34120', '34140', '34141', '34142', '34145'];
-
-    if (manatee.includes(z)) return 'Manatee';
-    if (sarasota.includes(z)) return 'Sarasota';
-    if (charlotte.includes(z)) return 'Charlotte';
-    if (lee.includes(z)) return 'Lee';
-    if (collier.includes(z)) return 'Collier';
+    if (MANATEE_ZIPS.includes(z)) return 'Manatee';
+    if (SARASOTA_ZIPS.includes(z)) return 'Sarasota';
+    if (CHARLOTTE_ZIPS.includes(z)) return 'Charlotte';
+    if (LEE_ZIPS.includes(z)) return 'Lee';
+    if (COLLIER_ZIPS.includes(z)) return 'Collier';
     return null;
   },
 };

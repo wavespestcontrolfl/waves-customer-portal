@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts } = require('../utils/datetime-et');
+const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 
 const ComplianceService = {
 
@@ -417,20 +418,21 @@ const ComplianceService = {
   },
 };
 
-// Internal helper for ZIP-to-county mapping
+// Internal helper for ZIP-to-county mapping. Compliance covers only the three
+// counties Waves operates in and returns the '<county>_county' form; it shares
+// the ZIP sets with tax-calculator via config/county-zips.js (LEE/COLLIER there
+// are tax-only and intentionally not referenced here).
 function inferCountyFromZipInternal(zip) {
   if (!zip) return null;
   const z = String(zip).substring(0, 5);
-  const manatee = ['34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209', '34210',
-    '34211', '34212', '34219', '34221', '34222', '34243', '34250', '34251', '34280', '34281', '34282'];
-  const sarasota = ['34228', '34229', '34230', '34231', '34232', '34233', '34234', '34235', '34236', '34237',
-    '34238', '34239', '34240', '34241', '34242', '34260', '34275', '34276', '34277', '34278', '34286', '34287', '34288', '34289', '34292', '34293'];
-  const charlotte = ['33947', '33948', '33949', '33950', '33952', '33953', '33954', '33955', '33980', '33981', '33982', '33983'];
 
-  if (manatee.includes(z)) return 'manatee_county';
-  if (sarasota.includes(z)) return 'sarasota_county';
-  if (charlotte.includes(z)) return 'charlotte_county';
+  if (MANATEE_ZIPS.includes(z)) return 'manatee_county';
+  if (SARASOTA_ZIPS.includes(z)) return 'sarasota_county';
+  if (CHARLOTTE_ZIPS.includes(z)) return 'charlotte_county';
   return null;
 }
 
 module.exports = ComplianceService;
+// Exported for testing — verifies ZIP→county inference is unchanged after the
+// shared-array extraction.
+module.exports.inferCountyFromZipInternal = inferCountyFromZipInternal;
