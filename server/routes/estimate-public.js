@@ -8761,7 +8761,33 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
-  if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
+  // An unreviewed draft must never be acceptable through the public link. The
+  // legacy server-HTML page short-circuited drafts (and any past/missing expiry)
+  // to the expired page, but the React accept flow reaches this guard instead.
+  if (estimate.status === 'draft') return false;
+  // Treat a missing expiry as already-expired (legacy relied on
+  // `new Date(null) < now` being true). Without this, a no-expiry draft/lead
+  // estimate would read as active and be acceptable from a leaked bearer URL.
+  if (!estimate.expires_at) return false;
+  if (new Date(estimate.expires_at) < now) return false;
+  return true;
+}
+
+// Whether the public React estimate page may receive this estimate's full
+// payload (quote + customer PII). The SPA fetches GET /:token/data for ANY
+// token, so — unlike the legacy server-HTML page, which rendered the
+// expired/not-found shell before building any payload — this must gate the
+// data endpoint explicitly. Accepted/declined are legitimate terminal views
+// the customer can reopen (legacy rendered them in full); everything else must
+// be a published (non-draft) estimate with a real, unexpired expiry. Admin
+// previews bypass this at the call site so staff can still review drafts.
+function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
+  if (!estimate || estimate.archived_at) return false;
+  if (['accepted', 'declined'].includes(estimate.status)) return true;
+  if (estimate.status === 'draft') return false;
+  if (['expired', 'send_failed'].includes(estimate.status)) return false;
+  if (!estimate.expires_at) return false;
+  if (new Date(estimate.expires_at) < now) return false;
   return true;
 }
 
@@ -10959,11 +10985,25 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
 
+    const ip = extractRequestIp(req);
+
+    // Security gate: the React SPA fetches this for ANY token, so an expired
+    // link, a never-published / no-expiry draft, or a send-failed estimate must
+    // NOT return the full quote + customer phone/email/address/notes. The legacy
+    // server-HTML page short-circuited these to the expired/not-found shell
+    // before building any payload; the data endpoint owns that guard for the
+    // React path. Admin previews (signed marker cookie / office IP) bypass so
+    // staff can still review drafts. Non-viewable → 404 (the SPA renders its
+    // "this link may have expired or isn't valid" screen).
+    const viewerIsAdmin = hasAdminMarker(req) || isAdminIp(ip);
+    if (!viewerIsAdmin && !isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
     // (filtered by shouldCountView). Defensive try/catch because schema
     // drift on estimate_views or a locked row shouldn't break the
     // customer-facing endpoint.
-    const ip = extractRequestIp(req);
     if (shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
@@ -11277,6 +11317,7 @@ module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
 module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
+module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
