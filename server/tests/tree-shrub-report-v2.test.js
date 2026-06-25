@@ -80,10 +80,12 @@ describe('buildTreeShrubVisualCategories — five categories + signal guardrails
     expect(text).toMatch(/leaf-spot signals/);
   });
 
-  it('null score reads tracking, not 0', () => {
+  it('null score reads tracking, not 0, with neutral (empty) copy — never worst-case', () => {
     const [foliage] = buildTreeShrubVisualCategories({ scores: { foliageFullness: null } });
     expect(foliage.score).toBeNull();
     expect(foliage.status).toBe('tracking');
+    // A tracking row must NOT inherit the needs_attention copy via bandOf().
+    expect(foliage.customerExplanation).toBe('');
   });
 });
 
@@ -159,6 +161,45 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     });
     expect(v2.treatment).toBeTruthy();
     expect(v2.treatment.kinds).toContain('systemic');
+  });
+
+  it('scrubs an over-claiming LLM observation from the customer photo summary', () => {
+    const ok = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ observations: 'Light pest-pressure signals on the front shrubs.' }) });
+    expect(ok.photoSummary).toMatch(/pest-pressure signals/);
+    // banned confirmed-diagnosis wording → dropped; deterministic copy carries the report
+    for (const obs of [
+      'The shrubs have a confirmed scale infestation.',
+      'The shrubs show a fungal infection on the lower leaves.',
+      'Several infected leaves were visible on the hedge.',
+      'The plant is diseased.',
+    ]) {
+      const bad = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ observations: obs }) });
+      expect(bad.photoSummary).toBeNull();
+    }
+    const sample = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ observations: 'The shrubs have a confirmed scale infestation.' }) });
+    expect(JSON.stringify(sample).toLowerCase()).not.toMatch(/infestation/);
+  });
+
+  it('does NOT downgrade water/stress on a negated "no dry" observation (false-positive guard)', () => {
+    const healthy = { foliageFullness: 90, leafColorVigor: 88, pestActivity: 92, diseaseLeafSpot: 92, waterHeatStress: 90, overallScore: 90 };
+    const v2 = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ scores: healthy, observations: 'No dry margins, wilt, or moisture stress were observed. Plants look healthy.' }) });
+    const stress = v2.diagnosis.find((c) => c.key === 'water_heat_mechanical_stress');
+    expect(stress.status).not.toBe('watch');
+    expect(v2.insights.some((i) => i.category === 'water_stress')).toBe(false);
+  });
+  it('DOES downgrade water/stress on a real dry observation', () => {
+    const healthy = { foliageFullness: 90, leafColorVigor: 88, pestActivity: 92, diseaseLeafSpot: 92, waterHeatStress: 90, overallScore: 90 };
+    const v2 = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ scores: healthy, observations: 'Some dry margins on the east bed.' }) });
+    expect(v2.diagnosis.find((c) => c.key === 'water_heat_mechanical_stress').status).toBe('watch');
+  });
+
+  it('suppresses the "stable overall" line for a genuinely poor visit (multi-low / low overall)', () => {
+    const v2 = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ scores: { foliageFullness: 40, leafColorVigor: 35, pestActivity: 45, diseaseLeafSpot: 50, waterHeatStress: 48, overallScore: 30 } }) });
+    expect(v2.snapshot.scoreExplanation).toBeNull();
+  });
+  it('emits the "stable overall" line only when overall is healthy and a single category is low', () => {
+    const v2 = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ scores: { foliageFullness: 88, leafColorVigor: 85, pestActivity: 50, diseaseLeafSpot: 90, waterHeatStress: 86, overallScore: 78 } }) });
+    expect(v2.snapshot.scoreExplanation).toMatch(/stable overall/);
   });
 
   it('emits an SMS summary under 280 chars', () => {

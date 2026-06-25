@@ -110,7 +110,10 @@ function buildTreeShrubVisualCategories({
       score: toScore(score),
       status,
       confidence,
-      customerExplanation: explain(key, bandOf(status)),
+      // A tracking (null/unscored) category must read neutral — never the
+      // worst-case "needs attention" copy bandOf() would otherwise return for it.
+      // The client falls back to "Not clearly visible in today’s photos."
+      customerExplanation: status === 'tracking' ? '' : explain(key, bandOf(status)),
       evidence,
     };
   };

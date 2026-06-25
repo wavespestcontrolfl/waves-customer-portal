@@ -9,6 +9,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { fetchServiceWeekWeather } = require('./application-conditions');
@@ -2449,6 +2450,51 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
+      reportV2 = null;
+    }
+  }
+
+  // Tree & Shrub Report V2 — visual plant-health payload (flag-gated, additive).
+  // Mirrors the lawn path: a tech-confirmed tree_shrub_assessments row, scored from
+  // the visit's photos, drives the five diagnosis categories + insights. Best-effort:
+  // a build hiccup or unmigrated tables must never break the report.
+  if (!reportV2 && serviceLine === 'tree_shrub' && process.env.TREE_SHRUB_REPORT_V2 === 'true') {
+    try {
+      const { buildTreeShrubAssessmentReportData } = require('../tree-shrub-assessment');
+      const treeShrubAssessment = await buildTreeShrubAssessmentReportData(service, serviceLine, knex);
+      if (treeShrubAssessment) {
+        reportV2 = buildTreeShrubReportV2({
+          treeShrubAssessment,
+          applications,
+          actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
+          customerConcern: structured.customerConcern || structured.customer_concern || '',
+          waterSnapshot: null, // Phase 3: landscape water calibration
+        });
+        // Next scheduled tree & shrub visit — confident date from a real upcoming
+        // row, else omitted (never invent a precise date the data can't back).
+        if (reportV2) {
+          try {
+            const svcRaw = service.service_date;
+            const svcIso = svcRaw ? (svcRaw instanceof Date ? svcRaw.toISOString().slice(0, 10) : String(svcRaw).slice(0, 10)) : '';
+            const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            const afterIso = svcIso && svcIso > todayIso ? svcIso : todayIso;
+            const fmtDate = (iso) => new Date(`${String(iso).slice(0, 10)}T12:00:00Z`)
+              .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+            const nextRow = await knex('scheduled_services')
+              .where('customer_id', service.customer_id)
+              .andWhere('scheduled_date', '>', afterIso)
+              .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+              .andWhere((b) => b.whereRaw('LOWER(service_type) LIKE ?', ['%tree%']).orWhereRaw('LOWER(service_type) LIKE ?', ['%shrub%']))
+              .orderBy('scheduled_date', 'asc')
+              .first('scheduled_date')
+              .catch(() => null);
+            if (nextRow && nextRow.scheduled_date && reportV2.snapshot) {
+              reportV2.snapshot.nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
+            }
+          } catch { /* next-visit lookup is best-effort */ }
+        }
+      }
+    } catch {
       reportV2 = null;
     }
   }

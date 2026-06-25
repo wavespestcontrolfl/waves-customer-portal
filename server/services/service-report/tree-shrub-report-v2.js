@@ -44,6 +44,19 @@ function classifyProduct(app = {}) {
   return { kind, tag, whatItDoes };
 }
 
+// Defense-in-depth on the ONE free-text path that reaches the customer (the photo
+// summary, from the vision model's observations). The five-category diagnosis +
+// insight copy are deterministic templates, but the LLM paragraph could in theory
+// over-claim despite the prompt. Drop it if it asserts a CONFIRMED pest/disease —
+// the report still reads fully from the deterministic "signals" copy. This enforces
+// the feature's core guardrail (signals, never "infestation"/"diseased").
+const BANNED_CONFIRMED = /\b(infestation|infested|infection|infected|diseased|confirmed\s+(pest|disease|infestation|fungus)|(has|have|with)\s+(a\s+|an\s+)?([a-z-]+\s+){0,2}(disease|infestation|infection)|is\s+(infested|infected|diseased))\b/i;
+function scrubObservations(value) {
+  const t = String(value || '').trim();
+  if (!t) return null;
+  return BANNED_CONFIRMED.test(t) ? null : t;
+}
+
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const uniq = (arr) => [...new Set(arr.filter(Boolean))];
 const num = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -51,8 +64,13 @@ const round1 = (v) => (v == null ? '' : String(Number(Number(v).toFixed(1))));
 
 function monthLabel(date) {
   if (!date) return '';
-  const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return String(date);
+  // A DATE column / 'YYYY-MM-DD' string parses as UTC midnight; formatting that in ET
+  // would show the PREVIOUS day. Anchor date-only values at noon UTC first so the ET
+  // label lands on the correct calendar day (matches the lawn V2 / report-data pattern).
+  const s = String(date);
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  const d = m ? new Date(`${m[1]}T12:00:00Z`) : new Date(date);
+  if (Number.isNaN(d.getTime())) return s;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
 }
 
@@ -238,7 +256,11 @@ function buildTreeShrubReportV2({
   // never contradicts the photo caption. Landscape-soft: mark it as localized
   // coverage (one area), not a whole-property "water more".
   const obsText = `${treeShrubAssessment.observations || ''} ${treeShrubAssessment.aiSummary || ''}`.toLowerCase();
-  const drySignal = /\b(dry|drought|crispy|wilt|scorch|uneven|coverage|moisture)\b/.test(obsText);
+  // Per-SENTENCE so a negated/no-issue sentence ("no dry margins, wilt, or moisture
+  // stress observed") doesn't read as a dry signal and falsely downgrade a clean visit.
+  const DRY_RE = /\b(dry|drought|crispy|wilt|scorch|uneven|coverage|moisture)\b/;
+  const NEG_RE = /\b(no|not|never|none|without)\b|n['’]t|free of/;
+  const drySignal = obsText.split(/[.!?]+/).some((sent) => DRY_RE.test(sent) && !NEG_RE.test(sent));
   const localizedDry = drySignal && (!water || water.status !== 'deficit');
   const stressCat = diagnosis.find((c) => c.key === 'water_heat_mechanical_stress');
   if (stressCat && drySignal && (stressCat.status === 'strong' || stressCat.status === 'healthy')) {
@@ -266,10 +288,13 @@ function buildTreeShrubReportV2({
   const photos = [...allPhotos]
     .sort((a, b) => (b.isBest ? 1 : 0) - (a.isBest ? 1 : 0) || (Number(b.qualityScore) || 0) - (Number(a.qualityScore) || 0))
     .slice(0, 6)
-    .map((p) => ({ url: p.url, label: p.label || (p.isBest ? 'Best view' : (p.zone || null)), caption: p.caption || null }));
-  const photoSummary = String(
+    // Captions are the OTHER customer-visible free-text path (set at closeout / typed
+    // completion) — run them through the same over-claim scrub as the photo summary so
+    // a caption like "confirmed scale infestation" can't bypass the signals guardrail.
+    .map((p) => ({ url: p.url, label: p.label || (p.isBest ? 'Best view' : (p.zone || null)), caption: scrubObservations(p.caption) }));
+  const photoSummary = scrubObservations(
     treeShrubAssessment.observations || treeShrubAssessment.aiSummary || treeShrubAssessment.customerSummary || '',
-  ).trim() || null;
+  );
   const heroPhoto = photos[0] || null;
 
   const overallScore = num(scores.overallScore);
@@ -277,11 +302,14 @@ function buildTreeShrubReportV2({
   const issues = insights.filter((i) => i.status === 'needs_attention' || i.status === 'watch' || i.status === 'urgent');
   const topIssue = issues[0] || null;
 
-  // "Why NN": name the category dragging the score down, reassure on the rest.
+  // "Why NN": name the category dragging the score down, reassure on the rest — but
+  // ONLY when the landscape really is stable overall (healthy band) and a SINGLE
+  // category is low. For a genuinely poor visit (low overall / several low categories)
+  // this reassurance would contradict the "Needs attention" headline, so suppress it.
   const scored = diagnosis.filter((c) => Number.isFinite(num(c.score)));
-  const lowest = scored.slice().sort((a, b) => num(a.score) - num(b.score))[0];
-  const scoreExplanation = (lowest && num(lowest.score) < 60 && scored.length > 2)
-    ? `Your landscape is stable overall — the score is mainly pulled down by ${lowest.label.toLowerCase()}, while the other areas are generally in a healthy range.`
+  const lowCats = scored.filter((c) => num(c.score) < 60);
+  const scoreExplanation = (overallScore != null && overallScore >= 70 && lowCats.length === 1 && scored.length > 2)
+    ? `Your landscape is stable overall — the score is mainly pulled down by ${lowCats[0].label.toLowerCase()}, while the other areas are generally in a healthy range.`
     : null;
 
   // Action OWNERSHIP: customerAction is a REAL homeowner task only.
