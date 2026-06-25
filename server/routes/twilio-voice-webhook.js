@@ -8,6 +8,8 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conversations');
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
+const { getCallRoutingConfig } = require('../services/call-routing-config');
+const { decideVoiceRoute } = require('../services/voice-route-decision');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -32,7 +34,7 @@ function scheduleRecordingRecovery(callSid) {
 // implementation is the verbatim toE164 contract that previously lived
 // here: preserve `+`-prefixed country codes for non-NANP callers and
 // fall back to raw on garbage.
-const { toE164 } = require('../utils/phone');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 
 function phoneDigits(value) {
   return String(value || '').replace(/\D/g, '');
@@ -266,6 +268,37 @@ function queueVoiceMessageSync(callSid) {
   void syncVoiceMessageForCall(callSid);
 }
 
+const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
+
+// Hand the live call to the configured bilingual AI voice agent.
+//
+// FAIL-OPEN BY CONSTRUCTION: the <Dial> carries a short `timeout` and an
+// `action` callback (/agent-fallback). If the agent endpoint does not answer
+// (no-answer/busy/failed), Twilio invokes the action and the caller drops to
+// the Waves voicemail — never dead air, never a trapped call. Only called once
+// decideVoiceRoute has confirmed a non-empty agentEndpoint.
+function appendAgentHandoff(twiml, config, opts = {}) {
+  const dialOpts = {
+    answerOnBridge: true,
+    timeout: Math.max(5, Number(config?.agentTimeoutSec) || 10),
+    action: AGENT_FALLBACK_ACTION,
+    method: 'POST',
+  };
+  // Pass the original caller's number through as the caller ID so the agent —
+  // and the lead it captures — see the real customer, not the Waves line that
+  // dialed out. Only set when we have it; otherwise Twilio uses the dialing
+  // number and the agent confirms the callback number verbally (prompt does).
+  // Only pass a real phone as the Dial callerId — a blocked/anonymous From would
+  // come back from toE164 unchanged and an invalid callerId can fail the agent
+  // Dial; omit it so Twilio uses the default caller ID instead.
+  const callerId = toE164(opts.callerId || '');
+  if (isLikelyE164(callerId)) dialOpts.callerId = callerId;
+  const dial = twiml.dial(dialOpts);
+  const endpoint = String(config?.agentEndpoint || '').trim();
+  if (/^sips?:/i.test(endpoint)) dial.sip(endpoint);
+  else dial.number(endpoint);
+}
+
 // =========================================================================
 // POST /api/webhooks/twilio/voice — Inbound voice call webhook
 //
@@ -390,6 +423,39 @@ router.post('/voice', async (req, res) => {
     const greetingUrl = process.env.WAVES_GREETING_URL
       || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
 
+    // ── AI voice agent routing (opt-in; default path untouched) ──
+    // The agent NEVER fronts a call unless GATE_VOICE_AI_AGENT is on AND the
+    // owner enabled "answers first" (manual toggle or active nightly schedule)
+    // AND an agent endpoint is configured. Gate off short-circuits before any
+    // config read, so the staff simul-ring below is byte-for-byte unchanged.
+    // Whole block is fail-open: any error continues to the normal flow.
+    let ringTimeoutSec = 30;
+    try {
+      if (isEnabled('voiceAiAgent')) {
+        const routingConfig = await getCallRoutingConfig(db);
+        // Only let the configured ring timeout shorten the staff ring when the
+        // AI can actually back the call up afterward (endpoint set + backstop
+        // enabled). Otherwise keep the normal 30s — never cut staff off early
+        // for an AI that can't answer.
+        const backstopActive = !!routingConfig.agentEndpoint && routingConfig.noAnswerBackstopEnabled !== false;
+        if (backstopActive) ringTimeoutSec = routingConfig.ringTimeoutSec || 30;
+        const decision = decideVoiceRoute({ phase: 'initial', gateEnabled: true, config: routingConfig, now: new Date() });
+        if (decision.action === 'agent') {
+          logger.info(`[voice] AI answers-first (${decision.reason}) for ${maskSid(CallSid)}`);
+          const agentTwiml = new VoiceResponse();
+          agentTwiml.play(greetingUrl); // FL §934.03 disclosure before the agent leg
+          appendAgentHandoff(agentTwiml, routingConfig, { callerId: From });
+          await db('call_log').where('twilio_call_sid', CallSid)
+            .update({ answered_by: 'ai_agent', updated_at: new Date() })
+            .catch(() => {});
+          return res.type('text/xml').send(agentTwiml.toString());
+        }
+      }
+    } catch (agentErr) {
+      logger.error(`[voice] answers-first routing failed; using normal flow: ${agentErr.message}`);
+      ringTimeoutSec = 30;
+    }
+
     // Mirror the Studio Flow's `forward_call` widget, but add callee
     // screening. Without "press 1 to accept", carrier voicemail can answer
     // Adam/Virginia's cell and steal the caller before Twilio reaches the
@@ -412,7 +478,7 @@ router.post('/voice', async (req, res) => {
       record: 'record-from-answer-dual',
       recordingStatusCallback: '/api/webhooks/twilio/recording-status',
       recordingStatusCallbackEvent: 'completed',
-      timeout: 30,
+      timeout: ringTimeoutSec,
       action: '/api/webhooks/twilio/call-complete',
       answerOnBridge: true,
     });
@@ -501,7 +567,32 @@ router.post('/call-complete', async (req, res) => {
     // tracked as a separate audit item).
     if (shouldRecordVoicemail) {
       const twiml = new VoiceResponse();
-      appendVoicemailRecording(twiml);
+      let handedToAgent = false;
+      // Fail-open AI backstop: replace dumb voicemail with the bilingual agent
+      // when enabled (the greeting/disclosure already played at /voice, so
+      // consent persists). Any error → fall through to voicemail below.
+      try {
+        const { isEnabled } = require('../config/feature-gates');
+        if (isEnabled('voiceAiAgent')) {
+          const routingConfig = await getCallRoutingConfig(db);
+          const decision = decideVoiceRoute({
+            phase: 'after_dial',
+            gateEnabled: true,
+            noHumanAnswered: true,
+            dialStatus: status,
+            config: routingConfig,
+            now: new Date(),
+          });
+          if (decision.action === 'agent') {
+            logger.info(`[call-complete] AI backstop (${decision.reason}) for ${maskSid(CallSid)}`);
+            appendAgentHandoff(twiml, routingConfig, { callerId: req.body?.From });
+            handedToAgent = true;
+          }
+        }
+      } catch (agentErr) {
+        logger.error(`[call-complete] backstop routing failed; using voicemail: ${agentErr.message}`);
+      }
+      if (!handedToAgent) appendVoicemailRecording(twiml);
       return res.type('text/xml').send(twiml.toString());
     }
 
@@ -528,6 +619,48 @@ router.post('/call-complete', async (req, res) => {
 // =========================================================================
 router.post('/voicemail-complete', (req, res) => {
   res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/agent-fallback — runs when the AI agent <Dial>
+// completes. Agent answered (DialCallStatus 'completed') → end the call. Agent
+// unreachable (no-answer/busy/failed/unknown) → fall OPEN to the Waves
+// voicemail so the caller is never left in dead air.
+// =========================================================================
+router.post('/agent-fallback', async (req, res) => {
+  const twiml = new VoiceResponse();
+  const dialStatus = String(req.body?.DialCallStatus || '').toLowerCase();
+  const callSid = req.body?.CallSid;
+  const agentDuration = parseInt(req.body?.DialCallDuration || 0, 10) || 0;
+  try {
+    if (dialStatus === 'completed') {
+      // Agent answered & handled the call — reconcile status/outcome AND the
+      // agent-leg duration so logs/metrics reflect the real AI conversation
+      // instead of the prior staff-leg status ('ringing' answers-first, or
+      // 'no-answer'/30s after-dial backstop).
+      if (callSid) {
+        await db('call_log').where('twilio_call_sid', callSid)
+          .update({ status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled', duration_seconds: agentDuration, updated_at: new Date() })
+          .catch((e) => logger.warn(`[agent-fallback] call_log update failed: ${e.message}`));
+      }
+    } else {
+      // Agent unreachable → fall open to voicemail; reflect the agent-leg status.
+      if (callSid) {
+        await db('call_log').where('twilio_call_sid', callSid)
+          .update({ status: dialStatus || 'no-answer', answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+          .catch((e) => logger.warn(`[agent-fallback] call_log update failed: ${e.message}`));
+      }
+      appendVoicemailRecording(twiml);
+    }
+  } catch (err) {
+    logger.error(`[agent-fallback] error; falling back to voicemail: ${err.message}`);
+    appendVoicemailRecording(twiml);
+  }
+  // Re-sync the unified messages row so Customer 360 / comms timeline pick up the
+  // final answered_by/status/duration of the AI leg (it was created + synced at
+  // /voice and /call-complete before the agent leg finished).
+  if (callSid) queueVoiceMessageSync(callSid);
+  res.type('text/xml').send(twiml.toString());
 });
 
 // =========================================================================

@@ -81,6 +81,7 @@ import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
 import NotificationEventsTabV2 from "./NotificationEventsTabV2";
 import PushSettingsV2 from "../../components/admin/PushSettingsV2";
+import CallRoutingSettingsV2 from "../../components/admin/CallRoutingSettingsV2";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -210,6 +211,11 @@ const TABS = [
     key: "csr",
     label: "CSR Coach",
     Icon: Headphones,
+  },
+  {
+    key: "call_routing",
+    label: "Call Routing",
+    Icon: Bot,
   },
   {
     key: "notifications",
@@ -2350,6 +2356,7 @@ export default function CommunicationsPageV2() {
         </>
       )}
       {tab === "csr" && <CSRCoachTabV2 />}
+      {tab === "call_routing" && <CallRoutingSettingsV2 />}
       {tab === "notifications" && <PushSettingsV2 />}
     </div>
   );

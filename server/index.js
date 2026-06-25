@@ -365,6 +365,9 @@ const { validateTwilioSignature } = require('./middleware/twilio-signature');
 app.use('/api/webhooks/twilio', validateTwilioSignature, twilioWebhookRoutes);
 app.use('/api/webhooks/lead', require('./routes/lead-webhook'));
 app.use('/api/leads', require('./routes/lead-webhook'));
+// Bilingual AI voice agent posts captured leads here (fail-closed shared-secret
+// auth inside the route). JSON body — mounted after express.json above.
+app.use('/api/webhooks/voice-agent', require('./routes/webhooks-voice-agent'));
 app.use('/api/reports', reportsPublicRoutes);
 app.use('/api/admin/inventory', adminInventoryRoutes);
 app.use('/api/admin/price-match', adminPriceMatchRoutes);
