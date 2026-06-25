@@ -57,6 +57,7 @@ import TimeGridDay from "../../components/schedule/TimeGridDay";
 import TimeGridDays from "../../components/schedule/TimeGridDays";
 import MobileWeekGrid from "../../components/schedule/MobileWeekGrid";
 import MobileDispatchList from "../../components/schedule/MobileDispatchList";
+import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
@@ -1194,6 +1195,18 @@ export default function DispatchPageV2({
     setSelectedScheduleService({ ...svc, customerId });
   }, []);
 
+  // Client search → jump the schedule to the chosen appointment's day so the
+  // operator sees it in context (Day view shows it in the list/grid below).
+  const handleClientSearchSelect = useCallback(
+    (svc) => {
+      if (!svc?.scheduledDate) return;
+      setDate(svc.scheduledDate);
+      setViewMode("day");
+      setActiveTab("board");
+    },
+    [setActiveTab],
+  );
+
   // Reset gridStats whenever the visible range changes (different date or
   // a different viewMode). Otherwise the centered stats row keeps showing
   // the prior range's totals until the new TimeGridDays fetch lands —
@@ -1773,6 +1786,14 @@ export default function DispatchPageV2({
           </Button>
         )}
       </div>
+      {/* Client search — find a customer's upcoming appointments from any
+          view and jump to that day. Board tab only. */}
+      {activeTab === "board" && (
+        <div className="max-w-md mx-auto mb-4">
+          {" "}
+          <ScheduleClientSearch onSelect={handleClientSearchSelect} />{" "}
+        </div>
+      )}
       {/* Centered view-mode selector — schedule grid sub-tab + desktop only. */}
       {!isMobile && activeTab === "board" && (
         <div className="flex justify-center mb-4">
