@@ -7,6 +7,7 @@ jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
+  mock.transaction = jest.fn((cb) => cb(mock)); // run the txn body against the same mock
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -59,8 +60,12 @@ function stubDb(firstResults) {
     for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
       chain[m] = jest.fn(() => chain);
     }
-    chain.first = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : null));
+    chain.first = jest.fn(() => {
+      const v = queue.length ? queue.shift() : null;
+      return v instanceof Error ? Promise.reject(v) : Promise.resolve(v);
+    });
     chain.update = jest.fn(() => Promise.resolve(1));
+    chain.insert = jest.fn(() => Promise.resolve([{}]));
     return chain;
   };
 }
@@ -264,6 +269,22 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
     mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('card_declined'), { type: 'StripeCardError', payment_intent: { id: 'pi_x' } }));
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(r.reason).toBe('charge_failed');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT charge a re-completed NOT-performed visit — routes to review', async () => {
+    stubDb([HELD]); // heldCard, then the priorNonPerformed gate fires before any lookup
+    const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1', priorNonPerformed: true });
+    expect(r).toEqual({ charged: false, reason: 'prior_non_performed' });
+    expect(mockCreateFromService).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails CLOSED (manual review) when the prepaid lookup errors', async () => {
+    stubDb([HELD, new Error('db timeout')]); // heldCard ok, scheduled_services read rejects
+    const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
+    expect(r).toEqual({ charged: false, reason: 'prepaid_lookup_failed' });
+    expect(mockCreateFromService).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 });

@@ -429,7 +429,13 @@ async function submitRecap({
   // exists (normal recaps stay no-bill). Best-effort — never blocks the recap.
   try {
     const CardHolds = require('./estimate-card-holds');
-    await CardHolds.chargeCardHoldForRecapCompletion({ scheduledServiceId: serviceId, serviceRecordId: recordId });
+    await CardHolds.chargeCardHoldForRecapCompletion({
+      scheduledServiceId: serviceId,
+      serviceRecordId: recordId,
+      // A re-completed NOT-performed visit (incomplete / inspection-only /
+      // declined) must not auto-charge a full completion fee — route to review.
+      priorNonPerformed: recapPriorNonPerformed,
+    });
   } catch (err) {
     logger.warn(`[pest-recap] card-hold completion charge failed for ${serviceId}: ${err.message}`);
   }
