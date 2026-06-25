@@ -950,10 +950,13 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
 router.get('/revenue-by-city', dashboardCache, async (req, res, next) => {
   try {
     const monthStart = startOfMonth(); // ET month-start date string
+    const todayStr = etDateString();   // ET today — upper bound so a future-dated
+                                       // completed/import row can't inflate the MTD cut
 
     let qb = db('service_records as sr')
       .join('customers as c', 'sr.customer_id', 'c.id')
       .where('sr.service_date', '>=', monthStart)
+      .where('sr.service_date', '<=', todayStr)
       .where('sr.status', 'completed')
       .whereNotNull('sr.revenue');
     if (INTERNAL_TEST_CUSTOMERS.length) {
@@ -964,10 +967,12 @@ router.get('/revenue-by-city', dashboardCache, async (req, res, next) => {
     }
 
     const rows = await qb
-      .select('c.city')
+      // NULLIF(TRIM(city), '') folds NULL + '' + whitespace-only into ONE group
+      // so missing-city revenue isn't split into duplicate 'Unknown' rows.
+      .select(db.raw("NULLIF(TRIM(c.city), '') as city"))
       .sum('sr.revenue as revenue')
       .count('* as jobs')
-      .groupBy('c.city')
+      .groupByRaw("NULLIF(TRIM(c.city), '')")
       .orderBy('revenue', 'desc');
 
     const all = rows.map((row) => ({
