@@ -2024,6 +2024,8 @@ export default function EstimateToolViewV2({
     trenchingWarrantyTier: "one_year_retreat",
     trenchingLabelConfirmed: false,
     foamPoints: "5",
+    foamRecurringPoints: "5",
+    foamRecurringFreq: "quarterly",
     roachType: "REGULAR",
     svcLawn: true,
     svcPest: true,
@@ -2043,6 +2045,7 @@ export default function EstimateToolViewV2({
     svcBoracare: false,
     svcPreslab: false,
     svcFoam: false,
+    svcFoamRecurring: false,
     svcRodentTrap: false,
     svcTrapOnlyRetainer: false,
     trapOnlyRetainerPlan: "standard",
@@ -2119,7 +2122,7 @@ export default function EstimateToolViewV2({
       "svcMosquito",
       "svcTermiteBait",
     ];
-    const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
+    const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
     const commercialManualQuoteCount =
       commercialDetected ? ["svcLawn", "svcPest"].filter((k) => form[k]).length : 0;
     const recurringCount = qualifyingRecurringKeys
@@ -2175,10 +2178,20 @@ export default function EstimateToolViewV2({
     }
     if (form.svcTermiteBait) approx.termiteBait = 50;
     if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 69 : 49;
+    if (form.svcFoamRecurring) {
+      // Rough preview; engine is authoritative. One-time per-visit by tier
+      // (no floor) × cadence multiplier × visits/yr ÷ 12.
+      const oneTimeByPoints = { 5: 182, 10: 308, 15: 434, 20: 598 };
+      const cadMult = { quarterly: 0.9, bimonthly: 0.85, monthly: 0.8 };
+      const cadVisits = { quarterly: 4, bimonthly: 6, monthly: 12 };
+      const cad = cadMult[form.foamRecurringFreq] ? form.foamRecurringFreq : "quarterly";
+      const base = oneTimeByPoints[form.foamRecurringPoints] || oneTimeByPoints[5];
+      approx.foamRecurring = Math.round((base * cadMult[cad] * cadVisits[cad]) / 12);
+    }
 
-    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0);
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0) + (approx.foamRecurring || 0);
     const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
-      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" ? 0 : value),
+      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" || key === "foamRecurring" ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
@@ -2944,6 +2957,7 @@ export default function EstimateToolViewV2({
       if (form.svcBoracare) selectedServices.push("BORACARE");
       if (form.svcPreslab) selectedServices.push("PRESLAB");
       if (form.svcFoam) selectedServices.push("FOAM");
+      if (form.svcFoamRecurring) selectedServices.push("FOAM_RECURRING");
       if (form.svcRodentTrap) selectedServices.push("RODENT_TRAP");
       if (form.svcTrapOnlyRetainer) selectedServices.push("TRAP_ONLY_RETAINER");
       // Legacy RODENT_WIRE_MESH / RODENT_BIRD_BOX — folded into EXCLUSION V2
@@ -3075,6 +3089,8 @@ export default function EstimateToolViewV2({
         preslabJobContext: resolvePreSlabJobContextForForm(form),
         includePreSlabWarrantyExtended: form.preslabWarranty === "EXTENDED",
         foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
+        foamRecurringPoints: form.foamRecurringPoints === undefined ? undefined : form.foamRecurringPoints,
+        foamRecurringFreq: form.foamRecurringFreq || "quarterly",
         bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
         bedbugMethod: form.bedbugMethod || "CHEMICAL",
         bedbugSeverity: form.bedbugSeverity || "light",
@@ -5308,6 +5324,38 @@ export default function EstimateToolViewV2({
                       ]}
                     />{" "}
                   </FieldV2>{" "}
+                </div>
+              )}
+              <CheckboxV2 k="svcFoamRecurring" label="Recurring Foam Treatment" />
+              {form.svcFoamRecurring && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  {" "}
+                  <FieldV2 label="Cadence" className="mb-2">
+                    {" "}
+                    <SelectV2
+                      k="foamRecurringFreq"
+                      options={[
+                        { value: "quarterly", label: "Quarterly (every 3 mo) — 10% off" },
+                        { value: "bimonthly", label: "Bimonthly (every 2 mo) — 15% off" },
+                        { value: "monthly", label: "Monthly — 20% off" },
+                      ]}
+                    />{" "}
+                  </FieldV2>{" "}
+                  <FieldV2 label="Drill Points" className="mb-0">
+                    {" "}
+                    <SelectV2
+                      k="foamRecurringPoints"
+                      options={[
+                        { value: "5", label: "1-5 Spot" },
+                        { value: "10", label: "6-10 Moderate" },
+                        { value: "15", label: "11-15 Extensive" },
+                        { value: "20", label: "15+ Full Perimeter" },
+                      ]}
+                    />{" "}
+                  </FieldV2>{" "}
+                  <div className="text-11 text-zinc-500 leading-snug mt-2">
+                    Per-visit rate is discounted off the one-time price by cadence. Standalone — does not count toward WaveGuard tier.
+                  </div>
                 </div>
               )}
               <SubGroupLabel className="mt-3">Pest</SubGroupLabel>{" "}

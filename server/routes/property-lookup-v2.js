@@ -2526,6 +2526,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       services.foam.points = o.foamPoints;
     }
   }
+  if (sel.has('FOAM_RECURRING')) {
+    services.foamRecurring = { cadence: o.foamRecurringFreq || 'quarterly' };
+    if (Object.prototype.hasOwnProperty.call(o, 'foamRecurringPoints')) {
+      services.foamRecurring.points = o.foamRecurringPoints;
+    }
+  }
   if (sel.has('RODENT_TRAP')) {
     services.rodentTrapping = {
       plan: o.rodentTrappingPlan || 'standard',

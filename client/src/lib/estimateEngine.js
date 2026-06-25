@@ -1146,6 +1146,8 @@ export function calculateEstimate(inputs) {
     preslabProductKey,
     preslabLabelConfirmed,
     foamPoints: _foamPoints,
+    foamRecurringPoints: _foamRecurringPoints,
+    foamRecurringFreq,
     roachType,
     roachSeverity,
     // Service selections (booleans)
@@ -1177,6 +1179,7 @@ export function calculateEstimate(inputs) {
     svcBoracare,
     svcPreslab,
     svcFoam,
+    svcFoamRecurring,
     svcRodentTrap,
     svcFlea,
     svcWasp,
@@ -1262,6 +1265,7 @@ export function calculateEstimate(inputs) {
     svcBoracare,
     svcPreslab,
     svcFoam,
+    svcFoamRecurring,
     svcRodentTrap,
     svcFlea,
     svcWasp,
@@ -2282,8 +2286,36 @@ export function calculateEstimate(inputs) {
     const FM_CAN = 39.08, FM_BITS = 8;
     const { pointCount: fmPts, tier: t } = resolveFoamDrillTier(_foamPoints);
     const cost = t.c * FM_CAN + t.l * LABOR + FM_BITS;
-    const fp = otP(Math.max(250, Math.round(cost / 0.45)));
+    // Floor removed (owner directive 2026-06-25): true tiered cost / margin.
+    const fp = otP(Math.round(cost / 0.45));
     otItems.push({ name: 'Foam Drill', price: fp, detail: t.c + ' cans | ~$' + Math.round(fp / fmPts) + '/point', tierName: t.n });
+  }
+
+  /* ── Recurring Foam Treatment (standalone, no WaveGuard) ──── */
+  if (svcFoamRecurring && !isCommercial) {
+    hasRec = true;
+    const FM_CAN = 39.08, FM_BITS = 8;
+    const FOAM_REC_MULT = { quarterly: 0.90, bimonthly: 0.85, monthly: 0.80 };
+    const FOAM_REC_VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
+    const FOAM_REC_LABEL = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' };
+    const cad = FOAM_REC_MULT[foamRecurringFreq] ? foamRecurringFreq : 'quarterly';
+    const { pointCount: frPts, tier: t } = resolveFoamDrillTier(_foamRecurringPoints || _foamPoints);
+    const cost = t.c * FM_CAN + t.l * LABOR + FM_BITS;
+    const oneTimePerVisit = Math.round(cost / 0.45); // no floor
+    const perVisit = Math.round(oneTimePerVisit * FOAM_REC_MULT[cad]);
+    const visits = FOAM_REC_VISITS[cad];
+    const ann = perVisit * visits;
+    const mo = Math.round(ann / 12 * 100) / 100;
+    const off = Math.round((1 - FOAM_REC_MULT[cad]) * 100);
+    R.foamRec = { perVisit, ann, mo, visits, cadence: cad, points: frPts, tierName: t.n, oneTimePerVisit, off };
+    wgServices.push({
+      name: 'Recurring Foam (' + FOAM_REC_LABEL[cad] + ')',
+      service: 'foam_recurring',
+      mo,
+      perTreatment: perVisit,
+      visitsPerYear: visits,
+      detail: t.c + ' cans | ' + visits + ' visits/yr | ' + off + '% off one-time',
+    });
   }
 
   /* ── Rodent Trapping ─────────────────────────────────────── */
@@ -2527,6 +2559,13 @@ export function calculateEstimate(inputs) {
     ra += termiteMonthly * 12;
     lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
   }
+  // Recurring Foam: standalone — flows into the recurring annual/monthly total
+  // but does NOT count toward the WaveGuard tier (no ac++) and is not discountable
+  // by the bundle %. The cadence multiplier is its only discount.
+  if (R.foamRec) {
+    ra += R.foamRec.ann;
+    lineItems.push({ name: 'Recurring Foam', service: 'foam_recurring', ann: R.foamRec.ann, discountable: false });
+  }
 
   // WaveGuard tier discounts — must match server
   // pricing-engine/constants.WAVEGUARD.tiers (see docs/pricing/POLICY.md).
@@ -2645,6 +2684,8 @@ export function calculateEstimate(inputs) {
       rodentBaitMo: R.rodBaitMo || 0,
       palmInjectionMo: palmMo,
       palmInjectionAnn: palmAnn,
+      foamRecurringMo: R.foamRec ? R.foamRec.mo : 0,
+      foamRecurringAnn: R.foamRec ? R.foamRec.ann : 0,
       serviceCount: ac,
       // Tier commitment: if customer cancels services and drops below tier threshold,
       // downstream billing should reconcile to the new tier rate retroactively for that period.

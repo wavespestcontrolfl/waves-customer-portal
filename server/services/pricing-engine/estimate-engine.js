@@ -34,7 +34,7 @@ const {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
-  pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
+  pricePlugging, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
@@ -994,6 +994,19 @@ function generateEstimate(input) {
       afterHours: foamOptions.afterHours || false,
     });
     lineItems.push(result);
+  }
+  // Recurring spot-foam termite program. Standalone recurring line: priced by
+  // cadence multiplier, NOT added to activeServiceKeys (no WaveGuard tier) and
+  // excluded from the bundle % discount via WAVEGUARD.excludedFromPercentDiscount.
+  const foamRecurringService = services.foamRecurring || services.foam_recurring;
+  if (foamRecurringService && !useCommercialManualQuote(foamRecurringService, 'pest_control')) {
+    const foamRecOptions = serviceOptions(foamRecurringService);
+    const result = priceRecurringFoam(
+      Object.prototype.hasOwnProperty.call(foamRecOptions, 'points') ? foamRecOptions.points : undefined,
+      { cadence: foamRecOptions.cadence || foamRecOptions.frequency },
+    );
+    lineItems.push(result);
+    // foam_recurring does NOT add to activeServiceKeys for tier determination
   }
   if (services.stinging && !useCommercialManualQuote(services.stinging, 'pest_control')) {
     const result = priceStingingInsect({

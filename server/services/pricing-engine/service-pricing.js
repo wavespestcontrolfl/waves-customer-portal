@@ -5989,20 +5989,63 @@ function resolveFoamDrillTier(points, tiers = SPECIALTY.foamDrill.tiers) {
   return { pointCount, tier };
 }
 
+function foamDrillTierLabel(tier) {
+  return tier.label + (tier.maxPoints === 5 ? ' (1–5)' : tier.maxPoints === 10 ? ' (6–10)' : tier.maxPoints === 15 ? ' (11–15)' : '');
+}
+
 function priceFoamDrill(points = 5, options = {}) {
   const { urgency = 'ROUTINE', afterHours = false } = options;
   const cfg = SPECIALTY.foamDrill;
   const { pointCount, tier } = resolveFoamDrillTier(points, cfg.tiers);
   const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
+  // Floor removed (owner directive 2026-06-25): true tiered cost ÷ margin.
   let price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
   price = applyUrgency(price, urgency, afterHours);
-  const label = tier.label + (tier.maxPoints === 5 ? ' (1–5)' : tier.maxPoints === 10 ? ' (6–10)' : tier.maxPoints === 15 ? ' (11–15)' : '');
+  const label = foamDrillTierLabel(tier);
   return {
     service: 'foam_drill',
     name: 'Drill-and-Foam Termite',
     price,
     detail: `${label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
     points: pointCount, tier: label, cans: tier.cans,
+  };
+}
+
+// Recurring spot-foam termite program. Per-visit price is the one-time foam
+// cost basis (material + labor ÷ margin, NO floor) × cadence multiplier, so a
+// more frequent cadence buys a deeper per-visit discount vs the one-time
+// service. Returned as a recurring line item (.annual / .monthly) that is
+// STANDALONE — the estimate engine does not add it to activeServiceKeys, and
+// WAVEGUARD.excludedFromPercentDiscount[foam_recurring] keeps it out of the
+// bundle % discount, so the cadence multiplier is its only discount.
+function priceRecurringFoam(points = 5, options = {}) {
+  const cfg = SPECIALTY.foamDrill;
+  const rec = SPECIALTY.foamDrillRecurring;
+  const { pointCount, tier } = resolveFoamDrillTier(points, cfg.tiers);
+  const cadence = rec.cadenceMultipliers[options.cadence] ? options.cadence : rec.defaultCadence;
+  const multiplier = rec.cadenceMultipliers[cadence];
+  const visits = rec.frequencies[cadence];
+  const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
+  const oneTimePerVisit = Math.round(cost / cfg.marginDivisor); // no floor
+  const perVisit = Math.round(oneTimePerVisit * multiplier);
+  const annual = perVisit * visits;
+  const monthly = Math.round(annual / 12 * 100) / 100;
+  const discountVsOneTime = Math.round((1 - multiplier) * 100);
+  const cadenceLabel = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' }[cadence];
+  const tierLabel = foamDrillTierLabel(tier);
+  return {
+    service: 'foam_recurring',
+    name: `Recurring Foam Treatment (${cadenceLabel})`,
+    annual,
+    monthly,
+    perVisit,
+    perTreatment: perVisit,
+    visitsPerYear: visits,
+    cadence,
+    oneTimePerVisit,
+    discountVsOneTime,
+    detail: `${tierLabel} | ${tier.cans} can${tier.cans > 1 ? 's' : ''} | ${visits} visits/yr | ${discountVsOneTime}% off one-time`,
+    points: pointCount, tier: tierLabel, cans: tier.cans,
   };
 }
 
@@ -6720,7 +6763,7 @@ module.exports = {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
-  pricePlugging, priceFoamDrill, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
+  pricePlugging, priceFoamDrill, priceRecurringFoam, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
