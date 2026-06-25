@@ -1632,6 +1632,116 @@ function DepositModal({ intent, onSuccess, onCancel }) {
   );
 }
 
+// One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). Mirrors
+// DepositModal but captures a card via a SetupIntent — NO money is taken. On a
+// succeeded setup the saved card's intent id flows to accept; the card is
+// charged the final total on completion, and a flat fee only on a no-show /
+// late cancel.
+function CardHoldModal({ intent, onSuccess, onCancel }) {
+  const mountRef = useRef(null);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadStripeSdk().then((StripeCtor) => {
+      if (cancelled || !mountRef.current) return;
+      const stripe = StripeCtor(intent.publishableKey);
+      const elements = stripe.elements({
+        clientSecret: intent.clientSecret,
+        appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
+      });
+      const paymentElement = elements.create('payment');
+      paymentElement.mount(mountRef.current);
+      paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      stripeRef.current = stripe;
+      elementsRef.current = elements;
+    }).catch(() => {
+      if (!cancelled) setError('Could not load the secure card form. Check your connection and try again.');
+    });
+    return () => { cancelled = true; };
+  }, [intent]);
+
+  const feeText = fmtMoney(intent.noShowFeeAmount != null ? intent.noShowFeeAmount : 49);
+  const windowText = `${intent.cancelWindowHours != null ? intent.cancelWindowHours : 24} hours`;
+
+  const handleSave = useCallback(async () => {
+    if (!stripeRef.current || !elementsRef.current) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      // Re-tap after a succeeded setup — honor the captured card instead of
+      // re-confirming.
+      const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
+      if (existing?.setupIntent?.status === 'succeeded') {
+        onSuccess(existing.setupIntent.id);
+        return;
+      }
+      const result = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        confirmParams: { return_url: window.location.href },
+        redirect: 'if_required',
+      });
+      if (result.error) {
+        setError(result.error.message || 'We could not save that card. Try another card.');
+        setSubmitting(false);
+        return;
+      }
+      const si = result.setupIntent;
+      if (si && si.status === 'succeeded') {
+        onSuccess(si.id);
+        return;
+      }
+      setError('That card could not be saved. Try again in a moment.');
+      setSubmitting(false);
+    } catch {
+      setError('We could not save that card. Try again.');
+      setSubmitting(false);
+    }
+  }, [intent, onSuccess]);
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
+      <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Hold your appointment</div>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '6px 0 14px' }}>
+          We won&rsquo;t charge you today. Your card is charged the final total after your visit is completed.
+          A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home.
+          {' '}Credit cards add a small processing fee; debit and bank cards don&rsquo;t.
+        </div>
+        <div ref={mountRef} />
+        {error ? (
+          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 10 }}>{error}</div>
+        ) : null}
+        <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!ready || submitting}
+            style={{
+              padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
+              border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
+              opacity: !ready || submitting ? 0.6 : 1,
+            }}
+          >{submitting ? 'Saving…' : 'Save card & hold my spot'}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={submitting}
+            style={{
+              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            }}
+          >Not now</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReviewPhase({ slotId, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, serviceMode, depositNote }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
@@ -1986,6 +2096,11 @@ export default function EstimateViewPage() {
   // the id is flow plumbing, not trust).
   const [depositIntent, setDepositIntent] = useState(null);
   const depositPaymentIntentIdRef = useRef(null);
+  // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). cardHoldIntent
+  // holds the live POST /card-hold-intent response while the capture modal is
+  // open; the succeeded SetupIntent id rides to accept via the ref.
+  const [cardHoldIntent, setCardHoldIntent] = useState(null);
+  const cardHoldSetupIntentIdRef = useRef(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -2009,8 +2124,16 @@ export default function EstimateViewPage() {
       if (piFromRedirect && params.get('redirect_status') === 'succeeded') {
         depositPaymentIntentIdRef.current = piFromRedirect;
       }
-      if (piFromRedirect) {
-        ['payment_intent', 'payment_intent_client_secret', 'redirect_status'].forEach((k) => params.delete(k));
+      // confirmSetup (one-time card hold, 3DS cards) returns with
+      // ?setup_intent=...&redirect_status=succeeded — carry it forward so the
+      // captured card isn't lost on the redirect and we don't re-mint a hold.
+      const siFromRedirect = params.get('setup_intent');
+      if (siFromRedirect && params.get('redirect_status') === 'succeeded') {
+        cardHoldSetupIntentIdRef.current = siFromRedirect;
+      }
+      if (piFromRedirect || siFromRedirect) {
+        ['payment_intent', 'payment_intent_client_secret', 'setup_intent', 'setup_intent_client_secret', 'redirect_status']
+          .forEach((k) => params.delete(k));
         const qs = params.toString();
         window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
       }
@@ -2242,6 +2365,7 @@ export default function EstimateViewPage() {
           serviceMode,
           selectedFrequency,
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
+          cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
         }),
       });
       if (!r.ok) {
@@ -2251,6 +2375,12 @@ export default function EstimateViewPage() {
           // us) — drop the cached PI; the next confirm mints a fresh top-up.
           depositPaymentIntentIdRef.current = null;
           throw new Error(body.error || 'A deposit is required to confirm your booking.');
+        }
+        if (r.status === 402 && body.code === 'CARD_HOLD_REQUIRED') {
+          // The captured card couldn't be verified — drop it so the next
+          // confirm re-opens the capture modal and mints a fresh SetupIntent.
+          cardHoldSetupIntentIdRef.current = null;
+          throw new Error(body.error || 'Add a card to hold your appointment to confirm this visit.');
         }
         if (r.status === 409) {
           if (/estimate is no longer active/i.test(body.error || '')) {
@@ -2287,6 +2417,37 @@ export default function EstimateViewPage() {
   // Dark-safe: depositPolicy.required is false while ESTIMATE_DEPOSIT_REQUIRED
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
+    // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). When a card
+    // is required to book this one-time visit and none is captured yet, mint
+    // the SetupIntent and open the capture modal; accept continues from the
+    // modal's onSuccess. Dark-safe: cardHoldPolicy.requiredForOneTime is false
+    // while the flag is off, so this falls straight through.
+    const cardHoldPolicy = data?.cardHoldPolicy;
+    if (serviceMode === 'one_time' && cardHoldPolicy?.requiredForOneTime && !cardHoldSetupIntentIdRef.current) {
+      setCtaPhase('submitting');
+      setError(null);
+      try {
+        const r = await fetch(`${API_BASE}/public/estimates/${token}/card-hold-intent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.exemptReason) {
+          // Policy says no hold owed — fall through to accept.
+        } else if (!r.ok) {
+          throw new Error(body.error || 'Could not start the card hold. Please try again.');
+        } else {
+          setCardHoldIntent(body);
+          setCtaPhase('review');
+          return; // modal takes over; accept continues from onSuccess
+        }
+      } catch (err) {
+        setError(err.message);
+        setCtaPhase('review');
+        return;
+      }
+    }
     const depositPolicy = data?.depositPolicy;
     if (depositPolicy?.required && paymentPreference !== 'prepay_annual' && !depositPaymentIntentIdRef.current) {
       setCtaPhase('submitting');
@@ -2323,6 +2484,14 @@ export default function EstimateViewPage() {
   }, [performAccept]);
 
   const handleDepositCancel = useCallback(() => setDepositIntent(null), []);
+
+  const handleCardHoldSuccess = useCallback(async (setupIntentId) => {
+    cardHoldSetupIntentIdRef.current = setupIntentId;
+    setCardHoldIntent(null);
+    await performAccept();
+  }, [performAccept]);
+
+  const handleCardHoldCancel = useCallback(() => setCardHoldIntent(null), []);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
@@ -2480,6 +2649,7 @@ export default function EstimateViewPage() {
                 annualPrepayEligible={pricing.annualPrepayEligible === true}
                 invoiceMode={!!estimate.billByInvoice}
                 selectedFrequency={combinedFrequency}
+                cardHold={data?.cardHoldPolicy || null}
               />
             </>
           ) : null}
@@ -2492,15 +2662,24 @@ export default function EstimateViewPage() {
             onCancel={handleReviewCancel}
             invoiceMode={!!estimate.billByInvoice}
             serviceMode={serviceMode}
-            depositNote={data?.depositPolicy?.required && paymentPreference !== 'prepay_annual'
-              ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
-              : null}
+            depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
+              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
+              : (data?.depositPolicy?.required && paymentPreference !== 'prepay_annual'
+                ? `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`
+                : null)}
           />
           {depositIntent ? (
             <DepositModal
               intent={depositIntent}
               onSuccess={handleDepositSuccess}
               onCancel={handleDepositCancel}
+            />
+          ) : null}
+          {cardHoldIntent ? (
+            <CardHoldModal
+              intent={cardHoldIntent}
+              onSuccess={handleCardHoldSuccess}
+              onCancel={handleCardHoldCancel}
             />
           ) : null}
           {aiPanelBlock}
@@ -2647,6 +2826,7 @@ export default function EstimateViewPage() {
               annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
               selectedFrequency={combinedFrequency}
+              cardHold={data?.cardHoldPolicy || null}
             />
           ) : null}
 

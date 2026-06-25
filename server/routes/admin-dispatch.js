@@ -1630,6 +1630,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
       } catch (e) { logger.error(`[admin-dispatch] cancellation invoice void sweep failed: ${e.message}`); }
 
+      // One-time card-on-file hold: a cancellation inside the window charges the
+      // flat late-cancel fee against the saved card; outside it the hold is
+      // released free. Dark until ONE_TIME_CARD_HOLD; no-op when no hold exists.
+      // Best-effort — never block the committed status change.
+      try {
+        const CardHolds = require('../services/estimate-card-holds');
+        await CardHolds.handleCardHoldCancellation({ scheduledServiceId: svc.id });
+      } catch (e) { logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`); }
+
       try {
         const result = await trackTransitions.cancel(svc.id, {
           reason: notes || null,
@@ -1677,6 +1686,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
         const InvoiceService = require('../services/invoice');
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
       } catch (e) { logger.error(`[admin-dispatch] no-show invoice void sweep failed: ${e.message}`); }
+
+      // One-time card-on-file hold: a no-show triggers the flat fee against the
+      // saved card (dark until ONE_TIME_CARD_HOLD; no-op when no hold exists).
+      // Best-effort — never fail the committed status flip.
+      try {
+        const CardHolds = require('../services/estimate-card-holds');
+        await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+      } catch (e) { logger.error(`[admin-dispatch] no-show card-hold fee charge failed: ${e.message}`); }
 
       // Notify the customer we missed them and invite a reschedule.
       // Best-effort — a Twilio/template failure must not fail the
@@ -4183,6 +4200,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (creditErr) {
         logger.warn(`[referral] account-credit auto-apply failed for invoice=${invoice?.id}: ${creditErr.message}`);
       }
+    }
+
+    // One-time card-on-file hold: resolve the hold on completion (dark until
+    // ONE_TIME_CARD_HOLD; no-op when no hold exists). chargeCardHoldOnCompletion
+    // CHARGES the residual when the invoice is collectible, or RELEASES the hold
+    // when it's already settled (prepaid / account credit) or payer-billed — so
+    // it's called whenever an invoice exists, even if alreadyPaid/payer, to
+    // avoid leaving a completed job's hold stuck in 'held'. On a real charge it
+    // marks the invoice already-paid so the completion SMS sends a receipt, not
+    // a pay link. Best-effort — never blocks completion.
+    if (invoice?.id) {
+      try {
+        const CardHolds = require('../services/estimate-card-holds');
+        const holdCharge = await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: invoice.id });
+        // covered_by_credit means the charge call found the invoice already
+        // settled by account credit (marked prepaid, hold released) — treat it
+        // the same as a paid completion so we don't send a pay-link SMS.
+        if (holdCharge?.charged || holdCharge?.reason === 'covered_by_credit') {
+          alreadyPaid = true;
+          invoiceCreated = false;
+          const fresh = await db('invoices').where({ id: invoice.id }).first('status', 'paid_at');
+          if (fresh) invoice = { ...invoice, ...fresh };
+        }
+      } catch (e) { logger.error(`[admin-dispatch] completion card-hold charge failed: ${e.message}`); }
     }
 
     // Immediate/legacy review requests can be bundled into the completion SMS.

@@ -297,6 +297,13 @@ finding and warns on P1. Reviewers must return JSON matching
   policies, PaymentIntent idempotent per estimate+amount with
   metadata-pinned purpose/estimate id; dark behind
   ESTIMATE_DEPOSIT_REQUIRED).
+  `/api/public/estimates/:token/card-hold-intent` (one-time card-on-file
+  hold; estimate token format gate, generic 404, 10 req/min limit,
+  terminal/expired rejection, mirrors the accept-time quote + one-time
+  availability gates, 409 for exempt policies, customerless SetupIntent
+  with metadata-pinned purpose/estimate id, NO money captured at booking —
+  the saved card is charged on completion and a flat no-show fee only;
+  dark behind ONE_TIME_CARD_HOLD).
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired

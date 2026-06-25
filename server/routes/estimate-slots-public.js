@@ -52,6 +52,10 @@ const {
   createDepositIntentForEstimate,
   resolveDepositPolicyForEstimate,
 } = require('../services/estimate-deposits');
+const {
+  createCardHoldSetupIntentForEstimate,
+  resolveCardHoldPolicy,
+} = require('../services/estimate-card-holds');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
@@ -404,6 +408,75 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[estimate-slots-public:deposit-intent] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// POST /:token/card-hold-intent — Stripe SetupIntent to capture the card that
+// HOLDS a one-time visit (dark until ONE_TIME_CARD_HOLD). No money is taken:
+// the saved card is charged the final total on completion, and a flat no-show
+// fee only if the customer cancels inside the window or isn't home. Gates
+// mirror accept: token format, terminal/expired rejection, the quote gate, the
+// one-time availability gate, and the card-hold policy (recurring / invoice-
+// mode / prepay owe no hold). The client confirms the SetupIntent, then calls
+// accept with cardHoldSetupIntentId.
+router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    const estData = parseEstimateData(estimate);
+    const pricingBundle = await buildPricingBundle(estimate);
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
+    if (quoteRequirement.quoteRequired) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+
+    // The hold only applies to a one-time booking — mirror accept's one-time
+    // availability gate before minting the intent so a one_time request on an
+    // estimate whose accept would reject one-time mode never captures a card.
+    const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
+    if (req.body?.serviceMode === 'one_time' && !isOneTimeOnly) {
+      const oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundle);
+      const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
+      if (!canChooseOneTime) {
+        return res.status(400).json({ error: 'one-time option is not available for this estimate' });
+      }
+    }
+    const treatAsOneTime = req.body?.serviceMode === 'one_time' || isOneTimeOnly;
+
+    const policy = resolveCardHoldPolicy({
+      treatAsOneTime,
+      billByInvoice: estimate.bill_by_invoice === true,
+      paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+    });
+    if (!policy.required) {
+      return res.status(409).json({ error: 'No card hold is required for this estimate', exemptReason: policy.exemptReason || null });
+    }
+
+    const intent = await createCardHoldSetupIntentForEstimate(estimate);
+    if (!intent) {
+      return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+    }
+    return res.json({
+      success: true,
+      clientSecret: intent.clientSecret,
+      setupIntentId: intent.setupIntentId,
+      noShowFeeAmount: intent.noShowFeeAmount,
+      cancelWindowHours: intent.cancelWindowHours,
+      // Both estimate UIs bootstrap Stripe Elements from this response — the
+      // public estimate pages have no other authenticated key source.
+      publishableKey: require('../config/stripe-config').publishableKey,
+    });
+  } catch (err) {
+    logger.error(`[estimate-slots-public:card-hold-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });

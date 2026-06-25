@@ -745,6 +745,14 @@ async function syncConstantsFromDB(dbInstance) {
       if (Number.isFinite(oneTime) && oneTime > 0) constants.DEPOSIT.oneTimeAmount = r(oneTime);
     }
 
+    // ── One-time card-on-file hold (no-show fee + cancel window) ──
+    if (config.estimate_card_hold) {
+      const fee = Number(config.estimate_card_hold.noShowFeeAmount);
+      const windowHours = Number(config.estimate_card_hold.cancelWindowHours);
+      if (Number.isFinite(fee) && fee > 0) constants.CARD_HOLD.noShowFeeAmount = r(fee);
+      if (Number.isFinite(windowHours) && windowHours > 0) constants.CARD_HOLD.cancelWindowHours = Math.round(windowHours);
+    }
+
     // ── Pest Control ─────────────────────────────────────────
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);

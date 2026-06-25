@@ -14,7 +14,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
 
-const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay', 'contract_signing', 'backfill']);
+const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold']);
 
 // methodType selects which authorization copy to snapshot. Omitted/
 // unknown values default to the card variant via getConsentText().

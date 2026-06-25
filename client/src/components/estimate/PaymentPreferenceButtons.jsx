@@ -88,6 +88,7 @@ export default function PaymentPreferenceButtons({
   invoiceMode = false,
   annualPrepayEligible = false,
   selectedFrequency = null,
+  cardHold = null,
 }) {
   const isOneTime = serviceMode === 'one_time';
   const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
@@ -168,6 +169,15 @@ export default function PaymentPreferenceButtons({
   }
 
   if (isOneTime) {
+    // Card-on-file hold (dark until ONE_TIME_CARD_HOLD). When required, the
+    // customer saves a card to reserve the visit — NOT charged today. The card
+    // is charged the final total on completion; a flat fee applies only on a
+    // no-show / late cancel. The selection stays 'pay_at_visit' — the hold is
+    // an orthogonal saved card, captured at confirm time, not a new payment
+    // method preference.
+    const holdRequired = !!cardHold?.requiredForOneTime;
+    const feeText = fmtMoney(cardHold?.noShowFeeAmount != null ? cardHold.noShowFeeAmount : 49);
+    const windowText = `${cardHold?.cancelWindowHours != null ? cardHold.cancelWindowHours : 24} hours`;
     return (
       <div style={{
         background: W.white, borderRadius: 16, padding: 24,
@@ -175,7 +185,7 @@ export default function PaymentPreferenceButtons({
       }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14 }}>
-          Book your visit
+          {holdRequired ? 'Hold your appointment' : 'Book your visit'}
         </div>
 
         <button
@@ -184,11 +194,13 @@ export default function PaymentPreferenceButtons({
           onClick={() => onSelect('pay_at_visit')}
           style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >
-          Book + pay on service day
+          {holdRequired ? 'Add a card to hold your appointment' : 'Book + pay on service day'}
         </button>
 
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
-          {fineprint}
+          {holdRequired
+            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
+            : fineprint}
         </div>
       </div>
     );
