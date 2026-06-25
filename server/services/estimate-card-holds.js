@@ -408,6 +408,112 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
   }
 }
 
+// Low-key office alert when a recap-path card-hold charge needs a human (the
+// recap flow has no pay-link/UI state to fall back on, unlike /complete).
+async function alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId, reason }) {
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'One-time card-hold needs billing review',
+      `A held card-hold visit completed via recap couldn't auto-charge (${reason}) — review + bill/release manually.`,
+      { link: customerId ? `/admin/customers/${customerId}` : '/admin/dispatch', metadata: { scheduledServiceId, reason } },
+    );
+  } catch (e) { logger.warn('[estimate-card-holds] recap card-hold review alert failed', { error: e.message }); }
+}
+
+// Completion charge for the RECAP completion paths (pest-recap, etc.), which
+// complete the visit WITHOUT invoicing — so the normal completion charge (which
+// needs an invoice) never fires there and the held card would go uncharged. For
+// a held card-hold job ONLY: find the existing completion invoice or mint one,
+// then charge it via chargeCardHoldOnCompletion (which releases the hold if the
+// invoice is already settled). Normal non-card-hold recaps stay no-bill. No-op
+// when the flag is off or no hold exists. Never throws into the recap flow.
+async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRecordId, priorNonPerformed = false }) {
+  if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
+  if (!serviceRecordId) return { charged: false, reason: 'no_service_record' };
+  const hold = await heldCardForScheduledService(scheduledServiceId);
+  if (!hold) return { charged: false, reason: 'no_hold' };
+
+  // The recap is re-completing a visit the record classifies as NOT performed
+  // (incomplete / inspection-only / customer-declined) — don't auto-charge a
+  // full completion fee for a visit that wasn't delivered; route to the office.
+  if (priorNonPerformed) {
+    await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: 'prior_non_performed' });
+    return { charged: false, reason: 'prior_non_performed' };
+  }
+
+  // A field prepayment (cash/Zelle/phone) settles the visit OUTSIDE the card
+  // hold and can coexist with a pre-minted invoice. Applying that credit is the
+  // /complete path's job; charging the card here — whether reusing an invoice OR
+  // minting one — would double-bill. Check FIRST, before resolving any invoice.
+  // FAIL CLOSED: if the lookup errors we cannot rule out a prepayment, so route
+  // to manual review rather than risk charging on top of one.
+  let ss;
+  try {
+    ss = await db('scheduled_services').where({ id: scheduledServiceId })
+      .first('service_type', 'prepaid_amount');
+  } catch (err) {
+    logger.error('[estimate-card-holds] recap prepaid lookup failed — manual review', { scheduledServiceId, error: err.message });
+    await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: 'prepaid_lookup_failed' });
+    return { charged: false, reason: 'prepaid_lookup_failed' };
+  }
+  if (ss && Number(ss.prepaid_amount) > 0) {
+    await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: 'prepaid_visit' });
+    return { charged: false, reason: 'prepaid_visit_manual' };
+  }
+
+  let invoiceId = null;
+  try {
+    // Resolve-or-mint the completion invoice inside a transaction-scoped advisory
+    // lock keyed on the visit. createFromService isn't trx-aware, but the lock
+    // (held for this block's duration) serializes the find-or-create across
+    // connections: a concurrent recap submit blocks here, then finds the just-
+    // committed invoice instead of minting a second one. Reuse is by
+    // service_record_id OR (pre-completion Charge-now/Tap-to-Pay)
+    // scheduled_service_id, back-linking the latter like the /complete path.
+    invoiceId = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`card_hold_recap_invoice:${scheduledServiceId}`]);
+      const bySr = await trx('invoices').where({ service_record_id: serviceRecordId })
+        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id');
+      if (bySr?.id) return bySr.id;
+      const bySs = await trx('invoices').where({ scheduled_service_id: scheduledServiceId })
+        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'service_record_id');
+      if (bySs?.id) {
+        if (!bySs.service_record_id) {
+          await trx('invoices').where({ id: bySs.id })
+            .update({ service_record_id: serviceRecordId, updated_at: trx.fn.now() }).catch(() => {});
+        }
+        return bySs.id;
+      }
+      // Mint. Omit taxRate so create() auto-computes county-aware tax from the
+      // customer's property_type (commercial AND business taxable; residential 0).
+      const InvoiceService = require('./invoice');
+      const inv = await InvoiceService.createFromService(serviceRecordId, {
+        description: ss?.service_type || undefined,
+        useScheduledReplay: true,
+        dueDate: etDateString(),
+      });
+      return inv?.id || null;
+    });
+  } catch (err) {
+    logger.error('[estimate-card-holds] recap completion invoice resolve/create failed', { scheduledServiceId, error: err.message });
+    await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: 'invoice_create_failed' });
+    return { charged: false, reason: 'invoice_create_failed', error: err.message };
+  }
+  if (!invoiceId) {
+    await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: 'no_invoice' });
+    return { charged: false, reason: 'no_invoice' };
+  }
+
+  const result = await chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId });
+  // Surface a declined / ambiguous card charge — the recap flow has no pay-link
+  // state to fall back on, so without this a stranded draft goes unnoticed.
+  if (result?.reason === 'charge_failed' || result?.reason === 'charge_review') {
+    await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: result.reason });
+  }
+  return result;
+}
+
 // ── Phase 3: no-show / late-cancel fee ───────────────────────────────────
 // Charge the flat fee against the held card (face value, off-session). The fee
 // is read from the FROZEN hold row, not live constants. Idempotent on the hold
@@ -735,6 +841,7 @@ module.exports = {
   heldCardForScheduledService,
   hasHeldCard,
   chargeCardHoldOnCompletion,
+  chargeCardHoldForRecapCompletion,
   chargeNoShowFee,
   releaseCardHold,
   handleCardHoldCancellation,
