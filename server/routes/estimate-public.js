@@ -6015,9 +6015,15 @@ async function handleEstimateView(req, res, next) {
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
       && estimate.bill_by_invoice !== true
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
-    const shouldUseReactEstimateView = estimate.use_v2_view === true
+    const shouldUseReactEstimateView = (estimate.use_v2_view === true
       || estimate.bill_by_invoice === true
-      || cardHoldForcesReactView;
+      || cardHoldForcesReactView)
+      // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
+      // renderer so office staff can still preview a draft via /estimate/<token>
+      // before it's sent. The React `/:token/data` gate 404s drafts (security),
+      // so routing them to React would break draft preview; the default flip
+      // only takes effect once the estimate is actually published.
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
@@ -6577,6 +6583,11 @@ router.put('/:token/accept', async (req, res, next) => {
       const acceptedUpdates = {
         status: 'accepted',
         accepted_at: trx.fn.now(),
+        // Persist the mode the customer actually booked ('recurring' | 'one_time')
+        // so a later reopen of the accepted estimate recaps the right plan — the
+        // React page otherwise derives mode and would show a mixed estimate's
+        // recurring plan for a one-time acceptance.
+        accepted_service_mode: serviceMode,
         // Acceptance is where money commits — freeze the price. The frequency
         // rung selected below is the one legitimate accept-time re-derive; it is
         // written into this same atomic update, so derive→lock cannot race or
@@ -11035,8 +11046,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
     // (filtered by shouldCountView). Defensive try/catch because schema
     // drift on estimate_views or a locked row shouldn't break the
-    // customer-facing endpoint.
-    if (shouldCountView(req, ip, estimate)) {
+    // customer-facing endpoint. The React page re-fetches /data after
+    // preference/slot/accept actions (and tags those `?refresh=1`); only the
+    // initial open counts, so internal refreshes don't inflate view_count the
+    // way the single legacy HTML page load never did.
+    const isInternalRefresh = req.query.refresh === '1';
+    if (!isInternalRefresh && shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -11056,8 +11071,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     }
 
     // First-view transition — keep admin preview clicks from making the
-    // estimate look customer-opened.
-    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // estimate look customer-opened. Internal React refreshes (?refresh=1) are
+    // never the first view, so they must not flip status or notify admin twice.
+    if (!isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -11216,6 +11232,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         showOneTimeOption: !!estimate.show_one_time_option,
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
+        // The mode the customer booked (set at accept). Null for legacy accepts
+        // + any non-accepted estimate; the accepted recap falls back to the
+        // derived mode when null.
+        acceptedServiceMode: estimate.accepted_service_mode || null,
         billByInvoice: !!estimate.bill_by_invoice,
         serviceCategory,
         acceptance,
