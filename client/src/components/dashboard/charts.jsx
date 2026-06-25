@@ -992,27 +992,51 @@ function sortAttributionRows(rows, key, dir) {
   });
 }
 
-function FunnelStat({ label, value, accent, money }) {
-  const display = value == null ? '—' : money ? fmtMoneyCompact(value) : value.toLocaleString();
+// Tapering visual funnel — Calls → Leads → Booked as proportional bars (each
+// width = value / calls, floored so the tiny Booked stage stays visible), with
+// the stage-to-stage pass-through % called out on the right, then a Won-rev line.
+function AttributionFunnel({ calls, leads, booked, leadsToBookedPct, revenue }) {
+  const base = calls > 0 ? calls : null;
+  const widthFor = (value) => {
+    if (base == null || value == null) return 6;
+    return Math.max((value / base) * 100, 6);
+  };
+  const leadsPct = base != null && leads != null ? Math.round((leads / base) * 100) : null;
+  const stages = [
+    { label: 'Calls', value: calls, pct: null },
+    { label: 'Leads', value: leads, pct: leadsPct },
+    { label: 'Booked', value: booked, pct: leadsToBookedPct ?? null },
+  ];
   return (
-    <div className="flex-1 min-w-0">
-      <div className={cn('u-nums text-22 leading-none text-ink-primary', accent && 'font-medium')}>
-        {display}
+    <div className="pb-3 mb-3 border-b border-hairline border-zinc-200">
+      <div className="u-label text-ink-tertiary mb-2">Funnel</div>
+      <div className="flex flex-col gap-1.5">
+        {stages.map((s) => (
+          <div key={s.label} className="flex items-center gap-3">
+            <span className="u-label text-ink-tertiary w-12 shrink-0">{s.label}</span>
+            <div className="relative flex-1 h-5 rounded-xs overflow-hidden bg-surface-sunken" style={{ background: CHART_GRID }}>
+              <div
+                className="absolute inset-y-0 left-0 rounded-xs"
+                style={{ width: `${widthFor(s.value)}%`, background: CHART_PRIMARY }}
+              />
+            </div>
+            {/* value sits OUTSIDE the bar so it stays legible even when the bar
+                is floored to its 6% minimum (e.g. the small Booked stage). */}
+            <span className="u-nums text-12 text-ink-primary w-10 shrink-0 text-right">
+              {s.value == null ? '—' : fmtInt(s.value)}
+            </span>
+            <span className="u-nums text-11 text-ink-tertiary w-12 shrink-0 text-right whitespace-nowrap">
+              {s.pct != null ? `↓ ${s.pct}%` : ''}
+            </span>
+          </div>
+        ))}
       </div>
-      <div className="u-label text-ink-tertiary mt-1">{label}</div>
-    </div>
-  );
-}
-
-function FunnelArrow({ pct, pctLabel }) {
-  return (
-    <div className="flex flex-col items-center justify-center px-1 shrink-0">
-      <span className="text-ink-disabled text-14 leading-none">→</span>
-      {pct != null && (
-        <span className="u-nums text-11 text-ink-tertiary mt-1 whitespace-nowrap">
-          {pct}% {pctLabel}
+      <div className="flex items-baseline gap-2 mt-2 pl-[3.75rem]">
+        <span className="u-label text-ink-tertiary">Won rev</span>
+        <span className="u-nums text-16 font-medium text-ink-primary">
+          {revenue == null ? '—' : fmtMoneyCompact(revenue)}
         </span>
-      )}
+      </div>
     </div>
   );
 }
@@ -1054,12 +1078,20 @@ const SCORECARD_GRID =
 export function AttributionScorecard({ callsBySource, leadsBySource, channelMix, loading, error }) {
   const [sortKey, setSortKey] = useState('leads');
   const [sortDir, setSortDir] = useState('desc');
+  const [showAll, setShowAll] = useState(false);
 
   if (loading) return <EmptyState>Loading…</EmptyState>;
   if (error) return <EmptyState>Failed to load attribution</EmptyState>;
 
   const rows = mergeAttributionRows(callsBySource?.sources || [], leadsBySource?.sources || []);
   if (!rows.length) return <EmptyState>No attribution data in this window</EmptyState>;
+
+  // Ranked "where leads & revenue come from" bars: lead-bearing sources only,
+  // most leads first, top 6. Winners (booked > 0) get a ★ + revenue call-out.
+  const leadRows = rows.filter((r) => r.hasLeads && r.leads > 0).sort((a, b) => b.leads - a.leads);
+  const topLeadRows = leadRows.slice(0, 6);
+  const maxLeads = Math.max(...leadRows.map((r) => r.leads), 1);
+  const shownCount = topLeadRows.length;
 
   const sorted = sortAttributionRows(rows, sortKey, sortDir);
   // The faint in-row bar tracks the sorted column (falls back to leads for the
@@ -1081,81 +1113,127 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
 
   return (
     <div>
-      <div className="flex items-stretch gap-1 pb-3 mb-3 border-b border-hairline border-zinc-200">
-        <FunnelStat label="Calls" value={callsBySource?.total_inbound_calls ?? null} />
-        <FunnelArrow />
-        <FunnelStat label="Leads" value={leadsBySource?.total_leads ?? null} />
-        <FunnelArrow pct={leadsBySource?.overall_conversion_pct ?? null} pctLabel="booked" />
-        <FunnelStat label="Booked" value={leadsBySource?.total_booked ?? null} />
-        <FunnelArrow />
-        <FunnelStat label="Won rev" value={leadsBySource?.total_revenue ?? null} money accent />
+      <AttributionFunnel
+        calls={callsBySource?.total_inbound_calls ?? null}
+        leads={leadsBySource?.total_leads ?? null}
+        booked={leadsBySource?.total_booked ?? null}
+        leadsToBookedPct={leadsBySource?.overall_conversion_pct ?? null}
+        revenue={leadsBySource?.total_revenue ?? null}
+      />
+
+      <div className="u-label text-ink-tertiary mb-2">Where leads &amp; revenue come from</div>
+      <div className="flex flex-col gap-2">
+        {topLeadRows.map((r, i) => {
+          const won = r.booked > 0;
+          return (
+            <div key={`${r.name}-${i}`} className="flex items-center gap-3">
+              <div className="flex items-center gap-2 min-w-0 w-40 shrink-0">
+                <span className="truncate text-12 text-ink-secondary">{r.name}</span>
+                <ChannelChip channel={r.channel} />
+              </div>
+              <div className="relative flex-1 h-4 rounded-xs overflow-hidden bg-surface-sunken">
+                <div
+                  className="absolute inset-y-0 left-0 rounded-xs"
+                  style={{ width: `${(r.leads / maxLeads) * 100}%`, background: CHART_PRIMARY }}
+                />
+              </div>
+              <span className="u-nums text-12 text-ink-primary w-8 shrink-0 text-right">{fmtInt(r.leads)}</span>
+              <span className="u-nums text-12 w-24 shrink-0 text-right whitespace-nowrap">
+                {won ? (
+                  <>
+                    <span className="font-medium" style={{ color: CHART_SUCCESS }}>★{r.booked}</span>
+                    {r.hasRevenue && (
+                      <span className="text-ink-secondary ml-1.5">{fmtMoneyCompact(r.revenue)}</span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-ink-disabled">·</span>
+                )}
+              </span>
+            </div>
+          );
+        })}
       </div>
 
-      <div className="overflow-x-auto">
-        <div className="min-w-[600px]">
-          <div className={cn('grid gap-x-2 pb-2 text-ink-tertiary', SCORECARD_GRID)}>
-            <button type="button" onClick={() => onSort('name')} className="u-label text-left hover:text-ink-secondary">
-              Source{arrow('name')}
-            </button>
-            {SCORECARD_COLUMNS.map((c) => (
-              <button
-                key={c.key}
-                type="button"
-                onClick={() => onSort(c.key)}
-                className="u-label text-right hover:text-ink-secondary whitespace-nowrap"
-              >
-                {c.label}
-                {arrow(c.key)}
+      {rows.length > shownCount && (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          className="mt-3 text-12 text-ink-tertiary hover:text-ink-secondary"
+        >
+          {showAll
+            ? 'Hide source detail ▴'
+            : `▸ ${rows.length - shownCount} more sources · Show all`}
+        </button>
+      )}
+
+      {showAll && (
+        <div className="overflow-x-auto mt-3 pt-3 border-t border-hairline border-zinc-200">
+          <div className="min-w-[600px]">
+            <div className={cn('grid gap-x-2 pb-2 text-ink-tertiary', SCORECARD_GRID)}>
+              <button type="button" onClick={() => onSort('name')} className="u-label text-left hover:text-ink-secondary">
+                Source{arrow('name')}
               </button>
-            ))}
-          </div>
-          {sorted.map((r, i) => {
-            const unmapped = r.sourceType === 'unmapped';
-            const dormant = r.isActive === false;
-            const lowConv = r.conversionPct != null && r.conversionPct < 20 && r.leads >= 5;
-            const barPct = ((r[barKey] || 0) / barMax) * 100;
-            return (
-              <div
-                key={`${r.name}-${i}`}
-                className={cn('relative grid gap-x-2 items-center py-1.5 text-12 border-t border-hairline border-zinc-100', SCORECARD_GRID)}
-              >
+              {SCORECARD_COLUMNS.map((c) => (
+                <button
+                  key={c.key}
+                  type="button"
+                  onClick={() => onSort(c.key)}
+                  className="u-label text-right hover:text-ink-secondary whitespace-nowrap"
+                >
+                  {c.label}
+                  {arrow(c.key)}
+                </button>
+              ))}
+            </div>
+            {sorted.map((r, i) => {
+              const unmapped = r.sourceType === 'unmapped';
+              const dormant = r.isActive === false;
+              const lowConv = r.conversionPct != null && r.conversionPct < 20 && r.leads >= 5;
+              const barPct = ((r[barKey] || 0) / barMax) * 100;
+              return (
                 <div
-                  className="absolute inset-y-0.5 left-0 rounded-xs pointer-events-none"
-                  style={{ width: `${barPct}%`, background: CHART_PRIMARY, opacity: 0.08 }}
-                />
-                <div className={cn('relative flex items-center gap-2 min-w-0', dormant && 'text-ink-tertiary')}>
-                  <span className="truncate">{r.name}</span>
-                  <ChannelChip channel={r.channel} />
-                  {unmapped && (
-                    <span className="text-[10px] uppercase tracking-label text-alert-fg shrink-0">unmapped</span>
-                  )}
+                  key={`${r.name}-${i}`}
+                  className={cn('relative grid gap-x-2 items-center py-1.5 text-12 border-t border-hairline border-zinc-100', SCORECARD_GRID)}
+                >
+                  <div
+                    className="absolute inset-y-0.5 left-0 rounded-xs pointer-events-none"
+                    style={{ width: `${barPct}%`, background: CHART_PRIMARY, opacity: 0.08 }}
+                  />
+                  <div className={cn('relative flex items-center gap-2 min-w-0', dormant && 'text-ink-tertiary')}>
+                    <span className="truncate">{r.name}</span>
+                    <ChannelChip channel={r.channel} />
+                    {unmapped && (
+                      <span className="text-[10px] uppercase tracking-label text-alert-fg shrink-0">unmapped</span>
+                    )}
+                  </div>
+                  <span className="relative text-right u-nums">{cell(r.hasCalls, r.calls)}</span>
+                  <span className="relative text-right u-nums text-ink-tertiary">{cell(r.hasCalls, r.uniqueCallers)}</span>
+                  <span className="relative text-right u-nums">{cell(r.hasLeads, r.leads)}</span>
+                  <span className="relative text-right u-nums text-ink-secondary">{cell(r.hasLeads, r.booked)}</span>
+                  <span className={cn('relative text-right u-nums', lowConv ? 'text-alert-fg font-medium' : 'text-ink-tertiary')}>
+                    {r.conversionPct != null ? `${r.conversionPct}%` : <span className="text-ink-disabled">—</span>}
+                  </span>
+                  <span className="relative text-right u-nums">
+                    {r.hasRevenue ? fmtMoneyCompact(r.revenue) : <span className="text-ink-disabled">—</span>}
+                  </span>
+                  <span className="relative text-right u-nums text-ink-tertiary">
+                    {r.roi == null ? (
+                      <span className="text-ink-disabled">—</span>
+                    ) : r.revenue > 0 && (r.cost == null || r.cost === 0) ? (
+                      // Revenue with no cost (e.g. a free GBP listing) → ROI is
+                      // infinite; "∞" reads cleaner than the 9999 sentinel.
+                      '∞'
+                    ) : (
+                      `${Math.round(r.roi).toLocaleString()}%`
+                    )}
+                  </span>
                 </div>
-                <span className="relative text-right u-nums">{cell(r.hasCalls, r.calls)}</span>
-                <span className="relative text-right u-nums text-ink-tertiary">{cell(r.hasCalls, r.uniqueCallers)}</span>
-                <span className="relative text-right u-nums">{cell(r.hasLeads, r.leads)}</span>
-                <span className="relative text-right u-nums text-ink-secondary">{cell(r.hasLeads, r.booked)}</span>
-                <span className={cn('relative text-right u-nums', lowConv ? 'text-alert-fg font-medium' : 'text-ink-tertiary')}>
-                  {r.conversionPct != null ? `${r.conversionPct}%` : <span className="text-ink-disabled">—</span>}
-                </span>
-                <span className="relative text-right u-nums">
-                  {r.hasRevenue ? fmtMoneyCompact(r.revenue) : <span className="text-ink-disabled">—</span>}
-                </span>
-                <span className="relative text-right u-nums text-ink-tertiary">
-                  {r.roi == null ? (
-                    <span className="text-ink-disabled">—</span>
-                  ) : r.revenue > 0 && (r.cost == null || r.cost === 0) ? (
-                    // Revenue with no cost (e.g. a free GBP listing) → ROI is
-                    // infinite; "∞" reads cleaner than the 9999 sentinel.
-                    '∞'
-                  ) : (
-                    `${Math.round(r.roi).toLocaleString()}%`
-                  )}
-                </span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
 
       <ChannelMixBar channels={channelMix?.channels || []} />
     </div>
