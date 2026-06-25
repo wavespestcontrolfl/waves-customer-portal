@@ -89,22 +89,17 @@ function spokenCallerName(customer) {
   return name || null;
 }
 
+// Read a number aloud only when it is a North American (NANP) 10-digit or
+// 1+10-digit number. International callers (e.g. +44…) are NOT reformatted as
+// U.S. numbers — they fall back to the plain "unknown number" announcement so
+// staff are never read a misleading number.
 function spokenPhoneDigits(raw) {
-  const match = String(raw || '').replace(/\D/g, '').match(/(\d{3})(\d{3})(\d{4})$/);
-  return match ? `${match[1]}. ${match[2]}. ${match[3]}.` : '';
-}
-
-function buildForwardScreenUrl({ customer, from }) {
-  const base = '/api/webhooks/twilio/inbound-forward-screen';
-  const params = new URLSearchParams();
-  const name = spokenCallerName(customer);
-  if (name) {
-    params.set('caller', name);
-  } else if (from) {
-    params.set('callerNum', toE164(from) || String(from));
-  }
-  const qs = params.toString();
-  return qs ? `${base}?${qs}` : base;
+  const digits = String(raw || '').replace(/\D/g, '');
+  const nanp = digits.length === 10
+    ? digits
+    : (digits.length === 11 && digits.startsWith('1')) ? digits.slice(1) : null;
+  if (!nanp) return '';
+  return `${nanp.slice(0, 3)}. ${nanp.slice(3, 6)}. ${nanp.slice(6)}.`;
 }
 
 function forwardScreenAnnouncement({ caller, callerNum }) {
@@ -116,6 +111,17 @@ function forwardScreenAnnouncement({ caller, callerNum }) {
   const spoken = spokenPhoneDigits(callerNum);
   if (spoken) return `Waves call from an unknown number. ${spoken} Press 1 to connect.`;
   return 'Waves call from an unknown number. Press 1 to connect.';
+}
+
+// Derive the screening-leg announcement from the persisted call_log row rather
+// than from the callback URL, so no caller name/number is ever placed in a URL
+// query string (those pass through the global morgan request logger). The /voice
+// handler stamps the spoken name into metadata at insert time; the number falls
+// back to the already-stored from_phone column.
+function screenAnnouncementFromCallRow(row) {
+  const caller = parseJsonObject(row?.metadata).screen_caller_name || null;
+  const callerNum = caller ? null : (row?.from_phone || null);
+  return forwardScreenAnnouncement({ caller, callerNum });
 }
 
 async function fetchTwilioCall(callSid) {
@@ -391,6 +397,9 @@ router.post('/voice', async (req, res) => {
         location: numberConfig?.label || 'unknown',
         numberType: numberConfig?.type || 'unknown',
         domain: numberConfig?.domain || null,
+        // Spoken on the staff screening leg (see screenAnnouncementFromCallRow).
+        // Stored server-side so the caller's name never enters a callback URL.
+        screen_caller_name: spokenCallerName(customer),
       }),
     });
     // call_log now committed — don't release the claim on a later error.
@@ -463,10 +472,9 @@ router.post('/voice', async (req, res) => {
       answerOnBridge: true,
     });
 
-    const screenUrl = buildForwardScreenUrl({ customer, from: From });
     for (const number of forwardNumbers) {
       dial.number({
-        url: screenUrl,
+        url: '/api/webhooks/twilio/inbound-forward-screen',
         method: 'POST',
       }, number);
     }
@@ -587,10 +595,17 @@ router.post('/voicemail-complete', (req, res) => {
 // =========================================================================
 router.post('/inbound-forward-screen', async (req, res) => {
   try {
-    const announcement = forwardScreenAnnouncement({
-      caller: req.query.caller || req.body.caller,
-      callerNum: req.query.callerNum || req.body.callerNum,
-    });
+    // Look the caller up from the persisted parent call_log row rather than the
+    // URL, so no name/number is logged by the global request logger.
+    const parentCallSid = req.body?.ParentCallSid || req.body?.CallSid || null;
+    let callRow = null;
+    if (parentCallSid) {
+      callRow = await db('call_log')
+        .where('twilio_call_sid', parentCallSid)
+        .select('metadata', 'from_phone')
+        .first();
+    }
+    const announcement = screenAnnouncementFromCallRow(callRow);
 
     const twiml = new VoiceResponse();
     const gather = twiml.gather({
@@ -1105,13 +1120,13 @@ router.post('/call-status', async (req, res) => {
 });
 
 router._test = {
-  buildForwardScreenUrl,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
   forwardScreenAnnouncement,
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
+  screenAnnouncementFromCallRow,
   spokenCallerName,
   spokenPhoneDigits,
   rememberForwardAccept,

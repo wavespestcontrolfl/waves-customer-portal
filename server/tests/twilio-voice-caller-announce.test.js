@@ -17,8 +17,8 @@ const voiceRouter = require('../routes/twilio-voice-webhook');
 
 describe('twilio voice inbound caller announcement', () => {
   const {
-    buildForwardScreenUrl,
     forwardScreenAnnouncement,
+    screenAnnouncementFromCallRow,
     spokenCallerName,
     spokenPhoneDigits,
   } = voiceRouter._test;
@@ -49,8 +49,13 @@ describe('twilio voice inbound caller announcement', () => {
       expect(spokenPhoneDigits('9415551234')).toBe('941. 555. 1234.');
     });
 
-    test('handles E.164 with country code', () => {
+    test('handles E.164 with US country code', () => {
       expect(spokenPhoneDigits('+19415551234')).toBe('941. 555. 1234.');
+    });
+
+    test('does NOT read an international (non-NANP) number as a US number', () => {
+      // UK number — must not be announced as "201. 234. 5678."
+      expect(spokenPhoneDigits('+442012345678')).toBe('');
     });
 
     test('returns empty string for non-NANP input', () => {
@@ -59,21 +64,28 @@ describe('twilio voice inbound caller announcement', () => {
     });
   });
 
-  describe('buildForwardScreenUrl', () => {
-    const base = '/api/webhooks/twilio/inbound-forward-screen';
-
-    test('announces a matched customer by name', () => {
-      const url = buildForwardScreenUrl({ customer: { first_name: 'John', last_name: 'Doe' }, from: '+19415551234' });
-      expect(url).toBe(`${base}?caller=John+Doe`);
+  describe('screenAnnouncementFromCallRow', () => {
+    test('reads a matched customer by name from jsonb metadata', () => {
+      const row = { metadata: { screen_caller_name: 'John Doe' }, from_phone: '+19415551234' };
+      expect(screenAnnouncementFromCallRow(row))
+        .toBe('Waves call from John Doe. Press 1 to connect.');
     });
 
-    test('announces an unmatched caller by number', () => {
-      const url = buildForwardScreenUrl({ customer: null, from: '+19415551234' });
-      expect(url).toBe(`${base}?callerNum=%2B19415551234`);
+    test('parses metadata when stored as a JSON string', () => {
+      const row = { metadata: JSON.stringify({ screen_caller_name: 'John Doe' }), from_phone: '+19415551234' };
+      expect(screenAnnouncementFromCallRow(row))
+        .toBe('Waves call from John Doe. Press 1 to connect.');
     });
 
-    test('falls back to the bare screen URL with no name and no number', () => {
-      expect(buildForwardScreenUrl({ customer: null, from: '' })).toBe(base);
+    test('falls back to the stored from_phone when there is no matched name', () => {
+      const row = { metadata: { screen_caller_name: null }, from_phone: '+19415551234' };
+      expect(screenAnnouncementFromCallRow(row))
+        .toBe('Waves call from an unknown number. 941. 555. 1234. Press 1 to connect.');
+    });
+
+    test('falls back to plain unknown when the row is missing entirely', () => {
+      expect(screenAnnouncementFromCallRow(null))
+        .toBe('Waves call from an unknown number. Press 1 to connect.');
     });
   });
 
