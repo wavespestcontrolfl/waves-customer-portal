@@ -2558,7 +2558,109 @@ export default function EstimateViewPage() {
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
 
+  // The service/price cards — shared by the live configurator (below) and the
+  // read-only recap shown in the accepted terminal state, so a customer
+  // reopening an accepted link still sees the services + pricing they agreed to
+  // (legacy server-HTML parity). When `readOnly`, the selectors are disabled and
+  // the booking-only extras (app-showcase upsell, one-time add-on pickers) are
+  // omitted.
+  const renderQuoteDetailCards = (readOnly = false) => {
+    const cardsDisabled = readOnly || ctaPhase === 'submitting';
+    if (serviceMode === 'recurring') {
+      return (
+        <>
+          {services.map((section) => {
+            const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
+              ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+                ? pricing.firstVisitFees
+                : (pricing.setupFee ? [pricing.setupFee] : []))
+              : [];
+            const afterPrice = services.length === 1 ? (
+              <>
+                {setupFees.map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
+                {!estimate.showOneTimeOption ? (
+                  <OneTimeBreakdownCard
+                    breakdown={pricing.oneTimeBreakdown}
+                    excludeServices={setupFees.map((fee) => fee.service)}
+                  />
+                ) : null}
+              </>
+            ) : null;
+            return (
+              <ServiceSection
+                key={section.key}
+                section={section}
+                servicesLength={services.length}
+                selectedFrequencyKey={selected[section.key]}
+                selectedAddOns={selectedAddOns[section.key] || new Set()}
+                onFrequencyChange={handleFrequencyChange}
+                onAddOnToggle={onToggleAddOn}
+                disabled={cardsDisabled}
+                renderFlags={renderFlags}
+                waveGuardTier={waveGuardTier}
+                afterPrice={afterPrice}
+              />
+            );
+          })}
+
+          {services.length > 1 && renderFlags.showRecurringSummary ? (
+            <CombinedRecurringPriceCard
+              combined={pricing.combinedRecurring}
+              selectedFrequency={combinedFrequency}
+              waveGuardTier={combinedTierEligible ? waveGuardTier : null}
+            />
+          ) : null}
+
+          {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
+            (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+              ? pricing.firstVisitFees
+              : (pricing.setupFee ? [pricing.setupFee] : [])
+            ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)
+          ) : null}
+
+          {services.length > 1 && !estimate.showOneTimeOption ? (
+            <OneTimeBreakdownCard
+              breakdown={pricing.oneTimeBreakdown}
+              excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
+            />
+          ) : null}
+
+          {readOnly ? null : <PortalShowcaseCard />}
+        </>
+      );
+    }
+    return (
+      <>
+        <OneTimePriceCard
+          oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+          breakdown={pricing.oneTimeBreakdown}
+        />
+        <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+        {!readOnly && renderFlags.showOneTimePestAddOns === true ? (
+          services
+            .filter((section) => section.isPest)
+            .map((section) => {
+              const frequency = selectedFrequencyForSection(section, selected);
+              return (
+                <AddOnsBlock
+                  key={`${section.key}-one-time-addons`}
+                  addOns={frequency?.addOns || []}
+                  selectedKeys={selectedAddOns[section.key] || new Set()}
+                  onToggle={(key) => onToggleAddOn(section.key, key)}
+                />
+              );
+            })
+        ) : null}
+      </>
+    );
+  };
+
   if (!canAccept) {
+    // Accepted estimates keep the full services + pricing recap below the
+    // accepted banner (read-only) so a customer reopening the link still sees
+    // what they agreed to — legacy server-HTML parity. Declined/expired keep
+    // the terminal card only (the legacy expired page showed no details either).
+    const showAcceptedRecap = cta.terminalState === 'accepted';
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
@@ -2581,6 +2683,7 @@ export default function EstimateViewPage() {
           isProposal={isCommercialProposal}
           proposalPdfEmailed={proposalPdfEmailed}
         />
+        {showAcceptedRecap ? renderQuoteDetailCards(true) : null}
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
     );
@@ -2709,90 +2812,7 @@ export default function EstimateViewPage() {
             />
           ) : null}
 
-          {serviceMode === 'recurring' ? (
-            <>
-              {services.map((section) => {
-                const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
-                  ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                    ? pricing.firstVisitFees
-                    : (pricing.setupFee ? [pricing.setupFee] : []))
-                  : [];
-                const afterPrice = services.length === 1 ? (
-                  <>
-                    {setupFees.map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
-                    {!estimate.showOneTimeOption ? (
-                      <OneTimeBreakdownCard
-                        breakdown={pricing.oneTimeBreakdown}
-                        excludeServices={setupFees.map((fee) => fee.service)}
-                      />
-                    ) : null}
-                  </>
-                ) : null;
-                return (
-                  <ServiceSection
-                    key={section.key}
-                    section={section}
-                    servicesLength={services.length}
-                    selectedFrequencyKey={selected[section.key]}
-                    selectedAddOns={selectedAddOns[section.key] || new Set()}
-                    onFrequencyChange={handleFrequencyChange}
-                    onAddOnToggle={onToggleAddOn}
-                    disabled={ctaPhase === 'submitting'}
-                    renderFlags={renderFlags}
-                    waveGuardTier={waveGuardTier}
-                    afterPrice={afterPrice}
-                  />
-                );
-              })}
-
-              {services.length > 1 && renderFlags.showRecurringSummary ? (
-                <CombinedRecurringPriceCard
-                  combined={pricing.combinedRecurring}
-                  selectedFrequency={combinedFrequency}
-                  waveGuardTier={combinedTierEligible ? waveGuardTier : null}
-                />
-              ) : null}
-
-              {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
-                (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                  ? pricing.firstVisitFees
-                  : (pricing.setupFee ? [pricing.setupFee] : [])
-                ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)
-              ) : null}
-
-              {services.length > 1 && !estimate.showOneTimeOption ? (
-                <OneTimeBreakdownCard
-                  breakdown={pricing.oneTimeBreakdown}
-                  excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
-                />
-              ) : null}
-
-              <PortalShowcaseCard />
-            </>
-          ) : (
-            <>
-              <OneTimePriceCard
-                oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
-                breakdown={pricing.oneTimeBreakdown}
-              />
-              <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
-              {renderFlags.showOneTimePestAddOns === true ? (
-                services
-                  .filter((section) => section.isPest)
-                  .map((section) => {
-                    const frequency = selectedFrequencyForSection(section, selected);
-                    return (
-                      <AddOnsBlock
-                        key={`${section.key}-one-time-addons`}
-                        addOns={frequency?.addOns || []}
-                        selectedKeys={selectedAddOns[section.key] || new Set()}
-                        onToggle={(key) => onToggleAddOn(section.key, key)}
-                      />
-                    );
-                  })
-              ) : null}
-            </>
-          )}
+          {renderQuoteDetailCards()}
 
           {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
               server-rendered estimate's order: price → Waves AI → booking) so
