@@ -50,14 +50,20 @@ function isAnswerFirstScheduleActive(schedule, now = new Date()) {
   if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) return false;
 
   const { hour, dayOfWeek } = etParts(now);
+  const days = Array.isArray(schedule.openDays) ? schedule.openDays : [];
+  const dayAllowed = (d) => days.length === 0 || days.includes(d);
 
-  if (Array.isArray(schedule.openDays) && schedule.openDays.length > 0
-      && !schedule.openDays.includes(dayOfWeek)) {
-    return false;
+  if (start < end) {
+    // Same-day window — gated on today.
+    return hour >= start && hour < end && dayAllowed(dayOfWeek);
   }
 
-  // Same-day window vs. overnight wrap.
-  return start < end ? (hour >= start && hour < end) : (hour >= start || hour < end);
+  // Overnight wrap. openDays is keyed to the day the window STARTS, so the
+  // morning tail (hour < end) belongs to the window that began the PREVIOUS ET
+  // day and must be gated on yesterday's membership, not today's.
+  if (hour >= start) return dayAllowed(dayOfWeek);        // evening portion → today started it
+  if (hour < end) return dayAllowed((dayOfWeek + 6) % 7); // morning tail → yesterday started it
+  return false;
 }
 
 /**

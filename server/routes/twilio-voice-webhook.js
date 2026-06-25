@@ -653,6 +653,10 @@ router.post('/agent-fallback', async (req, res) => {
     logger.error(`[agent-fallback] error; falling back to voicemail: ${err.message}`);
     appendVoicemailRecording(twiml);
   }
+  // Re-sync the unified messages row so Customer 360 / comms timeline pick up the
+  // final answered_by/status/duration of the AI leg (it was created + synced at
+  // /voice and /call-complete before the agent leg finished).
+  if (callSid) queueVoiceMessageSync(callSid);
   res.type('text/xml').send(twiml.toString());
 });
 

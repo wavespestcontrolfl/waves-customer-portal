@@ -103,11 +103,22 @@ describe('isAnswerFirstScheduleActive', () => {
     expect(isAnswerFirstScheduleActive(s, ET_07_WED)).toBe(false);
   });
 
-  test('openDays restricts by ET weekday', () => {
+  test('openDays gates the morning tail on the window START day (prev ET day)', () => {
     const weekdays = { enabled: true, startHourET: 18, endHourET: 8, openDays: [1, 2, 3, 4, 5] };
     const weekend = { enabled: true, startHourET: 18, endHourET: 8, openDays: [0, 6] };
-    expect(isAnswerFirstScheduleActive(weekdays, ET_07_WED)).toBe(true);  // Wed in Mon–Fri
-    expect(isAnswerFirstScheduleActive(weekend, ET_07_WED)).toBe(false);  // Wed not in weekend
+    // Wed 07:00 is the tail of TUE-night's window; Tue(2) ∈ Mon–Fri, ∉ weekend.
+    expect(isAnswerFirstScheduleActive(weekdays, ET_07_WED)).toBe(true);
+    expect(isAnswerFirstScheduleActive(weekend, ET_07_WED)).toBe(false);
+  });
+
+  test('overnight window uses the START day at the midnight boundary', () => {
+    const monFri = { enabled: true, startHourET: 18, endHourET: 8, openDays: [1, 2, 3, 4, 5] };
+    const MON_02 = new Date('2026-06-22T06:00:00Z'); // Mon 02:00 ET — tail of SUN night
+    const SAT_02 = new Date('2026-06-27T06:00:00Z'); // Sat 02:00 ET — tail of FRI night
+    const FRI_20 = new Date('2026-06-27T00:00:00Z'); // Fri 20:00 ET — evening
+    expect(isAnswerFirstScheduleActive(monFri, MON_02)).toBe(false); // Sun not selected
+    expect(isAnswerFirstScheduleActive(monFri, SAT_02)).toBe(true);  // Fri selected
+    expect(isAnswerFirstScheduleActive(monFri, FRI_20)).toBe(true);  // Fri evening
   });
 
   test('disabled / malformed → false', () => {

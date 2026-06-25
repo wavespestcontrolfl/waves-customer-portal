@@ -387,6 +387,15 @@ finding and warns on P1. Reviewers must return JSON matching
   the already-emailed archived filing streamed from private S3 — never
   live/unsigned content — and returns a generic 404 for non-WDO projects, reports
   with no archived filing, or malformed tokens).
+  `/api/webhooks/voice-agent/lead` (POST; machine-to-machine webhook — the
+  bilingual AI voice agent (ElevenLabs) posts a captured lead when an AI-handled
+  call ends. NOT browser-facing. Fail-closed shared-secret auth in the route
+  (`voiceAgentAuth`): 403 unless `GATE_VOICE_AI_AGENT` is on, 503 unless
+  `VOICE_AGENT_WEBHOOK_SECRET` is set, 401 on a constant-time token mismatch —
+  so the endpoint is inert until the feature is explicitly enabled. Accepts PII
+  (caller name/phone/address); rejects non-E.164 caller IDs before any lead
+  create/merge and writes via `createLeadFromExtraction` into the existing lead
+  pipeline. Any change to this route or its payload is security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

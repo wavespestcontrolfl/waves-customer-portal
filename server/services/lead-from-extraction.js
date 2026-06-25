@@ -39,6 +39,17 @@ const LEAD_PIPELINE_STAGES = new Set([
 ]);
 const isLeadStage = (stage) => LEAD_PIPELINE_STAGES.has(String(stage || '').toLowerCase());
 
+const normName = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// True only when BOTH a captured first name and the customer's first name are
+// present AND they differ — i.e. likely a different person on a shared line, so
+// we shouldn't link the call/lead to that customer.
+function nameConflicts(extracted, customer) {
+  const ex = normName(extracted && extracted.first_name);
+  const cust = normName(customer && customer.first_name);
+  if (!ex || !cust) return false;
+  return ex !== cust;
+}
+
 function maskPhone(value) {
   const d = phoneDigits(value);
   return d ? `***${d.slice(-4)}` : 'unknown';
@@ -112,7 +123,15 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let leadId = null;
   let created = false;
 
-  const customer = await findCustomerByPhone(phone);
+  let customer = await findCustomerByPhone(phone);
+  // Name-aware guard: on a shared line the phone-only match can resolve the
+  // wrong household member. If the agent captured a name that conflicts with the
+  // matched customer's, don't link (treat as a new, unlinked caller) rather than
+  // attach the call + language hint to the wrong customer.
+  if (customer && nameConflicts(extracted, customer)) {
+    logger.info(`[voice-agent-lead] Captured name conflicts with customer on ${maskPhone(phone)}; not linking`);
+    customer = null;
+  }
   customerId = customer?.id || null;
 
   // Non-routing language hint on the matched customer — applied even if the lead
@@ -126,17 +145,19 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       .catch((e) => logger.warn(`[voice-agent-lead] customer language hint failed (non-blocking): ${e.message}`));
   }
 
+  // Guard FIRST (mirror the voicemail processor): a matched lifecycle customer
+  // that isn't in a lead stage gets NO lead work — even if a historical/
+  // converted lead exists for this phone (so an ordinary support call can't
+  // overwrite a won lead). Brand-new callers (no match) and lead-stage customers
+  // proceed below.
+  if (customer && !isLeadStage(customer.pipeline_stage)) {
+    logger.info(`[voice-agent-lead] Skipping lead for ${maskPhone(phone)} — existing ${customer.pipeline_stage || 'lifecycle'} customer`);
+    return { leadId: null, customerId, created: false };
+  }
+
   const existingLead = phone
     ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first()
     : null;
-
-  // Mirror the voicemail processor's guard: don't reopen an active/won/churned
-  // lifecycle customer as a fresh lead from an ordinary call. Brand-new callers
-  // (no customer match) and customers already in a lead stage are still captured.
-  if (!existingLead && customer && !isLeadStage(customer.pipeline_stage)) {
-    logger.info(`[voice-agent-lead] Skipping new lead for ${maskPhone(phone)} — existing ${customer.pipeline_stage || 'lifecycle'} customer`);
-    return { leadId: null, customerId, created: false };
-  }
 
   if (existingLead) {
     leadId = existingLead.id;
