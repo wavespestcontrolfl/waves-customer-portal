@@ -395,10 +395,12 @@ const BRAND = {
 
 const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
 
-// App-store links — set these env vars on Railway once the listings are live to
-// turn the (currently non-clickable) badges into real download links. No code
-// change needed; empty = "coming soon" preview treatment.
-const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || '';
+// App-store links — the iOS app is live, so the Apple badge links to the
+// listing by default (env var still overrides). Android isn't published yet,
+// so the Google Play badge stays a non-clickable preview until
+// WAVES_ANDROID_APP_URL is set. Once both are empty the card falls back to the
+// "coming soon" treatment.
+const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || '';
 
 // Self-contained inline-SVG store badges (no hosted assets / no broken images).
@@ -3271,7 +3273,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const locked = est.status === 'accepted' || quoteRequired;
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
-  const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
+  // Per-day figure is a true daily rate: annual cost / 365 (monthly * 12 / 365).
+  const dayPrice = Math.round((monthlyTotal * 12 / 365) * 100) / 100;
 
   const R = estResult?.results || {};
   const hasTermiteBait = recurring.some((s) => isTermiteBaitServiceName(s.name || s.label || s.service));
@@ -3644,7 +3647,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     .filter((row) => row.price != null)
     .map((row) => {
       const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
-      const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
+      const day = row.visits > 0 ? Math.round((row.price * row.visits / 365) * 100) / 100 : null;
       const dayPriceHtml = day != null
         ? `<span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>`
         : '';
@@ -3696,7 +3699,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     if (!(canChooseOneTime && serviceCardsCoverRecurringTotal && billingServiceRows.length === 1)) return '';
     const row = billingServiceRows[0];
     const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
-    const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
+    const day = row.visits > 0 ? Math.round((row.price * row.visits / 365) * 100) / 100 : null;
     const dayPriceHtml = day != null
       ? `<span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>`
       : '';
@@ -4630,7 +4633,7 @@ ${shellQuestionsBar()}
         ? (prefOff * 12) / visits
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
-      el.textContent = fmt(Math.round(((adjusted * visits / 12) / 30) * 100) / 100);
+      el.textContent = fmt(Math.round((adjusted * visits / 365) * 100) / 100);
     });
   };
 
@@ -4712,7 +4715,7 @@ ${shellQuestionsBar()}
           if (oneTimeDisplay) oneTimeDisplay.textContent = fmt(data.onetimeTotal);
           document.querySelectorAll('[data-onetime-echo]').forEach(el => el.textContent = fmt(data.onetimeTotal));
         }
-        const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
+        const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal * 12 / 365) * 100) / 100);
         if (data.tierPrices) {
           document.querySelectorAll('[data-price-for]').forEach((pel) => {
             const t = pel.dataset.priceFor;
