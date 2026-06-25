@@ -73,8 +73,8 @@ pick up the new value.
 - [ ] **Heads-up the office (Virginia) + techs:** one-time estimates will now
       require a card to book, and completing a one-time job through the billing
       completion path auto-charges that card (no driveway collection).
-      No-shows/late-cancels auto-charge $49. **Important:** pest visits completed
-      from the tech **recap** flow do NOT charge the hold — see §7.
+      No-shows/late-cancels auto-charge $49. Pest visits completed from the tech
+      **recap** flow now also auto-charge the hold (PR #2071) — see §7.
 
 ---
 
@@ -102,6 +102,20 @@ reversible). Use a real card you control.
    FROM estimate_card_holds WHERE scheduled_service_id = '<ss_id>';
    -- expect status='charged_completion', a PI id, charged_amount = invoice total
    ```
+   **Also test the pest recap path** (PR #2071), since it's the primary way pest
+   one-time jobs complete: on a separate booking, complete a **pest** visit via
+   the tech **recap** flow (`ServiceRecapModal` → `POST
+   /api/admin/dispatch/:serviceId/pest-recap`) and run the same query — expect
+   `status='charged_completion'` (the recap path mints the completion invoice and
+   charges the hold). Two cases route to office review instead of auto-charging:
+   a visit whose **prior** record was already marked not-performed by an earlier
+   `/complete` (status `incomplete` or a non-performed `visitOutcome` — i.e.
+   re-completing a previously incomplete/inspection-only/declined visit), and a
+   visit with a recorded **field prepayment** (`scheduled_services.prepaid_amount`).
+   Those fire an **admin notification titled "One-time card-hold needs billing
+   review"** (not a log line) and leave the hold `held`. Note a *first-time*
+   no-work pest recap has no prior non-performed record, so it would still charge
+   — the guard keys off prior state, not the current recap.
 5. **No-show fee:** on a *second* test booking, mark the appointment **no-show**
    from the dispatch detail sheet. Verify the fee + the ledger row:
    ```sql
@@ -150,12 +164,21 @@ WHERE h.status = 'held' AND s.status IN ('completed','no_show','cancelled');
 ```
 
 **No-show fee revenue** — use this query as the source of truth. These fees
-land as `payments.status='paid'` with no `service_record`, so they do **not**
-necessarily show up in the standard revenue/P&L views (some tax/P&L paths sum
-`status='completed'`, and the revenue overview reads `service_records.revenue`):
+land as `payments` rows with no `service_record`, so they do **not** necessarily
+show up in the standard revenue/P&L views (some tax/P&L paths sum
+`status='completed'`, and the revenue overview reads `service_records.revenue`).
+Because the fee is **refundable**, net out refunds explicitly: a full refund
+flips the row to `status='refunded'`, a partial refund keeps `status='paid'` but
+sets `refund_amount`. So `sum(amount)` alone overstates net revenue:
 ```sql
-SELECT count(*), sum(amount) FROM payments
-WHERE metadata->>'purpose' = 'card_hold_no_show_fee' AND status = 'paid';
+SELECT
+  count(*) FILTER (WHERE status = 'paid')                         AS still_collected_count,
+  count(*) FILTER (WHERE status = 'refunded')                     AS fully_refunded_count,
+  COALESCE(sum(amount)         FILTER (WHERE status = 'paid'), 0)
+    - COALESCE(sum(refund_amount) FILTER (WHERE status = 'paid'), 0) AS net_collected
+FROM payments
+WHERE metadata->>'purpose' = 'card_hold_no_show_fee';
+-- net_collected = gross paid minus partial refunds; fully-refunded rows excluded
 ```
 
 **Log greps:** `[estimate-card-holds]` (all hold activity),
@@ -185,17 +208,22 @@ handful of already-held appointments.
 
 ## 7. Known limitations / by-design behavior
 
-- **⚠️ Pest "recap" completion does NOT charge the hold (important for go-live).**
-  The tech portal routes **pest** jobs into the recap flow (`ServiceRecapModal`
-  → `POST /api/admin/dispatch/:serviceId/pest-recap`), which is *recap-only —
-  no invoicing* yet still transitions the visit to `completed`. Because no
-  completion invoice is created, the card-hold completion charge never fires and
-  the hold is left `held`. Since pest is the most common one-time service and
-  recap is how techs complete it, **this is a real coverage gap**: either
-  complete one-time card-hold pest jobs via the billing completion path (`POST
-  /api/admin/dispatch/:serviceId/complete`), or land the code follow-up that
-  wires charging into the recap path before relying on auto-charge for pest.
-  Watch the "stuck `held` on completed jobs" query in §5 to catch these.
+- **Pest "recap" completion now charges the hold (PR #2071).** The tech portal
+  routes **pest** jobs into the recap flow (`ServiceRecapModal` → `POST
+  /api/admin/dispatch/:serviceId/pest-recap`), which is recap-only — no invoicing
+  — yet still transitions the visit to `completed`. That used to leave the hold
+  `held` and uncharged (the original coverage gap). It's now wired: for a held
+  card-hold job, the recap mints the completion invoice from its service record
+  and charges the saved card, the same as the `/complete` path. Two by-design
+  exceptions route to **office review** instead — each fires an admin
+  notification titled **"One-time card-hold needs billing review"** and leaves
+  the hold `held`: (1) a visit whose **prior** record was already marked
+  not-performed by an earlier `/complete` (status `incomplete` or a non-performed
+  `visitOutcome`) — note this is keyed off prior state, so a *first-time* no-work
+  recap is **not** caught and would still charge; and (2) a visit with a recorded
+  **field prepayment** (`scheduled_services.prepaid_amount > 0`). Keep watching
+  the "stuck `held` on completed jobs" query in §5 — it should now stay ~0 for
+  pest too, and the office-review cases surface there until handled.
 - **Status-dropdown "completed" doesn't charge either.** The charge fires on the
   real completion route (`POST /api/admin/dispatch/:serviceId/complete`, used by
   the tech "Complete" button and admin). The lighter admin status-dropdown →
@@ -209,12 +237,13 @@ handful of already-held appointments.
   captured card is carried back but the slot reservation is not re-held in the UI
   (15-min server-side reservation still stands). Same accepted behavior as the
   deposit flow. Follow-up if it proves to matter.
-- **No-show fee reporting + receipt.** The fee lands as a `payments` row
-  (`status='paid'`, no `service_record`), so it may not surface in the standard
-  revenue/P&L views — use the §5 query as the source of truth. A customer
-  receipt + a refundable fee invoice are added by the pending follow-up **PR
-  #2070** (not in the merged feature this runbook describes); until that merges,
-  no receipt is sent at charge time.
+- **No-show fee reporting + receipt.** The fee now settles as a **paid, refundable
+  fee invoice** with a linked `payments` row (PR #2070): the customer gets a
+  receipt (SMS/email per their `payment_receipt` channel preference), the office
+  gets a heads-up notification, and it's refundable via the existing `/refund`
+  flow (no new admin UI). The payment row is still `status='paid'` with no
+  `service_record`, so it may not surface in the standard revenue/P&L views —
+  use the §5 query as the source of truth for fee totals.
 - **Existing plan members are not exempted** — a current WaveGuard member booking
   a one-time visit is still asked for a card hold (faithful to "all one-time
   services"). One-line change in `resolveCardHoldPolicy` to skip them if desired.
@@ -227,7 +256,7 @@ handful of already-held appointments.
 |---|---|---|
 | One-time accept rejected `CARD_HOLD_REQUIRED` | No captured card reached accept | Customer must complete the card modal; check the SetupIntent succeeded in Stripe. |
 | One-time accept rejected `APPOINTMENT_REQUIRED` | Hold requires a booked slot | Customer must pick a time first (by design). |
-| Completion didn't charge | Pest **recap** completion (no invoicing), status-dropdown completion, or invoice was prepaid/credit-covered | Confirm completion went through `POST /api/admin/dispatch/:serviceId/complete`; check `estimate_card_holds.status` (`released` = nothing owed, `held` on a completed job = the recap-path gap in §7). |
+| Completion didn't charge | Status-dropdown completion (no invoicing), invoice was prepaid/credit-covered, or a recap routed to review (prior-non-performed / field prepayment) | Confirm completion went through `POST /api/admin/dispatch/:serviceId/complete` **or** the pest recap (both charge now); check `estimate_card_holds.status` (`released` = nothing owed). Office-review recaps surface as an admin notification **"One-time card-hold needs billing review"** and stay `held` — catch them with the §5 "stuck `held` on completed jobs" query (§7). |
 | `charge_review` row appears | Stripe charged but DB write failed, OR an ambiguous error (maybe no charge) | **Look up the PI in Stripe first.** If money moved, reconcile the `payments`/invoice state; if not (null PI columns), just clear the row. |
 | No-show fee not in standard revenue report | These `paid` payment rows aren't in the `completed`/`service_records` report paths (by design today) | Use the §5 no-show fee query. If the `payments` row is missing entirely, re-deliver the `payment_intent.succeeded` webhook (the recorder is idempotent). |
 | Hold stuck `pending` | Card never confirmed | Harmless; the estimate's next accept re-verifies, or it ages out with the estimate. |
