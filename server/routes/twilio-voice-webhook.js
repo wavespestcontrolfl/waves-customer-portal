@@ -72,6 +72,52 @@ async function findSingleCustomerByPhone(dbLike, phone) {
   return null;
 }
 
+// Caller announcement on the staff screening leg. A matched customer/lead is
+// read by name; an unmatched caller (or a number shared by 2+ records, which
+// findSingleCustomerByPhone deliberately returns null for) is read by number so
+// staff can decide whether to pick up. Mirrors the sanitize-and-cap pattern
+// used by /outbound-admin-prompt and /lead-alert-announce.
+function spokenCallerName(customer) {
+  if (!customer) return null;
+  const name = [customer.first_name, customer.last_name]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/[^\p{L}\p{N}\s.'’-]/gu, '')
+    .trim()
+    .slice(0, 60);
+  return name || null;
+}
+
+function spokenPhoneDigits(raw) {
+  const match = String(raw || '').replace(/\D/g, '').match(/(\d{3})(\d{3})(\d{4})$/);
+  return match ? `${match[1]}. ${match[2]}. ${match[3]}.` : '';
+}
+
+function buildForwardScreenUrl({ customer, from }) {
+  const base = '/api/webhooks/twilio/inbound-forward-screen';
+  const params = new URLSearchParams();
+  const name = spokenCallerName(customer);
+  if (name) {
+    params.set('caller', name);
+  } else if (from) {
+    params.set('callerNum', toE164(from) || String(from));
+  }
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+function forwardScreenAnnouncement({ caller, callerNum }) {
+  const name = String(caller || '')
+    .replace(/[^\p{L}\p{N}\s.'’-]/gu, '')
+    .trim()
+    .slice(0, 60);
+  if (name) return `Waves call from ${name}. Press 1 to connect.`;
+  const spoken = spokenPhoneDigits(callerNum);
+  if (spoken) return `Waves call from an unknown number. ${spoken} Press 1 to connect.`;
+  return 'Waves call from an unknown number. Press 1 to connect.';
+}
+
 async function fetchTwilioCall(callSid) {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
   try {
@@ -417,9 +463,10 @@ router.post('/voice', async (req, res) => {
       answerOnBridge: true,
     });
 
+    const screenUrl = buildForwardScreenUrl({ customer, from: From });
     for (const number of forwardNumbers) {
       dial.number({
-        url: '/api/webhooks/twilio/inbound-forward-screen',
+        url: screenUrl,
         method: 'POST',
       }, number);
     }
@@ -540,6 +587,11 @@ router.post('/voicemail-complete', (req, res) => {
 // =========================================================================
 router.post('/inbound-forward-screen', async (req, res) => {
   try {
+    const announcement = forwardScreenAnnouncement({
+      caller: req.query.caller || req.body.caller,
+      callerNum: req.query.callerNum || req.body.callerNum,
+    });
+
     const twiml = new VoiceResponse();
     const gather = twiml.gather({
       numDigits: 1,
@@ -548,10 +600,7 @@ router.post('/inbound-forward-screen', async (req, res) => {
       timeout: 7,
     });
 
-    gather.say(
-      { voice: 'Polly.Joanna' },
-      'Waves inbound call. Press 1 to accept.'
-    );
+    gather.say({ voice: 'Polly.Joanna' }, announcement);
     twiml.say({ voice: 'Polly.Joanna' }, 'No input received. Goodbye.');
     twiml.hangup();
 
@@ -1056,11 +1105,15 @@ router.post('/call-status', async (req, res) => {
 });
 
 router._test = {
+  buildForwardScreenUrl,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
+  forwardScreenAnnouncement,
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
+  spokenCallerName,
+  spokenPhoneDigits,
   rememberForwardAccept,
   resolveCsrName,
   resolveInboundDialCompletion,
