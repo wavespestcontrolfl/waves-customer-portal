@@ -318,9 +318,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
 
 // GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
 // ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv
-router.get('/core-kpis', dashboardCache, async (req, res, next) => {
-  try {
-    const period = String(req.query.period || 'mtd').toLowerCase();
+async function computeCoreKpis(period = 'mtd') {
     const now = new Date();
     const todayStr = etDateString(now);
 
@@ -735,7 +733,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       logger.error(`[admin-dashboard] leaderboard failed: ${err.message}`);
     }
 
-    res.json({
+    return {
       period,
       periodLabel: { today: 'Today', wtd: 'Week to Date', mtd: 'Month to Date', ytd: 'Year to Date' }[period] || 'Month to Date',
       service: {
@@ -781,8 +779,19 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
       retention: { pct: retentionPct, lost },
       momentum,
       leaderboard,
-    });
-  } catch (err) { next(err); }
+    };
+}
+
+// GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
+// Thin route over computeCoreKpis() — the same compute the daily KPI snapshot
+// cron calls, so the live tiles and the recorded trend never diverge.
+router.get('/core-kpis', dashboardCache, async (req, res, next) => {
+  try {
+    res.json(await computeCoreKpis(String(req.query.period || 'mtd').toLowerCase()));
+  } catch (err) {
+    logger.error(`[admin-dashboard] /core-kpis failed: ${err.message}`);
+    next(err);
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1211,3 +1220,6 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
 });
 
 module.exports = router;
+// computeCoreKpis is reused by the daily KPI snapshot cron (services/kpi-snapshot.js)
+// so the recorded trend reads the exact same numbers as the live dashboard tiles.
+module.exports.computeCoreKpis = computeCoreKpis;

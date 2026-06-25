@@ -412,6 +412,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 11:45PM ET — Core KPI snapshot. Records the day's live month-to-date
+  // value of every dashboard Core KPI (one row per metric) into kpi_snapshots so
+  // a later PR can draw trend sparklines. Runs near end-of-day ET (offset a few
+  // minutes from the 11:50pm mrr month-end run so they don't collide). Reads the
+  // same computeCoreKpis() the live tiles use, so the trend and tiles agree.
+  // =========================================================================
+  cron.schedule('45 23 * * *', async () => {
+    try {
+      // runExclusive: a deploy overlap must not double-write the same day.
+      await runExclusive('kpi-daily-snapshot', async () => {
+        const { recordKpiSnapshot } = require('./kpi-snapshot');
+        await recordKpiSnapshot();
+      });
+    } catch (err) {
+      logger.error(`[kpi-snapshot] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:10AM — Auto-Dispatch: optimize FUTURE recurring visits more than
   // 14 days out (route proximity + customer scheduling preferences). Double-
   // gated (cronJobs AND autoDispatch). Runs in the configured mode — dry_run
