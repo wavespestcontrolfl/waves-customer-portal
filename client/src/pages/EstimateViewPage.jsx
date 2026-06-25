@@ -2685,10 +2685,13 @@ export default function EstimateViewPage() {
   if (!canAccept) {
     // An accepted estimate keeps a read-only recap of the booked services +
     // pricing below the banner (legacy parity) so the customer/bookkeeper can
-    // reopen the link and see what they agreed to. Pinned to the mode actually
-    // accepted (acceptedServiceMode), falling back to the derived mode for
-    // legacy rows. Declined/expired keep just the terminal card.
-    const showAcceptedRecap = cta.terminalState === 'accepted';
+    // reopen the link and see what they agreed to. Gate on a STORED accepted
+    // mode: pre-column legacy accepts have none, and deriving mode/frequency
+    // from the live configurator default could misrepresent a one-time or
+    // non-default-frequency booking — better to show just the terminal card
+    // than a wrong recap. (New accepts always persist it.) Declined/expired
+    // keep just the terminal card too.
+    const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />

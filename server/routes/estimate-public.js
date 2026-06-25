@@ -6591,7 +6591,12 @@ router.put('/:token/accept', async (req, res, next) => {
         // structurally one-time estimate commits as one_time even when the body
         // omits serviceMode.
         accepted_service_mode: treatAsOneTime ? 'one_time' : serviceMode,
-        accepted_frequency_key: treatAsOneTime ? null : (acceptedFrequencyKey || null),
+        // Persist the UI SELECTION key the customer picked (what the React
+        // recap matches against `section.frequencies[].key`), NOT the billing
+        // cadence: for lawn/tree tier rows `acceptedFrequencyKey` resolves to
+        // `billingFrequencyKey` ('monthly'), which never matches the tier keys
+        // (basic/enhanced/…), so the recap would fall back to the default card.
+        accepted_frequency_key: treatAsOneTime ? null : (selectedFrequency?.key || selectedFrequencyKey || null),
         // Acceptance is where money commits — freeze the price. The frequency
         // rung selected below is the one legitimate accept-time re-derive; it is
         // written into this same atomic update, so derive→lock cannot race or
