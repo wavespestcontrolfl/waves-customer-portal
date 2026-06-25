@@ -597,7 +597,7 @@ export default function DashboardPageV2() {
                     kpis.financial.grossMarginWeighted != null &&
                     kpis.financial.grossMarginWeighted < 40
                   }
-                  chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100 }}
+                  chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100, target: 40 }}
                 />{" "}
                 <KpiTile
                   label="AR Days"

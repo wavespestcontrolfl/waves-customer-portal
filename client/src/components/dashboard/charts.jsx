@@ -230,7 +230,7 @@ export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false
         y="50%"
         textAnchor="middle"
         dominantBaseline="central"
-        fill={alert ? CHART_ALERT : '#18181B'}
+        fill={color === CHART_SUCCESS || color === CHART_ALERT ? color : present ? '#18181B' : CHART_PRIOR}
         style={{ fontSize: String(display ?? '').length > 4 ? 11 : 13, fontWeight: 500 }}
       >
         {display}
