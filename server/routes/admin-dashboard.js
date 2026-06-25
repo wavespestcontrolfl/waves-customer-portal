@@ -747,10 +747,14 @@ async function computeCoreKpis(period = 'mtd') {
 
     // Memberships sold — new WaveGuard members whose member_since (a DATE)
     // lands in the period window. 'none'/'None'/'One-Time' are non-membership
-    // classifications (Bronze/Silver/Gold/Platinum are the real tiers).
+    // classifications (Bronze/Silver/Gold/Platinum are the real tiers). Scoped
+    // to LIVE customers (active + not-deleted + real customer stage) the same
+    // way the momentum/customer KPIs are, so a deleted/deactivated/non-customer
+    // row with member_since in the window can't inflate the count.
     let membershipsSold = null;
     try {
       const m = await db('customers')
+        .where({ active: true }).whereNull('deleted_at').modify(whereRealCustomer)
         .whereNotNull('waveguard_tier')
         .whereNotIn('waveguard_tier', ['none', 'None', 'One-Time'])
         .where('member_since', '>=', start)
@@ -768,7 +772,12 @@ async function computeCoreKpis(period = 'mtd') {
         .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, todayStr))
         .count('* as n').first();
       inboundCalls = parseInt(cc?.n || 0, 10);
-      callToBooking = inboundCalls > 0 ? Math.round((leadMetrics.booked / inboundCalls) * 1000) / 10 : null;
+      // null (not 0%) when the lead-metrics query failed — booked is a stale 0
+      // in that case, so defer to the same fail-loud 'unavailable' the sales
+      // tiles already show rather than painting a real-looking 0% conversion.
+      callToBooking = (!leadMetrics.error && inboundCalls > 0)
+        ? Math.round((leadMetrics.booked / inboundCalls) * 1000) / 10
+        : null;
     } catch (err) { logger.error(`[admin-dashboard] call-to-booking query failed: ${err.message}`); }
 
     return {

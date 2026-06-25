@@ -749,12 +749,16 @@ export default function DashboardPageV2() {
                   <KpiTile
                     label="Call → Booking"
                     value={
-                      kpis.sales?.callToBooking != null
-                        ? `${kpis.sales.callToBooking}%`
+                      !salesUnavailable && sales.callToBooking != null
+                        ? `${sales.callToBooking}%`
                         : "—"
                     }
-                    sub={`${kpis.sales?.booked ?? 0} booked / ${kpis.sales?.inboundCalls ?? 0} calls`}
-                    chart={{ kind: "gauge", value: kpis.sales?.callToBooking, max: 100 }}
+                    sub={
+                      salesUnavailable
+                        ? "lead metrics unavailable"
+                        : `${sales.booked ?? 0} booked / ${sales.inboundCalls ?? 0} calls`
+                    }
+                    chart={{ kind: "gauge", value: salesUnavailable ? null : sales.callToBooking, max: 100 }}
                   />{" "}
                 </KpiGrid>
               )}{" "}
