@@ -1102,6 +1102,20 @@ router.post('/confirm', async (req, res, next) => {
       logger.error(`[booking:confirm] SMS failed: ${err.message}`);
     }
 
+    // A self-booked recurring series (quarterly pest follow-ups seeded above) is
+    // the deal closing — convert the originating lead to won now rather than
+    // waiting for the first visit to complete. Same convertLeadFromEvent guards
+    // as the admin recurring-booking and service_completed triggers: single
+    // unambiguous open originating lead only, idempotent. Best-effort.
+    if (followUpRows.length > 0) {
+      try {
+        const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+        await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: custId });
+      } catch (err) {
+        logger.warn(`[lead-trigger] self-booking recurring conversion failed for customer=${custId}: ${err.message}`);
+      }
+    }
+
     res.json({ booking, confirmationCode: confCode });
   } catch (err) {
     logger.error('[booking:confirm] failed:', err);
