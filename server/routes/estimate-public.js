@@ -404,10 +404,12 @@ const BRAND = {
 
 const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
 
-// App-store links — set these env vars on Railway once the listings are live to
-// turn the (currently non-clickable) badges into real download links. No code
-// change needed; empty = "coming soon" preview treatment.
-const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || '';
+// App-store links — the iOS app is live, so the Apple badge links to the
+// listing by default (env var still overrides). Android isn't published yet,
+// so the Google Play badge is hidden entirely until WAVES_ANDROID_APP_URL is
+// set (no dead/non-clickable badge once one store is live). Only when BOTH are
+// empty does the card fall back to the "coming soon" preview with both badges.
+const APP_STORE_URL = process.env.WAVES_IOS_APP_URL || 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = process.env.WAVES_ANDROID_APP_URL || '';
 
 // Self-contained inline-SVG store badges (no hosted assets / no broken images).
@@ -3280,7 +3282,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const locked = est.status === 'accepted' || quoteRequired;
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
-  const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
+  // Per-day figure is a true daily rate: annual cost / 365 (monthly * 12 / 365).
+  const dayPrice = Math.round((monthlyTotal * 12 / 365) * 100) / 100;
 
   const R = estResult?.results || {};
   const hasTermiteBait = recurring.some((s) => isTermiteBaitServiceName(s.name || s.label || s.service));
@@ -3653,7 +3656,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     .filter((row) => row.price != null)
     .map((row) => {
       const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
-      const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
+      const day = row.visits > 0 ? Math.round((row.price * row.visits / 365) * 100) / 100 : null;
       const dayPriceHtml = day != null
         ? `<span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>`
         : '';
@@ -3705,7 +3708,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     if (!(canChooseOneTime && serviceCardsCoverRecurringTotal && billingServiceRows.length === 1)) return '';
     const row = billingServiceRows[0];
     const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
-    const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
+    const day = row.visits > 0 ? Math.round((row.price * row.visits / 365) * 100) / 100 : null;
     const dayPriceHtml = day != null
       ? `<span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>`
       : '';
@@ -4469,8 +4472,8 @@ ${shellTopBar()}
         <div class="app-feature"><span class="af-ico">${ICON_CAL}</span><span>Reschedule &amp; history</span></div>
       </div>
       <span class="app-badges${APP_STORE_URL || PLAY_STORE_URL ? '' : ' is-coming-soon'}">
-        ${appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store')}
-        ${appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play')}
+        ${APP_STORE_URL || !PLAY_STORE_URL ? appBadge(appStoreBadgeSvg(), APP_STORE_URL, 'Download Waves on the App Store') : ''}
+        ${PLAY_STORE_URL || !APP_STORE_URL ? appBadge(googlePlayBadgeSvg(), PLAY_STORE_URL, 'Get Waves on Google Play') : ''}
         ${APP_STORE_URL || PLAY_STORE_URL ? '' : '<span class="app-badge-caption">Coming soon to iPhone &amp; Android</span>'}
       </span>
     </div>
@@ -4639,7 +4642,7 @@ ${shellQuestionsBar()}
         ? (prefOff * 12) / visits
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
-      el.textContent = fmt(Math.round(((adjusted * visits / 12) / 30) * 100) / 100);
+      el.textContent = fmt(Math.round((adjusted * visits / 365) * 100) / 100);
     });
   };
 
@@ -4721,7 +4724,7 @@ ${shellQuestionsBar()}
           if (oneTimeDisplay) oneTimeDisplay.textContent = fmt(data.onetimeTotal);
           document.querySelectorAll('[data-onetime-echo]').forEach(el => el.textContent = fmt(data.onetimeTotal));
         }
-        const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal / 30) * 100) / 100);
+        const dayEl = document.getElementById('day-price'); if (dayEl) dayEl.textContent = fmt(Math.round((data.monthlyTotal * 12 / 365) * 100) / 100);
         if (data.tierPrices) {
           document.querySelectorAll('[data-price-for]').forEach((pel) => {
             const t = pel.dataset.priceFor;
@@ -6641,7 +6644,7 @@ router.put('/:token/accept', async (req, res, next) => {
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
-        .whereNotIn('status', ['accepted', 'declined', 'expired'])
+        .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         .update(acceptedUpdates);
       if (!acceptedCount) {
@@ -7495,7 +7498,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
     // bail if the row was accepted/locked in the meantime.
     const tierUpdateCount = await db('estimates')
       .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
       .update(writes);
     if (!tierUpdateCount) {
@@ -7606,7 +7609,7 @@ router.put('/:token/preferences', async (req, res, next) => {
     // totals here would overwrite the frozen accepted price.
     const prefUpdateCount = await db('estimates')
       .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
       .update({
         estimate_data: JSON.stringify(parsedData),
@@ -7691,7 +7694,7 @@ router.put('/:token/decline', async (req, res, next) => {
 
     const declinedCount = await db('estimates')
       .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired'])
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
       .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
     if (!declinedCount) {
@@ -8767,9 +8770,43 @@ function assertExistingAppointmentUpdateApplied(updatedCount) {
   throw err;
 }
 
+// Statuses that mean the estimate hasn't been published to the customer yet —
+// a leaked bearer URL for one of these is the same exposure class as a draft.
+// All six estimate insert paths create rows as status='draft'; an operator-
+// scheduled send is status='scheduled' (with a future expiry) until the send
+// claim flips it to 'sending'. 'sending'/'sent'/'viewed' ARE published (the
+// customer link is out, possibly mid-send before expires_at is written), so
+// they are intentionally NOT here.
+const UNPUBLISHED_ESTIMATE_STATUSES = ['draft', 'scheduled'];
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
+  // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
+  // acceptable through the public link. The legacy server-HTML page short-
+  // circuited these to the expired page, but the React accept flow reaches this
+  // guard instead. Status (not a null expiry) is the signal, so a mid-send
+  // 'sending' row whose expiry isn't written yet stays acceptable.
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
+  return true;
+}
+
+// Whether the public React estimate page may receive this estimate's full
+// payload (quote + customer PII). The SPA fetches GET /:token/data for ANY
+// token, so — unlike the legacy server-HTML page, which rendered the
+// expired/not-found shell before building any payload — this must gate the
+// data endpoint explicitly. Accepted/declined are legitimate terminal views
+// the customer can reopen (legacy rendered them in full); a draft/scheduled
+// (unpublished) or expired/send_failed estimate must not be exposed; everything
+// else (sending/sent/viewed) is gated only by a real, past expiry — a missing
+// expiry during the brief mid-send window does NOT 404. Admin previews bypass
+// this at the call site so staff can still review drafts.
+function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
+  if (!estimate || estimate.archived_at) return false;
+  if (['accepted', 'declined'].includes(estimate.status)) return true;
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (['expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
 }
@@ -10968,11 +11005,27 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
 
+    const ip = extractRequestIp(req);
+
+    // Security gate: the React SPA fetches this for ANY token, so an expired
+    // link, an unpublished draft/scheduled-send, or a send-failed estimate must
+    // NOT return the full quote + customer phone/email/address/notes. The legacy
+    // server-HTML page short-circuited these to the expired/not-found shell
+    // before building any payload; the data endpoint owns that guard for the
+    // React path. Non-viewable → 404 (the SPA renders its "this link may have
+    // expired or isn't valid" screen). No admin bypass: this fetch carries no
+    // current-session credential (the public page sends no admin Bearer token),
+    // and the `waves_admin` marker cookie is a 2-year, logout-persistent
+    // view-count signal — not authorization — so previewing a draft/expired
+    // estimate goes through an authenticated admin surface, never this endpoint.
+    if (!isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
     // (filtered by shouldCountView). Defensive try/catch because schema
     // drift on estimate_views or a locked row shouldn't break the
     // customer-facing endpoint.
-    const ip = extractRequestIp(req);
     if (shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
@@ -11286,6 +11339,7 @@ module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
 module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
+module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
