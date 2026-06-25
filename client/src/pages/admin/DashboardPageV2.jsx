@@ -10,6 +10,7 @@ import {
 import {
   AgingBar,
   AttributionScorecard,
+  CaptureGauge,
   ChartCard,
   CompletionGauge,
   EmptyState,
@@ -73,6 +74,7 @@ export default function DashboardPageV2() {
   const [data, setData] = useState(null); // /admin/dashboard
   const [kpis, setKpis] = useState(null); // /admin/dashboard/core-kpis
   const [compare, setCompare] = useState(null); // /admin/dashboard/compare
+  const [salesCapture, setSalesCapture] = useState(null); // /admin/dashboard/sales-capture
   const [funnel, setFunnel] = useState(null);
   const [aging, setAging] = useState(null);
   const [mrrTrend, setMrrTrend] = useState(null);
@@ -117,16 +119,21 @@ export default function DashboardPageV2() {
           ),
         ),
         track(
+          "/sales-capture",
+          adminFetch("/admin/dashboard/sales-capture"),
+        ),
+        track(
           "/today-completion",
           adminFetch("/admin/dashboard/today-completion"),
         ),
         track("/billing-health", adminFetch("/admin/billing-health")),
         track("/alerts", adminFetch("/admin/dashboard/alerts")),
       ]);
-      const [d, cmp, td, bh, al] = wave1;
+      const [d, cmp, sc, td, bh, al] = wave1;
       if (cancelled) return;
       setData(d);
       setCompare(cmp);
+      setSalesCapture(sc);
       setToday(td);
       setBilling(bh?.summary || null);
       setAlerts(Array.isArray(al?.alerts) ? al.alerts : []);
@@ -333,6 +340,26 @@ export default function DashboardPageV2() {
         </div>{" "}
       </header>
       {alerts.length > 0 && <DashboardAlertsBanner alerts={alerts} />}
+      {/* Sales Capture hero — ServiceTitan-style captured-vs-missed gauge,
+          leads the dashboard content above the KPI sparkline row. */}
+      {salesCapture && (
+        <div className="mb-4 md:mb-5">
+          <ChartCard
+            title="Sales Capture"
+            sub={`${fmtMoney(salesCapture.captured)} captured of ${fmtMoney(
+              (salesCapture.captured || 0) + (salesCapture.missed || 0),
+            )} estimated · MTD`}
+          >
+            <CaptureGauge
+              captureRate={salesCapture.captureRate}
+              captured={salesCapture.captured}
+              missed={salesCapture.missed}
+              wonCount={salesCapture.wonCount}
+              lostCount={salesCapture.lostCount}
+            />
+          </ChartCard>
+        </div>
+      )}
       {/* Hero KPI row — sparkline + delta */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4 mb-4 md:mb-5">
         {HERO.map((h) => (

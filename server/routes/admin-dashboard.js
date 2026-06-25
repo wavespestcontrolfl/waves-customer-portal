@@ -867,6 +867,60 @@ router.get('/service-mix', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/sales-capture — ServiceTitan-style "captured vs
+// missed" hero gauge: won estimate value vs lost estimate value for the
+// current ET month, bounded on the RESOLUTION date (when the estimate was
+// won/lost), not when it was created.
+//
+// Won = status 'accepted' resolved this month (accepted_at). Missed = status
+// 'declined' or 'expired' resolved this month (declined_at, else expires_at).
+// This mirrors estimate-winloss.js's RESOLVED_STATUSES/resolutionDate
+// semantics (won=accepted, lost=declined-or-expired), restricted here to the
+// current month's resolutions. Value = annualized recurring + one-time, the
+// same monthly_total*12 + onetime_total basis the funnel's accepted-value uses.
+// Archived estimates are excluded so a cleaned-up row can't skew the rate.
+router.get('/sales-capture', dashboardCache, async (req, res, next) => {
+  try {
+    const monthStart = startOfMonth(); // ET date string, e.g. '2026-06-01'
+    const valueSum = 'COALESCE(SUM(COALESCE(monthly_total, 0) * 12 + COALESCE(onetime_total, 0)), 0)';
+
+    const [capturedRow, missedRow] = await Promise.all([
+      db('estimates')
+        .whereNull('archived_at')
+        .where('status', 'accepted')
+        // accepted_at is timestamptz; bind ET-midnight so the cutoff doesn't
+        // drift at the UTC boundary on Railway (UTC) — same ET_MIDNIGHT_TS
+        // pattern the retention/AR windows use.
+        .whereRaw(`accepted_at >= ${ET_MIDNIGHT_TS}`, [etDayStart(monthStart)])
+        .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
+        .first(),
+      db('estimates')
+        .whereNull('archived_at')
+        .whereIn('status', ['declined', 'expired'])
+        // Resolution date = declined_at for declines, else expires_at for
+        // expiries — COALESCE picks whichever applies to the row's status.
+        .whereRaw(`COALESCE(declined_at, expires_at) >= ${ET_MIDNIGHT_TS}`, [etDayStart(monthStart)])
+        .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
+        .first(),
+    ]);
+
+    const captured = parseFloat(capturedRow?.total || 0);
+    const missed = parseFloat(missedRow?.total || 0);
+    const denom = captured + missed;
+    res.json({
+      captured,
+      missed,
+      captureRate: denom > 0 ? Math.round((captured / denom) * 100) : 0,
+      wonCount: parseInt(capturedRow?.cnt || 0),
+      lostCount: parseInt(missedRow?.cnt || 0),
+      period: { label: 'Month to Date' },
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /sales-capture failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /api/admin/dashboard/compare?period=this_month&against=last_month
 // Powers period-over-period overlay on the revenue area chart and the
 // hero-tile delta arrows. Returns daily series for both windows.
