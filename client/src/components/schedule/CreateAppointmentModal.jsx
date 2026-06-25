@@ -830,28 +830,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
     return found ? found.label : group.cadence;
   };
-  const groupServicesByCadence = (rows) => {
-    const groups = new Map();
-    for (const s of rows) {
-      const cadence = s.cadence || 'one_time';
-      const wd = Number.isFinite(parseInt(s.weekday)) ? parseInt(s.weekday) : 3;
-      let key;
-      if (cadence === 'custom') key = `custom:${parseInt(s.intervalDays) || 30}`;
-      else if (cadence === 'monthly_nth_weekday') key = `nth:${parseInt(s.nth) || 3}:${wd}`;
-      else key = cadence;
-      if (!groups.has(key)) {
-        groups.set(key, {
-          cadence,
-          intervalDays: cadence === 'custom' ? parseInt(s.intervalDays) || 30 : null,
-          nth: cadence === 'monthly_nth_weekday' ? parseInt(s.nth) || 3 : null,
-          weekday: cadence === 'monthly_nth_weekday' ? wd : null,
-          lines: [],
-        });
-      }
-      groups.get(key).lines.push(s);
-    }
-    return Array.from(groups.values());
-  };
   const cadenceRankDays = (svc) => {
     const cadence = svc?.cadence || 'one_time';
     if (cadence === 'one_time') return Number.POSITIVE_INFINITY;
@@ -1427,15 +1405,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       {/* Quoted vs current charge, deposit posture, and the
                           balance to collect at the visit once any paid deposit
                           is credited — same card the appointment detail sheet
-                          shows at checkout. */}
-                      {/* Mixed cadences fan out into separate per-group
-                          appointments at submit (each charging only its own
-                          group subtotal), so the all-line netSubtotal isn't a
-                          single visit's charge. Pass null in that case to hide
-                          the price/balance lines (deposit posture still shows). */}
+                          shows at checkout. groupServicesForAppointmentSubmit
+                          books ALL lines as one appointment (primary + addons)
+                          whose estimated price is the full netSubtotal even when
+                          cadences differ, so netSubtotal is always this visit's
+                          charge. */}
                       <EstimateProvenanceCard
                         quotedTotal={linkedEstimate.quotedTotal}
-                        currentPrice={groupServicesByCadence(services).length <= 1 ? netSubtotal : null}
+                        currentPrice={netSubtotal}
                         deposit={linkedEstimate.deposit}
                         style={{ marginTop: 10 }}
                       />
