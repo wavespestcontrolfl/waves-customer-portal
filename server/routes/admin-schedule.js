@@ -3863,6 +3863,16 @@ router.put('/:id/status', async (req, res, next) => {
       // Void any still-open invoice pre-minted for this visit ("Charge now")
       // so dunning doesn't chase a cancelled job. Paid/processing stay put.
       await voidOpenInvoicesForCancelledService(svc.id);
+
+      // One-time card-on-file hold: charge the in-window late-cancel fee or
+      // release outside it. This route (the V2 dispatch delete/cancel action)
+      // is a separate cancel path from PUT /admin/dispatch/:id/status, so the
+      // hook must be mirrored here. Dark until ONE_TIME_CARD_HOLD; no-op when no
+      // hold exists. Best-effort — never block the committed cancel.
+      try {
+        const CardHolds = require('../services/estimate-card-holds');
+        await CardHolds.handleCardHoldCancellation({ scheduledServiceId: svc.id });
+      } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
 
     // En-route: track-transitions flip (which fires the customer SMS

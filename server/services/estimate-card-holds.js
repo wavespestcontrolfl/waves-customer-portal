@@ -33,6 +33,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const StripeService = require('./stripe');
 const { CARD_HOLD } = require('./pricing-engine/constants');
+const { isInvoiceCollectibleStatus } = require('./invoice-helpers');
 
 function isCardHoldEnabled() {
   const flag = process.env.ONE_TIME_CARD_HOLD;
@@ -107,11 +108,14 @@ async function createCardHoldSetupIntentForEstimate(estimate) {
       // intent is terminal — fall through and mint a fresh one.
       if (existing && ['requires_payment_method', 'requires_confirmation', 'requires_action', 'processing'].includes(existing.status)) {
         await db('estimate_card_holds').where({ id: pending.id }).update({ updated_at: db.fn.now() });
+        // Return the terms FROZEN on this pending row (what the customer was
+        // first shown), not live config — recordCardHoldHeld enforces these, so
+        // the displayed consent must match.
         return {
           clientSecret: existing.client_secret,
           setupIntentId: existing.id,
-          noShowFeeAmount: cardHoldNoShowFee(),
-          cancelWindowHours: cardHoldCancelWindowHours(),
+          noShowFeeAmount: pending.no_show_fee_amount != null ? Number(pending.no_show_fee_amount) : cardHoldNoShowFee(),
+          cancelWindowHours: pending.cancel_window_hours != null ? Number(pending.cancel_window_hours) : cardHoldCancelWindowHours(),
         };
       }
     } catch (err) {
@@ -246,9 +250,31 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
 // without losing the booking.
 async function attachCardHoldPaymentMethod({ customerId, paymentMethodId }) {
   if (!customerId || !paymentMethodId) return { attached: false };
+  // Idempotent: this runs post-accept AND again as a self-heal before the
+  // no-show / completion charge. savePaymentMethod inserts unconditionally, so
+  // re-saving an already-saved card would stack duplicate payment_methods +
+  // consent rows. Skip when the card is already on file.
+  const existing = await db('payment_methods')
+    .where({ customer_id: customerId, stripe_payment_method_id: paymentMethodId })
+    .first('id');
+  if (existing) return { attached: true, paymentMethodRowId: existing.id, alreadySaved: true };
   try {
-    await StripeService.savePaymentMethod(customerId, paymentMethodId, { enableAutopay: false, makeDefault: false });
-    return { attached: true };
+    const saved = await StripeService.savePaymentMethod(customerId, paymentMethodId, { enableAutopay: false, makeDefault: false });
+    // Record the immutable save-card consent (admin consent history reads this
+    // ledger). Non-fatal: a consent-write hiccup must not drop the held card.
+    try {
+      const ConsentService = require('./payment-method-consents');
+      await ConsentService.recordConsent({
+        customerId,
+        paymentMethodId: saved?.id || null,
+        stripePaymentMethodId: paymentMethodId,
+        source: 'estimate_card_hold',
+        methodType: 'card',
+      });
+    } catch (consentErr) {
+      logger.warn('[estimate-card-holds] card-hold consent record failed (non-fatal)', { error: consentErr.message });
+    }
+    return { attached: true, paymentMethodRowId: saved?.id || null };
   } catch (err) {
     logger.warn('[estimate-card-holds] attaching hold card post-commit failed (recoverable)', { error: err.message });
     return { attached: false, reason: err.message };
@@ -323,8 +349,11 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
 
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { charged: false, reason: 'invoice_missing' };
-  const collectibleStatuses = ['pending', 'sent', 'overdue', 'partial'];
-  if (invoice.payer_id || !collectibleStatuses.includes(invoice.status) || Number(invoice.total || 0) <= 0) {
+  // Completion invoices are created as 'draft' (InvoiceService.createFromService)
+  // — draft/sent/pending/overdue/partial are all collectible. Use the canonical
+  // helper, not a hand-rolled allow-list that would wrongly release a fresh
+  // draft uncharged and silently fall back to an unpaid invoice.
+  if (invoice.payer_id || !isInvoiceCollectibleStatus(invoice.status) || Number(invoice.total || 0) <= 0) {
     await db('estimate_card_holds').where({ id: hold.id, status: 'held' })
       .update({ status: 'released', updated_at: db.fn.now() });
     return { charged: false, reason: 'invoice_not_collectible' };
@@ -413,8 +442,20 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show' }) {
       idempotencyKey: `card_hold_no_show_${hold.id}`,
     });
   } catch (err) {
-    // The charge itself failed (decline / pre-charge error) — no money moved,
-    // so it is safe to reopen for a later retry.
+    // Distinguish a DEFINITE pre-charge decline (a PI exists but didn't succeed,
+    // or a deterministic error — no money moved, safe to retry) from an
+    // AMBIGUOUS connection/API error where Stripe may have accepted + confirmed
+    // the PI. Reopening an ambiguous outcome to 'held' would let a >24h retry
+    // mint a SECOND fee once Stripe's idempotency cache expires — park those.
+    const errType = err.type || err.raw?.type || null;
+    const piIdFromErr = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
+    const ambiguous = !piIdFromErr && ['StripeConnectionError', 'StripeAPIError'].includes(errType);
+    if (ambiguous) {
+      await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
+        .update({ status: 'charge_review', updated_at: db.fn.now() }).catch(() => {});
+      logger.error('[estimate-card-holds] no-show fee charge AMBIGUOUS (possible charge) — parked charge_review', { scheduledServiceId, error: err.message });
+      return { charged: false, reason: 'charge_review', error: err.message };
+    }
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
       .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
     logger.error('[estimate-card-holds] no-show fee charge FAILED (no charge)', { scheduledServiceId, error: err.message });
