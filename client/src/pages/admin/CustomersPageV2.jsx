@@ -884,7 +884,7 @@ function FilterPill({ active, onClick, alert = false, children }) {
       type="button"
       onClick={onClick}
       className={cn(
-        "u-label px-3 h-7 rounded-full border-hairline whitespace-nowrap transition-colors",
+        "u-label px-3 h-9 rounded-full border-hairline whitespace-nowrap transition-colors",
         active
           ? alert
             ? "bg-alert-bg text-alert-fg border-alert-fg"
