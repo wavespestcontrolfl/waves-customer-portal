@@ -11,6 +11,8 @@ import {
   AgingBar,
   AttributionScorecard,
   CaptureGauge,
+  CHART_SUCCESS,
+  CHART_WARN,
   ChartCard,
   CompletionGauge,
   EmptyState,
@@ -1014,62 +1016,107 @@ function KpiTile({ label, value, sub, alert, chart }) {
 }
 
 function BillingHealthPanel({ summary: h }) {
-  const metrics = [
-    { label: "Autopay active", value: h.autopay_active },
-    { label: "Paused", value: h.autopay_paused },
-    {
-      label: "No method",
-      value: h.no_payment_method,
-      alert: h.no_payment_method > 0,
-    },
-    { label: "Charged this month", value: h.charged_this_month },
-    {
-      label: "Failed (30d)",
-      value: h.failed_last_30_days,
-      alert: h.failed_last_30_days > 0,
-    },
-    { label: "In retry", value: h.in_retry_queue, alert: h.in_retry_queue > 0 },
-    {
-      label: "Escalated (30d)",
-      value: h.escalated_last_30_days,
-      alert: h.escalated_last_30_days > 0,
-    },
-    {
-      label: "Cards expired/60d",
-      value: h.expiring_cards_60_days,
-      alert: h.expiring_cards_60_days > 0,
-    },
+  const billable = h.total_billable || 0;
+  const autopay = h.autopay_active || 0;
+  const noMethod = h.no_payment_method || 0;
+  // Has a payment method but isn't on autopay — the convert-to-autopay pool.
+  const manual = Math.max(billable - autopay - noMethod, 0);
+  const autopayPct = billable > 0 ? Math.round((autopay / billable) * 100) : 0;
+  const seg = (n) => (billable > 0 ? (n / billable) * 100 : 0);
+
+  // The verdict is driven by the ACUTE failure pipeline — if every one of these
+  // is clear, collections are running healthy (no-method is a coverage gap, not
+  // a failure, so it's surfaced on the readiness row instead of flipping the verdict).
+  const exceptions = [
+    { label: "Failed", value: h.failed_last_30_days || 0 },
+    { label: "In retry", value: h.in_retry_queue || 0 },
+    { label: "Escalated", value: h.escalated_last_30_days || 0 },
+    { label: "Cards expiring", value: h.expiring_cards_60_days || 0 },
   ];
+  const healthy = exceptions.every((e) => e.value === 0);
+
+  const readiness = [
+    { label: "Autopay", value: autopay, color: CHART_SUCCESS, suffix: ` (${autopayPct}%)` },
+    { label: "Has method", value: manual, color: "#D4D4D8" },
+    { label: "No method", value: noMethod, color: CHART_WARN, warn: noMethod > 0 },
+  ];
+
   return (
     <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
-      {" "}
-      <CardHeader className="flex items-center justify-between">
-        {" "}
-        <CardTitle>Billing Health</CardTitle>{" "}
-        <Badge>{h.total_billable} billable</Badge>{" "}
-      </CardHeader>{" "}
+      <CardHeader className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <CardTitle>Billing Health</CardTitle>
+          {/* Status-first verdict — green when the failure pipeline is clear. */}
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium whitespace-nowrap",
+              !healthy && "text-alert-fg bg-alert-bg",
+            )}
+            style={healthy ? { color: CHART_SUCCESS, background: "rgba(16,185,129,0.10)" } : undefined}
+          >
+            {healthy ? "✓ Healthy" : "⚠ Needs attention"}
+          </span>
+        </div>
+        <Badge>{billable} billable</Badge>
+      </CardHeader>
       <CardBody>
-        {" "}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {metrics.map((m) => (
+        {/* Payment readiness — autopay (locked in) / has-method / can't-be-charged */}
+        <div className="u-label text-ink-tertiary mb-2">Payment readiness</div>
+        <div className="flex h-2.5 rounded-sm overflow-hidden bg-surface-sunken mb-2">
+          {readiness.map((r) => (
             <div
-              key={m.label}
-              className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3"
-            >
-              {" "}
-              <div className="u-label text-ink-secondary">{m.label}</div>{" "}
-              <div
-                className={cn(
-                  "u-nums text-22 font-medium tracking-tight mt-2 leading-none",
-                  m.alert ? "text-alert-fg" : "text-zinc-900",
-                )}
-              >
-                {m.value}
-              </div>{" "}
-            </div>
+              key={r.label}
+              style={{ width: `${seg(r.value)}%`, background: r.color }}
+              title={`${r.label}: ${r.value}`}
+            />
           ))}
-        </div>{" "}
-      </CardBody>{" "}
+        </div>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-12">
+          {readiness.map((r) => (
+            <span key={r.label} className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: r.color }} />
+              <span className="text-ink-secondary">{r.label}</span>
+              <span
+                className="u-nums font-medium"
+                style={r.warn ? { color: CHART_WARN } : undefined}
+              >
+                {r.value}
+              </span>
+              {r.suffix && <span className="u-nums text-ink-tertiary">{r.suffix}</span>}
+            </span>
+          ))}
+        </div>
+
+        {/* Dunning pipeline — exception chips, green-✓ when clear, alert when not */}
+        <div className="mt-4 pt-3 border-t border-hairline border-zinc-100">
+          <div className="flex items-center justify-between mb-2">
+            <span className="u-label text-ink-tertiary">Dunning · last 30d</span>
+            <span className="u-nums text-12 text-ink-tertiary">
+              {h.charged_this_month || 0} charged this month
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {exceptions.map((e) => {
+              const bad = e.value > 0;
+              return (
+                <span
+                  key={e.label}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-sm border px-2 py-1 text-12",
+                    bad
+                      ? "text-alert-fg bg-alert-bg border-alert-fg/30"
+                      : "text-ink-secondary bg-surface-sunken border-zinc-200",
+                  )}
+                >
+                  {!bad && <span style={{ color: CHART_SUCCESS }}>✓</span>}
+                  <span>{e.label}</span>
+                  <span className="u-nums font-medium">{e.value}</span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      </CardBody>
     </Card>
   );
 }
