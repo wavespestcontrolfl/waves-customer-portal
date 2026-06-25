@@ -30,6 +30,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
+import EstimateProvenanceCard from './EstimateProvenanceCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -829,28 +830,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
     return found ? found.label : group.cadence;
   };
-  const groupServicesByCadence = (rows) => {
-    const groups = new Map();
-    for (const s of rows) {
-      const cadence = s.cadence || 'one_time';
-      const wd = Number.isFinite(parseInt(s.weekday)) ? parseInt(s.weekday) : 3;
-      let key;
-      if (cadence === 'custom') key = `custom:${parseInt(s.intervalDays) || 30}`;
-      else if (cadence === 'monthly_nth_weekday') key = `nth:${parseInt(s.nth) || 3}:${wd}`;
-      else key = cadence;
-      if (!groups.has(key)) {
-        groups.set(key, {
-          cadence,
-          intervalDays: cadence === 'custom' ? parseInt(s.intervalDays) || 30 : null,
-          nth: cadence === 'monthly_nth_weekday' ? parseInt(s.nth) || 3 : null,
-          weekday: cadence === 'monthly_nth_weekday' ? wd : null,
-          lines: [],
-        });
-      }
-      groups.get(key).lines.push(s);
-    }
-    return Array.from(groups.values());
-  };
   const cadenceRankDays = (svc) => {
     const cadence = svc?.cadence || 'one_time';
     if (cadence === 'one_time') return Number.POSITIVE_INFINITY;
@@ -1422,18 +1401,34 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     ))}
                   </select>
                   {linkedEstimate && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
-                      <span style={{ minWidth: 0 }}>
-                        Linked to estimate #{String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setLinkedEstimate(null)}
-                        style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', padding: '4px 0' }}
-                      >
-                        Unlink
-                      </button>
-                    </div>
+                    <>
+                      {/* Quoted vs current charge, deposit posture, and the
+                          balance to collect at the visit once any paid deposit
+                          is credited — same card the appointment detail sheet
+                          shows at checkout. groupServicesForAppointmentSubmit
+                          books ALL lines as one appointment (primary + addons)
+                          whose estimated price is the full netSubtotal even when
+                          cadences differ, so netSubtotal is always this visit's
+                          charge. */}
+                      <EstimateProvenanceCard
+                        quotedTotal={linkedEstimate.quotedTotal}
+                        currentPrice={netSubtotal}
+                        deposit={linkedEstimate.deposit}
+                        style={{ marginTop: 10 }}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
+                        <span style={{ minWidth: 0 }}>
+                          Linked to estimate #{String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setLinkedEstimate(null)}
+                          style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', padding: '4px 0' }}
+                        >
+                          Unlink
+                        </button>
+                      </div>
+                    </>
                   )}
                 </>
               ) : (

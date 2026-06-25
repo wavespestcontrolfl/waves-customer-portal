@@ -4457,9 +4457,26 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     if (!svc || !svc.source_estimate_id) return res.json({ linked: false });
     const est = await db('estimates')
       .where({ id: svc.source_estimate_id })
-      .first('id', 'token', 'monthly_total', 'annual_total', 'onetime_total', 'created_at', 'status');
+      .first(
+        'id', 'customer_id', 'token', 'estimate_data',
+        'monthly_total', 'annual_total', 'onetime_total',
+        'bill_by_invoice', 'created_at', 'status',
+      );
     if (!est) return res.json({ linked: false });
-    const quotedTotal = Number(est.monthly_total || 0) + Number(est.annual_total || 0) + Number(est.onetime_total || 0);
+    // Recurring period charge (monthly, or annual when there's no monthly) plus
+    // any one-time. annual_total is monthly annualized — summing both would
+    // double-count the recurring plan against a single visit's price.
+    const quotedTotal = (Number(est.monthly_total || 0) || Number(est.annual_total || 0)) + Number(est.onetime_total || 0);
+    let deposit = null;
+    try {
+      const { summarizeEstimateDeposit } = require('../services/estimate-deposits');
+      // Scope the policy to THIS scheduled service so a per-job payer is honored
+      // even once the job leaves the pending/confirmed linked-appointment window.
+      deposit = await summarizeEstimateDeposit(est, {
+        scheduledServiceId: req.params.id,
+        useLinkedFallback: false,
+      });
+    } catch { deposit = null; }
     res.json({
       linked: true,
       estimateId: est.id,
@@ -4470,6 +4487,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       onetimeTotal: Number(est.onetime_total || 0),
       estimateStatus: est.status,
       createdAt: est.created_at,
+      deposit,
     });
   } catch (err) { next(err); }
 });

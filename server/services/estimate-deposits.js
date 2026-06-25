@@ -173,6 +173,143 @@ async function resolveDepositPolicyForEstimate({ estimate, paymentMethodPreferen
   return policy;
 }
 
+// Scheduling-surface summary: everything the New Appointment / appointment
+// detail card needs to show "does this estimate carry a deposit, how much was
+// paid, and what's the credit toward the first invoice". Read-only and
+// fail-soft — a deposit read must never block scheduling, so every branch
+// degrades to zeros rather than throwing. `policyAmount` is the flat amount
+// this estimate's service class CALLS FOR ($49 recurring / $99 one-time),
+// computed independent of the enforcement flag so the owner can see the
+// would-be deposit even while ESTIMATE_DEPOSIT_REQUIRED is dark; `required`
+// reflects whether it is actually enforced + non-exempt right now.
+async function summarizeEstimateDeposit(estimate, { scheduledServiceId = null, useLinkedFallback = true } = {}) {
+  const summary = {
+    enforced: isDepositEnforced(),
+    oneTime: false,
+    policyAmount: 0,
+    required: false,
+    exemptReason: null,
+    paid: 0,
+    creditRemaining: 0,
+  };
+  if (!estimate?.id) return summary;
+
+  try {
+    summary.paid = await receivedDepositTotal(estimate.id);
+    const credit = await pendingDepositCredit(estimate.id);
+    summary.creditRemaining = credit ? credit.amount : 0;
+  } catch (err) {
+    logger.warn('[estimate-deposits] schedule summary ledger read failed', { error: err.message });
+  }
+
+  // Structural one-time classification drives the service class ($99 vs $49).
+  // Prefer the canonical gate; fall back to the totals shape if it can't load.
+  let oneTime;
+  try {
+    const gates = require('../routes/estimate-public');
+    const estData = parseEstimateDataBlob(estimate);
+    oneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'
+      ? !!gates.isStructuralOneTimeOnlyEstimate(estData, estimate)
+      : null;
+  } catch {
+    oneTime = null;
+  }
+  if (oneTime == null) {
+    oneTime = Number(estimate.onetime_total || 0) > 0
+      && !Number(estimate.monthly_total || 0)
+      && !Number(estimate.annual_total || 0);
+  }
+  summary.oneTime = oneTime;
+  summary.policyAmount = computeDepositAmount({ oneTime });
+
+  // Recover the customer's accept-time payment choice from the scoped/linked
+  // scheduled service (the accept flow persists payment_method_preference on
+  // commit) so the resolver can honor the prepay_annual exemption — otherwise
+  // the summary shows "Deposit due" once enforcement is live for a visit an
+  // annual prepay already covers. Pre-accept callers (recordable/nudge) keep
+  // passing null because no committed service exists yet, so this load lives
+  // here on the post-accept scheduling summary rather than inside the resolver.
+  // Fail-soft: a read miss leaves the preference null (the safe direction — a
+  // wrongly-charged deposit still credits forward).
+  let linkedSsId = null;
+  let paymentMethodPreference = null;
+  try {
+    linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
+    if (linkedSsId) {
+      const ss = await db('scheduled_services').where({ id: linkedSsId }).first('payment_method_preference');
+      paymentMethodPreference = ss?.payment_method_preference || null;
+    }
+  } catch (err) {
+    logger.warn('[estimate-deposits] schedule summary payment-preference read failed', { error: err.message });
+  }
+
+  // Annual-prepay wins that skip auto-scheduling (estimate-manual-acceptance's
+  // skipAutoSchedule path) record the prepay choice on
+  // annual_prepay_terms.source_estimate_id — NOT on a scheduled service — so the
+  // read above finds no preference and, once enforcement is live, the resolver
+  // would report "Deposit due" for an estimate the annual prepay already
+  // exempts. Recognize a live (non-cancelled) prepay term for this estimate as
+  // the prepay_annual signal so the resolver honors the exemption. Fail-soft: a
+  // missing table or read error leaves the preference as-is (the safe direction
+  // — a wrongly-charged deposit still credits forward).
+  if (paymentMethodPreference == null && estimate?.id) {
+    try {
+      const term = await db('annual_prepay_terms')
+        .where({ source_estimate_id: estimate.id })
+        .whereNotIn('status', ['cancelled', 'canceled'])
+        .first('id');
+      if (term) paymentMethodPreference = 'prepay_annual';
+    } catch (err) {
+      logger.warn('[estimate-deposits] schedule summary annual-prepay term read failed', { error: err.message });
+    }
+  }
+
+  try {
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate,
+      paymentMethodPreference,
+      oneTime,
+      oneTimeUninvoiced: oneTime && estimate.bill_by_invoice !== true,
+      // When the caller answers for a specific appointment (the estimate-source
+      // route), scope the payer-billed exemption to THAT scheduled service —
+      // its per-job payer must be honored even after the job leaves the
+      // pending/confirmed window that the linked-appointment fallback covers.
+      scheduledServiceId,
+      useLinkedFallback,
+    });
+    summary.required = !!policy.required;
+    summary.exemptReason = policy.exemptReason || null;
+    if (policy.required && policy.amount) summary.policyAmount = policy.amount;
+  } catch (err) {
+    logger.warn('[estimate-deposits] schedule deposit policy summary failed', { error: err.message });
+  }
+
+  // Payer-billed scope for UNAPPLIED ledger credit, resolved independently of the
+  // enforcement gate. resolveDepositPolicyForEstimate only runs the payer check
+  // when a deposit is actively required (enforced + non-exempt), so while
+  // ESTIMATE_DEPOSIT_REQUIRED is dark a payer-billed job that still holds an
+  // unapplied homeowner deposit would be reported without exemptReason — and the
+  // card would show the credit as "applied to first invoice" even though payer
+  // invoices skip homeowner deposit credit (invoice.create). Resolve the payer
+  // here too, scoped to the same linked service, so the card can mark the credit
+  // not-applicable. Key this off creditRemaining, NOT paid: a deposit already
+  // fully credited to an earlier (self-pay) invoice has no unapplied credit left
+  // to warn about, and flagging it payer_billed would make the card claim the
+  // already-applied money was "not credited". Fail-soft: a miss leaves
+  // exemptReason as-is.
+  if (summary.creditRemaining > 0 && summary.exemptReason !== 'payer_billed' && estimate?.customer_id) {
+    try {
+      const PayerService = require('./payer');
+      const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId });
+      if (resolved?.payerId) summary.exemptReason = 'payer_billed';
+    } catch (err) {
+      logger.warn('[estimate-deposits] schedule summary payer scope read failed', { error: err.message });
+    }
+  }
+
+  return summary;
+}
+
 // Money the customer has paid and still holds with us: received/credited
 // rows MINUS any partial refunds already returned (a dashboard refund of
 // half a deposit must not keep satisfying the accept gate at full value).
@@ -1098,6 +1235,7 @@ module.exports = {
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
+  summarizeEstimateDeposit,
   linkedScheduledServiceId,
   restoreDepositCreditForVoidedInvoice,
   sweepTerminalEstimateDeposits,
