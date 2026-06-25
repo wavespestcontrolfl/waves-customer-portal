@@ -943,6 +943,65 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
   }
 });
 
+// GET /api/admin/dashboard/revenue-by-city — completed-service revenue grouped
+// by the customer's city for the current ET month (ServiceTitan-style geo cut).
+// service_date is a DATE column, so a string compare against the ET month-start
+// string is exact. Top 8 cities by revenue; the remainder folds into 'Other'.
+router.get('/revenue-by-city', dashboardCache, async (req, res, next) => {
+  try {
+    const monthStart = startOfMonth(); // ET month-start date string
+    const todayStr = etDateString();   // ET today — upper bound so a future-dated
+                                       // completed/import row can't inflate the MTD cut
+
+    let qb = db('service_records as sr')
+      .join('customers as c', 'sr.customer_id', 'c.id')
+      .where('sr.service_date', '>=', monthStart)
+      .where('sr.service_date', '<=', todayStr)
+      .where('sr.status', 'completed')
+      .whereNotNull('sr.revenue');
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      qb = qb.whereNotIn(
+        db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+
+    const rows = await qb
+      // NULLIF(TRIM(city), '') folds NULL + '' + whitespace-only into ONE group
+      // so missing-city revenue isn't split into duplicate 'Unknown' rows.
+      .select(db.raw("NULLIF(TRIM(c.city), '') as city"))
+      .sum('sr.revenue as revenue')
+      .count('* as jobs')
+      .groupByRaw("NULLIF(TRIM(c.city), '')")
+      .orderBy('revenue', 'desc');
+
+    const all = rows.map((row) => ({
+      city: row.city || 'Unknown',
+      revenue: parseFloat(row.revenue || 0),
+      jobs: parseInt(row.jobs || 0, 10),
+    }));
+
+    const total = all.reduce((s, r) => s + r.revenue, 0);
+
+    let cities = all;
+    if (all.length > 8) {
+      const top = all.slice(0, 8);
+      const rest = all.slice(8);
+      top.push({
+        city: 'Other',
+        revenue: rest.reduce((s, r) => s + r.revenue, 0),
+        jobs: rest.reduce((s, r) => s + r.jobs, 0),
+      });
+      cities = top;
+    }
+
+    res.json({ cities, total, period: { label: 'Month to Date' } });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /revenue-by-city failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /api/admin/dashboard/compare?period=this_month&against=last_month
 // Powers period-over-period overlay on the revenue area chart and the
 // hero-tile delta arrows. Returns daily series for both windows.

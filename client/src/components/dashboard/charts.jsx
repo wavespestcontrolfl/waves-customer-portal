@@ -499,6 +499,40 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
   );
 }
 
+// ─── Revenue by city (horizontal bar list) ────────────────────────
+//
+// ServiceTitan-style geo cut: where this month's completed-service
+// revenue comes from. Lightweight div-bar list (no Recharts), matching
+// the ChannelMixBar / AgingBar style already in this file.
+
+export function RevenueByCity({ cities = [], total = 0 }) {
+  if (!cities.length) {
+    return <EmptyState>No completed-service revenue this month</EmptyState>;
+  }
+  const maxRevenue = Math.max(...cities.map((c) => c.revenue || 0), 1);
+  return (
+    <ul className="space-y-2.5">
+      {cities.map((c) => (
+        <li key={c.city} className="flex items-center gap-3 text-12">
+          <span className="w-24 flex-shrink-0 truncate text-ink-secondary" title={c.city}>
+            {c.city}
+          </span>
+          <div className="flex-1 h-2 rounded-sm overflow-hidden bg-surface-sunken">
+            <div
+              className="h-full rounded-sm"
+              style={{ width: `${(c.revenue / maxRevenue) * 100}%`, background: CHART_PRIMARY }}
+            />
+          </div>
+          <span className="flex-shrink-0 u-nums text-right whitespace-nowrap">
+            <span className="font-medium text-zinc-900">{fmtMoneyCompact(c.revenue)}</span>
+            <span className="text-ink-tertiary"> · {c.jobs} jobs</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // ─── Today's completion gauge (radial) ────────────────────────────
 
 export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cancelled = 0, noShow = 0 }) {
