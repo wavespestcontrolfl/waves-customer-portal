@@ -4068,6 +4068,7 @@ export default function Customer360ProfileV2({
                   <CallBridgeLink
                     phone={c.phone}
                     customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+                    styledButton
                     className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
                   >
                     Call
