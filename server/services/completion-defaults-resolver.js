@@ -28,38 +28,22 @@
 
 const db = require('../models/db');
 const { hashResolvedSnapshot } = require('./completion-attempts');
+const { CITY_TO_LOCATION: CANONICAL_CITY_TO_LOCATION } = require('../config/locations');
 
-// Mirror review-request.js's location map so the resolver can compute
-// gbpResolved + routingReason without coupling to the SMS-send path.
-// Duplicated rather than imported because the source-of-truth list
-// belongs to a configuration concern, not the SMS send service; PR #3
-// or a later refactor can lift this into shared config.
+// Review GBP routing shares the canonical office map (config/locations.js) so
+// cities added there — including ZIP-recovered ones (utils/zip-to-city.js) —
+// route reviews to the right GBP automatically instead of silently defaulting
+// to Bradenton. The overrides below are the deliberate review-only exceptions
+// where a city's reviews go to a different GBP than its lead office (Palmetto
+// and Longboat Key reviews route to the Bradenton GBP), plus finer-grained
+// neighborhood keys that aren't needed for lead routing.
 const REVIEW_GBP_BY_CITY = {
-  'lakewood ranch': 'bradenton',
-  'bradenton': 'bradenton',
-  'university park': 'bradenton',
-  'braden river': 'bradenton',
-  'longboat key': 'bradenton',
-  'anna maria': 'bradenton',
-  'holmes beach': 'bradenton',
+  ...CANONICAL_CITY_TO_LOCATION,
   'palmetto': 'bradenton',
-  'cortez': 'bradenton',
-  'sarasota': 'sarasota',
-  'siesta key': 'sarasota',
-  'lido key': 'sarasota',
+  'longboat key': 'bradenton',
+  'braden river': 'bradenton',
   'bee ridge': 'sarasota',
   'gulf gate': 'sarasota',
-  'osprey': 'sarasota',
-  'venice': 'venice',
-  'north port': 'venice',
-  'englewood': 'venice',
-  'nokomis': 'venice',
-  'port charlotte': 'venice',
-  'punta gorda': 'venice',
-  'parrish': 'parrish',
-  'ellenton': 'parrish',
-  'ruskin': 'parrish',
-  'apollo beach': 'parrish',
 };
 
 const CUSTOMER_INTERACTION_CHOICES = [

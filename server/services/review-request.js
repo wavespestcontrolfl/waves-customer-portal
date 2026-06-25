@@ -20,33 +20,21 @@ const REVIEW_LINKS = {
   parrish: "https://g.page/r/Ca-4KKoWwFacEBM/review",
 };
 
-// City → location for review routing
+// City → location for review routing. Shares the canonical office map
+// (config/locations.js) so cities added there — including ZIP-recovered ones
+// (utils/zip-to-city.js) — route reviews to the right GBP automatically rather
+// than silently defaulting to Bradenton. The overrides are deliberate
+// review-only exceptions where reviews go to a different GBP than the lead
+// office (Palmetto/Longboat Key → Bradenton GBP) plus finer-grained
+// neighborhood keys not needed for lead routing.
+const { CITY_TO_LOCATION: CANONICAL_CITY_TO_LOCATION } = require("../config/locations");
 const CITY_TO_LOCATION = {
-  "lakewood ranch": "bradenton",
-  bradenton: "bradenton",
-  "university park": "bradenton",
-  "braden river": "bradenton",
-  "longboat key": "bradenton",
-  "anna maria": "bradenton",
-  "holmes beach": "bradenton",
+  ...CANONICAL_CITY_TO_LOCATION,
   palmetto: "bradenton",
-  cortez: "bradenton",
-  sarasota: "sarasota",
-  "siesta key": "sarasota",
-  "lido key": "sarasota",
+  "longboat key": "bradenton",
+  "braden river": "bradenton",
   "bee ridge": "sarasota",
   "gulf gate": "sarasota",
-  osprey: "sarasota",
-  venice: "venice",
-  "north port": "venice",
-  englewood: "venice",
-  nokomis: "venice",
-  "port charlotte": "venice",
-  "punta gorda": "venice",
-  parrish: "parrish",
-  ellenton: "parrish",
-  ruskin: "parrish",
-  "apollo beach": "parrish",
 };
 
 function resolveLocation(customer) {

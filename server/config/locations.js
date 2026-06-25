@@ -164,18 +164,49 @@ function nearestLocation(latitude, longitude) {
   return best;
 }
 
-// City → location mapping
+// City → location mapping. Every city the ZIP fallback (utils/zip-to-city.js)
+// can emit must have an entry here, or a recovered city would silently route
+// to the Bradenton default — e.g. Charlotte-county leads must reach the Venice
+// office, not Bradenton.
 const CITY_TO_LOCATION = {
   'lakewood ranch': 'bradenton', 'bradenton': 'bradenton', 'university park': 'bradenton',
-  'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota',
-  'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'port charlotte': 'venice',
-  'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'ruskin': 'parrish', 'apollo beach': 'parrish',
+  'cortez': 'bradenton', 'anna maria': 'bradenton', 'bradenton beach': 'bradenton', 'holmes beach': 'bradenton',
+  'oneco': 'bradenton', 'tallevast': 'bradenton', 'myakka city': 'bradenton',
+  'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota', 'longboat key': 'sarasota',
+  'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'laurel': 'venice',
+  'port charlotte': 'venice', 'punta gorda': 'venice', 'placida': 'venice', 'boca grande': 'venice',
+  'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'terra ceia': 'parrish',
+  // Northern reach into south Hillsborough served by the Parrish office
+  // (mirrors the ZIP routing in routes/satisfaction.js).
+  'ruskin': 'parrish', 'apollo beach': 'parrish', 'sun city center': 'parrish',
+  'wimauma': 'parrish', 'gibsonton': 'parrish', 'riverview': 'parrish',
 };
 
 function resolveLocation(city) {
   const key = (city || '').toLowerCase().trim();
   const locId = CITY_TO_LOCATION[key] || 'bradenton';
   return WAVES_LOCATIONS.find(l => l.id === locId) || WAVES_LOCATIONS[0];
+}
+
+// True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
+// non-city source area (e.g. "SW Florida" for the brand-wide lawn domain, or
+// arbitrary Google Ads utm_content) from being stored as a customer's city.
+function isOfficeCity(city) {
+  return !!CITY_TO_LOCATION[(city || '').toLowerCase().trim()];
+}
+
+// Resolve the office from an ordered list of city/area candidates, returning
+// the first that is actually in CITY_TO_LOCATION. resolveLocation() alone maps
+// BOTH an unknown city and an empty string to the Bradenton default, so a bare
+// resolveLocation(cityA || cityB) can never fall through to cityB when cityA is
+// a real-but-unmapped city (e.g. a Places city of "Rotonda West" would shadow a
+// known "Venice" source area). Falls back to the default office when none map.
+function resolveLocationFromCandidates(candidates = []) {
+  for (const candidate of candidates) {
+    const key = (candidate || '').toLowerCase().trim();
+    if (key && CITY_TO_LOCATION[key]) return resolveLocation(key);
+  }
+  return resolveLocation('');
 }
 
 module.exports = {
@@ -187,6 +218,8 @@ module.exports = {
   gbpTrackingUrlForLocation,
   isGbpUtmCampaign,
   resolveLocation,
+  resolveLocationFromCandidates,
+  isOfficeCity,
   nearestLocation,
   haversineMiles,
 };

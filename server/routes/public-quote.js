@@ -15,6 +15,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
 const {
   blockIfAutomatedEstimateDuplicate,
@@ -342,7 +343,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       components: req.body.address_components || req.body.addressComponents,
     });
     const quoteAddress = normalizedAddress.line1 || address;
-    const quoteCity = normalizedAddress.city || city || '';
+    // Fall back to a ZIP lookup when neither the parsed address nor the client
+    // supplied a city (free-text address with no Places pick). Feeds the lead,
+    // customer, and existing-customer-update writes below.
+    const quoteCity = normalizedAddress.city || city || zipToCity(normalizedAddress.zip) || '';
     const quoteState = normalizedAddress.state || 'FL';
     const quoteZip = normalizedAddress.zip || zip || '';
     const quoteFullAddress = normalizedAddress.fullAddress || [quoteAddress, quoteCity, [quoteState, quoteZip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
