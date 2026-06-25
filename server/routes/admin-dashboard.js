@@ -338,7 +338,14 @@ async function computeCoreKpis(period = 'mtd') {
       ).first();
     const svcTotal = parseInt(svcAgg?.total || 0);
     const svcCompleted = parseInt(svcAgg?.completed || 0);
-    const completionRate = svcTotal > 0 ? Math.round((svcCompleted / svcTotal) * 100) : null;
+    const svcCancelled = parseInt(svcAgg?.cancelled || 0);
+    // Completion rate excludes cancelled jobs from the denominator — a cancelled
+    // visit isn't a failed completion. Of the jobs that WEREN'T cancelled, how
+    // many got marked completed. (Jobs scheduled by today but still open —
+    // pending/confirmed/on_site/en_route not closed out — correctly count against
+    // it; a chronically low rate flags a closeout-lag, not a denominator bug.)
+    const svcDenom = svcTotal - svcCancelled;
+    const completionRate = svcDenom > 0 ? Math.round((svcCompleted / svcDenom) * 100) : null;
 
     // Callback rate — service_records.is_callback in window
     const cbAgg = await db('service_records')
@@ -440,7 +447,10 @@ async function computeCoreKpis(period = 'mtd') {
       ).select(
           db.raw("COUNT(*) as total"),
           db.raw("COUNT(*) FILTER (WHERE status = 'won') as booked"),
-          db.raw("AVG(response_time_minutes) FILTER (WHERE response_time_minutes IS NOT NULL) as avg_resp")
+          // MEDIAN (P50), not AVG — a handful of stale/abandoned leads with a
+          // huge or never-stamped response made the mean read ~17h when the
+          // typical response is ~25m. PERCENTILE_CONT ignores NULLs natively.
+          db.raw("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY response_time_minutes) as median_resp")
         ).first();
       const leads = parseInt(leadAgg?.total || 0);
       const booked = parseInt(leadAgg?.booked || 0);
@@ -448,7 +458,9 @@ async function computeCoreKpis(period = 'mtd') {
         leads,
         booked,
         conversion: leads > 0 ? Math.round((booked / leads) * 1000) / 10 : null,
-        avgResponseMin: leadAgg?.avg_resp ? Math.round(parseFloat(leadAgg.avg_resp)) : null,
+        // Keyed avgResponseMin for the client/snapshot, but it's the MEDIAN now
+        // (!= null, not truthy, so a legit 0-minute median isn't dropped).
+        avgResponseMin: leadAgg?.median_resp != null ? Math.round(parseFloat(leadAgg.median_resp)) : null,
         error: null,
       };
     } catch (err) {
@@ -738,7 +750,7 @@ async function computeCoreKpis(period = 'mtd') {
       periodLabel: { today: 'Today', wtd: 'Week to Date', mtd: 'Month to Date', ytd: 'Year to Date' }[period] || 'Month to Date',
       service: {
         completionRate,
-        scheduled: svcTotal,
+        scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
         completed: svcCompleted,
         callbackRate,
         callbacks,
