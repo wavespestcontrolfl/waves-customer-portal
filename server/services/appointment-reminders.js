@@ -20,6 +20,26 @@ const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateStri
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 
+// Service states for which a reminder must never fire. A reminder row can be
+// armed (cancelled=false) while its underlying scheduled_service moved into one
+// of these states through a path that didn't flip the row's cancelled flag —
+// recurring-series cancels, bulk status edits, the customer-portal
+// reschedule-request flow, day-of skip/no-show, etc. The cron re-checks the
+// live service status at send time so no phantom reminder goes out. Statuses
+// match scheduled_services_status_check; lowercased before lookup, with the
+// 'canceled' spelling tolerated defensively.
+//
+// Two tiers:
+//  - SELF_HEAL: genuinely terminal — the row will never produce a future visit,
+//    so mark it cancelled and never re-check it.
+//  - 'rescheduled': a pending-rebook marker, NOT terminal. The customer-portal
+//    request flow sets it before staff pick the new slot; the rebook reuses the
+//    same row via handleReschedule (which re-arms it). So skip the stale-slot
+//    text but leave the row armed — never self-cancel it, or the rebooked
+//    appointment loses its reminders.
+const SELF_HEAL_TERMINAL_STATUSES = new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
+const REMINDER_BLOCKING_STATUSES = new Set([...SELF_HEAL_TERMINAL_STATUSES, 'rescheduled']);
+
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
 // carrier-undeliverable / no mobile / blocked) we send the same information by
@@ -973,6 +993,34 @@ const AppointmentReminders = {
         .select('*');
 
       for (const r of reminders) {
+        // Live-status guard. The reminder row carries its own cancelled flag, but
+        // that flag is only as good as the cancel path that should have set it.
+        // Re-read the source-of-truth service status here so a job that moved to
+        // a reminder-blocking state after its row was armed can never text the
+        // customer. Truly terminal states self-heal the row; 'rescheduled' is a
+        // pending-rebook marker, so we skip the send but leave the row armed for
+        // the rebook (see status-set comments above).
+        if (r.scheduled_service_id) {
+          const svc = await db('scheduled_services')
+            .where({ id: r.scheduled_service_id })
+            .first('status');
+          const svcStatus = String(svc?.status || '').toLowerCase();
+          if (REMINDER_BLOCKING_STATUSES.has(svcStatus)) {
+            if (SELF_HEAL_TERMINAL_STATUSES.has(svcStatus)) {
+              await db('appointment_reminders')
+                .where({ id: r.id })
+                .update({ cancelled: true, updated_at: new Date() });
+            }
+            logger.info(
+              `[appt-remind] Skipping reminders for ${r.scheduled_service_id} — ` +
+              `service status '${svcStatus}'` +
+              (SELF_HEAL_TERMINAL_STATUSES.has(svcStatus) ? '; marked reminder cancelled' : ''),
+            );
+            results.skipped++;
+            continue;
+          }
+        }
+
         const apptTime = new Date(r.appointment_time);
         const msUntil = apptTime.getTime() - now.getTime();
         const hoursUntil = msUntil / 3600000;
@@ -1276,6 +1324,12 @@ const AppointmentReminders = {
       const r24 = resolveFlag(covered.alreadyInside24hWindow, record.reminder_24h_sent, record.reminder_24h_sent_at);
       const rescheduleUpdate = {
         appointment_time: newApptTime,
+        // Re-arm the row: a reschedule moves the appointment to a live new time,
+        // so clear any cancelled flag a prior self-heal (or stale cancel path)
+        // left behind, otherwise the rebooked visit would never be reminded. The
+        // cron's live-status guard re-checks the service each run, so this can
+        // never resurrect a reminder for a still-terminal service.
+        cancelled: false,
         reminder_72h_sent: r72.sent,
         reminder_72h_sent_at: r72.at,
         reminder_24h_sent: r24.sent,

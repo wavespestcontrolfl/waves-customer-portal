@@ -609,4 +609,75 @@ describe('appointment reminder cron delivery windows', () => {
       reminder_24h_sent_at: expect.any(Date),
     }));
   });
+
+  function armedReminder(overrides = {}) {
+    return {
+      id: 'reminder-stale',
+      scheduled_service_id: 'svc-x',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-07T13:00:00.000Z'), // 9:00 AM ET tomorrow
+      created_at: new Date('2026-05-01T13:45:00.000Z'),
+      service_type: 'Lawn Care Service',
+      cancelled: false,
+      confirmation_sent: true,
+      reminder_72h_sent: true,
+      reminder_24h_sent: false,
+      ...overrides,
+    };
+  }
+
+  test.each(['cancelled', 'completed', 'skipped', 'no_show'])(
+    'skips and self-cancels a reminder whose service is terminal (%s)',
+    async (svcStatus) => {
+      // Armed row (cancelled=false), due tomorrow — but the underlying service
+      // reached a terminal state through a path that never flipped the row's
+      // cancelled flag. The guard must suppress the text and self-heal the row.
+      const reminder = armedReminder({ scheduled_service_id: 'svc-terminal' });
+      const strandedConfirmations = chain({ select: jest.fn().mockResolvedValue([]) });
+      const reminderList = chain({ select: jest.fn().mockResolvedValue([reminder]) });
+      const statusQuery = chain({ first: jest.fn().mockResolvedValue({ status: svcStatus }) });
+      const markCancelled = chain();
+      const appointmentReminderQueries = [strandedConfirmations, reminderList, markCancelled];
+
+      db.mockImplementation((table) => {
+        if (table === 'appointment_reminders') return appointmentReminderQueries.shift();
+        if (table === 'scheduled_services') return statusQuery;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      const result = await AppointmentReminders.checkAndSendReminders();
+
+      expect(result.sent24h).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(statusQuery.where).toHaveBeenCalledWith({ id: 'svc-terminal' });
+      expect(markCancelled.where).toHaveBeenCalledWith({ id: 'reminder-stale' });
+      expect(markCancelled.update).toHaveBeenCalledWith(expect.objectContaining({ cancelled: true }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  test('skips a reschedule-request reminder WITHOUT self-cancelling it (pending rebook)', async () => {
+    // 'rescheduled' is a pending-rebook marker: the stale-slot text must be
+    // suppressed, but the row must stay armed so the rebook (handleReschedule)
+    // can resume reminders. The guard must NOT mark this row cancelled.
+    const reminder = armedReminder({ scheduled_service_id: 'svc-resched' });
+    const strandedConfirmations = chain({ select: jest.fn().mockResolvedValue([]) });
+    const reminderList = chain({ select: jest.fn().mockResolvedValue([reminder]) });
+    const statusQuery = chain({ first: jest.fn().mockResolvedValue({ status: 'rescheduled' }) });
+    const mustNotUpdate = chain();
+    const appointmentReminderQueries = [strandedConfirmations, reminderList, mustNotUpdate];
+
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return appointmentReminderQueries.shift();
+      if (table === 'scheduled_services') return statusQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(result.sent24h).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mustNotUpdate.update).not.toHaveBeenCalled(); // row left armed
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });
