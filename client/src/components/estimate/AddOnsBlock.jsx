@@ -15,7 +15,7 @@ function savingsFromDetail(detail) {
   return match ? match[1].trim() : '';
 }
 
-export default function AddOnsBlock({ addOns, selectedKeys, onToggle }) {
+export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled = false }) {
   const items = Array.isArray(addOns) ? addOns : [];
   if (items.length === 0) return null;
 
@@ -39,7 +39,9 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle }) {
         Skip parts you don't need
       </div>
       <div style={{ fontSize: 16, color: '#6B7280', lineHeight: 1.5, marginBottom: 18 }}>
-        These are on by default. Toggle off whatever you don't want and the price adjusts instantly.
+        {disabled
+          ? "The add-ons included in the visit you booked."
+          : "These are on by default. Toggle off whatever you don't want and the price adjusts instantly."}
       </div>
 
       {items.map((item) => {
@@ -53,7 +55,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle }) {
             border: `1px solid ${W.border}`,
             borderRadius: 10,
             background: checked ? W.white : '#F7F5EE',
-            cursor: 'pointer',
+            cursor: disabled ? 'default' : 'pointer',
           }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 16, fontWeight: 700, color: W.blueDeeper }}>
@@ -74,8 +76,9 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle }) {
               <input
                 type="checkbox"
                 checked={checked}
-                onChange={() => onToggle(item.key)}
-                style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', margin: 0 }}
+                disabled={disabled}
+                onChange={() => { if (!disabled) onToggle(item.key); }}
+                style={{ position: 'absolute', inset: 0, opacity: 0, cursor: disabled ? 'default' : 'pointer', margin: 0 }}
               />
               <span aria-hidden="true" style={{
                 position: 'absolute',

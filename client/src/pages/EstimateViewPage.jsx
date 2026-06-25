@@ -2066,6 +2066,7 @@ export function ServiceSection({
           addOns={current?.addOns || []}
           selectedKeys={selectedAddOns}
           onToggle={(key) => onAddOnToggle(section.key, key)}
+          disabled={disabled}
         />
       ) : null}
     </section>
@@ -2107,6 +2108,10 @@ export default function EstimateViewPage() {
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const countdownRef = useRef(null);
   const selectedRef = useRef({});
+  // Only the first /data fetch of a session is a real customer "view"; every
+  // later re-fetch (preference/slot/accept refresh) passes ?refresh=1 so the
+  // server doesn't inflate view_count / estimate_views. Reset per token.
+  const initialViewCountedRef = useRef(false);
   const selectedFrequencyRef = useRef(null);
   const reserveAttemptRef = useRef(0);
 
@@ -2164,13 +2169,15 @@ export default function EstimateViewPage() {
 
   const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
     setLoading(true);
-    const r = await fetch(`${API_BASE}/estimates/${token}/data`);
+    const isRefresh = initialViewCountedRef.current;
+    const r = await fetch(`${API_BASE}/estimates/${token}/data${isRefresh ? '?refresh=1' : ''}`);
     if (r.status === 404) {
       setNotFound(true);
       setLoading(false);
       return;
     }
     if (!r.ok) throw new Error(`estimate fetch failed: ${r.status}`);
+    initialViewCountedRef.current = true;
     const body = await r.json();
     setData(body);
     setLoading(false);
@@ -2182,10 +2189,27 @@ export default function EstimateViewPage() {
       return defaultServiceMode === 'one_time' ? 'one_time' : 'recurring';
     });
     const nextServices = pricingServices(body?.pricing);
-    const nextSelected = defaultSelectedForServices(nextServices, selectedRef.current, preserveSelection);
+    let nextSelected = defaultSelectedForServices(nextServices, selectedRef.current, preserveSelection);
+    // For a reopened ACCEPTED estimate, pin the recurring frequency to the one
+    // booked (acceptedFrequencyKey) so the read-only recap shows the agreed plan
+    // and price, not the section default (quarterly). selectedFrequency and the
+    // combined price both derive from `selected`, so seeding it here propagates
+    // through the whole recap. Only set for accepted rows (null otherwise).
+    const acceptedFreqKey = body?.estimate?.acceptedFrequencyKey;
+    if (acceptedFreqKey) {
+      nextSelected = { ...nextSelected };
+      for (const section of nextServices) {
+        if ((section.frequencies || []).some((f) => f.key === acceptedFreqKey)) {
+          nextSelected[section.key] = acceptedFreqKey;
+        }
+      }
+    }
     setSelected(nextSelected);
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
   }, [token]);
+
+  // A different estimate token is a fresh session — let its first load count.
+  useEffect(() => { initialViewCountedRef.current = false; }, [token]);
 
   // Fetch on mount
   useEffect(() => {
@@ -2558,7 +2582,116 @@ export default function EstimateViewPage() {
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
 
+  // Service/price cards — shared by the live configurator (below) and the
+  // read-only recap on an accepted estimate, so reopening an accepted link
+  // still shows the services + pricing the customer booked (legacy parity).
+  // `readOnly` disables every selector (incl. the add-on toggles) and drops
+  // booking-only extras (app-showcase upsell, one-time add-on pickers).
+  // `modeOverride` pins the recap to the mode actually accepted — the live
+  // `serviceMode` can derive 'recurring' for a one-time acceptance on a mixed
+  // estimate, so the accepted recap passes `acceptedServiceMode`.
+  const renderQuoteDetailCards = (readOnly = false, modeOverride = null) => {
+    const cardsDisabled = readOnly || ctaPhase === 'submitting';
+    const mode = modeOverride || serviceMode;
+    if (mode === 'recurring') {
+      return (
+        <>
+          {services.map((section) => {
+            const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
+              ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+                ? pricing.firstVisitFees
+                : (pricing.setupFee ? [pricing.setupFee] : []))
+              : [];
+            const afterPrice = services.length === 1 ? (
+              <>
+                {setupFees.map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
+                {!estimate.showOneTimeOption ? (
+                  <OneTimeBreakdownCard
+                    breakdown={pricing.oneTimeBreakdown}
+                    excludeServices={setupFees.map((fee) => fee.service)}
+                  />
+                ) : null}
+              </>
+            ) : null;
+            return (
+              <ServiceSection
+                key={section.key}
+                section={section}
+                servicesLength={services.length}
+                selectedFrequencyKey={selected[section.key]}
+                selectedAddOns={selectedAddOns[section.key] || new Set()}
+                onFrequencyChange={handleFrequencyChange}
+                onAddOnToggle={onToggleAddOn}
+                disabled={cardsDisabled}
+                renderFlags={renderFlags}
+                waveGuardTier={waveGuardTier}
+                afterPrice={afterPrice}
+              />
+            );
+          })}
+
+          {services.length > 1 && renderFlags.showRecurringSummary ? (
+            <CombinedRecurringPriceCard
+              combined={pricing.combinedRecurring}
+              selectedFrequency={combinedFrequency}
+              waveGuardTier={combinedTierEligible ? waveGuardTier : null}
+            />
+          ) : null}
+
+          {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
+            (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+              ? pricing.firstVisitFees
+              : (pricing.setupFee ? [pricing.setupFee] : [])
+            ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)
+          ) : null}
+
+          {services.length > 1 && !estimate.showOneTimeOption ? (
+            <OneTimeBreakdownCard
+              breakdown={pricing.oneTimeBreakdown}
+              excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
+            />
+          ) : null}
+
+          {readOnly ? null : <PortalShowcaseCard />}
+        </>
+      );
+    }
+    return (
+      <>
+        <OneTimePriceCard
+          oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+          breakdown={pricing.oneTimeBreakdown}
+        />
+        <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+        {!readOnly && renderFlags.showOneTimePestAddOns === true ? (
+          services
+            .filter((section) => section.isPest)
+            .map((section) => {
+              const frequency = selectedFrequencyForSection(section, selected);
+              return (
+                <AddOnsBlock
+                  key={`${section.key}-one-time-addons`}
+                  addOns={frequency?.addOns || []}
+                  selectedKeys={selectedAddOns[section.key] || new Set()}
+                  onToggle={(key) => onToggleAddOn(section.key, key)}
+                />
+              );
+            })
+        ) : null}
+      </>
+    );
+  };
+
   if (!canAccept) {
+    // An accepted estimate keeps a read-only recap of the booked services +
+    // pricing below the banner (legacy parity) so the customer/bookkeeper can
+    // reopen the link and see what they agreed to. Gate on a STORED accepted
+    // mode: pre-column legacy accepts have none, and deriving mode/frequency
+    // from the live configurator default could misrepresent a one-time or
+    // non-default-frequency booking — better to show just the terminal card
+    // than a wrong recap. (New accepts always persist it.) Declined/expired
+    // keep just the terminal card too.
+    const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
@@ -2581,6 +2714,7 @@ export default function EstimateViewPage() {
           isProposal={isCommercialProposal}
           proposalPdfEmailed={proposalPdfEmailed}
         />
+        {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
     );
@@ -2709,90 +2843,7 @@ export default function EstimateViewPage() {
             />
           ) : null}
 
-          {serviceMode === 'recurring' ? (
-            <>
-              {services.map((section) => {
-                const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
-                  ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                    ? pricing.firstVisitFees
-                    : (pricing.setupFee ? [pricing.setupFee] : []))
-                  : [];
-                const afterPrice = services.length === 1 ? (
-                  <>
-                    {setupFees.map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
-                    {!estimate.showOneTimeOption ? (
-                      <OneTimeBreakdownCard
-                        breakdown={pricing.oneTimeBreakdown}
-                        excludeServices={setupFees.map((fee) => fee.service)}
-                      />
-                    ) : null}
-                  </>
-                ) : null;
-                return (
-                  <ServiceSection
-                    key={section.key}
-                    section={section}
-                    servicesLength={services.length}
-                    selectedFrequencyKey={selected[section.key]}
-                    selectedAddOns={selectedAddOns[section.key] || new Set()}
-                    onFrequencyChange={handleFrequencyChange}
-                    onAddOnToggle={onToggleAddOn}
-                    disabled={ctaPhase === 'submitting'}
-                    renderFlags={renderFlags}
-                    waveGuardTier={waveGuardTier}
-                    afterPrice={afterPrice}
-                  />
-                );
-              })}
-
-              {services.length > 1 && renderFlags.showRecurringSummary ? (
-                <CombinedRecurringPriceCard
-                  combined={pricing.combinedRecurring}
-                  selectedFrequency={combinedFrequency}
-                  waveGuardTier={combinedTierEligible ? waveGuardTier : null}
-                />
-              ) : null}
-
-              {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
-                (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                  ? pricing.firstVisitFees
-                  : (pricing.setupFee ? [pricing.setupFee] : [])
-                ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)
-              ) : null}
-
-              {services.length > 1 && !estimate.showOneTimeOption ? (
-                <OneTimeBreakdownCard
-                  breakdown={pricing.oneTimeBreakdown}
-                  excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
-                />
-              ) : null}
-
-              <PortalShowcaseCard />
-            </>
-          ) : (
-            <>
-              <OneTimePriceCard
-                oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
-                breakdown={pricing.oneTimeBreakdown}
-              />
-              <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
-              {renderFlags.showOneTimePestAddOns === true ? (
-                services
-                  .filter((section) => section.isPest)
-                  .map((section) => {
-                    const frequency = selectedFrequencyForSection(section, selected);
-                    return (
-                      <AddOnsBlock
-                        key={`${section.key}-one-time-addons`}
-                        addOns={frequency?.addOns || []}
-                        selectedKeys={selectedAddOns[section.key] || new Set()}
-                        onToggle={(key) => onToggleAddOn(section.key, key)}
-                      />
-                    );
-                  })
-              ) : null}
-            </>
-          )}
+          {renderQuoteDetailCards()}
 
           {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
               server-rendered estimate's order: price → Waves AI → booking) so

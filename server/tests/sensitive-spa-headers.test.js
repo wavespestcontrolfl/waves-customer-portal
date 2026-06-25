@@ -3,11 +3,13 @@ const {
   isServiceOutlinePath,
   isLawnReportPath,
   isServiceReportPath,
+  isEstimatePath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const LAWN_TOKEN = '0123456789abcdef0123456789abcdef';
 const REPORT_TOKEN = '0123456789abcdef0123456789abcdef';
+const ESTIMATE_TOKEN = '0123456789abcdef0123456789abcdef';
 
 function mockResponse() {
   return { set: jest.fn() };
@@ -26,7 +28,7 @@ describe('sensitive SPA document headers', () => {
   test('does not apply service outline privacy headers to unrelated SPA pages', () => {
     const res = mockResponse();
 
-    applySensitiveSpaHeaders('/estimate/abc123', res);
+    applySensitiveSpaHeaders('/dashboard', res);
 
     expect(res.set).not.toHaveBeenCalled();
   });
@@ -73,5 +75,32 @@ describe('sensitive SPA document headers', () => {
     expect(isServiceReportPath('/report/not-a-real-token')).toBe(false);
     expect(isServiceReportPath('/api/reports/0123456789abcdef0123456789abcdef')).toBe(false);
     expect(isServiceReportPath('/reports')).toBe(false);
+  });
+
+  test('marks customer estimate token pages (hex and slug-style) noindex, no-referrer, no-store', () => {
+    for (const tokenPath of [`/estimate/${ESTIMATE_TOKEN}`, '/estimate/john-smith-a1b2c3d4']) {
+      const res = mockResponse();
+      applySensitiveSpaHeaders(tokenPath, res);
+      expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+      expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    }
+  });
+
+  test('noindexes any estimate token (hex or slug-style) but leaves marketing service slugs indexable', () => {
+    // Tokens come in two shapes: 32-hex (randomBytes(16), admin) and slug-style
+    // `${nameSlug}-${shortId}` (SMS/lead intake). Both must be noindex'd.
+    expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}`)).toBe(true);
+    expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/`)).toBe(true);
+    expect(isEstimatePath('/estimate/jane-doe-9f8e7d6c')).toBe(true);
+    expect(isEstimatePath('/estimate/lead-00112233')).toBe(true);
+    // Known public marketing service-slug quote pages (routed to QuotePage) stay indexable.
+    expect(isEstimatePath('/estimate/mosquito')).toBe(false);
+    expect(isEstimatePath('/estimate/termite')).toBe(false);
+    expect(isEstimatePath('/estimate/bed-bug')).toBe(false);
+    expect(isEstimatePath('/estimate/top-dressing')).toBe(false);
+    // Not single-segment estimate paths at all.
+    expect(isEstimatePath('/estimate')).toBe(false);
+    expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
   });
 });

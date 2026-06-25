@@ -210,6 +210,15 @@ function estimateHasBeenSent(estimate) {
 
 function shouldCountView(req, ip, estimate = null) {
   if (!estimateHasBeenSent(estimate)) return false;
+  // Expired links don't count as views or fire first-view side effects (status
+  // flip + admin "Estimate viewed" notify). The legacy server-HTML path
+  // short-circuits to the expired page before any view tracking; the React
+  // /:token/data path reaches here instead, so the guard lives centrally so
+  // both renderers agree. Accepted estimates past expiry still render + count
+  // (mirrors the `status !== 'accepted'` carve-out in handleEstimateView).
+  if (estimate && estimate.expires_at
+    && new Date(estimate.expires_at) < new Date()
+    && estimate.status !== 'accepted') return false;
   if (isBotUserAgent(requestUserAgent(req))) return false;
   if (hasAdminMarker(req)) return false;
   if (isAdminIp(ip)) return false;
@@ -6006,9 +6015,15 @@ async function handleEstimateView(req, res, next) {
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
       && estimate.bill_by_invoice !== true
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
-    const shouldUseReactEstimateView = estimate.use_v2_view === true
+    const shouldUseReactEstimateView = (estimate.use_v2_view === true
       || estimate.bill_by_invoice === true
-      || cardHoldForcesReactView;
+      || cardHoldForcesReactView)
+      // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
+      // renderer so office staff can still preview a draft via /estimate/<token>
+      // before it's sent. The React `/:token/data` gate 404s drafts (security),
+      // so routing them to React would break draft preview; the default flip
+      // only takes effect once the estimate is actually published.
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
     if (shouldUseReactEstimateView && req.path.startsWith('/estimate/')) {
       return next();
     }
@@ -6568,6 +6583,20 @@ router.put('/:token/accept', async (req, res, next) => {
       const acceptedUpdates = {
         status: 'accepted',
         accepted_at: trx.fn.now(),
+        // Persist what the customer actually booked so a later reopen recaps the
+        // right plan — the React page otherwise derives mode + frequency and
+        // would show a mixed estimate's recurring plan for a one-time accept, or
+        // the default frequency card for a non-default recurring choice.
+        // Use the RESOLVED mode (treatAsOneTime), not the raw request value: a
+        // structurally one-time estimate commits as one_time even when the body
+        // omits serviceMode.
+        accepted_service_mode: treatAsOneTime ? 'one_time' : serviceMode,
+        // Persist the UI SELECTION key the customer picked (what the React
+        // recap matches against `section.frequencies[].key`), NOT the billing
+        // cadence: for lawn/tree tier rows `acceptedFrequencyKey` resolves to
+        // `billingFrequencyKey` ('monthly'), which never matches the tier keys
+        // (basic/enhanced/…), so the recap would fall back to the default card.
+        accepted_frequency_key: treatAsOneTime ? null : (selectedFrequency?.key || selectedFrequencyKey || null),
         // Acceptance is where money commits — freeze the price. The frequency
         // rung selected below is the one legitimate accept-time re-derive; it is
         // written into this same atomic update, so derive→lock cannot race or
@@ -10992,6 +11021,16 @@ const dataLimiter = rateLimit({
 
 router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
+    // This JSON carries the customer's address, phone/email, notes, pricing,
+    // and a bearer askToken. With React as the default estimate view it's the
+    // primary payload, so it must be as uncacheable as the legacy server-HTML
+    // page (which sets the same on sendEstimatePage) — no shared-browser or
+    // intermediary retention of a tokenized estimate. Set on every response
+    // path (incl. 404s) by stamping before any branch.
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Referrer-Policy', 'no-referrer');
+
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -11016,8 +11055,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
     // (filtered by shouldCountView). Defensive try/catch because schema
     // drift on estimate_views or a locked row shouldn't break the
-    // customer-facing endpoint.
-    if (shouldCountView(req, ip, estimate)) {
+    // customer-facing endpoint. The React page re-fetches /data after
+    // preference/slot/accept actions (and tags those `?refresh=1`); only the
+    // initial open counts, so internal refreshes don't inflate view_count the
+    // way the single legacy HTML page load never did. `refresh` is a public
+    // query param, so honor it ONLY once a first view is already recorded
+    // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
+    // suppress the very first "viewed" count + admin notification.
+    const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
+    if (!isInternalRefresh && shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -11037,8 +11083,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     }
 
     // First-view transition — keep admin preview clicks from making the
-    // estimate look customer-opened.
-    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // estimate look customer-opened. Internal React refreshes (?refresh=1) are
+    // never the first view, so they must not flip status or notify admin twice.
+    if (!isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -11197,6 +11244,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         showOneTimeOption: !!estimate.show_one_time_option,
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
+        // What the customer booked (set at accept). Null for legacy accepts +
+        // any non-accepted estimate; the accepted recap falls back to the
+        // derived mode/frequency when null.
+        acceptedServiceMode: estimate.accepted_service_mode || null,
+        acceptedFrequencyKey: estimate.accepted_frequency_key || null,
         billByInvoice: !!estimate.bill_by_invoice,
         serviceCategory,
         acceptance,

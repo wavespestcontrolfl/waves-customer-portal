@@ -91,18 +91,7 @@ const toolHealthRoutes = require('./routes/tool-health');
 
 const app = express();
 
-const SERVICE_ESTIMATE_SLUGS = new Set([
-  'mosquito',
-  'termite',
-  'lawn',
-  'flea',
-  'cockroach',
-  'bed-bug',
-  'dethatching',
-  'dehatching',
-  'top-dressing',
-  'overseeding',
-]);
+const SERVICE_ESTIMATE_SLUGS = require('./config/service-estimate-slugs');
 
 // Railway terminates TLS upstream and forwards via X-Forwarded-For.
 // Trust a single proxy hop so express-rate-limit can key on the real client IP.
