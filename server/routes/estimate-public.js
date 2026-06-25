@@ -198,26 +198,6 @@ function hasAdminMarker(req) {
   } catch { return false; }
 }
 
-// Stronger than hasAdminMarker(): authorize an admin DRAFT/expired PREVIEW of
-// the customer data endpoint. The `waves_admin` cookie is a 2-year, view-count
-// marker (not cleared on logout), so a well-formed marker alone is NOT enough
-// to release a withheld quote + customer PII — we resolve the marker's subject
-// and require a CURRENTLY active staff technician, which revokes offboarded /
-// deactivated staff whose marker cookie lingers on a shared device. The
-// spoofable X-Forwarded-For IP allowlist is intentionally NOT honored on this
-// authorization path. Async (one DB lookup); call only on the cold non-viewable
-// branch so normal customer loads pay nothing.
-async function markerBelongsToActiveAdmin(req) {
-  const token = readCookie(req, 'waves_admin');
-  if (!token) return false;
-  try {
-    const payload = jwt.verify(token, config.jwt.secret);
-    if (!payload || payload.kind !== 'admin_marker' || !payload.sub) return false;
-    const tech = await db('technicians').where({ id: payload.sub }).first();
-    return !!(tech && tech.active && ['admin', 'technician'].includes(tech.role));
-  } catch { return false; }
-}
-
 function requestUserAgent(req) {
   if (typeof req?.get === 'function') return req.get('user-agent');
   return req?.headers?.['user-agent'] || req?.headers?.['User-Agent'] || '';
@@ -11021,12 +11001,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // server-HTML page short-circuited these to the expired/not-found shell
     // before building any payload; the data endpoint owns that guard for the
     // React path. Non-viewable → 404 (the SPA renders its "this link may have
-    // expired or isn't valid" screen). The one exception is an admin previewing
-    // a draft — authorized via an ACTIVE staff technician (markerBelongsToActiveAdmin),
-    // NOT a spoofable X-Forwarded-For IP or a bare 2-year marker cookie, and
-    // checked only on this cold non-viewable branch so normal customer loads pay
-    // no extra query.
-    if (!isEstimateCustomerViewable(estimate) && !(await markerBelongsToActiveAdmin(req))) {
+    // expired or isn't valid" screen). No admin bypass: this fetch carries no
+    // current-session credential (the public page sends no admin Bearer token),
+    // and the `waves_admin` marker cookie is a 2-year, logout-persistent
+    // view-count signal — not authorization — so previewing a draft/expired
+    // estimate goes through an authenticated admin surface, never this endpoint.
+    if (!isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
