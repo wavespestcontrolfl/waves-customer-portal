@@ -91,6 +91,7 @@ export default function DashboardPageV2() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [period, setPeriod] = useState("mtd");
+  const [showAllKpis, setShowAllKpis] = useState(false);
   const [kpisLoading, setKpisLoading] = useState(false);
   const [kpisError, setKpisError] = useState(null);
   const [attributionLoading, setAttributionLoading] = useState(false);
@@ -501,23 +502,11 @@ export default function DashboardPageV2() {
           ) : (
             <>
               {" "}
-              {kpis.momentum && (
-                <>
-                  {" "}
-                  <SectionLabel>Momentum</SectionLabel>{" "}
-                  <KpiGrid>
+              <KpiGrid>
+                {" "}
+                {kpis.momentum && (
+                  <>
                     {" "}
-                    <KpiTile
-                      label="Net Customers"
-                      value={signed(kpis.momentum.customers?.net, fmtInt)}
-                      sub={`+${fmtInt(kpis.momentum.customers?.new ?? 0)} new · ${fmtInt(kpis.momentum.customers?.lost ?? 0)} lost`}
-                      alert={kpis.momentum.customers?.net < 0}
-                      chart={{
-                        kind: "diverging",
-                        positive: kpis.momentum.customers?.new ?? 0,
-                        negative: kpis.momentum.customers?.lost ?? 0,
-                      }}
-                    />{" "}
                     <KpiTile
                       label="Net MRR"
                       value={signed(kpis.momentum.mrr?.net, fmtMoney)}
@@ -529,114 +518,19 @@ export default function DashboardPageV2() {
                         negative: kpis.momentum.mrr?.churned ?? 0,
                       }}
                     />{" "}
-                  </KpiGrid>{" "}
-                </>
-              )}{" "}
-              <SectionLabel>Operations</SectionLabel>{" "}
-              <KpiGrid>
-                {" "}
-                <KpiTile
-                  label="Service Completion"
-                  value={pct(kpis.service.completionRate)}
-                  sub={`${kpis.service.completed}/${kpis.service.scheduled} jobs`}
-                  alert={
-                    kpis.service.completionRate != null &&
-                    kpis.service.completionRate < 85
-                  }
-                  chart={{ kind: "gauge", value: kpis.service.completionRate, max: 100, target: 85 }}
-                />{" "}
-                <KpiTile
-                  label="Callback Rate"
-                  value={
-                    kpis.service.callbackRate != null
-                      ? `${kpis.service.callbackRate}%`
-                      : "—"
-                  }
-                  sub={`${kpis.service.callbacks} callbacks`}
-                  alert={
-                    kpis.service.callbackRate != null &&
-                    kpis.service.callbackRate >= 6
-                  }
-                  chart={{ kind: "gauge", value: kpis.service.callbackRate, max: 12, target: 6, lowerIsBetter: true }}
-                />{" "}
-                <KpiTile
-                  label="Tech Utilization"
-                  value={pct(kpis.financial.utilization)}
-                  sub={
-                    kpis.financial.activeTechs != null
-                      ? `${kpis.financial.laborHours}h / ${kpis.financial.activeTechs} techs`
-                      : "tech count unavailable"
-                  }
-                  alert={
-                    kpis.financial.utilization != null &&
-                    kpis.financial.utilization < 45
-                  }
-                  chart={{ kind: "gauge", value: kpis.financial.utilization, max: 100, target: 45 }}
-                />{" "}
-                <KpiTile
-                  label="Stops / Hour"
-                  value={
-                    kpis.financial.stopsPerHour != null
-                      ? kpis.financial.stopsPerHour.toFixed(1)
-                      : "—"
-                  }
-                  sub="route efficiency"
-                />{" "}
-              </KpiGrid>{" "}
-              <SectionLabel>Financial</SectionLabel>{" "}
-              <KpiGrid>
-                {" "}
-                <KpiTile
-                  label="Revenue / Job"
-                  value={
-                    kpis.financial.revPerJob != null
-                      ? fmtMoney(kpis.financial.revPerJob)
-                      : "—"
-                  }
-                  sub={`${kpis.financial.jobsDone} completed`}
-                />{" "}
-                <KpiTile
-                  label="Revenue / Man-Hour"
-                  value={
-                    kpis.financial.rpmh != null
-                      ? fmtMoney(kpis.financial.rpmh)
-                      : "—"
-                  }
-                  sub="target $120"
-                  alert={
-                    kpis.financial.rpmh != null && kpis.financial.rpmh < 90
-                  }
-                  chart={{ kind: "bullet", value: kpis.financial.rpmh, target: 120 }}
-                />{" "}
-                <KpiTile
-                  label="Gross Margin"
-                  value={
-                    kpis.financial.grossMarginWeighted != null
-                      ? `${Math.round(kpis.financial.grossMarginWeighted)}%`
-                      : "—"
-                  }
-                  sub={
-                    kpis.financial.grossMarginAvg != null
-                      ? `per-job avg ${Math.round(kpis.financial.grossMarginAvg)}%`
-                      : "revenue-weighted"
-                  }
-                  alert={
-                    kpis.financial.grossMarginWeighted != null &&
-                    kpis.financial.grossMarginWeighted < 40
-                  }
-                  chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100, target: 40 }}
-                />{" "}
-                <KpiTile
-                  label="AR Days"
-                  value={kpis.ar.days != null ? `${kpis.ar.days}d` : "—"}
-                  sub={`${fmtMoneyCompact(kpis.ar.open)} open · ${kpis.ar.overdueCount} overdue`}
-                  alert={kpis.ar.days != null && kpis.ar.days > 30}
-                  chart={{ kind: "bullet", value: kpis.ar.days, target: 30, lowerIsBetter: true }}
-                />{" "}
-              </KpiGrid>{" "}
-              <SectionLabel>Sales &amp; Customer</SectionLabel>{" "}
-              <KpiGrid>
-                {" "}
+                    <KpiTile
+                      label="Net Customers"
+                      value={signed(kpis.momentum.customers?.net, fmtInt)}
+                      sub={`+${fmtInt(kpis.momentum.customers?.new ?? 0)} new · ${fmtInt(kpis.momentum.customers?.lost ?? 0)} lost`}
+                      alert={kpis.momentum.customers?.net < 0}
+                      chart={{
+                        kind: "diverging",
+                        positive: kpis.momentum.customers?.new ?? 0,
+                        negative: kpis.momentum.customers?.lost ?? 0,
+                      }}
+                    />{" "}
+                  </>
+                )}{" "}
                 <KpiTile
                   label="Lead → Booked"
                   value={
@@ -674,41 +568,15 @@ export default function DashboardPageV2() {
                   chart={{ kind: "bullet", value: sales.avgResponseMin, target: 60, lowerIsBetter: true }}
                 />{" "}
                 <KpiTile
-                  label="CSAT"
-                  value={
-                    kpis.quality.csatAvg != null
-                      ? `${kpis.quality.csatAvg}/10`
-                      : "—"
-                  }
-                  sub={
-                    kpis.quality.csatResponses
-                      ? `${kpis.quality.csatResponses} rate-page responses`
-                      : "no responses yet"
-                  }
+                  label="Service Completion"
+                  value={pct(kpis.service.completionRate)}
+                  sub={`${kpis.service.completed}/${kpis.service.scheduled} jobs`}
                   alert={
-                    kpis.quality.csatAvg != null &&
-                    parseFloat(kpis.quality.csatAvg) < 8
+                    kpis.service.completionRate != null &&
+                    kpis.service.completionRate < 85
                   }
-                  chart={{
-                    kind: "gauge",
-                    value: kpis.quality.csatAvg != null ? parseFloat(kpis.quality.csatAvg) : null,
-                    max: 10,
-                    target: 8,
-                  }}
+                  chart={{ kind: "gauge", value: kpis.service.completionRate, max: 100, target: 85 }}
                 />{" "}
-                <KpiTile
-                  label="Retention"
-                  value={
-                    kpis.retention.pct != null ? `${kpis.retention.pct}%` : "—"
-                  }
-                  sub={`${kpis.retention.lost} lost`}
-                  alert={kpis.retention.pct != null && kpis.retention.pct < 85}
-                  chart={{ kind: "gauge", value: kpis.retention.pct, max: 100, target: 85 }}
-                />{" "}
-              </KpiGrid>{" "}
-              <SectionLabel>Billing</SectionLabel>{" "}
-              <KpiGrid>
-                {" "}
                 <KpiTile
                   label="Collection Rate"
                   value={
@@ -729,20 +597,125 @@ export default function DashboardPageV2() {
                   chart={{ kind: "gauge", value: kpis.billing?.collectionRate, max: 100, target: 70 }}
                 />{" "}
                 <KpiTile
-                  label="Autopay Coverage"
+                  label="Gross Margin"
                   value={
-                    kpis.billing?.autopayPct != null
-                      ? `${kpis.billing.autopayPct}%`
+                    kpis.financial.grossMarginWeighted != null
+                      ? `${Math.round(kpis.financial.grossMarginWeighted)}%`
                       : "—"
                   }
                   sub={
-                    kpis.billing?.customerBase
-                      ? `${kpis.billing.autopayCount} of ${kpis.billing.customerBase} customers`
-                      : "no customers"
+                    kpis.financial.grossMarginAvg != null
+                      ? `per-job avg ${Math.round(kpis.financial.grossMarginAvg)}%`
+                      : "revenue-weighted"
                   }
-                  chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
+                  alert={
+                    kpis.financial.grossMarginWeighted != null &&
+                    kpis.financial.grossMarginWeighted < 40
+                  }
+                  chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100, target: 40 }}
+                />{" "}
+                <KpiTile
+                  label="Retention"
+                  value={
+                    kpis.retention.pct != null ? `${kpis.retention.pct}%` : "—"
+                  }
+                  sub={`${kpis.retention.lost} lost`}
+                  alert={kpis.retention.pct != null && kpis.retention.pct < 85}
+                  chart={{ kind: "gauge", value: kpis.retention.pct, max: 100, target: 85 }}
                 />{" "}
               </KpiGrid>{" "}
+              <button
+                type="button"
+                onClick={() => setShowAllKpis((v) => !v)}
+                className="mt-3 u-label text-ink-secondary hover:text-zinc-900 u-focus-ring"
+              >
+                {showAllKpis ? "Show fewer metrics ▴" : "Show all metrics ▾"}
+              </button>{" "}
+              {showAllKpis && (
+                <KpiGrid>
+                  {" "}
+                  <KpiTile
+                    label="Callback Rate"
+                    value={
+                      kpis.service.callbackRate != null
+                        ? `${kpis.service.callbackRate}%`
+                        : "—"
+                    }
+                    sub={`${kpis.service.callbacks} callbacks`}
+                    alert={
+                      kpis.service.callbackRate != null &&
+                      kpis.service.callbackRate >= 6
+                    }
+                    chart={{ kind: "gauge", value: kpis.service.callbackRate, max: 12, target: 6, lowerIsBetter: true }}
+                  />{" "}
+                  <KpiTile
+                    label="Revenue / Job"
+                    value={
+                      kpis.financial.revPerJob != null
+                        ? fmtMoney(kpis.financial.revPerJob)
+                        : "—"
+                    }
+                    sub={`${kpis.financial.jobsDone} completed`}
+                  />{" "}
+                  <KpiTile
+                    label="Revenue / Man-Hour"
+                    value={
+                      kpis.financial.rpmh != null
+                        ? fmtMoney(kpis.financial.rpmh)
+                        : "—"
+                    }
+                    sub="target $120"
+                    alert={
+                      kpis.financial.rpmh != null && kpis.financial.rpmh < 90
+                    }
+                    chart={{ kind: "bullet", value: kpis.financial.rpmh, target: 120 }}
+                  />{" "}
+                  <KpiTile
+                    label="AR Days"
+                    value={kpis.ar.days != null ? `${kpis.ar.days}d` : "—"}
+                    sub={`${fmtMoneyCompact(kpis.ar.open)} open · ${kpis.ar.overdueCount} overdue`}
+                    alert={kpis.ar.days != null && kpis.ar.days > 30}
+                    chart={{ kind: "bullet", value: kpis.ar.days, target: 30, lowerIsBetter: true }}
+                  />{" "}
+                  <KpiTile
+                    label="CSAT"
+                    value={
+                      kpis.quality.csatAvg != null
+                        ? `${kpis.quality.csatAvg}/10`
+                        : "—"
+                    }
+                    sub={
+                      kpis.quality.csatResponses
+                        ? `${kpis.quality.csatResponses} rate-page responses`
+                        : "no responses yet"
+                    }
+                    alert={
+                      kpis.quality.csatAvg != null &&
+                      parseFloat(kpis.quality.csatAvg) < 8
+                    }
+                    chart={{
+                      kind: "gauge",
+                      value: kpis.quality.csatAvg != null ? parseFloat(kpis.quality.csatAvg) : null,
+                      max: 10,
+                      target: 8,
+                    }}
+                  />{" "}
+                  <KpiTile
+                    label="Autopay Coverage"
+                    value={
+                      kpis.billing?.autopayPct != null
+                        ? `${kpis.billing.autopayPct}%`
+                        : "—"
+                    }
+                    sub={
+                      kpis.billing?.customerBase
+                        ? `${kpis.billing.autopayCount} of ${kpis.billing.customerBase} customers`
+                        : "no customers"
+                    }
+                    chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
+                  />{" "}
+                </KpiGrid>
+              )}{" "}
             </>
           )}
         </CardBody>{" "}
@@ -931,14 +904,6 @@ function signed(n, fmt) {
   const v = Number(n);
   if (v === 0) return fmt(0);
   return `${v > 0 ? "+" : "−"}${fmt(Math.abs(v))}`;
-}
-
-function SectionLabel({ children }) {
-  return (
-    <div className="u-label text-ink-secondary pb-2 mb-3 mt-4 first:mt-0">
-      {children}
-    </div>
-  );
 }
 
 function KpiGrid({ children }) {
