@@ -2057,16 +2057,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
         // Booking a recurring service (e.g. a quarterly WaveGuard membership) is
         // the deal closing — convert the originating lead to won now rather than
-        // waiting for the first visit to complete. enforceOriginating keeps the
-        // fuzzy contact fallback from winning a LATER unlinked add-on lead that
-        // happens to share the customer's phone/email (e.g. an established
-        // customer booking an add-on): only a lead first contacted on/before the
-        // customer signed up converts. Single unambiguous open lead only,
-        // idempotent. Best-effort; never blocks the booking.
+        // waiting for the first visit to complete. When the booking came from an
+        // accepted estimate, pass that authoritative link so the estimate-FK lead
+        // converts directly (and carries its value hints) instead of risking a
+        // customer-link ambiguity skip when the customer has another open lead.
+        // enforceOriginating still guards the contact fallback used when there is
+        // no estimate link: only a lead first contacted on/before the customer
+        // signed up converts, so a LATER unlinked add-on lead sharing the phone/
+        // email never wins. Single unambiguous open lead only, idempotent.
+        // Best-effort; never blocks the booking.
         if (isRecurring) {
           try {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-            await convertLeadFromEvent({ source: 'recurring_service_booked', customerId, enforceOriginating: true });
+            await convertLeadFromEvent({ source: 'recurring_service_booked', customerId, estimateId: linkedEstimateId, enforceOriginating: true });
           } catch (e) {
             logger.warn(`[lead-trigger] recurring-booking conversion failed for customer=${customerId}: ${e.message}`);
           }

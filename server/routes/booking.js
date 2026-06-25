@@ -1104,14 +1104,17 @@ router.post('/confirm', async (req, res, next) => {
 
     // A self-booked recurring series (quarterly pest follow-ups seeded above) is
     // the deal closing — convert the originating lead to won now rather than
-    // waiting for the first visit to complete. enforceOriginating keeps the fuzzy
-    // contact fallback from winning a later unlinked add-on lead sharing the
-    // customer's phone/email; only a lead first contacted on/before the customer
-    // signed up converts. Single unambiguous open lead only, idempotent.
+    // waiting for the first visit to complete. When the booking carried an
+    // estimate_id, pass it so the estimate-FK lead converts directly (and carries
+    // its value hints) instead of risking a customer/contact ambiguity skip when
+    // the customer has another open lead. enforceOriginating still guards the
+    // contact fallback used when there is no estimate link: only a lead first
+    // contacted on/before the customer signed up converts. Single unambiguous
+    // open lead only, idempotent.
     if (followUpRows.length > 0) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: custId, enforceOriginating: true });
+        await convertLeadFromEvent({ source: 'recurring_service_booked', customerId: custId, estimateId: estimate_id || null, enforceOriginating: true });
       } catch (err) {
         logger.warn(`[lead-trigger] self-booking recurring conversion failed for customer=${custId}: ${err.message}`);
       }
