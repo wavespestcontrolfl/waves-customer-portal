@@ -210,6 +210,15 @@ function estimateHasBeenSent(estimate) {
 
 function shouldCountView(req, ip, estimate = null) {
   if (!estimateHasBeenSent(estimate)) return false;
+  // Expired links don't count as views or fire first-view side effects (status
+  // flip + admin "Estimate viewed" notify). The legacy server-HTML path
+  // short-circuits to the expired page before any view tracking; the React
+  // /:token/data path reaches here instead, so the guard lives centrally so
+  // both renderers agree. Accepted estimates past expiry still render + count
+  // (mirrors the `status !== 'accepted'` carve-out in handleEstimateView).
+  if (estimate && estimate.expires_at
+    && new Date(estimate.expires_at) < new Date()
+    && estimate.status !== 'accepted') return false;
   if (isBotUserAgent(requestUserAgent(req))) return false;
   if (hasAdminMarker(req)) return false;
   if (isAdminIp(ip)) return false;

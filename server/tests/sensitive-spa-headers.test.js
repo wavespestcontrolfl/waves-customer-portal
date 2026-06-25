@@ -3,11 +3,13 @@ const {
   isServiceOutlinePath,
   isLawnReportPath,
   isServiceReportPath,
+  isEstimatePath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const LAWN_TOKEN = '0123456789abcdef0123456789abcdef';
 const REPORT_TOKEN = '0123456789abcdef0123456789abcdef';
+const ESTIMATE_TOKEN = '0123456789abcdef0123456789abcdef';
 
 function mockResponse() {
   return { set: jest.fn() };
@@ -73,5 +75,25 @@ describe('sensitive SPA document headers', () => {
     expect(isServiceReportPath('/report/not-a-real-token')).toBe(false);
     expect(isServiceReportPath('/api/reports/0123456789abcdef0123456789abcdef')).toBe(false);
     expect(isServiceReportPath('/reports')).toBe(false);
+  });
+
+  test('marks customer estimate token pages noindex, no-referrer, and no-store', () => {
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/estimate/${ESTIMATE_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('recognizes 32-hex estimate token pages but leaves marketing slug quotes indexable', () => {
+    expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}`)).toBe(true);
+    expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/`)).toBe(true);
+    // Short marketing service-slug quote pages (routed to QuotePage) must stay indexable.
+    expect(isEstimatePath('/estimate/pest-control')).toBe(false);
+    expect(isEstimatePath('/estimate/lawn-care')).toBe(false);
+    expect(isEstimatePath('/estimate')).toBe(false);
+    expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
   });
 });

@@ -19,13 +19,24 @@ function isServiceReportPath(reqPath = '') {
     || /^\/recap\/[a-f0-9]{32}\/?$/i.test(value);
 }
 
+// Public tokenized customer estimate page — 32-hex token (randomBytes(16) in
+// admin-estimate-persistence). The token is a bearer credential in the URL and
+// the page renders the customer's address + quoted pricing, so the React-served
+// estimate must carry the same noindex the legacy server-HTML page set via its
+// <meta name="robots" content="noindex">. The short marketing service-slug
+// quote pages (/estimate/pest-control etc., routed to QuotePage) are NOT 32-hex
+// and intentionally stay indexable.
+function isEstimatePath(reqPath = '') {
+  return /^\/estimate\/[a-f0-9]{32}\/?$/i.test(String(reqPath || ''));
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isServiceReportPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -37,4 +48,5 @@ module.exports = {
   isServiceOutlinePath,
   isLawnReportPath,
   isServiceReportPath,
+  isEstimatePath,
 };
