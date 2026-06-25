@@ -11001,6 +11001,16 @@ const dataLimiter = rateLimit({
 
 router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
+    // This JSON carries the customer's address, phone/email, notes, pricing,
+    // and a bearer askToken. With React as the default estimate view it's the
+    // primary payload, so it must be as uncacheable as the legacy server-HTML
+    // page (which sets the same on sendEstimatePage) — no shared-browser or
+    // intermediary retention of a tokenized estimate. Set on every response
+    // path (incl. 404s) by stamping before any branch.
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Referrer-Policy', 'no-referrer');
+
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
