@@ -25,12 +25,20 @@ both are ever on at once.
 | Knob | Where | Default | Notes |
 |---|---|---|---|
 | On/off | env `ONE_TIME_CARD_HOLD` | off | `true` / `1` / `on` enables. Anything else = dark. |
-| No-show fee | `pricing_config.estimate_card_hold.noShowFeeAmount` | `49` | Dollars. Hot-reloaded (no redeploy). |
-| Cancel window | `pricing_config.estimate_card_hold.cancelWindowHours` | `24` | Hours before the slot. Hot-reloaded. |
+| No-show fee | `pricing_config.estimate_card_hold.noShowFeeAmount` | `49` | Dollars. Synced into the engine on deploy/startup or via the admin pricing path — **not** by a raw SQL edit alone (see §3). |
+| Cancel window | `pricing_config.estimate_card_hold.cancelWindowHours` | `24` | Hours before the slot. Same sync caveat. |
+
+The $49 / 24h defaults are the in-code constants — they apply with **no DB row
+at all**. A `pricing_config` row is only needed to *change* them. The card-hold
+path reads the in-memory `CARD_HOLD` constants, which are refreshed from
+`pricing_config` only by `syncConstantsFromDB()` (on startup, or when an edit
+goes through the admin pricing routes) — a raw `UPDATE`/`INSERT` is **not**
+picked up until a sync/restart, so staff could see the old fee still being
+frozen onto new bookings.
 
 Amounts are **frozen onto each hold row at booking**, so changing them never
-moves a fee a customer already consented to — only new bookings pick up the new
-value.
+moves a fee a customer already consented to — only new bookings (after a sync)
+pick up the new value.
 
 ---
 
@@ -48,15 +56,25 @@ value.
       `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` set, and the
       `setup_intent.succeeded` + `payment_intent.succeeded` webhook events are
       subscribed.
-- [ ] **Decide the amounts.** Keep $49 / 24h or set a row in `pricing_config`:
+- [ ] **Decide the amounts.** $49 / 24h need no DB row. To change them, seed the
+      row — `pricing_config` requires `name` + `category` (both NOT NULL) — and
+      then **sync** (the admin pricing route only *updates* an existing key, so
+      seed first):
       ```sql
-      INSERT INTO pricing_config (config_key, data)
-      VALUES ('estimate_card_hold', '{"noShowFeeAmount": 49, "cancelWindowHours": 24}'::jsonb)
+      INSERT INTO pricing_config (config_key, name, category, data)
+      VALUES ('estimate_card_hold', 'One-time card hold', 'estimate',
+              '{"noShowFeeAmount": 49, "cancelWindowHours": 24}'::jsonb)
       ON CONFLICT (config_key) DO UPDATE SET data = EXCLUDED.data;
       ```
+      Then run a sync so the engine picks it up: **restart the server**, or save
+      the value once through the admin Pricing Config route (`PUT
+      /api/admin/pricing-config/estimate_card_hold`), which calls
+      `syncConstantsFromDB()`. A bare SQL edit without a sync stays inert.
 - [ ] **Heads-up the office (Virginia) + techs:** one-time estimates will now
-      require a card to book, and completing a one-time job auto-charges that
-      card (no driveway collection). No-shows/late-cancels auto-charge $49.
+      require a card to book, and completing a one-time job through the billing
+      completion path auto-charges that card (no driveway collection).
+      No-shows/late-cancels auto-charge $49. **Important:** pest visits completed
+      from the tech **recap** flow do NOT charge the hold — see §7.
 
 ---
 
@@ -111,9 +129,11 @@ SELECT status, count(*) FROM estimate_card_holds GROUP BY status ORDER BY 2 DESC
 ```
 
 **`charge_review` — the manual-reconcile queue (should normally be empty).**
-A row lands here only when Stripe took money but our DB write failed, or a charge
-outcome was ambiguous. Each one is a real charge that needs a human to confirm /
-reconcile:
+A row lands here when Stripe took money but our DB write failed, OR on an
+**ambiguous** Stripe connection/API error where no PaymentIntent id came back —
+in that second case the money may NOT have moved. **Always inspect Stripe
+first** (a row with null `*_payment_intent_id` columns is the ambiguous kind —
+confirm whether a charge actually exists before reconciling or refunding):
 ```sql
 SELECT id, estimate_id, scheduled_service_id, charged_amount,
        completion_payment_intent_id, no_show_payment_intent_id, updated_at
@@ -129,7 +149,10 @@ JOIN scheduled_services s ON s.id = h.scheduled_service_id
 WHERE h.status = 'held' AND s.status IN ('completed','no_show','cancelled');
 ```
 
-**No-show fee revenue** (also appears in the admin revenue/tax reports):
+**No-show fee revenue** — use this query as the source of truth. These fees
+land as `payments.status='paid'` with no `service_record`, so they do **not**
+necessarily show up in the standard revenue/P&L views (some tax/P&L paths sum
+`status='completed'`, and the revenue overview reads `service_records.revenue`):
 ```sql
 SELECT count(*), sum(amount) FROM payments
 WHERE metadata->>'purpose' = 'card_hold_no_show_fee' AND status = 'paid';
@@ -162,11 +185,22 @@ handful of already-held appointments.
 
 ## 7. Known limitations / by-design behavior
 
-- **Status-dropdown "completed" doesn't charge.** The charge fires on the real
-  completion route (`POST /api/admin/dispatch/:serviceId/complete`, used by the
-  tech "Complete" button and admin). The lighter admin status-dropdown →
+- **⚠️ Pest "recap" completion does NOT charge the hold (important for go-live).**
+  The tech portal routes **pest** jobs into the recap flow (`ServiceRecapModal`
+  → `POST /api/admin/dispatch/:serviceId/pest-recap`), which is *recap-only —
+  no invoicing* yet still transitions the visit to `completed`. Because no
+  completion invoice is created, the card-hold completion charge never fires and
+  the hold is left `held`. Since pest is the most common one-time service and
+  recap is how techs complete it, **this is a real coverage gap**: either
+  complete one-time card-hold pest jobs via the billing completion path (`POST
+  /api/admin/dispatch/:serviceId/complete`), or land the code follow-up that
+  wires charging into the recap path before relying on auto-charge for pest.
+  Watch the "stuck `held` on completed jobs" query in §5 to catch these.
+- **Status-dropdown "completed" doesn't charge either.** The charge fires on the
+  real completion route (`POST /api/admin/dispatch/:serviceId/complete`, used by
+  the tech "Complete" button and admin). The lighter admin status-dropdown →
   "completed" doesn't auto-create an invoice, so it doesn't charge — same as
-  existing billing behavior. Complete one-time jobs the normal way.
+  existing billing behavior.
 - **Credit-card processing fee applies on completion.** Completion goes through
   the shared `chargeInvoiceWithSavedCard`, which adds the standard card surcharge
   for credit cards (debit/bank exempt). This is disclosed in the hold consent
@@ -175,9 +209,12 @@ handful of already-held appointments.
   captured card is carried back but the slot reservation is not re-held in the UI
   (15-min server-side reservation still stands). Same accepted behavior as the
   deposit flow. Follow-up if it proves to matter.
-- **No customer receipt/SMS for the no-show fee yet.** The fee lands in the
-  payments ledger (so it's in history + reports), but no text is sent at charge
-  time. Follow-up.
+- **No-show fee reporting + receipt.** The fee lands as a `payments` row
+  (`status='paid'`, no `service_record`), so it may not surface in the standard
+  revenue/P&L views — use the §5 query as the source of truth. A customer
+  receipt + a refundable fee invoice are added by the pending follow-up **PR
+  #2070** (not in the merged feature this runbook describes); until that merges,
+  no receipt is sent at charge time.
 - **Existing plan members are not exempted** — a current WaveGuard member booking
   a one-time visit is still asked for a card hold (faithful to "all one-time
   services"). One-line change in `resolveCardHoldPolicy` to skip them if desired.
@@ -190,9 +227,9 @@ handful of already-held appointments.
 |---|---|---|
 | One-time accept rejected `CARD_HOLD_REQUIRED` | No captured card reached accept | Customer must complete the card modal; check the SetupIntent succeeded in Stripe. |
 | One-time accept rejected `APPOINTMENT_REQUIRED` | Hold requires a booked slot | Customer must pick a time first (by design). |
-| Completion didn't charge | Job completed via a non-invoicing path, or invoice was prepaid/credit-covered | Confirm completion went through `/complete`; check `estimate_card_holds.status` (released = nothing owed). |
-| `charge_review` row appears | Stripe charged but DB write failed / ambiguous | Look up the PI in Stripe; reconcile the `payments`/invoice state manually, then set the row to its terminal state. |
-| No-show fee not in revenue report | `payment_intent.succeeded` webhook missed | Re-deliver the webhook from Stripe; the recorder is idempotent. |
+| Completion didn't charge | Pest **recap** completion (no invoicing), status-dropdown completion, or invoice was prepaid/credit-covered | Confirm completion went through `POST /api/admin/dispatch/:serviceId/complete`; check `estimate_card_holds.status` (`released` = nothing owed, `held` on a completed job = the recap-path gap in §7). |
+| `charge_review` row appears | Stripe charged but DB write failed, OR an ambiguous error (maybe no charge) | **Look up the PI in Stripe first.** If money moved, reconcile the `payments`/invoice state; if not (null PI columns), just clear the row. |
+| No-show fee not in standard revenue report | These `paid` payment rows aren't in the `completed`/`service_records` report paths (by design today) | Use the §5 no-show fee query. If the `payments` row is missing entirely, re-deliver the `payment_intent.succeeded` webhook (the recorder is idempotent). |
 | Hold stuck `pending` | Card never confirmed | Harmless; the estimate's next accept re-verifies, or it ages out with the estimate. |
 
 ---
@@ -207,9 +244,11 @@ handful of already-held appointments.
 - **Accept (gate + record):** `PUT /api/estimates/:token/accept`.
 - **Completion charge:** `POST /api/admin/dispatch/:serviceId/complete`
   (admin-dispatch.js, after the auto-invoice).
-- **Cancel/no-show triggers:** `PUT /admin/dispatch/:id/status` (no-show + cancel),
-  `PUT /admin/schedule/:id/status` (cancel), `/api/admin/schedule/bulk-action`
-  (cancel).
+- **Cancel/no-show triggers** (full paths — Express mounts these under `/api`):
+  `PUT /api/admin/dispatch/:id/status` (no-show + cancel),
+  `PUT /api/admin/schedule/:id/status` (cancel),
+  `POST /api/admin/schedule/bulk-action` (cancel). These are `adminFetch`
+  endpoints (auth required) — a bare `/admin/...` curl hits the SPA/404.
 - **Webhooks:** `setup_intent.succeeded` (card captured) + `payment_intent.succeeded`
   with `metadata.purpose='card_hold_no_show_fee'` (fee ledger) — `stripe-webhook.js`.
 - **Status flow:** `pending → held → charged_completion | charged_no_show |
