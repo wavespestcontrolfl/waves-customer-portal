@@ -547,17 +547,28 @@ async function settleNoShowFee(paymentIntent) {
   const customerId = paymentIntent?.metadata?.waves_customer_id || null;
   if (!piId || !customerId) return { settled: false, reason: 'missing_pi_or_customer' };
 
+  // Pre-settlement refund guard: an immediate dashboard refund can deliver
+  // charge.refunded BEFORE this succeeded event — and since no invoice/payment
+  // exists yet, that refund handler finds nothing to mark. Re-check the LIVE
+  // charge; if the money's already refunded, don't create a paid invoice +
+  // receipt for it. (Fail-open only on a retrieve error — confirmed-refunded
+  // skips.)
+  try {
+    const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
+    const ch = live?.latest_charge;
+    if (ch && typeof ch === 'object' && (ch.refunded === true || Number(ch.amount_refunded) > 0)) {
+      logger.warn('[estimate-card-holds] no-show fee already refunded before settlement — skipping', { piId });
+      return { settled: false, reason: 'refunded_pre_settlement' };
+    }
+  } catch (err) {
+    logger.warn('[estimate-card-holds] pre-settlement refund check failed — proceeding', { error: err.message });
+  }
+
   const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
   const reason = paymentIntent.metadata?.reason || 'no_show';
   const estimateId = paymentIntent.metadata?.estimate_id || null;
   const scheduledServiceId = paymentIntent.metadata?.scheduled_service_id || null;
   const feeLabel = reason === 'late_cancel' ? 'Late-cancellation fee' : 'No-show fee';
-
-  let appt = null;
-  if (scheduledServiceId) {
-    appt = await db('scheduled_services').where({ id: scheduledServiceId })
-      .first('scheduled_date', 'service_type').catch(() => null);
-  }
 
   // Invoice + paid-mark + ledger row land atomically. A transaction-scoped
   // advisory lock keyed on the PI serializes concurrent settlements for the same
@@ -626,69 +637,42 @@ async function settleNoShowFee(paymentIntent) {
   // invoice are durable, so a comms hiccup must NOT throw (that would make
   // Stripe retry and double-create the invoice).
   try {
-    await sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason, appt });
+    await sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason });
   } catch (err) {
     logger.warn('[estimate-card-holds] no-show fee receipt/notify failed (non-fatal)', { error: err.message });
   }
   return { settled: true, invoiceId: invoice.id };
 }
 
-// Customer receipt (SMS honoring the sms preference + emailed PDF receipt) and
-// a low-key office notification for the just-settled fee. Each leg is isolated
-// so one failing channel doesn't drop the others.
-async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason, appt }) {
-  const customer = await db('customers').where({ id: customerId }).first('first_name', 'phone').catch(() => null);
+// Customer receipt via the CANONICAL receipt path (dispatched by the customer's
+// payment_receipt channel preference) + a low-key office notification. Using
+// InvoiceService.sendReceipt / sendReceiptEmail rather than a hand-rolled
+// message means the receipt kill switch, the payment_receipt opt-out, the
+// per-location Twilio number, and the invoices.receipt_sent_at stamp (so the
+// admin "needs receipt" filter + batch resend don't double-send) all apply. The
+// fee invoice's title already names the charge, so no custom copy is needed.
+async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason }) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
-  const first = customer?.first_name || 'there';
-  const feeText = amount % 1 ? `$${amount.toFixed(2)}` : `$${amount}`;
-  const whenPhrase = (() => {
-    const d = appt?.scheduled_date;
-    if (!d) return 'your recent one-time visit';
-    const s = typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10);
-    const [, m, day] = s.split('-');
-    return (m && day) ? `your ${Number(m)}/${Number(day)} one-time visit` : 'your recent one-time visit';
-  })();
-  const parenthetical = reason === 'late_cancel' ? 'cancelled within 24 hours' : 'no one was home';
+  const receiptOptOut = prefs?.payment_receipt === false;
+  const channel = prefs?.payment_receipt_channel || 'sms';
 
-  // SMS receipt via the customer messaging wrapper — NOT a raw sendSMS. The
-  // wrapper enforces the per-purpose `payment_receipt` opt-out + messaging
-  // policy AND resolves the customer's per-location Twilio number (a raw send
-  // honors neither). It blocks/no-ops on opt-out, so there's no manual pref gate
-  // here.
-  if (customer?.phone) {
-    let receiptUrl = `${require('../utils/portal-url').publicPortalUrl()}/receipt/${invoice.token}`;
+  // SMS receipt — sendReceipt stamps receipt_sent_at + routes through the
+  // payment_receipt template/policy (kill switch, per-location number, opt-out).
+  if (!receiptOptOut && (channel === 'sms' || channel === 'both')) {
     try {
-      const { shortenOrPassthrough } = require('./short-url');
-      receiptUrl = await shortenOrPassthrough(receiptUrl, { kind: 'receipt', entityType: 'invoices', entityId: invoice.id, customerId });
-    } catch { /* fall back to the long url */ }
-    const body = `Hi ${first} — per the terms you approved at booking, we charged a ${feeText} ${feeLabel.toLowerCase()} for ${whenPhrase} (${parenthetical}). Receipt: ${receiptUrl}. If this looks wrong, reply here and we’ll take a look.`;
-    try {
-      const { sendCustomerMessage } = require('./messaging/send-customer-message');
-      await sendCustomerMessage({
-        to: customer.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'payment_receipt',
-        customerId,
-        invoiceId: invoice.id,
-        identityTrustLevel: 'admin_operator',
-        entryPoint: 'no_show_fee_receipt_sms',
-        metadata: { original_message_type: 'no_show_fee_receipt' },
-      });
-    } catch (e) { logger.warn('[estimate-card-holds] no-show fee SMS failed', { error: e.message }); }
+      await require('./invoice').sendReceipt(invoice.id);
+    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
   }
-
-  // Emailed PDF receipt — gate on the email preference (sendReceiptEmail's
-  // recipient resolver delegates to the billing recipient and does NOT itself
-  // check email_enabled).
-  if (prefs?.email_enabled !== false) {
+  // Emailed PDF receipt.
+  if (!receiptOptOut && (channel === 'email' || channel === 'both') && prefs?.email_enabled !== false) {
     try {
       await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `no_show_fee_receipt:${invoice.id}` });
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
   }
 
   // Office heads-up so a "what's this charge?" call isn't a surprise.
+  const first = (await db('customers').where({ id: customerId }).first('first_name').catch(() => null))?.first_name || 'A customer';
+  const feeText = amount % 1 ? `$${amount.toFixed(2)}` : `$${amount}`;
   try {
     await require('./notification-service').notifyAdmin(
       'billing',
