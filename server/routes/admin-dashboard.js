@@ -867,6 +867,82 @@ router.get('/service-mix', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/sales-capture — ServiceTitan-style "captured vs
+// missed" hero gauge: won estimate value vs lost estimate value for the
+// current ET month, bounded on the RESOLUTION date (when the estimate was
+// won/lost), not when it was created.
+//
+// Won = status 'accepted' resolved this month (accepted_at). Missed = status
+// 'declined' or 'expired' resolved this month (declined_at, else expires_at).
+// This mirrors estimate-winloss.js's RESOLVED_STATUSES/resolutionDate
+// semantics (won=accepted, lost=declined-or-expired), restricted here to the
+// current month's resolutions. Value = annualized recurring + one-time, the
+// same monthly_total*12 + onetime_total basis the funnel's accepted-value uses.
+// Archived estimates are excluded so a cleaned-up row can't skew the rate.
+router.get('/sales-capture', dashboardCache, async (req, res, next) => {
+  try {
+    const cutoff = etDayStart(startOfMonth()); // ET month start; ET-midnight-bound below
+    const valueSum = 'COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)), 0)';
+
+    // estimates `e` + customers `c` so the internal/test-account exclusion
+    // (Adam Martinez et al.) matches the funnel's excludeInternalEstimates — a
+    // test estimate accepted/declined this month must not skew the hero totals.
+    const base = () => {
+      const qb = db('estimates as e')
+        .leftJoin('customers as c', 'e.customer_id', 'c.id')
+        .whereNull('e.archived_at');
+      if (INTERNAL_TEST_CUSTOMERS.length) {
+        qb.whereNotIn(db.raw("LOWER(COALESCE(e.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)
+          .whereNotIn(
+            db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+            INTERNAL_TEST_CUSTOMERS,
+          );
+      }
+      return qb;
+    };
+
+    const [capturedRow, missedRow] = await Promise.all([
+      // Won = accepted, resolved this month. Resolution date matches
+      // estimate-winloss.resolutionDate: accepted_at, else created_at. Bound
+      // ET-midnight so the cutoff doesn't drift at the UTC boundary on Railway.
+      base()
+        .where('e.status', 'accepted')
+        .whereRaw(`COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS}`, [cutoff])
+        .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
+        .first(),
+      // Missed = declined/expired, resolved this month. declined → declined_at,
+      // expired → expires_at, then updated_at, else created_at — matching
+      // resolutionDate so AGE-expired rows (status set by the worker, no
+      // expires_at) still count instead of dropping to NULL.
+      base()
+        .whereIn('e.status', ['declined', 'expired'])
+        .whereRaw(
+          `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS}`,
+          [cutoff],
+        )
+        .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
+        .first(),
+    ]);
+
+    const captured = parseFloat(capturedRow?.total || 0);
+    const missed = parseFloat(missedRow?.total || 0);
+    const denom = captured + missed;
+    res.json({
+      captured,
+      missed,
+      // null (not 0) when nothing resolved this month — the gauge renders its
+      // "unavailable" state instead of a misleading red 0% capture failure.
+      captureRate: denom > 0 ? Math.round((captured / denom) * 100) : null,
+      wonCount: parseInt(capturedRow?.cnt || 0),
+      lostCount: parseInt(missedRow?.cnt || 0),
+      period: { label: 'Month to Date' },
+    });
+  } catch (err) {
+    logger.error(`[admin-dashboard] /sales-capture failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // GET /api/admin/dashboard/compare?period=this_month&against=last_month
 // Powers period-over-period overlay on the revenue area chart and the
 // hero-tile delta arrows. Returns daily series for both windows.
