@@ -92,39 +92,19 @@ function spokenCallerName(customer) {
   return name || null;
 }
 
-// Read a number aloud only when it is a genuine North American (NANP) number.
-// A '+'-prefixed value carries an explicit country code, so only +1 followed by
-// 10 digits qualifies; other international callers (e.g. +49…/+44…) fall back to
-// the generic confirmation so staff are never read a misleading U.S.-style
-// number. Bare (no '+') 10-digit or 1+10-digit values are treated as US.
-function spokenPhoneDigits(raw) {
-  const str = String(raw || '').trim();
-  const digits = str.replace(/\D/g, '');
-  let nanp = null;
-  if (str.startsWith('+')) {
-    if (digits.length === 11 && digits.startsWith('1')) nanp = digits.slice(1);
-  } else if (digits.length === 10) {
-    nanp = digits;
-  } else if (digits.length === 11 && digits.startsWith('1')) {
-    nanp = digits.slice(1);
-  }
-  if (!nanp) return '';
-  return `${nanp.slice(0, 3)}. ${nanp.slice(3, 6)}. ${nanp.slice(6)}.`;
-}
-
 // Spoken to the staff member AFTER they press 1 to accept — by which point a
 // human, never carrier voicemail, is on the line — so it is safe to read caller
 // identity here. Derived from the persisted call_log row (name stamped into
-// metadata by /voice; number from the from_phone column), never from a URL.
+// metadata by /voice), never from a URL. A matched customer/lead is announced
+// by name; everyone else is announced as an unknown number (the digits
+// themselves are intentionally not read aloud).
 function connectingAnnouncement(row) {
   const name = String(parseJsonObject(row?.metadata).screen_caller_name || '')
     .replace(/[^\p{L}\p{N}\s.'’-]/gu, '')
     .trim()
     .slice(0, 60);
   if (name) return `Connecting your call from ${name}.`;
-  const spoken = spokenPhoneDigits(row?.from_phone);
-  if (spoken) return `Connecting your call from an unknown number. ${spoken}`;
-  return 'Connecting your call.';
+  return 'Connecting your call from an unknown number.';
 }
 
 async function fetchTwilioCall(callSid) {
@@ -1270,7 +1250,6 @@ router._test = {
   maskSid,
   metadataHasForwardAcceptance,
   spokenCallerName,
-  spokenPhoneDigits,
   rememberForwardAccept,
   resolveCsrName,
   resolveInboundDialCompletion,
