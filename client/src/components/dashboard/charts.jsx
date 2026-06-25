@@ -200,13 +200,17 @@ function kpiTone(value, target, lowerIsBetter, alert) {
 // Progress ring with the value in the center. `display` is the formatted
 // label (e.g. "45%", "10/10"); value/max drive the arc fraction.
 export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false, alert = false, display }) {
-  const v = Number(value);
-  const frac = max > 0 && Number.isFinite(v) ? Math.max(0, Math.min(1, v / max)) : 0;
+  // null/undefined/'' = metric absent this period. Keep it absent (NaN) so a
+  // lower-is-better KPI isn't coerced to 0 and painted "on target" (green) while
+  // the tile shows "—"; an absent ring renders a muted, empty track instead.
+  const v = value == null || value === '' ? NaN : Number(value);
+  const present = Number.isFinite(v);
+  const frac = present && max > 0 ? Math.max(0, Math.min(1, v / max)) : 0;
   const size = 58;
   const stroke = 6;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
-  const color = kpiTone(v, target, lowerIsBetter, alert);
+  const color = present ? kpiTone(v, target, lowerIsBetter, alert) : CHART_PRIOR;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="flex-shrink-0">
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={CHART_GRID} strokeWidth={stroke} />
@@ -238,12 +242,15 @@ export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false
 // Horizontal value bar with a target marker. `max` defaults to leave the
 // value and target both visible with headroom.
 export function KpiBullet({ value, target = null, max = null, lowerIsBetter = false, alert = false }) {
-  const v = Number(value) || 0;
+  // Absent metric → no fill + muted tone, so missing data never paints as
+  // "on target" (see KpiRing).
+  const present = value != null && value !== '' && Number.isFinite(Number(value));
+  const v = present ? Number(value) : 0;
   const t = target != null ? Number(target) : null;
   const ceiling = max || Math.max(v, t || 0) * 1.25 || 1;
-  const valFrac = Math.max(0, Math.min(1, v / ceiling));
+  const valFrac = present ? Math.max(0, Math.min(1, v / ceiling)) : 0;
   const tgtFrac = t != null ? Math.max(0, Math.min(1, t / ceiling)) : null;
-  const color = kpiTone(v, t, lowerIsBetter, alert);
+  const color = present ? kpiTone(v, t, lowerIsBetter, alert) : CHART_PRIOR;
   return (
     <div className="relative h-2 rounded-sm bg-zinc-200 overflow-hidden">
       <div className="absolute inset-y-0 left-0 rounded-sm" style={{ width: `${valFrac * 100}%`, background: color }} />
