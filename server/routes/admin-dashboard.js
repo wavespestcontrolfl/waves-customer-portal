@@ -745,6 +745,32 @@ async function computeCoreKpis(period = 'mtd') {
       logger.error(`[admin-dashboard] leaderboard failed: ${err.message}`);
     }
 
+    // Memberships sold — new WaveGuard members whose member_since (a DATE)
+    // lands in the period window. 'none'/'None'/'One-Time' are non-membership
+    // classifications (Bronze/Silver/Gold/Platinum are the real tiers).
+    let membershipsSold = null;
+    try {
+      const m = await db('customers')
+        .whereNotNull('waveguard_tier')
+        .whereNotIn('waveguard_tier', ['none', 'None', 'One-Time'])
+        .where('member_since', '>=', start)
+        .where('member_since', '<=', todayStr)
+        .count('* as n').first();
+      membershipsSold = parseInt(m?.n || 0, 10);
+    } catch (err) { logger.error(`[admin-dashboard] memberships query failed: ${err.message}`); }
+
+    // Call → Booking — booked leads (leadMetrics.booked) over inbound calls in
+    // the same ET window the /calls-by-source endpoint uses (applyETTimestampWindow
+    // on call_log.created_at, direction='inbound'). Low directional rate.
+    let inboundCalls = 0, callToBooking = null;
+    try {
+      const cc = await db('call_log').where('direction', 'inbound')
+        .modify((qb) => applyETTimestampWindow(qb, 'created_at', start, todayStr))
+        .count('* as n').first();
+      inboundCalls = parseInt(cc?.n || 0, 10);
+      callToBooking = inboundCalls > 0 ? Math.round((leadMetrics.booked / inboundCalls) * 1000) / 10 : null;
+    } catch (err) { logger.error(`[admin-dashboard] call-to-booking query failed: ${err.message}`); }
+
     return {
       period,
       periodLabel: { today: 'Today', wtd: 'Week to Date', mtd: 'Month to Date', ytd: 'Year to Date' }[period] || 'Month to Date',
@@ -776,7 +802,8 @@ async function computeCoreKpis(period = 'mtd') {
         stopsPerHour,
         utilization,
       },
-      sales: leadMetrics,
+      sales: { ...leadMetrics, callToBooking, inboundCalls },
+      membershipsSold,
       ar: { days: arDays, open: arOpen, overdueCount: arOverdue },
       billing: {
         collectionRate,

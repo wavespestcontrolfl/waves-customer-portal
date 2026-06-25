@@ -737,6 +737,25 @@ export default function DashboardPageV2() {
                     }
                     chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
                   />{" "}
+                  <KpiTile
+                    label="Memberships Sold"
+                    value={
+                      kpis.membershipsSold != null
+                        ? fmtInt(kpis.membershipsSold)
+                        : "—"
+                    }
+                    sub="new WaveGuard members"
+                  />{" "}
+                  <KpiTile
+                    label="Call → Booking"
+                    value={
+                      kpis.sales?.callToBooking != null
+                        ? `${kpis.sales.callToBooking}%`
+                        : "—"
+                    }
+                    sub={`${kpis.sales?.booked ?? 0} booked / ${kpis.sales?.inboundCalls ?? 0} calls`}
+                    chart={{ kind: "gauge", value: kpis.sales?.callToBooking, max: 100 }}
+                  />{" "}
                 </KpiGrid>
               )}{" "}
             </>
