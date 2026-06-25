@@ -430,7 +430,12 @@ router.post('/voice', async (req, res) => {
     try {
       if (isEnabled('voiceAiAgent')) {
         const routingConfig = await getCallRoutingConfig(db);
-        ringTimeoutSec = routingConfig.ringTimeoutSec || 30;
+        // Only let the configured ring timeout shorten the staff ring when the
+        // AI can actually back the call up afterward (endpoint set + backstop
+        // enabled). Otherwise keep the normal 30s — never cut staff off early
+        // for an AI that can't answer.
+        const backstopActive = !!routingConfig.agentEndpoint && routingConfig.noAnswerBackstopEnabled !== false;
+        if (backstopActive) ringTimeoutSec = routingConfig.ringTimeoutSec || 30;
         const decision = decideVoiceRoute({ phase: 'initial', gateEnabled: true, config: routingConfig, now: new Date() });
         if (decision.action === 'agent') {
           logger.info(`[voice] AI answers-first (${decision.reason}) for ${maskSid(CallSid)}`);
@@ -619,11 +624,29 @@ router.post('/voicemail-complete', (req, res) => {
 // unreachable (no-answer/busy/failed/unknown) → fall OPEN to the Waves
 // voicemail so the caller is never left in dead air.
 // =========================================================================
-router.post('/agent-fallback', (req, res) => {
+router.post('/agent-fallback', async (req, res) => {
   const twiml = new VoiceResponse();
+  const status = String(req.body?.DialCallStatus || '').toLowerCase();
+  const callSid = req.body?.CallSid;
   try {
-    const status = String(req.body?.DialCallStatus || '').toLowerCase();
-    if (status !== 'completed') appendVoicemailRecording(twiml);
+    if (status === 'completed') {
+      // Agent answered & handled the call — reconcile the row so a successful
+      // AI conversation isn't left classified as voicemail (after-dial backstop
+      // pre-marks it) or stuck on a stale ai_agent mark (answers-first).
+      if (callSid) {
+        await db('call_log').where('twilio_call_sid', callSid)
+          .update({ answered_by: 'ai_agent', call_outcome: 'ai_handled', updated_at: new Date() })
+          .catch((e) => logger.warn(`[agent-fallback] call_log update failed: ${e.message}`));
+      }
+    } else {
+      // Agent unreachable → fall open to voicemail and reflect that on the row.
+      if (callSid) {
+        await db('call_log').where('twilio_call_sid', callSid)
+          .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+          .catch((e) => logger.warn(`[agent-fallback] call_log update failed: ${e.message}`));
+      }
+      appendVoicemailRecording(twiml);
+    }
   } catch (err) {
     logger.error(`[agent-fallback] error; falling back to voicemail: ${err.message}`);
     appendVoicemailRecording(twiml);

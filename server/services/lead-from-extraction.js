@@ -130,7 +130,9 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       const [newLead] = await db('leads').insert(insert).returning('*');
       leadId = newLead.id;
       created = true;
-      logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)} (service: ${service || 'general'})`);
+      // Log IDs/masked phone only — `service` is caller-provided free text and
+      // can contain names/addresses; it belongs in the row, not plain logs.
+      logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)}`);
     }
 
     if (leadId) {
@@ -156,9 +158,13 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         source: 'voice_agent',
         language,
       });
-      leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
+      // Only touch is_qualified when the agent sent a recognized quality, so a
+      // later quality-less payload can't demote a previously qualified lead.
+      if (extracted.lead_quality) leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
       if (language) leadUpdates.preferred_language = language;
-      leadUpdates.customer_id = customerId;
+      // Only (re)link a customer when one was unambiguously resolved — never
+      // null out an existing lead's customer_id on a no-match/ambiguous lookup.
+      if (customerId) leadUpdates.customer_id = customerId;
       leadUpdates.updated_at = new Date();
       await db('leads').where({ id: leadId }).update(leadUpdates);
 
