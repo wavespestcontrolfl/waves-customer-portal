@@ -14,6 +14,9 @@ import {
   CompletionGauge,
   EmptyState,
   EstimateFunnel,
+  KpiBullet,
+  KpiDivergingBar,
+  KpiRing,
   KpiSparklineTile,
   MrrTrendChart,
   RevenueTrendArea,
@@ -482,12 +485,22 @@ export default function DashboardPageV2() {
                       value={signed(kpis.momentum.customers?.net, fmtInt)}
                       sub={`+${fmtInt(kpis.momentum.customers?.new ?? 0)} new · ${fmtInt(kpis.momentum.customers?.lost ?? 0)} lost`}
                       alert={kpis.momentum.customers?.net < 0}
+                      chart={{
+                        kind: "diverging",
+                        positive: kpis.momentum.customers?.new ?? 0,
+                        negative: kpis.momentum.customers?.lost ?? 0,
+                      }}
                     />{" "}
                     <KpiTile
                       label="Net MRR"
                       value={signed(kpis.momentum.mrr?.net, fmtMoney)}
                       sub={`+${fmtMoneyCompact(kpis.momentum.mrr?.new ?? 0)} new · ${fmtMoneyCompact(kpis.momentum.mrr?.churned ?? 0)} lost`}
                       alert={kpis.momentum.mrr?.net < 0}
+                      chart={{
+                        kind: "diverging",
+                        positive: kpis.momentum.mrr?.new ?? 0,
+                        negative: kpis.momentum.mrr?.churned ?? 0,
+                      }}
                     />{" "}
                   </KpiGrid>{" "}
                 </>
@@ -503,6 +516,7 @@ export default function DashboardPageV2() {
                     kpis.service.completionRate != null &&
                     kpis.service.completionRate < 85
                   }
+                  chart={{ kind: "gauge", value: kpis.service.completionRate, max: 100, target: 85 }}
                 />{" "}
                 <KpiTile
                   label="Callback Rate"
@@ -516,6 +530,7 @@ export default function DashboardPageV2() {
                     kpis.service.callbackRate != null &&
                     kpis.service.callbackRate >= 6
                   }
+                  chart={{ kind: "gauge", value: kpis.service.callbackRate, max: 12, target: 6, lowerIsBetter: true }}
                 />{" "}
                 <KpiTile
                   label="Tech Utilization"
@@ -529,6 +544,7 @@ export default function DashboardPageV2() {
                     kpis.financial.utilization != null &&
                     kpis.financial.utilization < 45
                   }
+                  chart={{ kind: "gauge", value: kpis.financial.utilization, max: 100, target: 45 }}
                 />{" "}
                 <KpiTile
                   label="Stops / Hour"
@@ -563,6 +579,7 @@ export default function DashboardPageV2() {
                   alert={
                     kpis.financial.rpmh != null && kpis.financial.rpmh < 90
                   }
+                  chart={{ kind: "bullet", value: kpis.financial.rpmh, target: 120 }}
                 />{" "}
                 <KpiTile
                   label="Gross Margin"
@@ -580,12 +597,14 @@ export default function DashboardPageV2() {
                     kpis.financial.grossMarginWeighted != null &&
                     kpis.financial.grossMarginWeighted < 40
                   }
+                  chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100, target: 40 }}
                 />{" "}
                 <KpiTile
                   label="AR Days"
                   value={kpis.ar.days != null ? `${kpis.ar.days}d` : "—"}
                   sub={`${fmtMoneyCompact(kpis.ar.open)} open · ${kpis.ar.overdueCount} overdue`}
                   alert={kpis.ar.days != null && kpis.ar.days > 30}
+                  chart={{ kind: "bullet", value: kpis.ar.days, target: 30, lowerIsBetter: true }}
                 />{" "}
               </KpiGrid>{" "}
               <SectionLabel>Sales &amp; Customer</SectionLabel>{" "}
@@ -607,6 +626,7 @@ export default function DashboardPageV2() {
                     salesUnavailable ||
                     (sales.conversion != null && sales.conversion < 20)
                   }
+                  chart={{ kind: "gauge", value: sales.conversion, max: 100, target: 20 }}
                 />{" "}
                 <KpiTile
                   label="Response Speed"
@@ -624,6 +644,7 @@ export default function DashboardPageV2() {
                     salesUnavailable ||
                     (sales.avgResponseMin != null && sales.avgResponseMin > 60)
                   }
+                  chart={{ kind: "bullet", value: sales.avgResponseMin, target: 60, lowerIsBetter: true }}
                 />{" "}
                 <KpiTile
                   label="CSAT"
@@ -641,6 +662,12 @@ export default function DashboardPageV2() {
                     kpis.quality.csatAvg != null &&
                     parseFloat(kpis.quality.csatAvg) < 8
                   }
+                  chart={{
+                    kind: "gauge",
+                    value: kpis.quality.csatAvg != null ? parseFloat(kpis.quality.csatAvg) : null,
+                    max: 10,
+                    target: 8,
+                  }}
                 />{" "}
                 <KpiTile
                   label="Retention"
@@ -649,6 +676,7 @@ export default function DashboardPageV2() {
                   }
                   sub={`${kpis.retention.lost} lost`}
                   alert={kpis.retention.pct != null && kpis.retention.pct < 85}
+                  chart={{ kind: "gauge", value: kpis.retention.pct, max: 100, target: 85 }}
                 />{" "}
               </KpiGrid>{" "}
               <SectionLabel>Billing</SectionLabel>{" "}
@@ -671,6 +699,7 @@ export default function DashboardPageV2() {
                     kpis.billing.issuedCount >= 5 &&
                     kpis.billing.collectionRate < 70
                   }
+                  chart={{ kind: "gauge", value: kpis.billing?.collectionRate, max: 100, target: 70 }}
                 />{" "}
                 <KpiTile
                   label="Autopay Coverage"
@@ -684,6 +713,7 @@ export default function DashboardPageV2() {
                       ? `${kpis.billing.autopayCount} of ${kpis.billing.customerBase} customers`
                       : "no customers"
                   }
+                  chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
                 />{" "}
               </KpiGrid>{" "}
             </>
@@ -890,7 +920,28 @@ function KpiGrid({ children }) {
   );
 }
 
-function KpiTile({ label, value, sub, alert }) {
+function KpiTile({ label, value, sub, alert, chart }) {
+  // Gauge tiles let the ring BE the value (number in the center), with the
+  // sub beside it — no duplicate big number.
+  if (chart?.kind === "gauge") {
+    return (
+      <div className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
+        <div className="u-label text-ink-secondary">{label}</div>
+        <div className="flex items-center gap-3 mt-2">
+          <KpiRing
+            value={chart.value}
+            max={chart.max}
+            target={chart.target}
+            lowerIsBetter={chart.lowerIsBetter}
+            alert={alert}
+            display={value}
+          />
+          {sub && <div className="text-11 text-ink-secondary min-w-0">{sub}</div>}
+        </div>
+      </div>
+    );
+  }
+  // Bullet / diverging tiles keep the big number, with the bar beneath.
   return (
     <div className="bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-3">
       {" "}
@@ -904,6 +955,22 @@ function KpiTile({ label, value, sub, alert }) {
         {value}
       </div>
       {sub && <div className="mt-1 text-11 text-ink-secondary">{sub}</div>}
+      {chart?.kind === "bullet" && (
+        <div className="mt-2">
+          <KpiBullet
+            value={chart.value}
+            target={chart.target}
+            max={chart.max}
+            lowerIsBetter={chart.lowerIsBetter}
+            alert={alert}
+          />
+        </div>
+      )}
+      {chart?.kind === "diverging" && (
+        <div className="mt-2">
+          <KpiDivergingBar positive={chart.positive} negative={chart.negative} />
+        </div>
+      )}
     </div>
   );
 }

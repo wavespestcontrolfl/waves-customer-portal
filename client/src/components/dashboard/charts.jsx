@@ -181,6 +181,100 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
   );
 }
 
+// ─── Compact KPI charts (gauge ring / bullet bar / diverging) ─────
+//
+// Tiny visuals sized to live INSIDE a Core-KPI tile. All point-in-time
+// (no time series), tone-coded: alert = red, on/above target = emerald,
+// otherwise the Waves sky. Used by DashboardPageV2's KpiTile.
+
+// Pick a fill tone from the row's alert flag + whether it meets its target.
+function kpiTone(value, target, lowerIsBetter, alert) {
+  if (alert) return CHART_ALERT;
+  if (target != null && Number.isFinite(value)) {
+    const meets = lowerIsBetter ? value <= target : value >= target;
+    if (meets) return CHART_SUCCESS;
+  }
+  return CHART_PRIMARY;
+}
+
+// Progress ring with the value in the center. `display` is the formatted
+// label (e.g. "45%", "10/10"); value/max drive the arc fraction.
+export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false, alert = false, display }) {
+  // null/undefined/'' = metric absent this period. Keep it absent (NaN) so a
+  // lower-is-better KPI isn't coerced to 0 and painted "on target" (green) while
+  // the tile shows "—"; an absent ring renders a muted, empty track instead.
+  const v = value == null || value === '' ? NaN : Number(value);
+  const present = Number.isFinite(v);
+  const frac = present && max > 0 ? Math.max(0, Math.min(1, v / max)) : 0;
+  const size = 58;
+  const stroke = 6;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const color = present ? kpiTone(v, target, lowerIsBetter, alert) : CHART_PRIOR;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="flex-shrink-0">
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={CHART_GRID} strokeWidth={stroke} />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke={color}
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={`${frac * c} ${c}`}
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+      <text
+        x="50%"
+        y="50%"
+        textAnchor="middle"
+        dominantBaseline="central"
+        fill={color === CHART_SUCCESS || color === CHART_ALERT ? color : present ? '#18181B' : CHART_PRIOR}
+        style={{ fontSize: String(display ?? '').length > 4 ? 11 : 13, fontWeight: 500 }}
+      >
+        {display}
+      </text>
+    </svg>
+  );
+}
+
+// Horizontal value bar with a target marker. `max` defaults to leave the
+// value and target both visible with headroom.
+export function KpiBullet({ value, target = null, max = null, lowerIsBetter = false, alert = false }) {
+  // Absent metric → no fill + muted tone, so missing data never paints as
+  // "on target" (see KpiRing).
+  const present = value != null && value !== '' && Number.isFinite(Number(value));
+  const v = present ? Number(value) : 0;
+  const t = target != null ? Number(target) : null;
+  const ceiling = max || Math.max(v, t || 0) * 1.25 || 1;
+  const valFrac = present ? Math.max(0, Math.min(1, v / ceiling)) : 0;
+  const tgtFrac = t != null ? Math.max(0, Math.min(1, t / ceiling)) : null;
+  const color = present ? kpiTone(v, t, lowerIsBetter, alert) : CHART_PRIOR;
+  return (
+    <div className="relative h-2 rounded-sm bg-zinc-200 overflow-hidden">
+      <div className="absolute inset-y-0 left-0 rounded-sm" style={{ width: `${valFrac * 100}%`, background: color }} />
+      {tgtFrac != null && (
+        <div className="absolute inset-y-0 w-px bg-zinc-900" style={{ left: `${tgtFrac * 100}%` }} title={`target ${target}`} />
+      )}
+    </div>
+  );
+}
+
+// New-vs-lost split for momentum tiles (net = positive − negative).
+export function KpiDivergingBar({ positive = 0, negative = 0 }) {
+  const p = Math.abs(Number(positive) || 0);
+  const n = Math.abs(Number(negative) || 0);
+  const tot = p + n;
+  if (tot === 0) return <div className="h-2 rounded-sm bg-zinc-200" />;
+  return (
+    <div className="flex h-2 rounded-sm overflow-hidden bg-zinc-200">
+      <div style={{ width: `${(p / tot) * 100}%`, background: CHART_SUCCESS }} title={`+${positive} new`} />
+      <div style={{ width: `${(n / tot) * 100}%`, background: CHART_ALERT }} title={`${negative} lost`} />
+    </div>
+  );
+}
+
 // ─── Revenue trend area (current vs prior overlay) ────────────────
 
 // `current`/`prior` are arrays of { date, total }. We zip them by index
