@@ -34,6 +34,7 @@ const logger = require('./logger');
 const StripeService = require('./stripe');
 const { CARD_HOLD } = require('./pricing-engine/constants');
 const { isInvoiceCollectibleStatus } = require('./invoice-helpers');
+const { etDateString } = require('../utils/datetime-et');
 
 function isCardHoldEnabled() {
   const flag = process.env.ONE_TIME_CARD_HOLD;
@@ -407,6 +408,50 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
   }
 }
 
+// Completion charge for the RECAP completion paths (pest-recap, etc.), which
+// complete the visit WITHOUT invoicing — so the normal completion charge (which
+// needs an invoice) never fires there and the held card would go uncharged. For
+// a held card-hold job ONLY, mint the completion invoice from the service record
+// (same factory the /complete path uses, priced from the scheduled service) and
+// charge it; normal non-card-hold recaps stay no-bill. No-op when the flag is
+// off or no hold exists. Never throws into the host completion flow.
+async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRecordId }) {
+  if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
+  if (!serviceRecordId) return { charged: false, reason: 'no_service_record' };
+  const hold = await heldCardForScheduledService(scheduledServiceId);
+  if (!hold) return { charged: false, reason: 'no_hold' };
+
+  let invoiceId;
+  try {
+    // Reuse an existing completion invoice for this service record (e.g. a prior
+    // recap attempt whose charge failed) so a retry never mints a duplicate.
+    const existing = await db('invoices')
+      .where({ service_record_id: serviceRecordId })
+      .whereNot('status', 'void')
+      .orderBy('created_at', 'desc')
+      .first('id');
+    if (existing?.id) {
+      invoiceId = existing.id;
+    } else {
+      const ss = await db('scheduled_services').where({ id: scheduledServiceId })
+        .first('property_type', 'service_type');
+      const InvoiceService = require('./invoice');
+      const inv = await InvoiceService.createFromService(serviceRecordId, {
+        taxRate: ss?.property_type === 'commercial' ? 0.07 : 0,
+        description: ss?.service_type || undefined,
+        useScheduledReplay: true,
+        dueDate: etDateString(),
+      });
+      invoiceId = inv?.id || null;
+    }
+  } catch (err) {
+    logger.error('[estimate-card-holds] recap completion invoice create failed', { scheduledServiceId, error: err.message });
+    return { charged: false, reason: 'invoice_create_failed', error: err.message };
+  }
+  if (!invoiceId) return { charged: false, reason: 'no_invoice' };
+  return chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId });
+}
+
 // ── Phase 3: no-show / late-cancel fee ───────────────────────────────────
 // Charge the flat fee against the held card (face value, off-session). The fee
 // is read from the FROZEN hold row, not live constants. Idempotent on the hold
@@ -546,6 +591,7 @@ module.exports = {
   heldCardForScheduledService,
   hasHeldCard,
   chargeCardHoldOnCompletion,
+  chargeCardHoldForRecapCompletion,
   chargeNoShowFee,
   releaseCardHold,
   handleCardHoldCancellation,

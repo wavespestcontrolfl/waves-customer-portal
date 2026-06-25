@@ -422,6 +422,18 @@ async function submitRecap({
     logger.warn(`[pest-recap] markComplete failed for ${serviceId}: ${err.message}`);
   }
 
+  // 4b. One-time card-on-file hold: the recap path completes WITHOUT invoicing,
+  // so a held card would otherwise never be charged. For a held card-hold job
+  // only, this mints the completion invoice from the recap's service record and
+  // charges the saved card. Dark until ONE_TIME_CARD_HOLD; no-op when no hold
+  // exists (normal recaps stay no-bill). Best-effort — never blocks the recap.
+  try {
+    const CardHolds = require('./estimate-card-holds');
+    await CardHolds.chargeCardHoldForRecapCompletion({ scheduledServiceId: serviceId, serviceRecordId: recordId });
+  } catch (err) {
+    logger.warn(`[pest-recap] card-hold completion charge failed for ${serviceId}: ${err.message}`);
+  }
+
   // 5. Optional customer recap SMS. Only the submit that won the
   //    recap_sms_sent_at claim under the lock reaches the send — a
   //    concurrent/retried submit has willSendSms=false and is skipped.
