@@ -35,25 +35,22 @@ function plannedCity(row) {
 }
 
 async function planTable(table) {
+  // Select only id/zip/city — never names. Customer names in logs are treated
+  // as PII; the sample output below uses IDs/ZIPs/cities only.
   const rows = await db(table)
     .where(function () {
       this.whereNull('city').orWhereRaw("TRIM(city) = ''");
     })
     .whereNotNull('zip')
     .whereRaw("TRIM(zip) <> ''")
-    .select('id', 'first_name', 'last_name', 'city', 'zip');
+    .select('id', 'city', 'zip');
 
   const updates = [];
   let unresolved = 0;
   for (const row of rows) {
     const newCity = plannedCity(row);
     if (newCity) {
-      updates.push({
-        id: row.id,
-        zip: row.zip,
-        newCity,
-        name: `${row.first_name || ''} ${row.last_name || ''}`.trim(),
-      });
+      updates.push({ id: row.id, zip: row.zip, newCity });
     } else {
       unresolved += 1;
     }
@@ -70,18 +67,27 @@ function summarize(table, plan) {
     console.log(`     ${String(n).padStart(4)}  ${city}`);
   }
   for (const u of plan.updates.slice(0, 8)) {
-    console.log(`     e.g. #${u.id} ${u.name || '(no name)'} — zip ${u.zip} → ${u.newCity}`);
+    console.log(`     e.g. #${u.id} — zip ${u.zip} → ${u.newCity}`);
   }
 }
 
 async function applyPlan(table, plan) {
-  // Group ids by target city → one UPDATE per distinct city.
+  // Group ids by target city → one UPDATE per distinct city. Re-assert the
+  // blank-city predicate on the UPDATE so a row whose city was filled by intake
+  // or admin work between planTable() and here is NOT overwritten — preserving
+  // the "never overwrites an existing city" guarantee. Count actually-updated
+  // rows (knex returns the affected-row count), not the planned ids.
   const idsByCity = {};
   for (const u of plan.updates) (idsByCity[u.newCity] ||= []).push(u.id);
   let updated = 0;
   for (const [city, ids] of Object.entries(idsByCity)) {
-    await db(table).whereIn('id', ids).update({ city });
-    updated += ids.length;
+    const n = await db(table)
+      .whereIn('id', ids)
+      .where(function () {
+        this.whereNull('city').orWhereRaw("TRIM(city) = ''");
+      })
+      .update({ city });
+    updated += n;
   }
   return updated;
 }
