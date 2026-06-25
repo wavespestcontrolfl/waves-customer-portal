@@ -2055,6 +2055,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
           }
         }
 
+        // Booking a recurring service (e.g. a quarterly WaveGuard membership) is
+        // the deal closing — convert the originating lead to won now rather than
+        // waiting for the first visit to complete. enforceOriginating keeps the
+        // fuzzy contact fallback from winning a LATER unlinked add-on lead that
+        // happens to share the customer's phone/email (e.g. an established
+        // customer booking an add-on): only a lead first contacted on/before the
+        // customer signed up converts. Single unambiguous open lead only,
+        // idempotent. Best-effort; never blocks the booking.
+        if (isRecurring) {
+          try {
+            const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+            await convertLeadFromEvent({ source: 'recurring_service_booked', customerId, enforceOriginating: true });
+          } catch (e) {
+            logger.warn(`[lead-trigger] recurring-booking conversion failed for customer=${customerId}: ${e.message}`);
+          }
+        }
+
         // Optional: push an in-app notification to the assigned tech's PWA queue
         // (honors the "Notify technician" checkbox — unchecked by default).
         if (sendTechNotification && resolvedTechId) {
