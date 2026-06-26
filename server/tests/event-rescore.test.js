@@ -136,10 +136,21 @@ describe('rescoreOnInboundMessage', () => {
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
-  test('releases the claim when the alert send fails (so a later text retries)', async () => {
+  test('releases the claim when the alert send throws (so a later text retries)', async () => {
     const { releaseChain } = wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
     customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
     TwilioService.sendSMS.mockRejectedValueOnce(new Error('twilio down'));
+
+    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
+
+    expect(releaseChain.update).toHaveBeenCalledWith({ critical_alert_sent_at: null });
+  });
+
+  test('releases the claim on an undelivered internal-alert redirect (success:true but not delivered)', async () => {
+    const { releaseChain } = wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
+    customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
+    // internal_alert redirect failure shape from twilio.js
+    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, suppressed: true, notificationUndelivered: true });
 
     await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
 

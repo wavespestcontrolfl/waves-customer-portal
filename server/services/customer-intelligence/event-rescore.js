@@ -97,6 +97,20 @@ async function claimCriticalAlert(customerId) {
   }
 }
 
+// Whether a TwilioService.sendSMS result counts as delivered. internal_alert
+// sends to owner numbers are REDIRECTED to Waves notifications, which return
+// `success: true` (no `sent` field) and flag failures as
+// notificationUndelivered/notificationError — so a bare `sent === false` check
+// would treat those as delivered and burn the claim. Treat any failure shape
+// (success === false, sent === false, blocked, redirect-undelivered/error) as
+// undelivered so the claim is released and a later text retries.
+function isAlertDelivered(r) {
+  if (!r) return false;
+  if (r.success === false || r.sent === false) return false;
+  if (r.blocked || r.notificationUndelivered || r.notificationError) return false;
+  return true;
+}
+
 // Owner SMS the instant a customer drops to critical. Mirrors the nightly
 // churn-alert format (retention-engine) but marked "(live)" and carrying no
 // outreach draft — it is an immediate heads-up, not the morning action plan.
@@ -122,7 +136,7 @@ async function sendCriticalChurnAlert(customerId, result, source = 'inbound') {
       + `📞 ${customer.phone || 'no phone on file'}`;
 
     const sendResult = await TwilioService.sendSMS(adamPhone, body, { messageType: 'internal_alert' });
-    if (sendResult && sendResult.sent === false) return false; // soft failure (blocked/undelivered)
+    if (!isAlertDelivered(sendResult)) return false;
     logger.info(`[event-rescore] live churn alert sent for ${customerId} (source: ${source})`);
     return true;
   } catch (err) {

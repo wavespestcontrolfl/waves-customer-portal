@@ -268,14 +268,21 @@ class SignalDetector {
         .where('customer_id', customerId)
         .where('direction', 'inbound')
         .where('created_at', '>', new Date(now - 30 * 86400000))
-        .select('message_body', 'message_type');
+        .select('message_body', 'message_type', 'metadata');
 
       const allText = recentMessages.map(m => (m.message_body || '').toLowerCase()).join(' ');
       // An explicit SMS opt-out (STOP/UNSUBSCRIBE/QUIT/CANCEL) is logged with
       // message_type 'opt_out' regardless of the exact keyword the body matched.
       // Treat it as the same cancellation-intent signal as the keyword rule, so
-      // a bare "STOP" is caught (not just "cancel"/"stop service").
-      const hasOptOut = recentMessages.some(m => m.message_type === 'opt_out');
+      // a bare "STOP" is caught (not just "cancel"/"stop service") — but EXCLUDE
+      // "wrong number" reports, which are also logged as opt_out (opt_out_reason
+      // in metadata) and are not churn intent.
+      const hasOptOut = recentMessages.some(m => {
+        if (m.message_type !== 'opt_out') return false;
+        let meta = m.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+        return (meta?.opt_out_reason || '') !== 'wrong_number';
+      });
 
       if ((hasOptOut || allText.includes('cancel') || allText.includes('stop service') || allText.includes('not renew')) && !existing.has('DOWNGRADE_REQUEST')) {
         newSignals.push({

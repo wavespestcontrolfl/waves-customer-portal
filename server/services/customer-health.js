@@ -750,13 +750,17 @@ async function scoreCustomer(customerId) {
         if (!(await db.schema.hasColumn('customer_health_scores', 'scored_at'))) {
           await db.schema.alterTable('customer_health_scores', t => { t.timestamp('scored_at').defaultTo(db.fn.now()); });
         }
-        if (!(await db.schema.hasColumn('customer_health_scores', 'critical_alert_sent_at'))) {
-          await db.schema.alterTable('customer_health_scores', t => { t.timestamp('critical_alert_sent_at'); });
-        }
         if (!(await db.schema.hasColumn('customer_health_scores', 'overall_score'))) {
           await db.schema.alterTable('customer_health_scores', t => { t.integer('overall_score').defaultTo(50); });
         }
         logger.info('[health] Auto-added missing sub-score columns');
+      }
+      // Independent of the sub-score auto-heal above: the table can be
+      // auto-created WITH payment_score but WITHOUT critical_alert_sent_at, and
+      // the event-driven live-alert claim (event-rescore.js) needs it. Ensure
+      // it regardless so claimCriticalAlert never hits an undefined column.
+      if (!(await db.schema.hasColumn('customer_health_scores', 'critical_alert_sent_at'))) {
+        await db.schema.alterTable('customer_health_scores', t => { t.timestamp('critical_alert_sent_at'); });
       }
     } catch (e) { logger.error('[health] Column check error:', e.message); }
 
