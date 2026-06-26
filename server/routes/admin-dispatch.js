@@ -1176,7 +1176,7 @@ router.get('/:date?', async (req, res, next) => {
         customerName: `${s.first_name} ${s.last_name}`,
         customerId: s.customer_id,
         customerPhone: s.customer_phone,
-        address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
+        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: s.service_type,
         scheduledDate: s.scheduled_date,
