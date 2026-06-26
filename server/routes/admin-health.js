@@ -93,22 +93,20 @@ router.get('/dashboard', async (req, res) => {
       .first().catch(() => null);
     const fleetHealthAvg = Math.round(parseFloat(avgResult?.avg || 50));
 
-    // At-risk count — churn_risk column may not exist, and the current row
-    // may carry either engine's vocabulary: customer-health.js (v3, 2:15AM)
-    // writes low/moderate/high/critical, the customer-intelligence pipeline
-    // (3AM, the later/canonical nightly writer) writes
-    // healthy/watch/at_risk/critical. Accept the at-risk band of both.
+    // At-risk count. A single canonical engine (customer-health.js) now owns
+    // churn_risk with one vocabulary: low / moderate / high / critical. The
+    // at-risk band is high + critical. (Legacy churn_risk_level fallback kept
+    // only for the auto-created-table edge case where churn_risk is absent.)
     let atRiskCount = 0;
     try {
       const atRiskResult = await db('customer_health_scores')
-        .whereIn('churn_risk', ['high', 'critical', 'at_risk'])
+        .whereIn('churn_risk', ['high', 'critical'])
         .count('* as count').first();
       atRiskCount = parseInt(atRiskResult?.count || 0);
     } catch {
-      // churn_risk column may not exist — use churn_risk_level instead
       try {
         const atRiskResult = await db('customer_health_scores')
-          .whereIn('churn_risk_level', ['at_risk', 'critical'])
+          .whereIn('churn_risk_level', ['high', 'critical'])
           .count('* as count').first();
         atRiskCount = parseInt(atRiskResult?.count || 0);
       } catch { /* column doesn't exist */ }
