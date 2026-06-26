@@ -224,6 +224,11 @@ function compactLineItem(item = {}) {
     total: item.totalAfterDiscount ?? item.total ?? null,
     perApp: item.perApp ?? null,
     frequency: item.frequency ?? item.visitsPerYear ?? null,
+    // Recurring foam carries an operator-chosen cadence + tier labor duration;
+    // keep them so accept/render/booking present the sold cadence and reserve a
+    // long-enough slot instead of defaulting to quarterly / the generic window.
+    cadence: item.cadence ?? null,
+    estimatedDurationMinutes: item.estimatedDurationMinutes ?? null,
     quoteRequired: item.quoteRequired || item.requiresManualReview || item.requiresMeasurement || false,
     reason: item.reason || item.manualReviewReason || item.manualReviewReasons?.[0] || null,
   };

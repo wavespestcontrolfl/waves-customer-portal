@@ -9792,14 +9792,34 @@ function foamFrequenciesFromV1Services(services = []) {
     .find((svc) => recurringServiceKey(svc) === 'foam_recurring');
   if (!row) return [];
   const VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
+  const VISITS_TO_CADENCE = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
   const LABELS = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' };
-  const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(row.cadence) ? row.cadence : 'quarterly';
-  const visits = finiteNumberOrNull(row.visitsPerYear ?? row.visits ?? row.frequency) || VISITS[cadence];
+  // Compact engine-backed rows (quote wizard / lead automation) persist name +
+  // frequency but drop `cadence`, so derive it: explicit field → visit count →
+  // the cadence baked into the line name, before defaulting to quarterly. (Check
+  // bi-monthly before monthly — "bimonthly" contains "monthly".)
+  const rawVisits = finiteNumberOrNull(row.visitsPerYear ?? row.visits ?? row.frequency);
+  const nameLc = String(row.name ?? row.displayName ?? row.label ?? '').toLowerCase();
+  const cadenceFromName = /bi-?monthly/.test(nameLc) ? 'bimonthly'
+    : /monthly/.test(nameLc) ? 'monthly'
+    : /quarterly/.test(nameLc) ? 'quarterly'
+    : null;
+  const cadenceCandidate = row.cadence
+    || row.frequencyKey
+    || (rawVisits != null ? VISITS_TO_CADENCE[rawVisits] : null)
+    || cadenceFromName;
+  const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(cadenceCandidate) ? cadenceCandidate : 'quarterly';
+  const visits = rawVisits || VISITS[cadence];
   const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
   const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.pv);
-  const annual = monthlyBase != null
-    ? roundMonthly(monthlyBase * 12)
-    : (perTreatmentBase != null && visits ? roundMonthly(perTreatmentBase * visits) : null);
+  // Prefer the authoritative sold annual (e.g. engine persists annual:1108,
+  // monthly:92.33) so accept/invoice lock the engine price, not 92.33×12=1107.96.
+  const annualBase = finiteNumberOrNull(row.annual ?? row.ann);
+  const annual = annualBase != null
+    ? annualBase
+    : (monthlyBase != null
+      ? roundMonthly(monthlyBase * 12)
+      : (perTreatmentBase != null && visits ? roundMonthly(perTreatmentBase * visits) : null));
   const monthly = monthlyBase != null
     ? monthlyBase
     : (annual != null ? roundMonthly(annual / 12) : null);
@@ -11521,6 +11541,7 @@ module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
+module.exports.foamFrequenciesFromEngineResult = foamFrequenciesFromEngineResult;
 module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.attachPublicPricingContract = attachPublicPricingContract;
