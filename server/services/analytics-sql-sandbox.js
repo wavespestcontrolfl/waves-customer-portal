@@ -95,10 +95,14 @@ async function runReadOnlyAnalyticsQuery(rawSql, { rowCap = 1000, timeoutMs = 50
   let rows = [];
   let fields = [];
   await db.transaction(async (trx) => {
-    // Order matters: lock read-only first, then drop to the least-privilege role
-    // (so the query is privilege-checked by Postgres), then bound the clock.
+    // Order matters: lock read-only first, then bound the clock + pin the
+    // timezone (Railway runs UTC; the prompt tells the model dates are Eastern,
+    // so date_trunc/::date/current_date must bucket in ET or "today"/monthly
+    // charts shift rows across the midnight-ET boundary), then drop to the
+    // least-privilege role so the query is privilege-checked by Postgres.
     await trx.raw('SET TRANSACTION READ ONLY');
     await trx.raw(`SET LOCAL statement_timeout = ${Number(timeoutMs) || 5000}`);
+    await trx.raw("SET LOCAL TIME ZONE 'America/New_York'");
     await trx.raw(`SET LOCAL ROLE ${ANALYTICS_ROLE}`);
     const res = await trx.raw(wrapped);
     rows = res.rows || [];

@@ -1734,27 +1734,36 @@ router.post('/widgets', requireAiChartsEnabled, async (req, res, next) => {
   try {
     const { title, prompt, sql, chartSpec } = req.body || {};
     if (!title || !sql || !chartSpec) return res.status(400).json({ error: 'title, sql and chartSpec are required.' });
-    const countRow = await db('user_dashboard_widgets')
-      .where('owner_technician_id', req.technicianId).count({ c: '*' }).first();
-    if (parseInt(countRow?.c || 0, 10) >= MAX_WIDGETS_PER_USER) {
-      return res.status(409).json({ error: `You can pin up to ${MAX_WIDGETS_PER_USER} charts. Remove one first.` });
-    }
     let cleanSql;
     try {
       cleanSql = validateAnalyticsSql(sql);
     } catch (err) {
       return res.status(400).json({ error: err instanceof SqlGuardError ? err.message : 'Invalid query.' });
     }
-    const [row] = await db('user_dashboard_widgets')
-      .insert({
-        owner_technician_id: req.technicianId,
-        title: String(title).slice(0, 200),
-        prompt: prompt ? String(prompt).slice(0, 500) : null,
-        sql: cleanSql,
-        chart_spec: JSON.stringify(chartSpec),
-        updated_at: new Date(),
-      })
-      .returning(['id', 'title', 'prompt', 'chart_spec']);
+    // Enforce the cap atomically: a per-owner advisory lock serializes concurrent
+    // pins (double-submit / scripted parallel POSTs) so the count+insert can't
+    // race past MAX_WIDGETS_PER_USER and blow up GET /widgets fan-out.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`aiwidget:${req.technicianId}`]);
+      const countRow = await trx('user_dashboard_widgets')
+        .where('owner_technician_id', req.technicianId).count({ c: '*' }).first();
+      if (parseInt(countRow?.c || 0, 10) >= MAX_WIDGETS_PER_USER) return { capped: true };
+      const [row] = await trx('user_dashboard_widgets')
+        .insert({
+          owner_technician_id: req.technicianId,
+          title: String(title).slice(0, 200),
+          prompt: prompt ? String(prompt).slice(0, 500) : null,
+          sql: cleanSql,
+          chart_spec: JSON.stringify(chartSpec),
+          updated_at: new Date(),
+        })
+        .returning(['id', 'title', 'prompt', 'chart_spec']);
+      return { row };
+    });
+    if (result.capped) {
+      return res.status(409).json({ error: `You can pin up to ${MAX_WIDGETS_PER_USER} charts. Remove one first.` });
+    }
+    const { row } = result;
     res.status(201).json({ widget: { id: row.id, title: row.title, prompt: row.prompt, chartSpec: row.chart_spec } });
   } catch (err) {
     logger.error(`[admin-dashboard] POST /widgets failed: ${err.message}`);
