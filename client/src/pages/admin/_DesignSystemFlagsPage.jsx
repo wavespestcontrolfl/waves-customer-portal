@@ -41,6 +41,8 @@ const KNOWN_FLAGS = [
   // newsletter-v1 retired — newsletter rolled out at /admin/newsletter
   // with Compose/History/Subscribers/Automations consolidated under it.
   "ff_invoice_send_receipt",
+  "ff_invoice_ai_summary", // one-tap AI visit summary on the invoice (PR #2107)
+  "ff_invoice_email_message", // AI thank-you message in the invoice email (PR #2111)
   "visual_service_notes_enabled",
   "tech_social_enabled", // gates the Tech portal "Social Post" tile (UI side of TECH_SOCIAL_ENABLED)
 ];
