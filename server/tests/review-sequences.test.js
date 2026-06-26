@@ -149,9 +149,55 @@ describe('review sequences — cadence engine', () => {
     expect(seq.stop_reason).toBe('responded');
   });
 
+  test('a cadence stops once the lifetime 3-ask cap is reached', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'cap1', first_name: 'Max', last_name: 'A', phone: '+19410000030', nearest_location_id: 'venice' }],
+      review_sequences: [{
+        id: 'seqCap', customer_id: 'cap1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      // 3 delivered review asks already exist (e.g. 2 prior + the cadence Day-0).
+      review_requests: [
+        { customer_id: 'cap1', channel: 'sms', sms_sent_at: new Date('2026-06-01') },
+        { customer_id: 'cap1', channel: 'sms', sms_sent_at: new Date('2026-06-10') },
+        { customer_id: 'cap1', sequence_id: 'seqCap', channel: 'sms', sms_sent_at: new Date('2026-06-20') },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('capped');
+  });
+
+  test('a cadence stops on a non-promoter draft score tap (no submit)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'lo1', first_name: 'Lo', last_name: 'W', phone: '+19410000031', nearest_location_id: 'parrish' }],
+      review_sequences: [{
+        id: 'seqLo', customer_id: 'lo1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      // Day-0 touch: a detractor tapped score 3 but never hit submit (no submitted_at).
+      review_requests: [{ id: 'rrLo', sequence_id: 'seqLo', customer_id: 'lo1', channel: 'sms', sms_sent_at: new Date(Date.now() - 3 * 86400000), score: 3, category: 'detractor' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('responded');
+  });
+
   test('the final email step completes the sequence', async () => {
     const mock = makeMock({
       customers: [{ id: 'cust-3', first_name: 'Lee', last_name: 'P', email: 'lee@x.com', nearest_location_id: 'sarasota' }],
+      // Email fails closed without a prefs row, so model the backfilled row.
+      notification_prefs: [{ customer_id: 'cust-3', review_request: true, email_enabled: true, sms_enabled: true }],
       review_sequences: [{
         id: 'seq-3', customer_id: 'cust-3', status: 'active', current_step: 2, touches_sent: 2,
         plan: JSON.stringify([

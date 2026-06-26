@@ -544,7 +544,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         const inCooldown = ask.lastAsked ? (new Date(ask.lastAsked).getTime() >= thirtyDaysAgo) : false;
         const atCap = ask.askCount >= 3;
         const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed && !emailPreferred;
-        const emailable = !!email && !reviewOptedOut && !emailPrefOff;
+        // Email fails closed like the sender: requires an existing prefs row
+        // (parity with SMS's NO_CONSENT_RECORD on a missing row).
+        const emailable = !!email && !!prefs && !reviewOptedOut && !emailPrefOff;
         const sequence = sequenceMap[c.id] || null;
         // `sendable` gates the SMS-only manual Send; `cadenceable` gates
         // Start-Cadence (can use email). A customer who turned OFF review SMS but

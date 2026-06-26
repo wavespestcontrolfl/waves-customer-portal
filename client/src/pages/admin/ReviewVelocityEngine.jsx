@@ -2003,12 +2003,24 @@ function CustomerDrawer({
     if (tpl) setMsg(hydrate(tpl.body, { ...c, reviewUrl: "{review_url}" }));
   };
 
+  // A no-link private check-in (resolution_check / satisfaction_confirm) bypasses
+  // the review ask cap/cooldown on the server, so the client must allow it even
+  // when c.sendable is false (those are review-ask-only blockers) — it just needs
+  // an SMS-reachable phone.
+  const selectedTplObj = TEMPLATES.find((t) => t.id === selectedTpl);
+  const selectedIsNoLink = !!(selectedTplObj && !selectedTplObj.body.includes("{review_url}"));
+  const canSendSelected = selectedIsNoLink ? !!c.phone : c.sendable;
+
   // Sends the chosen template / edited body through the server's NPS rate-page
   // flow (audit O2). The server resolves {review_url} to the tokenized /rate
   // link, so the happy→Google / issue→private gate is preserved.
   const sendSms = async () => {
-    if (!c.sendable) {
-      showToast(eligibilityLabel(c.eligibilityReasons) || "Not eligible to send");
+    if (!canSendSelected) {
+      showToast(
+        selectedIsNoLink
+          ? "No phone on file for a check-in"
+          : eligibilityLabel(c.eligibilityReasons) || "Not eligible to send",
+      );
       return;
     }
     setSending(true);
@@ -2358,7 +2370,7 @@ function CustomerDrawer({
               {" {review_url}"} resolves to a rating link that routes happy
               customers to Google and issues to a private recovery inbox.
             </div>{" "}
-            {!c.sendable && (
+            {!c.sendable && !selectedIsNoLink && (
               <div
                 style={{
                   fontSize: 11,
@@ -2370,14 +2382,23 @@ function CustomerDrawer({
                 Not sendable: {eligibilityLabel(c.eligibilityReasons)}
               </div>
             )}
+            {!c.sendable && selectedIsNoLink && (
+              <div style={{ fontSize: 11, color: C.t2, marginTop: 6 }}>
+                Private check-in — bypasses the review ask cap/cooldown.
+              </div>
+            )}
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
               {" "}
               <Btn
                 variant="success"
                 onClick={sendSms}
-                disabled={sending || !c.sendable}
+                disabled={sending || !canSendSelected}
               >
-                {sending ? "Sending…" : "Send Review Request"}
+                {sending
+                  ? "Sending…"
+                  : selectedIsNoLink
+                    ? "Send Check-In"
+                    : "Send Review Request"}
               </Btn>{" "}
               <Btn
                 variant="primary"

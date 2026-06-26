@@ -1230,11 +1230,26 @@ const ReviewService = {
     const reviewBlocked = !!prefs && prefs.review_request === false;
     const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
     const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
+    // Hard suppression (DNC / wrong-number) on the phone — if the SMS block is
+    // suppression-only, the cadence should fall back to email rather than stall.
+    // sendCustomerMessage would also block it, but checking here lets the channel
+    // resolver pick email (matching the candidate list's sms_suppressed → email).
+    let phoneSuppressed = false;
+    if (contact.phone) {
+      try {
+        const sup = await db("messaging_suppression").where({ phone: contact.phone, active: true }).first();
+        phoneSuppressed = !!sup;
+      } catch {
+        /* table may not exist → treat as not suppressed */
+      }
+    }
     // SMS consent is re-checked downstream in sendCustomerMessage (fails closed
-    // there), so a prefs-read blip can still attempt SMS. Email has NO
-    // downstream consent gate, so fail CLOSED on a prefs-lookup failure.
-    const canSms = !!contact.phone && !smsBlocked;
-    const canEmail = !!contact.email && !emailBlocked && !prefsLookupFailed;
+    // there), so a prefs-read blip can still attempt SMS. Email has NO downstream
+    // consent gate, so it fails CLOSED: it requires an existing prefs row with
+    // review + email enabled (parity with SMS's NO_CONSENT_RECORD on a missing
+    // row) and a clean prefs read.
+    const canSms = !!contact.phone && !smsBlocked && !phoneSuppressed;
+    const canEmail = !!contact.email && !!prefs && !emailBlocked && !prefsLookupFailed;
 
     // A no-link private check-in (resolution_check / satisfaction_confirm) must
     // NEVER route to email — the only email template is review_request_email,
@@ -1485,15 +1500,17 @@ const ReviewService = {
       return { started: false, reason: "cooldown" };
     }
 
-    // Supersede any already-queued ask (post-service auto, or a quiet-hours
+    // Supersede any already-queued ASK (post-service auto, or a quiet-hours
     // deferral): otherwise processScheduled() would fire it AND the cadence's
-    // Day-0 touch → a duplicate review request. The cadence takes over outreach.
+    // Day-0 touch → a duplicate review request. Only ASKS are superseded — a
+    // queued private no-link check-in (ASK_TOUCH_SQL excludes it) is left alone.
     // Fail CLOSED — if this can't run, abort the start (no .catch → it throws and
     // the route records not-started) rather than risk a stranded duplicate ask.
     await db("review_requests")
       .where({ customer_id: customerId, status: "pending" })
       .whereNull("sms_sent_at")
       .whereNotNull("scheduled_for")
+      .whereRaw(ASK_TOUCH_SQL)
       .update({ status: "suppressed" });
 
     const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
@@ -1541,7 +1558,20 @@ const ReviewService = {
       throw err;
     }
 
-    const firstTouch = await this._runSequenceStep(sequence.id);
+    let firstTouch;
+    try {
+      firstTouch = await this._runSequenceStep(sequence.id);
+    } catch (err) {
+      // The Day-0 touch threw during setup (insert / short-link / send). The
+      // step's own catch restored next_run_at for a CRON retry, but for a
+      // START the operator is told it failed — so DON'T leave an active row the
+      // cron would fire later. Stop it and report not-started.
+      await db("review_sequences")
+        .where({ id: sequence.id, status: "active" })
+        .update({ status: "stopped", stop_reason: "start_failed", next_run_at: null, completed_at: new Date(), updated_at: new Date() })
+        .catch(() => {});
+      return { started: false, reason: "send_failed" };
+    }
     const refreshed = await db("review_sequences").where({ id: sequence.id }).first();
     // If the immediate first touch stopped the cadence (no contact, just opted
     // out, already reviewed), report it as NOT started so the route doesn't
@@ -1594,8 +1624,29 @@ const ReviewService = {
           .whereNotNull("rated_at")
           .first()
           .catch(() => null);
-    if (submitted || rated) return stop("responded");
+    // Also catch a NON-PROMOTER draft score tap — /rate/:token/score stores
+    // score + category WITHOUT submitted_at, and the touch is followup_sent=true
+    // so the legacy low-score path won't catch it either. A detractor/passive
+    // who tapped a low score must not keep getting Day-3/7 review asks.
+    const lowDraft = submitted || rated
+      ? null
+      : await db("review_requests")
+          .where({ sequence_id: seq.id })
+          .whereNotNull("score")
+          .whereNot("category", "promoter")
+          .first()
+          .catch(() => null);
+    if (submitted || rated || lowDraft) return stop("responded");
     if (seq.current_step >= plan.length) return stop("completed");
+    // Keep the whole cadence within the lifetime 3-ask cap: a customer who had
+    // 1-2 prior asks must not reach 4-5 via the cadence. Delivered ask touches
+    // (incl. this cadence's own) are counted, so the sequence stops once 3 is hit.
+    try {
+      const askStats = await this.getDeliveredAskStats(seq.customer_id);
+      if (askStats.count >= 3) return stop("capped");
+    } catch {
+      /* on a stats blip, let the per-send guards apply */
+    }
     try {
       const prefs = await db("notification_prefs").where({ customer_id: seq.customer_id }).first();
       if (prefs && prefs.review_request === false) return stop("opted_out");
