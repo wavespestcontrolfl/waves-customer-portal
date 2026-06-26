@@ -384,13 +384,15 @@ router.get('/', dashboardCache, async (req, res, next) => {
 
 // GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
 // ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv
-async function computeCoreKpis(period = 'mtd') {
+async function computeCoreKpis(period = 'mtd', range = null) {
     const now = new Date();
     const todayStr = etDateString(now);
 
     // Shared period resolver (periodStartDate) — same windows the attribution
-    // panels use; every window ends today.
-    const start = periodStartDate(period);
+    // panels use; every window ends today. A custom range overrides only the
+    // START (a custom lookback through today), so every metric's "as of now"
+    // numerator stays valid — no historical reconstruction needed.
+    const start = (range && range.from) || periodStartDate(period);
 
     // Service completion rate — scheduled_services in window
     const svcAgg = await db('scheduled_services')
@@ -845,8 +847,8 @@ async function computeCoreKpis(period = 'mtd') {
     } catch (err) { logger.error(`[admin-dashboard] call-to-booking query failed: ${err.message}`); }
 
     return {
-      period,
-      periodLabel: periodLabel(period),
+      period: range ? 'custom' : period,
+      periodLabel: range ? `Since ${start}` : periodLabel(period),
       service: {
         completionRate,
         scheduled: svcDenom, // non-cancelled, so the tile's "completed/scheduled" matches the rate
@@ -899,7 +901,7 @@ async function computeCoreKpis(period = 'mtd') {
 // cron calls, so the live tiles and the recorded trend never diverge.
 router.get('/core-kpis', dashboardCache, async (req, res, next) => {
   try {
-    res.json(await computeCoreKpis(String(req.query.period || 'mtd').toLowerCase()));
+    res.json(await computeCoreKpis(String(req.query.period || "mtd").toLowerCase(), parseCustomRange(req.query)));
   } catch (err) {
     logger.error(`[admin-dashboard] /core-kpis failed: ${err.message}`);
     next(err);
@@ -1434,7 +1436,20 @@ router.get('/today-completion', dashboardCache, async (req, res, next) => {
 // Periods accepted: today | wtd | mtd | ytd. Defaults to mtd.
 // ─────────────────────────────────────────────────────────────────────
 
-function resolveAttributionWindow(period) {
+// Custom lookback: an operator-chosen START date through today (?from=YYYY-MM-DD).
+// Window end is always today, so every "as of now" metric stays valid — no
+// historical end. Null unless `from` is a valid ET date not in the future.
+function parseCustomRange(query) {
+  const from = typeof query.from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : null;
+  if (!from) return null;
+  const today = etDateString();
+  return { from: from > today ? today : from };
+}
+
+function resolveAttributionWindow(period, range) {
+  if (range && range.from) {
+    return { from: range.from, to: etDateString(), label: `Since ${range.from}` };
+  }
   return { from: periodStartDate(period), to: etDateString(), label: periodLabel(period) };
 }
 
@@ -1445,7 +1460,7 @@ function resolveAttributionWindow(period) {
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     // Direct equality match — the 20260428000003 backfill normalized
     // every call_log.to_phone to E.164, and admin-import-sheets.js +
     // the Twilio webhooks both write E.164 going forward, so the
@@ -1501,7 +1516,7 @@ router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
 // before customer conversion). Joined to lead_sources for the human label.
 router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(
         db('leads as l')
@@ -1618,7 +1633,7 @@ router.get('/leads-by-source', dashboardCache, async (req, res, next) => {
 // shop or has the web caught up?". Reads leads.first_contact_channel.
 router.get('/channel-mix', dashboardCache, async (req, res, next) => {
   try {
-    const win = resolveAttributionWindow(req.query.period);
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
     const rows = await excludeInternalLeads(
       applyETTimestampWindow(db('leads'), 'first_contact_at', win.from, win.to)
     ).select(
