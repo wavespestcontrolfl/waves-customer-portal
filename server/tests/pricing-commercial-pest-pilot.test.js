@@ -1,10 +1,7 @@
 const { generateEstimate } = require('../services/pricing-engine');
 const { priceCommercialPestPilot } = require('../services/pricing-engine/service-pricing');
 const { COMMERCIAL_PEST_PILOT } = require('../services/pricing-engine/constants');
-const {
-  normalizeProposal,
-  computeProposalTotals,
-} = require('../services/estimate-proposal');
+const { normalizeProposal } = require('../services/estimate-proposal');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
 function commercialInput(overrides = {}) {
@@ -194,64 +191,23 @@ describe('priceCommercialPestPilot through generateEstimate', () => {
   });
 });
 
-describe('proposal synthesizes from the SAVED legacy spec-item shape', () => {
-  test('an admin-saved pilot estimate still shows the suggested price + FL tax', () => {
-    // Admin save persists mapV1ToLegacyShape output under estimate_data.result —
-    // there is no top-level lineItems array.
+describe('the pilot suggestion is advisory — it never auto-authors a billable proposal', () => {
+  // Commercial pilot estimates are quote-required, so their saved numbers skip
+  // the server-authoritative recompute that priced estimates get. To avoid
+  // promoting an unverified/stale number into a billable proposal, the synthesized
+  // fallback proposal must NOT pull the pilot's suggested price; the operator
+  // authors the commercial proposal with a verified price + tax (matching every
+  // other commercial proposal). The suggestion stays operator-facing on the
+  // estimate card (see the line-reason test above).
+  test('the synthesized fallback proposal omits the quote-required pilot price', () => {
     const result = mapV1ToLegacyShape(generateEstimate(commercialInput()));
     const proposal = normalizeProposal({
       address: '9 Plaza Dr',
       estimate_data: JSON.stringify({ result }),
     });
-
-    expect(proposal.taxRate).toBeCloseTo(0.07, 4);
-    // Emitted at the pilot's real cadence (quarterly $165/visit), not flattened
-    // to monthly — so proposal-win invoices the correct first service period.
-    expect(proposal.buildings[0].lineItems).toContainEqual(expect.objectContaining({
-      description: 'Commercial Pest Control',
-      taxable: true,
-      frequency: 'quarterly',
-      unitPrice: 165,
-    }));
-    const totals = computeProposalTotals(proposal);
-    expect(totals.totalTax).toBeCloseTo(46.2, 2); // 660 annual × 7%
-  });
-
-  test('a manual-quote commercial selection alongside the pilot is surfaced, not dropped', () => {
-    // Pilot pest + manual-quote lawn on the same commercial property.
-    const result = mapV1ToLegacyShape(generateEstimate({
-      propertyType: 'commercial', isCommercial: true,
-      buildingSqFt: 5000, stories: 1, lotSqFt: 20000, features: {},
-      services: {
-        pest: { frequency: 'quarterly', commercialPricingMode: 'small_commercial_pilot' },
-        lawn: { track: 'st_augustine', tier: 'enhanced', commercialPricingMode: 'small_commercial_pilot' },
-      },
-    }));
-    const proposal = normalizeProposal({ address: 'x', estimate_data: JSON.stringify({ result }) });
-    const rows = proposal.buildings[0].lineItems;
-    // Pilot pest priced; manual-quote lawn surfaced as a $0 "price before sending" row.
-    expect(rows).toContainEqual(expect.objectContaining({ description: 'Commercial Pest Control', unitPrice: 165 }));
-    expect(rows.some((r) => /Commercial Lawn Treatment — manual quote/.test(r.description) && r.unitPrice === 0)).toBe(true);
-  });
-});
-
-describe('customer-facing proposal applies FL commercial tax to the suggested pilot price', () => {
-  test('synthesized proposal renders the readable label, marks it taxable, defaults the FL rate', () => {
-    const estimate = generateEstimate(commercialInput());
-    const pest = estimate.lineItems.find((l) => l.service === 'commercial_pest');
-
-    const proposal = normalizeProposal({
-      address: '123 Commerce Way',
-      estimate_data: JSON.stringify({ lineItems: [pest] }),
-    });
-    expect(proposal.taxRate).toBeCloseTo(0.07, 4);
-    // Readable label, not the raw service key (Codex P3).
-    expect(proposal.buildings[0].lineItems[0].description).toBe('Commercial Pest Control');
-
-    const totals = computeProposalTotals(proposal);
-    expect(totals.hasTax).toBe(true);
-    expect(totals.taxableAnnualRecurring).toBe(660); // 55/mo × 12
-    expect(totals.totalTax).toBeCloseTo(46.2, 2);
-    expect(totals.firstYearTotal).toBeCloseTo(706.2, 2);
+    const descriptions = proposal.buildings.flatMap((b) => b.lineItems.map((li) => li.description));
+    expect(descriptions.some((d) => /commercial pest/i.test(d))).toBe(false);
+    // No auto-defaulted commercial tax rate either — the operator/CPA sets it.
+    expect(proposal.taxRate).toBe(0);
   });
 });

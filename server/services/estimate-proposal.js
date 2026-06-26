@@ -21,13 +21,6 @@
 
 const FREQUENCIES = ['monthly', 'quarterly', 'bimonthly', 'annual', 'one_time'];
 
-// FL nonresidential pest control is taxable (6% state + ~1% county surtax).
-// Mirrors the tax-calculator default for commercial when a county can't be
-// inferred. Used only to pre-fill the synthesized fallback proposal so a priced
-// commercial line shows tax without the operator hand-typing a rate; the
-// operator can still override the rate when authoring the proposal.
-const DEFAULT_COMMERCIAL_TAX_RATE = 0.07;
-
 // Occurrences per year for each recurring cadence. one_time is handled
 // separately (it never contributes to the recurring/annualized totals).
 const OCCURRENCES_PER_YEAR = {
@@ -111,94 +104,27 @@ function parseEstimateData(estimateData) {
 function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
   const lineItems = [];
   const engineLines = Array.isArray(estimateData?.sendSnapshot?.pricingBundle?.lineItems)
-    ? [...estimateData.sendSnapshot.pricingBundle.lineItems]
+    ? estimateData.sendSnapshot.pricingBundle.lineItems
     : Array.isArray(estimateData?.lineItems)
-    ? [...estimateData.lineItems]
+    ? estimateData.lineItems
     : [];
 
-  // An admin-saved estimate persists the legacy `mapV1ToLegacyShape` output, not
-  // a top-level `lineItems` array, so the small-commercial pilot line lives in
-  // `result.(oneTime.)specItems`. Pull the commercial pilot line(s) from there
-  // (by service key, deduped) so a saved pilot estimate still synthesizes a
-  // proposal with the suggested price + tax instead of an empty $0 PDF.
-  const specSources = [
-    ...(Array.isArray(estimateData?.result?.oneTime?.specItems) ? estimateData.result.oneTime.specItems : []),
-    ...(Array.isArray(estimateData?.result?.specItems) ? estimateData.result.specItems : []),
-    ...(Array.isArray(estimateData?.engineResult?.oneTime?.specItems) ? estimateData.engineResult.oneTime.specItems : []),
-    ...(Array.isArray(estimateData?.engineResult?.specItems) ? estimateData.engineResult.specItems : []),
-  ];
-  // Pull ALL commercial selections from the saved spec-item shape — both the
-  // pilot's suggested-price pest line AND any unpriced manual-quote line (e.g.
-  // a commercial LAWN selected alongside). Surfacing the unpriced lines (as $0
-  // "manual quote" rows below) keeps them from being silently dropped when the
-  // operator opens, saves, and sends the synthesized proposal.
-  for (const s of specSources) {
-    const svc = String(s?.service || '');
-    if (svc.startsWith('commercial_') && !engineLines.some((l) => l.service === svc)) {
-      engineLines.push(s);
-    }
-  }
-
-  // A taxable commercial line (e.g. the small-commercial pest pilot) pre-fills a
-  // default FL commercial tax rate so the synthesized PDF shows tax. Residential
-  // lines stay non-taxable and the rate stays 0.
-  let hasTaxableCommercialLine = false;
-
   for (const line of engineLines) {
-    const taxable = line.taxable === true;
-    const description = line.displayName || line.name || line.label || line.service;
-
-    // Small-commercial pilot rows carry a per-visit suggestion at a real cadence
-    // (`suggestedPerApp` at `frequency`). Emit the row AT THAT CADENCE — not
-    // flattened to monthly — so the annualized total is unchanged but
-    // proposal-win invoices the correct first service period (a quarterly
-    // pilot's first invoice is one quarterly visit, not one month).
-    const pilotPerVisit = num(line.suggestedPerApp);
-    if (pilotPerVisit > 0) {
-      if (taxable) hasTaxableCommercialLine = true;
-      lineItems.push(normalizeLineItem({
-        description: description || 'Recurring service',
-        unitPrice: pilotPerVisit,
-        frequency: line.frequency || 'quarterly',
-        taxable,
-      }));
-      continue;
-    }
-
-    // Engine recurring lines carry `.monthly`/`.annual`; persisted bundles may
-    // use `monthlyPrice`/`monthly_price`. Accept all so a priced/suggested
-    // commercial line is not silently dropped.
-    const monthly = num(
-      line.monthlyPrice ?? line.monthly_price ?? line.monthly
-      ?? line.suggestedMonthly
-      ?? (num(line.annual) > 0 ? num(line.annual) / 12 : 0)
-      ?? (num(line.suggestedAnnual) > 0 ? num(line.suggestedAnnual) / 12 : 0),
-    );
+    const monthly = num(line.monthlyPrice ?? line.monthly_price);
     const oneTime = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
-    if (taxable && (monthly > 0 || oneTime > 0)) hasTaxableCommercialLine = true;
     if (monthly > 0) {
       lineItems.push(normalizeLineItem({
-        description: description || 'Recurring service',
+        description: line.displayName || line.name || line.service || 'Recurring service',
         unitPrice: monthly,
         frequency: 'monthly',
-        taxable,
+        taxable: false,
       }));
     } else if (oneTime > 0) {
       lineItems.push(normalizeLineItem({
-        description: description || 'One-time service',
+        description: line.displayName || line.name || line.service || 'One-time service',
         unitPrice: oneTime,
         frequency: 'one_time',
-        taxable,
-      }));
-    } else if (String(line.service || '').startsWith('commercial_')) {
-      // Unpriced commercial selection (a manual-quote line with no suggested
-      // price). Surface it as a $0 row the operator must price before sending,
-      // rather than dropping it silently from the synthesized proposal.
-      lineItems.push(normalizeLineItem({
-        description: `${description || 'Commercial service'} — manual quote (enter price before sending)`,
-        unitPrice: 0,
-        frequency: 'monthly',
-        taxable,
+        taxable: false,
       }));
     }
   }
@@ -219,9 +145,6 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
   return {
     enabled: false,
     synthesized: true,
-    ...(hasTaxableCommercialLine
-      ? { taxRate: DEFAULT_COMMERCIAL_TAX_RATE, taxLabel: 'FL sales tax (commercial)' }
-      : {}),
     buildings: [{ name: estimate.address || 'Service location', note: null, lineItems }],
   };
 }
