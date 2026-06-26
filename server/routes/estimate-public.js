@@ -8692,7 +8692,13 @@ function acceptanceServiceLists(estData) {
 
   return {
     recurringSvcList: uniqueRecurringServiceRows([
-      ...recurringServicesWithSupplements(result),
+      // Engine-invocation estimates (quote wizard / IB agent drafts) persist the
+      // priced lines under estData.engineResult with no v1-mapped
+      // result.recurring.services, so source recurring rows from engineResult too
+      // (same `result || engineResult || estData` idiom used elsewhere in this
+      // file) — otherwise a foam-only engine-backed accept yields an empty
+      // recurring list and EstimateConverter schedules/seeds/invoices nothing.
+      ...recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
       ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
     ]),
     oneTimeList,
@@ -8714,6 +8720,14 @@ function withSupplementedRecurringServices(estData) {
   if (!estData || typeof estData !== 'object') return estData;
   const hasResult = estData.result && typeof estData.result === 'object';
   const result = hasResult ? estData.result : estData;
+  // Engine-invocation estimates have no v1-mapped result; their priced recurring
+  // lines live under estData.engineResult.lineItems. Pull those in so foam (and
+  // any other engine-backed recurring service) is supplemented onto the estData
+  // the accept path reads, matching the result|engineResult fallback used across
+  // this file.
+  const engineResult = !hasResult && estData.engineResult && typeof estData.engineResult === 'object'
+    ? estData.engineResult
+    : null;
   const rootRecurring = hasResult && estData.recurring && typeof estData.recurring === 'object'
     ? estData.recurring
     : null;
@@ -8726,6 +8740,7 @@ function withSupplementedRecurringServices(estData) {
     : null;
   const services = uniqueRecurringServiceRows([
     ...recurringServicesWithSupplements(result),
+    ...(engineResult ? recurringServicesWithSupplements(engineResult) : []),
     ...(rootResult ? recurringServicesWithSupplements(rootResult) : []),
   ]);
   if (!services.length) return estData;
