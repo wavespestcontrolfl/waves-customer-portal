@@ -2523,6 +2523,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/7 SMS+email).
+  // Advances operator-started review_sequences whose next_run_at has passed,
+  // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
+  // preview/dev env with live creds can't text/email real customers. Quiet
+  // hours, suppression, and per-customer prefs still apply at the send site.
+  // =========================================================================
+  cron.schedule('*/30 * * * *', async () => {
+    if (!isEnabled('reviewSequences')) return;
+    try {
+      await runExclusive('review-sequences', async () => {
+        const ReviewService = require('./review-request');
+        const result = await ReviewService.processReviewSequences();
+        if (result.sent > 0 || result.completed > 0) {
+          logger.info(`Review sequences: ${result.sent} sent, ${result.completed} completed, ${result.stopped} stopped`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Review sequence processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUNDAY 6AM — Agronomic Wiki refresh (stale pages + seasonal)
   // =========================================================================
   cron.schedule('0 6 * * 0', async () => {

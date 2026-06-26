@@ -11,6 +11,7 @@ const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { publicPortalUrl } = require("../utils/portal-url");
+const OUTREACH = require("./review-outreach-templates");
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -356,18 +357,37 @@ const ReviewService = {
     });
     const techName = request.tech_name || "Our team";
 
-    // Body sourced from sms_templates.review_request. If the row is
-    // missing/disabled, requeue instead of falling back to inline copy.
+    // Body source: when the row carries a chosen outreach template_key (manual
+    // Review Outreach send, or a cadence touch), render that template so a
+    // deferred/retried send keeps the operator's chosen copy instead of
+    // silently reverting to the canonical message. Otherwise fall back to the
+    // canonical sms_templates.review_request. If neither resolves, requeue.
     let body = null;
-    try {
-      const tpl = require("../routes/admin-sms-templates");
-      body = await tpl.getTemplate("review_request", {
-        first_name: contact.name || customer.first_name || "",
-        review_url: reviewUrl,
-        tech_name: techName,
-      });
-    } catch {
-      /* template lookup failed → null */
+    const outreachTpl = request.template_key
+      ? OUTREACH.getOutreachTemplate(request.template_key)
+      : null;
+    if (outreachTpl) {
+      body = OUTREACH.renderOutreachBody(
+        outreachTpl.body,
+        {
+          first: contact.name || customer.first_name || "",
+          tech: techName,
+          service_type: request.service_type || "service",
+          review_url: reviewUrl,
+        },
+        { requireLink: outreachTpl.body.includes("{review_url}") },
+      );
+    } else {
+      try {
+        const tpl = require("../routes/admin-sms-templates");
+        body = await tpl.getTemplate("review_request", {
+          first_name: contact.name || customer.first_name || "",
+          review_url: reviewUrl,
+          tech_name: techName,
+        });
+      } catch {
+        /* template lookup failed → null */
+      }
     }
     if (!body) {
       const retryAt = await retryReviewRequestAfterTemplateMiss(requestId);
@@ -864,6 +884,12 @@ const ReviewService = {
       .whereNotNull("scheduled_for")
       .where("scheduled_for", "<=", new Date())
       .whereNull("sms_sent_at")
+      // Never SMS-send an email-channel cadence touch. Email touches are
+      // re-driven by processReviewSequences via review_sequences.next_run_at,
+      // not this SMS scheduler.
+      .where(function () {
+        this.where("channel", "sms").orWhereNull("channel");
+      })
       .whereNotExists(function () {
         this.select(1)
           .from("customers")
@@ -1127,6 +1153,575 @@ const ReviewService = {
       );
     }
     return { sent, suppressed, internalFollowups };
+  },
+
+  // ════════════════════════════════════════════════════════════════
+  // OUTREACH — manual sends + multi-touch cadence (Review Outreach tab)
+  // ════════════════════════════════════════════════════════════════
+
+  /**
+   * Send a single review-ask "touch" on SMS or email, recording it in
+   * review_requests with channel + template + sequence linkage so it flows
+   * through the same NPS rate page, suppression, and analytics as every other
+   * ask. Used by the manual Review Outreach send AND by each cadence step.
+   *
+   * The chosen template/body actually sends (audit O2): the {review_url}
+   * placeholder always resolves to the tokenized /rate page, preserving the
+   * happy→Google / issue→private gate on both channels.
+   *
+   * @returns {{ ok, sent?, deferred?, blocked?, terminal?, retryable?,
+   *   reason?, code?, channel?, requestId?, nextAllowedAt? }}
+   */
+  async sendOutreachTouch({
+    customer,
+    channel = "sms",
+    templateId = null,
+    body: customBody = null,
+    locationId,
+    techName,
+    serviceType,
+    serviceDate,
+    serviceRecordId = null,
+    sequenceId = null,
+    sequenceStep = null,
+    triggeredBy = "admin",
+    expiresAt,
+    manageRetryVia = "cron",
+  }) {
+    if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
+    if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
+    if (customer.has_left_google_review) {
+      return { ok: false, reason: "already_reviewed", terminal: true };
+    }
+
+    const { getServiceContact } = require("./customer-contact");
+    const contact = getServiceContact(customer);
+
+    // Resolve the actual channel from intent + available contact info.
+    let actualChannel = channel === "email" ? "email" : "sms";
+    if (actualChannel === "sms" && !contact.phone) actualChannel = contact.email ? "email" : null;
+    if (actualChannel === "email" && !contact.email) actualChannel = contact.phone ? "sms" : null;
+    if (!actualChannel) return { ok: false, reason: "no_contact", terminal: true };
+
+    // Email opt-out parity — the email library suppresses on email_suppressions
+    // but does NOT read notification_prefs, so gate it here.
+    if (actualChannel === "email") {
+      try {
+        const prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
+        if (prefs && (prefs.email_enabled === false || prefs.review_request === false)) {
+          return { ok: false, reason: "email_opted_out", blocked: true, terminal: true };
+        }
+      } catch {
+        /* fail-open to library suppression */
+      }
+    }
+
+    const token = generateToken();
+    const [request] = await db("review_requests")
+      .insert({
+        token,
+        customer_id: customer.id,
+        service_record_id: serviceRecordId,
+        location_id: locationId || resolveLocation(customer),
+        tech_name: techName || null,
+        service_type: serviceType || null,
+        service_date: serviceDate || null,
+        triggered_by: triggeredBy,
+        channel: actualChannel,
+        template_key: templateId || null,
+        sequence_id: sequenceId,
+        sequence_step: sequenceStep,
+        status: "pending",
+        // Sequence touches must NOT also get the legacy Day-3 auto-followup.
+        followup_sent: sequenceId ? true : false,
+        expires_at: expiresAt || new Date(Date.now() + 14 * 86400000).toISOString(),
+      })
+      .returning("*");
+
+    const domain = publicPortalUrl();
+    const longUrl = `${domain}/rate/${token}`;
+    const reviewUrl = await shortenOrPassthrough(longUrl, {
+      kind: "review",
+      entityType: "review_requests",
+      entityId: request.id,
+      customerId: customer.id,
+    });
+
+    const vars = {
+      first: contact.name || customer.first_name || "",
+      tech: techName || "Adam",
+      service_type: serviceType || "service",
+      review_url: reviewUrl,
+    };
+
+    if (actualChannel === "email") {
+      return this._sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia });
+    }
+    return this._sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia });
+  },
+
+  async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
+    const tpl = templateId ? OUTREACH.getOutreachTemplate(templateId) : null;
+    const rawBody =
+      typeof customBody === "string" && customBody.trim() ? customBody : tpl ? tpl.body : null;
+    if (!rawBody) {
+      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+      return { ok: false, reason: "no_template", terminal: true, requestId: request.id };
+    }
+    const body = OUTREACH.renderOutreachBody(rawBody, vars, {
+      requireLink: rawBody.includes("{review_url}"),
+    });
+    try {
+      const result = await sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: "sms",
+        audience: "customer",
+        purpose: "review_request",
+        customerId: customer.id,
+        entryPoint: "review_outreach_touch",
+        metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
+      });
+      return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms");
+    } catch (err) {
+      if (manageRetryVia === "cron") {
+        await db("review_requests")
+          .where({ id: request.id })
+          .update({ status: "pending", scheduled_for: new Date(Date.now() + 5 * 60 * 1000) })
+          .catch(() => {});
+      } else {
+        await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+      }
+      logger.error(`[review] outreach SMS threw (requestId=${request.id} errType=${err?.name || "Error"})`);
+      return { ok: false, retryable: true, channel: "sms", requestId: request.id };
+    }
+  },
+
+  async _applyOutreachSendResult(request, result, manageRetryVia, channel) {
+    if (result && result.sent) {
+      await db("review_requests").where({ id: request.id }).update({
+        sms_sent_at: new Date(),
+        sent_at: new Date(),
+        status: "sent",
+      });
+      return { ok: true, sent: true, channel, requestId: request.id, auditLogId: result.auditLogId };
+    }
+    const deferredRetryAt = retryAtForDeferredSend(result);
+    if (deferredRetryAt) {
+      if (manageRetryVia === "cron") {
+        await db("review_requests").where({ id: request.id }).update({
+          status: "pending",
+          scheduled_for: deferredRetryAt,
+        });
+      } else {
+        // The sequence cron owns retries — keep this row out of processScheduled.
+        await db("review_requests").where({ id: request.id }).update({ status: "deferred" });
+      }
+      return { ok: false, deferred: true, nextAllowedAt: deferredRetryAt, channel, requestId: request.id, code: result?.code };
+    }
+    if (result && result.blocked && result.code !== "CONSENT_LOOKUP_FAILED") {
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
+      return { ok: false, blocked: true, terminal: true, channel, requestId: request.id, code: result?.code };
+    }
+    // Transient (provider failure / consent lookup blip).
+    if (manageRetryVia === "cron") {
+      await db("review_requests").where({ id: request.id }).update({
+        status: "pending",
+        scheduled_for: new Date(Date.now() + 5 * 60 * 1000),
+      });
+    } else {
+      await db("review_requests").where({ id: request.id }).update({ status: "failed" });
+    }
+    return { ok: false, retryable: true, channel, requestId: request.id, code: result?.code };
+  },
+
+  async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia }) {
+    try {
+      const EmailLib = require("./email-template-library");
+      const result = await EmailLib.sendTemplate({
+        templateKey: "review_request_email",
+        to: contact.email,
+        payload: {
+          first_name: contact.name || customer.first_name || "",
+          review_url: reviewUrl,
+          tech_name: techName || "Adam",
+        },
+        recipientType: "customer",
+        recipientId: customer.id,
+        idempotencyKey: `review_touch:${request.id}`,
+        suppressionGroupKey: "service_operational",
+        categories: ["review_request"],
+      });
+      if (result && result.sent) {
+        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
+        return { ok: true, sent: true, channel: "email", requestId: request.id };
+      }
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
+      return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
+    } catch (err) {
+      if (manageRetryVia === "cron") {
+        await db("review_requests").where({ id: request.id }).update({ status: "pending" }).catch(() => {});
+      } else {
+        await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+      }
+      logger.error(`[review] outreach email failed (requestId=${request.id} errType=${err?.name || "Error"})`);
+      return { ok: false, retryable: true, channel: "email", requestId: request.id };
+    }
+  },
+
+  /**
+   * Start a multi-touch review cadence for one customer. Idempotent: a customer
+   * with an active sequence returns that one instead of starting a second
+   * (also enforced by the partial unique index). Fires step 0 immediately.
+   */
+  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId }) {
+    const customer = await db("customers").where({ id: customerId }).first();
+    if (!customer) throw new Error("Customer not found");
+    if (customer.deleted_at) throw new Error("Customer is archived");
+    if (customer.has_left_google_review) return { started: false, reason: "already_reviewed" };
+
+    const active = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+    if (active) return { started: false, reason: "already_active", sequence: active };
+
+    const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
+    let svcType = serviceType;
+    let tName = techName;
+    if (!svcType || !tName) {
+      const lastSvc = await db("scheduled_services")
+        .where({ customer_id: customerId, status: "completed" })
+        .orderBy("scheduled_date", "desc")
+        .first()
+        .catch(() => null);
+      svcType = svcType || lastSvc?.service_type || null;
+      tName = tName || lastSvc?.tech_name || "Adam";
+    }
+    const locId = locationId || customer.nearest_location_id || resolveLocation(customer);
+
+    let sequence;
+    try {
+      [sequence] = await db("review_sequences")
+        .insert({
+          customer_id: customerId,
+          location_id: locId,
+          status: "active",
+          plan: JSON.stringify(usePlan),
+          current_step: 0,
+          touches_sent: 0,
+          next_run_at: new Date(),
+          service_record_id: serviceRecordId || null,
+          tech_name: tName,
+          service_type: svcType,
+          started_by: startedBy || null,
+          started_at: new Date(),
+        })
+        .returning("*");
+    } catch (err) {
+      if (err?.code === "23505") {
+        const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+        return { started: false, reason: "already_active", sequence: existing };
+      }
+      throw err;
+    }
+
+    const firstTouch = await this._runSequenceStep(sequence.id);
+    const refreshed = await db("review_sequences").where({ id: sequence.id }).first();
+    return { started: true, sequence: refreshed, firstTouch };
+  },
+
+  /** Run the current step of one sequence (send + advance, or stop). */
+  async _runSequenceStep(sequenceId) {
+    const seq = await db("review_sequences").where({ id: sequenceId }).first();
+    if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
+    const plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
+    const customer = await db("customers").where({ id: seq.customer_id }).first();
+
+    const stop = async (reason) => {
+      await db("review_sequences").where({ id: seq.id }).update({
+        status: reason === "completed" ? "completed" : "stopped",
+        stop_reason: reason,
+        next_run_at: null,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+      return { ran: false, stopped: true, reason };
+    };
+
+    if (!customer || customer.deleted_at) return stop("deleted");
+    if (customer.has_left_google_review) return stop("reviewed");
+    try {
+      const gr = await db("google_reviews").where({ customer_id: seq.customer_id }).first();
+      if (gr) return stop("reviewed");
+    } catch {
+      /* google_reviews may not exist */
+    }
+    if (seq.current_step >= plan.length) return stop("completed");
+    try {
+      const prefs = await db("notification_prefs").where({ customer_id: seq.customer_id }).first();
+      if (prefs && prefs.review_request === false) return stop("opted_out");
+      if (prefs && prefs.sms_enabled === false && prefs.email_enabled === false) return stop("opted_out");
+    } catch {
+      /* ignore */
+    }
+
+    const step = plan[seq.current_step] || {};
+    const outcome = await this.sendOutreachTouch({
+      customer,
+      channel: step.channel || "sms",
+      templateId: step.templateKey || null,
+      locationId: seq.location_id,
+      techName: seq.tech_name,
+      serviceType: seq.service_type,
+      serviceRecordId: seq.service_record_id,
+      sequenceId: seq.id,
+      sequenceStep: seq.current_step,
+      triggeredBy: "sequence",
+      manageRetryVia: "sequence",
+    });
+
+    if (outcome.ok && outcome.sent) {
+      const nextStep = seq.current_step + 1;
+      if (nextStep >= plan.length) {
+        await db("review_sequences").where({ id: seq.id }).update({
+          status: "completed",
+          stop_reason: "completed",
+          current_step: nextStep,
+          touches_sent: seq.touches_sent + 1,
+          last_touch_at: new Date(),
+          next_run_at: null,
+          completed_at: new Date(),
+          updated_at: new Date(),
+        });
+        return { ran: true, sent: true, completed: true, step: seq.current_step };
+      }
+      const plannedAt = new Date(new Date(seq.started_at).getTime() + (Number(plan[nextStep].day) || 0) * 86400000);
+      const next_run_at = plannedAt > new Date() ? plannedAt : new Date(Date.now() + 60000);
+      await db("review_sequences").where({ id: seq.id }).update({
+        current_step: nextStep,
+        touches_sent: seq.touches_sent + 1,
+        last_touch_at: new Date(),
+        next_run_at,
+        updated_at: new Date(),
+      });
+      return { ran: true, sent: true, step: seq.current_step };
+    }
+
+    if (outcome.terminal || outcome.blocked) {
+      if (outcome.reason === "no_contact") return stop("no_contact");
+      if (outcome.reason === "already_reviewed") return stop("reviewed");
+      return stop("opted_out");
+    }
+
+    // Deferred / transient → retry this step later without advancing.
+    const retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    await db("review_sequences").where({ id: seq.id }).update({ next_run_at: retryAt, updated_at: new Date() });
+    return { ran: false, deferred: true, retryAt };
+  },
+
+  /** Cron: advance all due review sequences. Gated by GATE_REVIEW_SEQUENCES. */
+  async processReviewSequences() {
+    const due = await db("review_sequences")
+      .where({ status: "active" })
+      .whereNotNull("next_run_at")
+      .where("next_run_at", "<=", new Date())
+      .orderBy("next_run_at", "asc")
+      .limit(25);
+    let sent = 0;
+    let stopped = 0;
+    let completed = 0;
+    let deferred = 0;
+    for (const seq of due) {
+      try {
+        const r = await this._runSequenceStep(seq.id);
+        if (r.sent) sent++;
+        if (r.completed) completed++;
+        else if (r.stopped) stopped++;
+        if (r.deferred) deferred++;
+      } catch (err) {
+        logger.error(`[review] sequence step failed (sequenceId=${seq.id} errType=${err?.name || "Error"})`);
+      }
+    }
+    if (sent || stopped || completed || deferred) {
+      logger.info(`[review] Sequences: ${sent} sent, ${completed} completed, ${stopped} stopped, ${deferred} deferred`);
+    }
+    return { sent, stopped, completed, deferred };
+  },
+
+  async stopReviewSequence(sequenceId, reason = "manual") {
+    const updated = await db("review_sequences")
+      .where({ id: sequenceId, status: "active" })
+      .update({
+        status: "stopped",
+        stop_reason: reason,
+        next_run_at: null,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+    return { stopped: updated > 0 };
+  },
+
+  /** Map of customerId → active sequence summary (for candidate annotation). */
+  async getActiveSequencesForCustomers(ids = []) {
+    if (!ids.length) return {};
+    const rows = await db("review_sequences").whereIn("customer_id", ids).where("status", "active");
+    const map = {};
+    rows.forEach((r) => {
+      const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
+      map[r.customer_id] = {
+        id: r.id,
+        currentStep: r.current_step,
+        totalSteps: plan.length,
+        nextRunAt: r.next_run_at,
+      };
+    });
+    return map;
+  },
+
+  /**
+   * Real conversion funnel + velocity for the Review Outreach dashboard
+   * (audit O1). Conversion is the share of sent asks that clicked through to
+   * Google (redirected_to_google); velocity is actual Google reviews landed.
+   */
+  async getOutreachAnalytics({ days = 90 } = {}) {
+    const window = Math.max(1, Math.min(365, Number(days) || 90));
+    const since = new Date(Date.now() - window * 86400000);
+
+    const [funnel] = await db("review_requests")
+      .where("created_at", ">=", since)
+      .select(
+        db.raw("COUNT(*) FILTER (WHERE sms_sent_at IS NOT NULL OR sent_at IS NOT NULL) AS sent"),
+        db.raw("COUNT(*) FILTER (WHERE opened_at IS NOT NULL) AS opened"),
+        db.raw("COUNT(*) FILTER (WHERE rated_at IS NOT NULL) AS rated"),
+        db.raw("COUNT(*) FILTER (WHERE rating >= 7) AS promoters"),
+        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
+        db.raw("COUNT(*) FILTER (WHERE channel = 'email') AS email_touches"),
+      );
+
+    const byLocation = await db("review_requests")
+      .where("created_at", ">=", since)
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .groupBy("location_id")
+      .select(
+        "location_id",
+        db.raw("COUNT(*) AS sent"),
+        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
+      );
+
+    const byTemplate = await db("review_requests")
+      .where("created_at", ">=", since)
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .groupBy("template_key")
+      .select(
+        "template_key",
+        db.raw("COUNT(*) AS sent"),
+        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
+      );
+
+    const byChannel = await db("review_requests")
+      .where("created_at", ">=", since)
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .groupBy("channel")
+      .select(
+        "channel",
+        db.raw("COUNT(*) AS sent"),
+        db.raw("COUNT(*) FILTER (WHERE redirected_to_google = true) AS reviewed"),
+      );
+
+    // Actual Google reviews landed in window — the real outcome + velocity.
+    let googleByLocation = [];
+    let velocity = [];
+    try {
+      googleByLocation = await db("google_reviews")
+        .where("reviewer_name", "!=", "_stats")
+        .where("review_created_at", ">=", since)
+        .groupBy("location_id")
+        .select("location_id", db.raw("COUNT(*) AS reviews"), db.raw("ROUND(AVG(star_rating)::numeric, 2) AS avg_rating"));
+      velocity = await db("google_reviews")
+        .where("reviewer_name", "!=", "_stats")
+        .where("review_created_at", ">=", since)
+        .select(db.raw("date_trunc('week', review_created_at) AS week"), db.raw("COUNT(*) AS reviews"))
+        .groupByRaw("date_trunc('week', review_created_at)")
+        .orderByRaw("date_trunc('week', review_created_at) ASC");
+    } catch {
+      /* google_reviews may not exist */
+    }
+
+    const num = (v) => Number(v) || 0;
+    const sent = num(funnel?.sent);
+    const reviewed = num(funnel?.reviewed);
+    const activeSequences = num(
+      (await db("review_sequences").where("status", "active").count("* as c").first().catch(() => ({ c: 0 })))?.c,
+    );
+
+    return {
+      window,
+      funnel: {
+        sent,
+        opened: num(funnel?.opened),
+        rated: num(funnel?.rated),
+        promoters: num(funnel?.promoters),
+        reviewed,
+        emailTouches: num(funnel?.email_touches),
+        conversionRate: sent > 0 ? Math.round((reviewed / sent) * 100) : 0,
+        openRate: sent > 0 ? Math.round((num(funnel?.opened) / sent) * 100) : 0,
+      },
+      byLocation: byLocation.map((r) => ({ locationId: r.location_id, sent: num(r.sent), reviewed: num(r.reviewed) })),
+      byTemplate: byTemplate.map((r) => ({ templateKey: r.template_key || "canonical", sent: num(r.sent), reviewed: num(r.reviewed) })),
+      byChannel: byChannel.map((r) => ({ channel: r.channel || "sms", sent: num(r.sent), reviewed: num(r.reviewed) })),
+      googleByLocation: googleByLocation.map((r) => ({ locationId: r.location_id, reviews: num(r.reviews), avgRating: Number(r.avg_rating) || 0 })),
+      velocity: velocity.map((r) => ({ week: r.week, reviews: num(r.reviews) })),
+      activeSequences,
+    };
+  },
+
+  /** Server-backed activity feed (audit O3 — replaces the localStorage log). */
+  async getOutreachActivity({ limit = 50 } = {}) {
+    const lim = Math.max(1, Math.min(200, Number(limit) || 50));
+    const rows = await db("review_requests as rr")
+      .leftJoin("customers as c", "c.id", "rr.customer_id")
+      .whereRaw("COALESCE(rr.sms_sent_at, rr.sent_at, rr.rated_at, rr.opened_at) IS NOT NULL")
+      .select(
+        "rr.id",
+        "rr.status",
+        "rr.channel",
+        "rr.template_key",
+        "rr.location_id",
+        "rr.sms_sent_at",
+        "rr.sent_at",
+        "rr.opened_at",
+        "rr.rated_at",
+        "rr.rating",
+        "rr.redirected_to_google",
+        "rr.sequence_id",
+        "rr.triggered_by",
+        "c.first_name",
+        "c.last_name",
+      )
+      .orderByRaw("COALESCE(rr.rated_at, rr.opened_at, rr.sms_sent_at, rr.sent_at, rr.created_at) DESC")
+      .limit(lim);
+
+    return rows.map((r) => {
+      const name = `${r.first_name || ""} ${r.last_name || ""}`.trim() || "Customer";
+      let type = "sent";
+      let msg;
+      if (r.redirected_to_google) {
+        type = "reviewed";
+        msg = `${name} left a Google review`;
+      } else if (r.rated_at) {
+        type = "rated";
+        msg = `${name} rated ${r.rating ?? "?"}/10`;
+      } else {
+        const via = r.sequence_id ? "cadence" : r.triggered_by === "auto" ? "auto" : "manual";
+        msg = `Review request sent to ${name} (${r.channel || "sms"}, ${via})`;
+      }
+      return {
+        id: r.id,
+        type,
+        channel: r.channel || "sms",
+        locationId: r.location_id,
+        message: msg,
+        at: r.rated_at || r.opened_at || r.sms_sent_at || r.sent_at,
+      };
+    });
   },
 
   // ── Stats ──

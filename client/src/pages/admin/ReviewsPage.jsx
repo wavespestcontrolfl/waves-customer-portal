@@ -173,7 +173,7 @@ function BreakdownBar({ star, count, max }) {
       >
         {star}
       </span>{" "}
-      <span style={{ color: D.amber, fontSize: 12 }}>Star</span>{" "}
+      <Star size={11} color={D.amber} fill={D.amber} style={{ flexShrink: 0 }} />{" "}
       <div
         style={{
           flex: 1,
@@ -1627,7 +1627,9 @@ function ReviewIncentivesPanel() {
                           textTransform: "uppercase",
                         }}
                       >
-                        {p.status}
+                        {/* The summary calls unpaid bonuses "Pending Payroll";
+                            keep the ledger vocab aligned (status is 'earned'). */}
+                        {p.status === "paid" ? "Paid" : "Pending"}
                       </div>
                       <div style={{ fontFamily: "JetBrains Mono, monospace", fontWeight: 800 }}>
                         {money(p.amountCents)}
@@ -1639,207 +1641,6 @@ function ReviewIncentivesPanel() {
             </div>
           </div>
         </>
-      )}
-    </div>
-  );
-}
-
-// REVIEW OUTREACH HELPERS
-// =============================================================================
-
-// =============================================================================
-// REVIEW OUTREACH — database-backed
-// =============================================================================
-function ReviewOutreach() {
-  const [customers, setCustomers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [sending, setSending] = useState({});
-
-  useEffect(() => {
-    // Fetch customers with recent completed services who haven't left a review
-    adminFetch("/admin/reviews/outreach-candidates")
-      .then((d) => {
-        setCustomers(d.customers || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
-  const filtered = customers.filter((c) => {
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
-    return (
-      (c.name || "").toLowerCase().includes(q) ||
-      (c.city || "").toLowerCase().includes(q) ||
-      (c.phone || "").toLowerCase().includes(q)
-    );
-  });
-
-  const sendReviewRequest = async (customer) => {
-    setSending((prev) => ({ ...prev, [customer.id]: true }));
-    try {
-      await adminFetch("/admin/reviews/send-request", {
-        method: "POST",
-        body: JSON.stringify({ customerId: customer.id }),
-      });
-      setCustomers((prev) =>
-        prev.map((c) =>
-          c.id === customer.id ? { ...c, requestSent: true } : c,
-        ),
-      );
-    } catch (e) {
-      alert("Failed: " + e.message);
-    } finally {
-      setSending((prev) => ({ ...prev, [customer.id]: false }));
-    }
-  };
-
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 60, textAlign: "center" }}>
-        Loading outreach candidates...
-      </div>
-    );
-
-  return (
-    <div>
-      {" "}
-      <div
-        style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}
-      >
-        {" "}
-        <StatCard
-          label="Outreach Candidates"
-          value={customers.length}
-          color={D.teal}
-        />{" "}
-        <StatCard
-          label="Review Requests Sent"
-          value={customers.filter((c) => c.requestSent).length}
-          color={D.green}
-        />{" "}
-      </div>{" "}
-      <input
-        type="text"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search by name, city, or phone..."
-        style={{
-          width: "100%",
-          padding: "10px 14px",
-          background: D.card,
-          border: `1px solid ${D.border}`,
-          borderRadius: 8,
-          color: D.text,
-          fontSize: 13,
-          fontFamily: "Roboto, Arial, sans-serif",
-          outline: "none",
-          boxSizing: "border-box",
-          marginBottom: 16,
-        }}
-      />
-      {filtered.length === 0 ? (
-        <div
-          style={{
-            padding: 48,
-            textAlign: "center",
-            color: D.muted,
-            background: D.card,
-            borderRadius: 12,
-            border: `1px solid ${D.border}`,
-          }}
-        >
-          {" "}
-          <div style={{ fontSize: 15 }}>No outreach candidates found</div>{" "}
-          <div style={{ fontSize: 13, marginTop: 4 }}>
-            Customers with recent completed services who haven't been asked for
-            a review will appear here.
-          </div>{" "}
-        </div>
-      ) : (
-        <div style={{ display: "grid", gap: 10 }}>
-          {filtered.map((c) => (
-            <div
-              key={c.id}
-              style={{
-                background: D.card,
-                border: `1px solid ${D.border}`,
-                borderRadius: 10,
-                padding: "14px 18px",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                flexWrap: "wrap",
-                gap: 12,
-              }}
-            >
-              {" "}
-              <div>
-                {" "}
-                <div
-                  style={{ fontSize: 15, fontWeight: 600, color: D.heading }}
-                >
-                  {c.name}
-                </div>{" "}
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-                  {c.city && <span>{c.city} </span>}
-                  {c.phone && <span>· {c.phone} </span>}
-                  {c.lastService && (
-                    <span>· Last service: {c.lastService} </span>
-                  )}
-                  {c.lastServiceDate && (
-                    <span>
-                      · {new Date(c.lastServiceDate).toLocaleDateString()}
-                    </span>
-                  )}
-                </div>
-                {c.tier && (
-                  <span
-                    style={{
-                      fontSize: 10,
-                      padding: "2px 8px",
-                      borderRadius: 4,
-                      background: `${D.teal}22`,
-                      color: D.teal,
-                      marginTop: 4,
-                      display: "inline-block",
-                    }}
-                  >
-                    {c.tier}
-                  </span>
-                )}
-              </div>{" "}
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                {c.requestSent ? (
-                  <span
-                    style={{ fontSize: 12, color: D.green, fontWeight: 600 }}
-                  >
-                    Sent
-                  </span>
-                ) : (
-                  <button
-                    onClick={() => sendReviewRequest(c)}
-                    disabled={sending[c.id]}
-                    style={{
-                      padding: "8px 16px",
-                      background: D.teal,
-                      color: "#fff",
-                      border: "none",
-                      borderRadius: 8,
-                      fontSize: 13,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      opacity: sending[c.id] ? 0.5 : 1,
-                    }}
-                  >
-                    {sending[c.id] ? "Sending..." : "Send Review Request"}
-                  </button>
-                )}
-              </div>{" "}
-            </div>
-          ))}
-        </div>
       )}
     </div>
   );
@@ -2309,9 +2110,11 @@ export default function ReviewsPage() {
                   }}
                 >
                   {" "}
-                  <div style={{ fontSize: 32, marginBottom: 12 }}>
-                    Star
-                  </div>{" "}
+                  <Star
+                    size={32}
+                    color={D.muted}
+                    style={{ marginBottom: 12 }}
+                  />{" "}
                   <div style={{ fontSize: 15 }}>
                     No reviews match your filters
                   </div>{" "}
