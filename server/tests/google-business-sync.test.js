@@ -46,11 +46,14 @@ function createDbMock(initialRows = {}) {
         return this;
       },
       whereRaw(sql, bindings = []) {
-        // Implemented only for the reviewer-name dedup match; other raw
-        // clauses keep the historical pass-through behavior.
+        // Implemented for the two name-match clauses the service relies on;
+        // other raw clauses keep the historical pass-through behavior.
         if (typeof sql === 'string' && sql.includes('LOWER(reviewer_name) = LOWER(?)')) {
           const name = String(bindings[0] || '').toLowerCase();
           this._rawFilters.push(row => String(row.reviewer_name || '').toLowerCase() === name);
+        } else if (typeof sql === 'string' && sql.includes("first_name || ' ' || COALESCE(last_name")) {
+          const name = String(bindings[0] || '').trim().toLowerCase();
+          this._rawFilters.push(row => `${row.first_name || ''} ${row.last_name || ''}`.trim().toLowerCase() === name);
         }
         return this;
       },
@@ -64,6 +67,7 @@ function createDbMock(initialRows = {}) {
         return rows
           .filter(row => matchesWhere(row, this._where))
           .filter(row => this._rawFilters.every(fn => fn(row)))
+          .filter(row => !this._whereNull || row[this._whereNull] == null)
           .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value)) || null;
       },
       insert(record) {
@@ -428,5 +432,158 @@ describe('Google Business review sync', () => {
       star_rating: 1,
       review_text: 'A different John Smith',
     });
+  });
+
+  test('auto-flips has_left_google_review when a synced review matches a customer', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-1',
+      first_name: 'John',
+      last_name: 'Doe',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'FIVE',
+        comment: 'Great work',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const customer = db.__state.rows.customers.find(c => c.id === 'cust-1');
+    expect(customer.has_left_google_review).toBe(true);
+    expect(customer.review_marked_at).toBeTruthy();
+    // No admin "unlinked" notification when the review matched a customer.
+    expect((db.__state.rows.notifications || []).some(n => n.category === 'review')).toBe(false);
+  });
+
+  test('notifies admin when a newly synced review cannot be matched to a customer', async () => {
+    // No customers seeded → the reviewer name resolves to no customer.
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-9',
+        reviewer: { displayName: 'Stranger Smith' },
+        starRating: 'FIVE',
+        comment: 'Loved it',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const notifs = db.__state.rows.notifications || [];
+    const alert = notifs.find(n => n.recipient_type === 'admin' && n.category === 'review');
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('Stranger Smith');
+    expect(alert.link).toBe('/admin/reviews');
+  });
+
+  test('does not re-notify for an already-synced unmatched review', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'review-existing',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-9',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-9',
+      location_id: 'bradenton',
+      reviewer_name: 'Stranger Smith',
+      star_rating: 5,
+      review_text: 'Loved it',
+      review_created_at: '2026-05-25T12:00:00Z',
+      customer_id: null,
+      review_reply: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-9',
+        reviewer: { displayName: 'Stranger Smith' },
+        starRating: 'FIVE',
+        comment: 'Loved it',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    expect((db.__state.rows.notifications || []).filter(n => n.category === 'review')).toHaveLength(0);
+  });
+
+  test('alerts admin when a review name matches only a soft-deleted customer', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-deleted',
+      first_name: 'John',
+      last_name: 'Doe',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: '2026-05-01T00:00:00Z', // soft-deleted → not a real link
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'FIVE',
+        comment: 'Great work',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    // The deleted record is never auto-flagged...
+    expect(db.__state.rows.customers.find(c => c.id === 'cust-deleted').has_left_google_review).toBe(false);
+    // ...and the review still surfaces for manual matching.
+    const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('John Doe');
+  });
+
+  test('does not auto-mark when a reviewer name matches multiple active customers', async () => {
+    // Display names are not unique. Two active "John Doe" customers → we can't
+    // tell which one left the review, so neither is auto-flagged (auto-marking
+    // an arbitrary one would suppress outreach for someone who never reviewed)
+    // and the review is routed to the manual-match alert instead.
+    db.__state.rows.customers.push(
+      { id: 'cust-a', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+      { id: 'cust-b', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+    );
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'FIVE',
+        comment: 'Great work',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    // Neither ambiguous customer is flipped...
+    expect(db.__state.rows.customers.every(c => c.has_left_google_review === false)).toBe(true);
+    // ...the review is left unlinked...
+    const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-1');
+    expect(review.customer_id).toBeNull();
+    // ...and the office is alerted to match it manually.
+    const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('John Doe');
   });
 });
