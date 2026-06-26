@@ -1286,6 +1286,11 @@ function LawnTrendChart({ trend = [], summary }) {
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const points = trend.filter((point) => point.overallScore != null);
+  // A trend needs at least two assessments. On the first visit a single point
+  // renders as a lone dot stranded in a tall empty chart — no trend to show
+  // yet. The card copy already says "Future reports will show the trend", so
+  // suppress the chart entirely until there's an actual line to draw.
+  if (points.length < 2) return null;
   const xFor = (index) => {
     if (points.length <= 1) return padding.left + chartWidth / 2;
     return padding.left + (index * chartWidth) / (points.length - 1);
@@ -1361,11 +1366,16 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
     || (Number.isFinite(fungusControl) && fungusControl > 0 && fungusControl <= 50);
   const metricRows = lawnMetricRows(assessment);
   const visiblePhotos = (assessment.photos || []).filter((photo) => photo.url).slice(0, 3);
+  // Drop the trend chart (and collapse the two-column layout) until there are
+  // two assessments to plot — keeps the first report from showing an empty
+  // chart column. Mirrors the guard inside LawnTrendChart.
+  const trendPoints = (assessment.trend || []).filter((point) => point.overallScore != null);
+  const hasTrend = trendPoints.length >= 2;
 
   return (
     <Root className={`${embedded ? 'lawn-assessment-card lawn-assessment-card-embedded' : 'report-card lawn-assessment-card'}`} data-section="lawn-assessment">
       <div className="section-eyebrow">Lawn intelligence</div>
-      <div className="lawn-assessment-layout">
+      <div className={`lawn-assessment-layout${hasTrend ? '' : ' lawn-assessment-layout-no-trend'}`}>
         <div>
           <h2>{assessment.customerSummary || 'Lawn health assessment is ready.'}</h2>
           <div className="lawn-overall-score">
@@ -1387,7 +1397,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
             </div>
           )}
         </div>
-        <LawnTrendChart trend={assessment.trend || []} summary={assessment.customerSummary} />
+        {hasTrend && <LawnTrendChart trend={assessment.trend || []} summary={assessment.customerSummary} />}
       </div>
       <LawnWaterBalance water={assessment.waterContext} grassLabel={grassLabel} mode={mode} overwateringObserved={overwateringObserved} />
       <div className="lawn-score-grid">
@@ -6657,6 +6667,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           gap: 18px;
           align-items: center;
         }
+        /* First assessment: no trend chart yet — collapse to a single column so
+           the summary text doesn't leave an empty chart gutter. */
+        .lawn-assessment-layout-no-trend {
+          grid-template-columns: 1fr;
+        }
         .lawn-overall-score {
           display: inline-flex;
           align-items: center;
@@ -7295,33 +7310,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {/* Lawn + Tree/Shrub V2 lead with the factual record — products applied + the
-            visit timeline — right after the assessment. Other service lines
-            keep these lower (rendered below, gated by !isV2LeadLayout). The
-            program explainer + Ask-Waves move down for these. */}
-        {(isLawnReport || isTreeShrubV2) && (
-          <>
-            <AppliedProductsSection data={data} mode={mode} />
-            {/* V2 renders the timeline up top (under Re-entry); legacy keeps it here. */}
-            {!data.reportV2 && (
-              <div id="map">
-                <ServiceReportCoverageAndWorkflow
-                  serviceType={visitTimelineServiceType}
-                  serviceCoverage={serviceCoverage}
-                  visitTimeline={normalizedVisitTimeline}
-                  workflowEvents={data.workflowEvents}
-                  customerInteraction={data.customerInteraction}
-                  visitTiming={data.visitTiming}
-                  timingSource={data}
-                  evidenceLevel={data.evidenceLevel}
-                  mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
-                  mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-                  applications={data.applications || []}
-                  serviceLine={data.serviceLine}
-                />
-              </div>
-            )}
-          </>
+        {/* V2 lead layout (lawn + tree_shrub WITH reportV2) leads with the factual
+            record — products applied right after the assessment; the visit
+            timeline already rendered up top under Re-entry. Legacy lawn and every
+            other service line render products + timeline lower down, gated by
+            !isV2LeadLayout — so this must gate on isV2LeadLayout (not just
+            isLawnReport), otherwise a legacy lawn report renders both and the
+            Products/Timeline sections (and their DOM ids) duplicate. */}
+        {isV2LeadLayout && (
+          <AppliedProductsSection data={data} mode={mode} />
         )}
 
         <TypedFindingsCard typedReport={data.typedReport} />
