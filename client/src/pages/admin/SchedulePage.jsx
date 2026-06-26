@@ -9343,12 +9343,6 @@ export function CompletionPanel({
               />
             </div>
           )}
-          {recapEligible && (
-            <div style={{ padding: "12px 16px 0" }}>
-              <RecapCapture serviceId={service.id} />
-              <PestRecapCard serviceId={service.id} />
-            </div>
-          )}
           {success && (
             <div
               style={{
@@ -9575,6 +9569,13 @@ export function CompletionPanel({
             )}
           </div>{" "}
           <div style={{ padding: 20, maxWidth: 560, margin: "0 auto" }}>
+            {/* Visit recap (pest) — below the title, top of the form body */}
+            {recapEligible && (
+              <div style={{ marginBottom: 16 }}>
+                <RecapCapture serviceId={service.id} />
+                <PestRecapCard serviceId={service.id} />
+              </div>
+            )}
             {showDraftPrompt && (
               <div
                 style={{
