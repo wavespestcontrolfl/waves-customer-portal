@@ -248,7 +248,6 @@ const AREAS_BY_SERVICE = {
     "Irrigation zone",
   ],
   universal: [
-    "Customer spoke with tech",
     "No issues found",
     "Follow-up recommended",
   ],
@@ -9670,46 +9669,6 @@ export function CompletionPanel({
                 </div>{" "}
               </div>
             )}
-            {/* Quick complete */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                marginBottom: 24,
-              }}
-            >
-              {" "}
-              <button
-                type="button"
-                onClick={() => {
-                  if (structuredCloseoutRequired) return;
-                  setQuickComplete(!quickComplete);
-                }}
-                disabled={structuredCloseoutRequired}
-                style={{
-                  height: 36,
-                  padding: "0 16px",
-                  borderRadius: 999,
-                  background: quickComplete ? M.ink : "transparent",
-                  color: quickComplete ? M.actionFg : M.ink,
-                  border: quickComplete ? "none" : `1px solid ${M.ink}`,
-                  fontFamily: font,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.3px",
-                  cursor:
-                    structuredCloseoutRequired
-                      ? "not-allowed"
-                      : "pointer",
-                  opacity: structuredCloseoutRequired ? 0.55 : 1,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                Quick complete {quickComplete ? "on" : "off"}
-              </button>{" "}
-            </div>
             {/* Callback banner */}
             {isCallback && (
               <div
@@ -11668,50 +11627,6 @@ export function CompletionPanel({
               </div>{" "}
             </div>
           )}
-          {/* Quick Complete toggle */}
-          <div
-            style={{
-              marginTop: 10,
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            {" "}
-            <button
-              onClick={() => {
-                if (structuredCloseoutRequired) return;
-                setQuickComplete(!quickComplete);
-              }}
-              disabled={structuredCloseoutRequired}
-              style={{
-                padding: "6px 14px",
-                borderRadius: 8,
-                fontSize: 12,
-                fontWeight: 700,
-                cursor:
-                  structuredCloseoutRequired
-                    ? "not-allowed"
-                    : "pointer",
-                background: quickComplete ? D.amber : "transparent",
-                color: quickComplete ? D.bg : D.amber,
-                border: `1px solid ${D.amber}`,
-                opacity: structuredCloseoutRequired ? 0.55 : 1,
-                transition: "all 0.15s",
-              }}
-            >
-              {quickComplete ? "Quick Complete ON" : "Quick Complete"}
-            </button>{" "}
-            <span style={{ fontSize: 11, color: D.muted }}>
-              {structuredCloseoutRequired
-                ? treeShrubCloseoutRequired
-                  ? "Tree/Shrub protocol closeout requires full form"
-                  : "WaveGuard lawn closeout requires full execution checklist"
-                : quickComplete
-                ? "Showing minimal fields"
-                : "Bulk end-of-day mode"}
-            </span>{" "}
-          </div>{" "}
         </div>
         {/* Callback banner */}
         {isCallback && (
