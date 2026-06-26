@@ -1695,6 +1695,129 @@ function AlertsTab() {
 // ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Quiet tab — healthy customers who've gone quiet (proactive reach-out list)
+// ---------------------------------------------------------------------------
+function QuietTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    adminFetch("/admin/health/quiet")
+      .then(setData)
+      .catch(() => setData({ count: 0, customers: [], quietDays: null }))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return <div style={{ padding: 24, color: COLORS.textMuted }}>Loading…</div>;
+  }
+
+  const customers = data?.customers || [];
+
+  return (
+    <div>
+      <Card style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: COLORS.text }}>
+          Healthy customers with no completed visit or reply in{" "}
+          <strong>{data?.quietDays ?? "—"}+ days</strong>. Their scores are fine,
+          so they don't show up in the at-risk views — but a long silence is how
+          customers start to feel forgotten. A quick personal check-in keeps them
+          warm. <strong>{customers.length}</strong> flagged.
+        </div>
+      </Card>
+
+      <Card>
+        {customers.length === 0 ? (
+          <div
+            style={{
+              padding: 24,
+              textAlign: "center",
+              color: COLORS.textMuted,
+              fontSize: 13,
+            }}
+          >
+            No quiet customers right now — everyone healthy has been touched
+            recently.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
+            >
+              <thead>
+                <tr>
+                  {["Customer", "Tier", "City", "Score", "Last touch", "Phone"].map(
+                    (h) => (
+                      <th
+                        key={h}
+                        style={{
+                          padding: "8px 12px",
+                          textAlign: "left",
+                          color: COLORS.textMuted,
+                          fontWeight: 500,
+                          fontSize: 11,
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        {h}
+                      </th>
+                    )
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {customers.map((c) => (
+                  <tr
+                    key={c.id}
+                    style={{ borderBottom: `1px solid ${COLORS.border}22` }}
+                  >
+                    <td style={{ padding: "8px 12px", color: COLORS.text }}>
+                      {c.first_name} {c.last_name}
+                    </td>
+                    <td style={{ padding: "8px 12px" }}>
+                      {c.waveguard_tier ? (
+                        <Badge label={c.waveguard_tier} color={COLORS.teal} />
+                      ) : (
+                        "--"
+                      )}
+                    </td>
+                    <td style={{ padding: "8px 12px", color: COLORS.textMuted }}>
+                      {c.city || "--"}
+                    </td>
+                    <td
+                      style={{ padding: "8px 12px", ...mono, color: COLORS.text }}
+                    >
+                      {c.overall_score}
+                    </td>
+                    <td
+                      style={{ padding: "8px 12px", ...mono, color: COLORS.amber }}
+                    >
+                      {c.days_since_touch == null
+                        ? "never"
+                        : `${c.days_since_touch}d ago`}
+                    </td>
+                    <td
+                      style={{
+                        padding: "8px 12px",
+                        ...mono,
+                        color: COLORS.textMuted,
+                      }}
+                    >
+                      {c.phone || "--"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 export default function CustomerHealthPage() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [dashboard, setDashboard] = useState(null);
@@ -1727,6 +1850,7 @@ export default function CustomerHealthPage() {
   const tabs = [
     { key: "dashboard", label: "Dashboard" },
     { key: "scores", label: "Health Scores" },
+    { key: "quiet", label: "Quiet" },
     { key: "alerts", label: "Alerts" },
   ];
 
@@ -1791,6 +1915,7 @@ export default function CustomerHealthPage() {
       <TabBar tabs={tabs} active={activeTab} onChange={setActiveTab} />
       {activeTab === "dashboard" && <DashboardTab data={dashboard} />}
       {activeTab === "scores" && <ScoresTab />}
+      {activeTab === "quiet" && <QuietTab />}
       {activeTab === "alerts" && <AlertsTab />}
     </div>
   );
