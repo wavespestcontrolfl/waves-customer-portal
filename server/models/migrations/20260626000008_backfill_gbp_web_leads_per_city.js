@@ -14,17 +14,36 @@
  * showed in a separate generic bucket while per-city rows held only calls.
  *
  * New leads already route per-city; this fixes the history so the panel shows
- * GBP web + calls together per city. Mapping is derived from the linked customer
- * (utm_data.source='gbp' confirms GBP web) using the same
- * findGbpLocationByUtmContent the live code uses, so a lead only moves when its
- * city is unambiguous.
+ * GBP web + calls together per city.
  *
- * Idempotent + re-runnable: only considers leads still on the generic row whose
- * customer is GBP web and whose area/content maps to a configured GBP location.
- * Safe no-op when the rows/columns/config aren't present.
+ * GBP detection + city resolution prefer each LEAD's OWN recorded attribution
+ * (leads.extracted_data.attribution: leadSource + raw utm) and fall back to the
+ * linked customer's first-touch utm_data — because:
+ *   - lead-webhook only writes the attribution block onto a lead's extracted_data
+ *     on newer submissions (server/routes/lead-webhook.js:577-600); historical
+ *     leads (the ones this backfill targets) predate it and carry no lead-level
+ *     attribution, so the customer's utm_data — set from that same GBP submission
+ *     at customer creation — is the only and correct signal for them.
+ *   - lead-webhook never overwrites customers.utm_data on a later submission from
+ *     an *existing* customer (server/routes/lead-webhook.js:219-232). So where a
+ *     lead DOES carry its own attribution, that is preferred (and takes priority
+ *     for the city) over the customer's possibly-stale first touch — which is the
+ *     case a customer-only filter would misattribute.
+ *   - GBP is matched the same way the live path does, via the shared
+ *     isGbpUtmCampaign predicate: utm_source=gbp OR the legacy
+ *     utm_source=google & medium=organic & campaign=gbp shape
+ *     (server/config/locations.js:132), plus leadSource.source='google_business'
+ *     which determineLeadSource sets exactly on a GBP campaign
+ *     (server/routes/lead-webhook.js:1060) — so legacy-campaign leads aren't left
+ *     behind. City is resolved via the same findGbpLocationByUtmContent the live
+ *     code uses, so a lead only moves when its city is unambiguous; otherwise it
+ *     is left on the generic row (matching the live "GBP unattributed" fallback).
+ *
+ * Idempotent + re-runnable: only touches leads still on the generic row. Safe
+ * no-op when the rows/columns/config aren't present.
  */
 
-const { findGbpLocationByUtmContent } = require('../../config/locations');
+const { findGbpLocationByUtmContent, isGbpUtmCampaign } = require('../../config/locations');
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('lead_sources'))) return;
@@ -43,25 +62,49 @@ exports.up = async function up(knex) {
   const rowByGoogleId = new Map(cityRows.map((r) => [String(r.gbp_location_id), r]));
   if (rowByGoogleId.size === 0) return; // per-city rows not seeded yet
 
-  // Candidate leads: still on the generic GBP row and linked to a GBP-web customer.
+  // Every lead still on the generic GBP bucket, with both the lead's own recorded
+  // attribution (preferred) and the linked customer's first-touch attribution
+  // (fallback for historical leads whose extracted_data predates the block).
   const candidates = await knex('leads as l')
-    .join('customers as c', 'c.id', 'l.customer_id')
+    .leftJoin('customers as c', 'c.id', 'l.customer_id')
     .where('l.lead_source_id', generic.id)
-    .whereRaw("lower(c.utm_data->>'source') = 'gbp'")
     .select(
       'l.id as lead_id',
-      'c.lead_source_area as area',
-      knex.raw("c.utm_data->>'content' as utm_content"),
+      // lead-level (preferred)
+      knex.raw("l.extracted_data->'attribution'->'leadSource'->>'source' as ls_source"),
+      knex.raw("l.extracted_data->'attribution'->'leadSource'->>'area' as ls_area"),
+      knex.raw("l.extracted_data->'attribution'->'utm'->>'source' as l_utm_source"),
+      knex.raw("l.extracted_data->'attribution'->'utm'->>'medium' as l_utm_medium"),
+      knex.raw("l.extracted_data->'attribution'->'utm'->>'campaign' as l_utm_campaign"),
+      knex.raw("l.extracted_data->'attribution'->'utm'->>'content' as l_utm_content"),
+      // customer-level (fallback)
+      knex.raw("c.utm_data->>'source' as c_utm_source"),
+      knex.raw("c.utm_data->>'medium' as c_utm_medium"),
+      knex.raw("c.utm_data->>'campaign' as c_utm_campaign"),
+      knex.raw("c.utm_data->>'content' as c_utm_content"),
+      'c.lead_source_area as c_area',
     );
 
   let moved = 0;
+  let unmapped = 0;
+  let notGbp = 0;
   const perCity = {};
   for (const lead of candidates) {
-    const token = lead.area || lead.utm_content;
+    // Confirm GBP from the lead's OWN attribution first, then the customer's,
+    // using the shared predicate (covers utm_source=gbp AND the legacy
+    // google/organic/gbp campaign shape).
+    const leadGbp = lead.ls_source === 'google_business'
+      || isGbpUtmCampaign({ source: lead.l_utm_source, medium: lead.l_utm_medium, campaign: lead.l_utm_campaign });
+    const custGbp = isGbpUtmCampaign({ source: lead.c_utm_source, medium: lead.c_utm_medium, campaign: lead.c_utm_campaign });
+    if (!leadGbp && !custGbp) { notGbp += 1; continue; } // not a GBP web lead → leave it
+
+    // Resolve the city from the lead's own attribution first (resolved GBP
+    // location id, then raw utm_content), then the customer's first-touch tokens.
+    const token = lead.ls_area || lead.l_utm_content || lead.c_area || lead.c_utm_content;
     const loc = token ? findGbpLocationByUtmContent(token) : null;
-    if (!loc || !loc.googleLocationId) continue; // city not resolvable → leave it
+    if (!loc || !loc.googleLocationId) { unmapped += 1; continue; } // city not resolvable → leave it
     const dest = rowByGoogleId.get(String(loc.googleLocationId));
-    if (!dest) continue;
+    if (!dest) { unmapped += 1; continue; }
     await knex('leads').where({ id: lead.lead_id }).update({ lead_source_id: dest.id });
     moved += 1;
     perCity[dest.name] = (perCity[dest.name] || 0) + 1;
@@ -69,7 +112,8 @@ exports.up = async function up(knex) {
 
   // eslint-disable-next-line no-console
   console.log(
-    `[migration 20260626000008] re-attributed ${moved} GBP web lead(s) to per-city rows: ${JSON.stringify(perCity)}`,
+    `[migration 20260626000008] re-attributed ${moved} GBP web lead(s) to per-city rows `
+      + `(${unmapped} left: city unresolved, ${notGbp} left: not GBP): ${JSON.stringify(perCity)}`,
   );
 };
 
