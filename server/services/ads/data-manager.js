@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { runExclusive } = require('../../utils/cron-lock');
 
 let _googleapis;
 function getGoogle() {
@@ -699,7 +700,18 @@ function uploadValidateOnly(requestedValidateOnly) {
   return requestedValidateOnly !== false;
 }
 
-async function uploadConversions({
+// Public entry point. Wraps the upload in a Postgres advisory lock keyed by
+// conversion type so the daily cron AND the admin /data-manager/upload endpoint
+// (and overlapping instances) can't both read the upload log before either
+// writes it and send the same transaction IDs twice. Non-blocking: a concurrent
+// caller is skipped (the holder's sweep covers the same candidates).
+async function uploadConversions(opts = {}) {
+  const conversionType = opts.conversionType || 'completed_job_revenue';
+  if (!CONVERSIONS[conversionType]) throw new Error(`Unsupported conversion type: ${conversionType}`);
+  return runExclusive(`data-manager-upload:${conversionType}`, () => uploadConversionsLocked({ ...opts, conversionType }));
+}
+
+async function uploadConversionsLocked({
   conversionType = 'completed_job_revenue',
   periodDays = 30,
   limit = 100,

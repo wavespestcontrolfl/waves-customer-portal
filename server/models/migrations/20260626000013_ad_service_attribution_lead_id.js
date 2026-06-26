@@ -9,6 +9,12 @@
  *
  * Nullable + onDelete SET NULL: existing web rows (which never set it) stay
  * lead_id NULL and are unaffected.
+ *
+ * UNIQUE index (not plain): enforces at most one funnel row per lead, so two
+ * overlapping call-bridge/apply requests can't both insert a row for the same
+ * lead (recordCallPpcAttribution also uses ON CONFLICT (lead_id) DO NOTHING).
+ * Postgres treats NULLs as distinct, so the many NULL-lead_id web rows are
+ * unaffected — only non-null lead_ids are deduped.
  */
 exports.up = async function up(knex) {
   const hasTable = await knex.schema.hasTable('ad_service_attribution');
@@ -17,7 +23,7 @@ exports.up = async function up(knex) {
   if (hasColumn) return;
   await knex.schema.alterTable('ad_service_attribution', (t) => {
     t.uuid('lead_id').references('id').inTable('leads').onDelete('SET NULL');
-    t.index('lead_id', 'idx_ad_service_attribution_lead');
+    t.unique('lead_id', { indexName: 'uq_ad_service_attribution_lead' });
   });
 };
 

@@ -84,6 +84,13 @@ async function recordCallPpcAttribution({
     // existing row (e.g. the bridge later supplies the campaign).
     const existing = await db('ad_service_attribution').where({ lead_id: leadId }).first();
     if (existing) {
+      // The lead already has a funnel row. If it belongs to a DIFFERENT source
+      // (e.g. it was first a WEB-form lead and the customer later called the paid
+      // number), don't create a duplicate and don't override its source — the
+      // lead keeps its original attribution and is counted once.
+      if (existing.lead_source && existing.lead_source !== leadSource) {
+        return { recorded: false, reason: 'other_source' };
+      }
       const patch = {};
       if (campaignId && !existing.campaign_id) patch.campaign_id = campaignId;
       if (leadSourceDetail && !existing.lead_source_detail) patch.lead_source_detail = leadSourceDetail;
@@ -98,6 +105,9 @@ async function recordCallPpcAttribution({
       return { recorded: false, reason: 'already_recorded' };
     }
 
+    // ON CONFLICT (lead_id) DO NOTHING — two overlapping bridge-apply runs could
+    // both miss the lookup above; the unique index + ignore prevents a duplicate
+    // row (the loser is a no-op; a later run backfills any missing campaign).
     await db('ad_service_attribution').insert({
       campaign_id: campaignId,
       customer_id: customerId,
@@ -109,7 +119,7 @@ async function recordCallPpcAttribution({
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
       funnel_stage: 'lead',
-    });
+    }).onConflict('lead_id').ignore();
     logger.info(`[call-attribution] recorded ${leadSource} call lead ${leadId}${campaignId ? ` (campaign ${campaignId})` : ''}`);
     return { recorded: true, campaignId };
   } catch (err) {

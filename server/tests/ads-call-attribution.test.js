@@ -8,10 +8,12 @@ const updateCalls = [];
 const mockDb = jest.fn((table) => {
   const b = {};
   const self = () => b;
-  ['where', 'whereNot', 'select', 'orderBy', 'limit'].forEach((m) => { b[m] = jest.fn(self); });
+  ['where', 'whereNot', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
-  b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return Promise.resolve([1]); });
+  b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
+  // Makes an awaited insert(...).onConflict(...).ignore() chain resolve.
+  b.then = (res, rej) => Promise.resolve([1]).then(res, rej);
   return b;
 });
 
@@ -132,6 +134,19 @@ describe('recordCallPpcAttribution', () => {
     expect(insertCalls).toHaveLength(0);
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0].row).toMatchObject({ campaign_id: 'local-9', lead_source_detail: 'Search - Bradenton' });
+  });
+
+  test('does not duplicate or override when the lead already has a different-source row (reused web lead)', async () => {
+    firstByTable.ad_service_attribution = { id: 'web-row', lead_source: 'domain_website', campaign_id: null, service_line: 'pest' };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', googleCampaignId: '22594274874', leadSourceDetail: 'Search',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'other_source' });
+    expect(insertCalls).toHaveLength(0);
+    expect(updateCalls).toHaveLength(0);
   });
 
   test('does not touch an existing lead row that already has its campaign', async () => {

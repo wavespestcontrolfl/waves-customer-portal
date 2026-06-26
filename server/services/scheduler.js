@@ -2270,35 +2270,32 @@ function initScheduledJobs() {
     if (process.env.GOOGLE_DATA_MANAGER_CRON_ENABLED !== 'true') return;
     logger.info('Running: Google Ads offline conversion upload (Data Manager)');
     try {
-      // runExclusive: read-then-POST job — uploadConversions checks the upload log
-      // before the external POST and writes it after, so two pods / a deploy
-      // overlap could both send the same conversions. Serialize across instances.
-      await runExclusive('data-manager-offline-conversions', async () => {
-        const DataManager = require('./ads/data-manager');
-        // Reconcile prior runs' still-pending requests first, so failures/partials
-        // get marked (and become retryable) instead of stuck pending forever.
-        const reconciled = await DataManager.reconcilePendingRequests({ limit: 100 });
-        if (reconciled.length) {
-          logger.info(`[data-manager cron] reconciled ${reconciled.length} pending request(s)`);
-        }
-        // Per-type window: a lead can be marked qualified (is_qualified) well after
-        // first contact, and qualified-lead candidates are dated by
-        // COALESCE(converted_at, first_contact_at, created_at) — so scan wide
-        // enough to still catch a late-qualified lead before Google's ~90d import
-        // window closes. Per-transaction dedupe makes the overlap a no-op.
-        const PERIOD_DAYS = { qualified_lead: 60, completed_job_revenue: 30 };
-        for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
-          const r = await DataManager.uploadConversions({
-            conversionType, periodDays: PERIOD_DAYS[conversionType], limit: 500, validateOnly: false,
-          });
-          logger.info(`[data-manager cron] ${conversionType}: ${JSON.stringify({
-            configured: r.configured, validateOnly: r.validateOnly, candidates: r.candidates,
-            sent: r.sent, accepted: r.accepted, pending: r.pending,
-            skipped: Array.isArray(r.skipped) ? r.skipped.length : r.skipped,
-            requestId: r.requestId || null, error: r.error || null,
-          })}`);
-        }
-      });
+      const DataManager = require('./ads/data-manager');
+      // Reconcile prior runs' still-pending requests first, so failures/partials
+      // get marked (and become retryable) instead of stuck pending forever.
+      const reconciled = await DataManager.reconcilePendingRequests({ limit: 100 });
+      if (reconciled.length) {
+        logger.info(`[data-manager cron] reconciled ${reconciled.length} pending request(s)`);
+      }
+      // No cron-lock wrapper here — uploadConversions self-serializes with a
+      // per-type advisory lock, so it's safe against overlapping cron ticks AND a
+      // concurrent admin-triggered upload (the manual endpoint calls the same fn).
+      // Per-type window: a lead can be marked qualified (is_qualified) well after
+      // first contact, and qualified-lead candidates are dated by
+      // COALESCE(converted_at, first_contact_at, created_at) — so scan wide enough
+      // to still catch a late-qualified lead before Google's ~90d import window
+      // closes. Per-transaction dedupe makes the overlap a no-op.
+      const PERIOD_DAYS = { qualified_lead: 60, completed_job_revenue: 30 };
+      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+        const r = await DataManager.uploadConversions({
+          conversionType, periodDays: PERIOD_DAYS[conversionType], limit: 500, validateOnly: false,
+        });
+        logger.info(`[data-manager cron] ${conversionType}: ${JSON.stringify({
+          skipped: r.skipped || false, configured: r.configured, validateOnly: r.validateOnly,
+          candidates: r.candidates, sent: r.sent, accepted: r.accepted, pending: r.pending,
+          requestId: r.requestId || null, error: r.error || null,
+        })}`);
+      }
     } catch (err) {
       logger.error(`Data Manager offline conversion upload failed: ${err.message}`);
     }

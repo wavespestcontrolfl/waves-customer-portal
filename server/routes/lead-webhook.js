@@ -736,6 +736,10 @@ router.post('/', async (req, res) => {
     try {
       await db('ad_service_attribution').insert({
         customer_id: customer.id,
+        // Stamp the lead so the call-attribution path dedupes against this row
+        // (a customer who fills the web form and later calls the paid number is
+        // one lead, not two) — see services/ads/call-attribution.js.
+        lead_id: leadRecord?.id || null,
         service_line: inferServiceLine(serviceInterest),
         specific_service: inferSpecificService(serviceInterest),
         service_bucket: inferServiceBucket(serviceInterest),
@@ -748,7 +752,7 @@ router.post('/', async (req, res) => {
         utm_campaign: utmCampaign,
         utm_term: utmTerm,
         funnel_stage: 'lead',
-      });
+      }).onConflict('lead_id').ignore();
     } catch (attrErr) {
       logger.error(`Ad attribution insert failed: ${attrErr.message}`);
     }
