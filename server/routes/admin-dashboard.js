@@ -959,33 +959,47 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
           INTERNAL_TEST_CUSTOMERS,
         );
       }
+      // Keep the three exit signals separate so the departure month can be picked
+      // by CAUSE in JS — a flat COALESCE would grab a stale pre-exit stage change.
       rows = await qb.select(
         db.raw(`to_char(${CONVERSION_DATE_SQL}, 'YYYY-MM') as cohort_month`),
         'active',
         'deleted_at',
         'pipeline_stage',
-        db.raw(
-          "to_char(COALESCE(churned_at, (pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, "
-            + "(deleted_at AT TIME ZONE 'America/New_York')::date), 'YYYY-MM') as departed_month",
-        ),
+        db.raw("to_char(churned_at, 'YYYY-MM') as churned_month"),
+        db.raw("to_char((pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as stage_changed_month"),
+        db.raw("to_char((deleted_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as deleted_month"),
       );
     } catch (err) {
       logger.error(`[admin-dashboard] /retention-cohort query failed: ${err.message}`);
       return res.json({ cohorts: [], maxOffset: 0, months });
     }
 
-    // Bucket members by cohort month, precomputing live-now + a departure month index.
-    const byCohort = new Map(); // 'YYYY-MM' -> [{ liveNow, churnIdx }]
+    const LEFT_STAGES = new Set(['churned', 'dormant']);
+    // Bucket members by cohort month, precomputing a churn month index.
+    const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx }]
     for (const r of rows) {
       const cohort = r.cohort_month;
       if (!cohort) continue;
       const cIdx = monthIndexOf(cohort);
       const liveNow = r.active === true && r.deleted_at == null && CUSTOMER_STAGES.includes(r.pipeline_stage);
-      // Departed in the month of departed_month; absent (no timestamp) → treat as
-      // having left in the signup month (drops at offset 1). Live members never churn.
-      const churnIdx = liveNow
-        ? Infinity
-        : (r.departed_month ? Math.max(cIdx, monthIndexOf(r.departed_month)) : cIdx);
+      let churnIdx;
+      if (liveNow) {
+        churnIdx = Infinity;
+      } else {
+        // Resolve the exit month by CAUSE, never a stale stage change:
+        //   - churned/dormant: the stage move IS the exit (churned_at, else its ts)
+        //   - otherwise deleted: the archive (deleted_at) is the exit — the archive
+        //     route only stamps deleted_at, leaving pipeline_stage live
+        //   - active=false with no churn/delete: an admin deactivation carries no
+        //     departure date, so it's dropped entirely (mirrors the core-KPIs
+        //     retention cohort) rather than backdated to signup/last-stage-change.
+        let exitMonth = null;
+        if (LEFT_STAGES.has(r.pipeline_stage)) exitMonth = r.churned_month || r.stage_changed_month;
+        else if (r.deleted_month) exitMonth = r.deleted_month;
+        if (!exitMonth) continue; // undatable deactivation → exclude
+        churnIdx = Math.max(cIdx, monthIndexOf(exitMonth));
+      }
       if (!byCohort.has(cohort)) byCohort.set(cohort, []);
       byCohort.get(cohort).push({ churnIdx });
     }
