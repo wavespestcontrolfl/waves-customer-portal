@@ -2077,8 +2077,10 @@ const CallRecordingProcessor = {
         // it only counts actual leads (shouldCreateLead already excluded established
         // customers). campaign_id is null here (single-number bucket; the
         // call-reporting bridge fills the campaign when it matches). Best-effort.
-        if (leadId && customerId && leadSourceRow
-            && (leadSourceRow.source_type === 'google_ads' || leadSourceRow.channel === 'paid')) {
+        // Scope to ACTUAL Google Ads sources — a `channel='paid'` row with a
+        // non-Google source_type (Facebook/LSA/other paid number) must not be
+        // labelled google_ads and pollute the Google Ads PPC funnel.
+        if (leadId && customerId && leadSourceRow && leadSourceRow.source_type === 'google_ads') {
           require('./ads/call-attribution').recordCallPpcAttribution({
             customerId,
             leadId,

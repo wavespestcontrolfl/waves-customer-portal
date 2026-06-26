@@ -91,6 +91,13 @@ async function recordCallPpcAttribution({
       if (existing.lead_source && existing.lead_source !== leadSource) {
         return { recorded: false, reason: 'other_source' };
       }
+      // A click-attributed (web) row owns this lead's PPC attribution via its
+      // gclid — Google credits the click's campaign. A later phone call to the
+      // same lead must NOT overwrite that first-touch campaign/detail. (Call rows
+      // never carry a click id, so this only excludes genuine web rows.)
+      if (existing.gclid || existing.wbraid || existing.gbraid) {
+        return { recorded: false, reason: 'click_attributed' };
+      }
       // Upgrade placeholders, not just nulls — the first path (dedicated number)
       // inserts a row with a generic detail ("inbound call") + default service
       // bucket, and a later bridge run brings the REAL campaign + a now-known

@@ -171,6 +171,20 @@ describe('recordCallPpcAttribution', () => {
     expect(updateCalls).toHaveLength(0);
   });
 
+  test('leaves a click-attributed (web) row untouched so first-touch campaign survives', async () => {
+    // A google_ads WEB lead: same source, no campaign_id, but it has a gclid.
+    firstByTable.ad_service_attribution = { id: 'web', lead_source: 'google_ads', gclid: 'abc123', campaign_id: null, lead_source_detail: 'web detail', service_line: 'lawn' };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', leadSource: 'google_ads', googleCampaignId: '22594274874', leadSourceDetail: 'Call Campaign',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'click_attributed' });
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+  });
+
   test('does not duplicate or override when the lead already has a different-source row (reused web lead)', async () => {
     firstByTable.ad_service_attribution = { id: 'web-row', lead_source: 'domain_website', campaign_id: null, service_line: 'pest' };
     firstByTable.ad_campaigns = { id: 'local-9' };

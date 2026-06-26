@@ -479,18 +479,28 @@ async function applyBridge(options = {}) {
 
   for (const match of preview.matches) {
     if (match.status === 'already_bridged') {
+      // Only attribute when the CRM call is bridged to THIS Google call. A call
+      // can score 'already_bridged' off a resource_name linked to a DIFFERENT
+      // nearby Google call, and using this match.googleCall's campaign then would
+      // mis-attribute. (PPC write only — lead-attribution retry is campaign-
+      // agnostic and still runs.)
+      const bridgedToThisCall = !!match.callLog?.googleAdsCallResourceName
+        && match.callLog.googleAdsCallResourceName === match.googleCall.resourceName;
+
       if (!shouldRetryLeadAttribution(match)) {
-        // Backfill the funnel row for calls bridged before this shipped (idempotent).
-        // call_log.lead_id is only populated by the twilio_call_sid join; a call
-        // lead-matched by phone/customer (recorded in metadata) has it null, so
-        // resolve the lead in that case before attributing.
-        let backfillLeadId = match.callLog?.leadId || null;
-        let backfillCustomerId = match.callLog?.customerId || null;
-        if (!backfillLeadId) {
-          const lm = await findLeadForCall(match.callLog).catch(() => null);
-          if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
+        if (bridgedToThisCall) {
+          // Backfill the funnel row for calls bridged before this shipped (idempotent).
+          // call_log.lead_id is only populated by the twilio_call_sid join; a call
+          // lead-matched by phone/customer (recorded in metadata) has it null, so
+          // resolve the lead in that case before attributing.
+          let backfillLeadId = match.callLog?.leadId || null;
+          let backfillCustomerId = match.callLog?.customerId || null;
+          if (!backfillLeadId) {
+            const lm = await findLeadForCall(match.callLog).catch(() => null);
+            if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
+          }
+          await writeCallPpcAttribution(match, backfillCustomerId, backfillLeadId);
         }
-        await writeCallPpcAttribution(match, backfillCustomerId, backfillLeadId);
         skipped.push({ ...match, skipReason: 'already_bridged' });
         continue;
       }
@@ -513,7 +523,9 @@ async function applyBridge(options = {}) {
             updated_at: now,
           });
 
-        await writeCallPpcAttribution(match, leadMatch.customerId || match.callLog?.customerId || null, leadMatch.leadId);
+        if (bridgedToThisCall) {
+          await writeCallPpcAttribution(match, leadMatch.customerId || match.callLog?.customerId || null, leadMatch.leadId);
+        }
 
         applied.push({ ...match, status: 'lead_attribution_retried' });
       } catch (err) {
